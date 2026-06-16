@@ -152,7 +152,11 @@ fn ensure_git_repository(path: &Path) -> Result<()> {
         .args(["rev-parse", "--show-toplevel"])
         .status()
         .context("run git rev-parse")?;
-    anyhow::ensure!(status.success(), "{} is not a Git repository", path.display());
+    anyhow::ensure!(
+        status.success(),
+        "{} is not a Git repository",
+        path.display()
+    );
     Ok(())
 }
 
@@ -168,7 +172,12 @@ fn detect_default_branch(root_path: &Path, remote_name: &str) -> String {
         .ok()
         .filter(|output| output.status.success())
         .and_then(|output| String::from_utf8(output.stdout).ok())
-        .and_then(|branch| branch.trim().strip_prefix(&format!("{remote_name}/")).map(str::to_owned))
+        .and_then(|branch| {
+            branch
+                .trim()
+                .strip_prefix(&format!("{remote_name}/"))
+                .map(str::to_owned)
+        })
         .filter(|branch| !branch.is_empty())
         .unwrap_or_else(|| "main".to_owned())
 }

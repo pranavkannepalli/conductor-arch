@@ -37,4 +37,3 @@ impl AppPaths {
 fn env_path(name: &str, fallback: PathBuf) -> PathBuf {
     env::var_os(name).map(PathBuf::from).unwrap_or(fallback)
 }
-

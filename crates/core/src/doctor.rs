@@ -29,7 +29,7 @@ impl DoctorReport {
 pub fn report_from_os_release(os_release: &str) -> DoctorReport {
     let parsed = parse_os_release(os_release);
     let distro_id = parsed.get("ID").cloned();
-    let distro_like = parsed
+    let distro_like: Vec<String> = parsed
         .get("ID_LIKE")
         .map(|value| value.split_whitespace().map(str::to_owned).collect())
         .unwrap_or_default();
@@ -111,7 +111,11 @@ fn is_executable(path: &Path) -> bool {
 
 #[cfg(not(unix))]
 fn is_executable(path: &Path) -> bool {
-    path.is_file() || std::process::Command::new(path).arg("--version").output().is_ok()
+    path.is_file()
+        || std::process::Command::new(path)
+            .arg("--version")
+            .output()
+            .is_ok()
 }
 
 #[cfg(test)]
