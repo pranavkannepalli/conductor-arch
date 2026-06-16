@@ -168,6 +168,27 @@ pub struct ChecksSummary {
     pub total_todos: usize,
     pub branch_push_state: Option<BranchPushState>,
     pub open_review_comments: usize,
+    pub conflicting_workspaces: Vec<(String, Vec<String>)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceStatusLine {
+    pub workspace: Workspace,
+    pub open_todos: usize,
+    pub pull_request: Option<PullRequest>,
+    pub run_running: bool,
+    pub active_sessions: usize,
+    pub branch_push_state: Option<BranchPushState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Checkpoint {
+    pub id: i64,
+    pub workspace_id: i64,
+    pub session_id: Option<i64>,
+    pub git_ref: String,
+    pub message: String,
+    pub created_at: String,
 }
 
 struct RepositoryRecord {
@@ -279,6 +300,40 @@ impl WorkspaceStore {
             .query_map([], row_to_workspace)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(workspaces)
+    }
+
+    pub fn list_status(&self) -> Result<Vec<WorkspaceStatusLine>> {
+        let workspaces = self.list()?;
+        let mut lines = Vec::with_capacity(workspaces.len());
+        for workspace in workspaces {
+            let open_todos: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM todos WHERE workspace_id = ?1 AND status = 'open'",
+                [workspace.id],
+                |row| row.get(0),
+            )?;
+            let pull_request = self.pull_request_by_workspace_id(workspace.id)?;
+            let run_running: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM processes WHERE workspace_id = ?1 AND kind = 'run' AND status = 'running'",
+                [workspace.id],
+                |row| row.get(0),
+            )?;
+            let active_sessions =
+                self.count_running_processes(workspace.id, ProcessKind::Session)?;
+            let branch_push_state = if workspace.status == "active" {
+                self.branch_push_state(&workspace.name).ok()
+            } else {
+                None
+            };
+            lines.push(WorkspaceStatusLine {
+                workspace,
+                open_todos: open_todos as usize,
+                pull_request,
+                run_running: run_running > 0,
+                active_sessions,
+                branch_push_state,
+            });
+        }
+        Ok(lines)
     }
 
     pub fn archive(&self, name: &str, remove_worktree: bool) -> Result<Workspace> {
@@ -636,6 +691,71 @@ impl WorkspaceStore {
             .with_context(|| format!("load review comment {id}"))
     }
 
+    pub fn checkpoint_create(
+        &self,
+        name: &str,
+        message: &str,
+        session_id: Option<i64>,
+    ) -> Result<Checkpoint> {
+        let workspace = self.get_by_name(name)?;
+        let now = timestamp();
+        let git_ref = format!("refs/linux-conductor/checkpoints/{}/{now}", workspace.id);
+        // Create the ref pointing at the current HEAD of the workspace branch
+        let head = git_output_dynamic(&workspace.path, &["rev-parse", "HEAD"])?;
+        let head = head.trim();
+        git_dynamic(&workspace.path, &["update-ref", &git_ref, head])?;
+
+        self.conn.execute(
+            "INSERT INTO checkpoints (workspace_id, session_id, git_ref, message, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![workspace.id, session_id, git_ref, message, now],
+        )?;
+        self.get_checkpoint(self.conn.last_insert_rowid())
+    }
+
+    pub fn checkpoint_list(&self, name: &str) -> Result<Vec<Checkpoint>> {
+        let workspace = self.get_by_name(name)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, workspace_id, session_id, git_ref, message, created_at
+             FROM checkpoints WHERE workspace_id = ?1 ORDER BY id DESC",
+        )?;
+        let checkpoints = stmt
+            .query_map([workspace.id], row_to_checkpoint)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(checkpoints)
+    }
+
+    pub fn checkpoint_restore(&self, name: &str, checkpoint_id: i64) -> Result<Checkpoint> {
+        let workspace = self.get_by_name(name)?;
+        let checkpoint = self.get_checkpoint(checkpoint_id)?;
+        anyhow::ensure!(
+            checkpoint.workspace_id == workspace.id,
+            "checkpoint {checkpoint_id} does not belong to workspace {name}"
+        );
+
+        // Resolve the checkpoint ref to a commit hash
+        let commit = git_output_dynamic(&workspace.path, &["rev-parse", &checkpoint.git_ref])?;
+        let commit = commit.trim();
+
+        // Hard-reset the workspace to the checkpoint commit
+        git_dynamic(&workspace.path, &["reset", "--hard", commit])?;
+        // Remove untracked files that weren't part of the checkpoint
+        git_dynamic(&workspace.path, &["clean", "-fd"])?;
+
+        Ok(checkpoint)
+    }
+
+    fn get_checkpoint(&self, id: i64) -> Result<Checkpoint> {
+        self.conn
+            .query_row(
+                "SELECT id, workspace_id, session_id, git_ref, message, created_at
+                 FROM checkpoints WHERE id = ?1",
+                [id],
+                row_to_checkpoint,
+            )
+            .with_context(|| format!("load checkpoint {id}"))
+    }
+
     pub fn branch_push_state(&self, name: &str) -> Result<BranchPushState> {
         let workspace = self.get_by_name(name)?;
         let upstream_exists = Command::new("git")
@@ -712,6 +832,43 @@ impl WorkspaceStore {
         Ok(crate::mcp::workspace_mcp_status(&workspace.path))
     }
 
+    /// Returns other active workspaces in the same repository that have overlapping changed files.
+    pub fn find_conflicting_workspaces(&self, name: &str) -> Result<Vec<(String, Vec<String>)>> {
+        let workspace = self.get_by_name(name)?;
+        let my_files: std::collections::HashSet<String> =
+            self.changed_files(name)?.into_iter().collect();
+        if my_files.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let siblings: Vec<Workspace> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, repository_id, name, path, branch, base_ref, port_base, status, archived_at, created_at, updated_at
+                 FROM workspaces WHERE repository_id = ?1 AND id != ?2 AND status = 'active'",
+            )?;
+            let rows = stmt
+                .query_map(
+                    params![workspace.repository_id, workspace.id],
+                    row_to_workspace,
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+
+        let mut conflicts = Vec::new();
+        for sibling in siblings {
+            let sibling_files: std::collections::HashSet<String> =
+                self.changed_files(&sibling.name)?.into_iter().collect();
+            let overlap: Vec<String> = my_files.intersection(&sibling_files).cloned().collect();
+            if !overlap.is_empty() {
+                let mut sorted = overlap;
+                sorted.sort();
+                conflicts.push((sibling.name, sorted));
+            }
+        }
+        Ok(conflicts)
+    }
+
     pub fn checks_summary(&self, name: &str) -> Result<ChecksSummary> {
         let workspace = self.get_by_name(name)?;
         let changed_files = self.changed_files(name)?.len();
@@ -724,6 +881,7 @@ impl WorkspaceStore {
         let branch_push_state = self.branch_push_state(name).ok();
         let comments = self.list_review_comments(name)?;
         let open_review_comments = comments.iter().filter(|c| c.status == "open").count();
+        let conflicting_workspaces = self.find_conflicting_workspaces(name).unwrap_or_default();
         Ok(ChecksSummary {
             workspace,
             changed_files,
@@ -735,6 +893,7 @@ impl WorkspaceStore {
             total_todos: todos.len(),
             branch_push_state,
             open_review_comments,
+            conflicting_workspaces,
         })
     }
 
@@ -1134,6 +1293,15 @@ impl WorkspaceStore {
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS checkpoints (
+              id INTEGER PRIMARY KEY,
+              workspace_id INTEGER NOT NULL REFERENCES workspaces(id),
+              session_id INTEGER REFERENCES processes(id),
+              git_ref TEXT NOT NULL,
+              message TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            );
             ",
         )?;
         Ok(())
@@ -1225,6 +1393,17 @@ fn row_to_review_comment(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReviewComm
         github_thread_id: row.get(6)?,
         created_at: row.get(7)?,
         updated_at: row.get(8)?,
+    })
+}
+
+fn row_to_checkpoint(row: &rusqlite::Row<'_>) -> rusqlite::Result<Checkpoint> {
+    Ok(Checkpoint {
+        id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        session_id: row.get(2)?,
+        git_ref: row.get(3)?,
+        message: row.get(4)?,
+        created_at: row.get(5)?,
     })
 }
 

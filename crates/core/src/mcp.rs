@@ -13,6 +13,8 @@ pub struct McpStatus {
     pub claude_project: Vec<McpServer>,
     pub codex_user: Vec<McpServer>,
     pub codex_project: Vec<McpServer>,
+    pub cursor_user: Vec<McpServer>,
+    pub cursor_project: Vec<McpServer>,
 }
 
 pub fn workspace_mcp_status(workspace_path: &Path) -> McpStatus {
@@ -26,6 +28,8 @@ pub fn workspace_mcp_status(workspace_path: &Path) -> McpStatus {
         claude_project: read_json_mcp_servers(&workspace_path.join(".mcp.json")),
         codex_user: read_codex_mcp(&home.join(".codex/config.toml")),
         codex_project: read_codex_mcp(&workspace_path.join(".codex/config.toml")),
+        cursor_user: read_cursor_mcp(&home.join(".cursor/mcp.json")),
+        cursor_project: read_cursor_mcp(&workspace_path.join(".cursor/mcp.json")),
     }
 }
 
@@ -53,6 +57,15 @@ fn read_codex_mcp(path: &Path) -> Vec<McpServer> {
     };
     let source = path.display().to_string();
     parse_toml_mcp_keys(&contents, &source)
+}
+
+fn read_cursor_mcp(path: &Path) -> Vec<McpServer> {
+    // Cursor uses the same JSON shape as Claude project .mcp.json: {"mcpServers": {...}}
+    let contents = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    parse_claude_json_servers(&contents, path.display().to_string())
 }
 
 fn parse_claude_json_servers(json: &str, source: String) -> Vec<McpServer> {

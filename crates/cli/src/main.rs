@@ -3,7 +3,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use linux_conductor_core::doctor;
 use linux_conductor_core::paths::AppPaths;
 use linux_conductor_core::repository::{AddRepository, RepositoryStore};
-use linux_conductor_core::workspace::{CreateWorkspace, SessionKind, WorkspaceStore};
+use linux_conductor_core::workspace::{
+    CreateWorkspace, SessionKind, WorkspaceStatusLine, WorkspaceStore,
+};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -72,6 +74,19 @@ enum Command {
     Review {
         #[command(subcommand)]
         command: ReviewCommand,
+    },
+    Archive {
+        name: String,
+        #[arg(long)]
+        remove_worktree: bool,
+    },
+    Status,
+    Checkpoint {
+        #[command(subcommand)]
+        command: CheckpointCommand,
+    },
+    Conflicts {
+        workspace: String,
     },
 }
 
@@ -194,6 +209,23 @@ enum TodoCommand {
     },
     Sync {
         workspace: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum CheckpointCommand {
+    Create {
+        workspace: String,
+        #[arg(long)]
+        session: Option<i64>,
+        message: Vec<String>,
+    },
+    List {
+        workspace: String,
+    },
+    Restore {
+        workspace: String,
+        id: i64,
     },
 }
 
@@ -503,6 +535,65 @@ fn main() -> Result<()> {
                 }
             }
         }
+        Command::Archive {
+            name,
+            remove_worktree,
+        } => {
+            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            let workspace = store.archive(&name, remove_worktree)?;
+            println!(
+                "Archived {} at {}",
+                workspace.name,
+                workspace.path.display()
+            );
+        }
+        Command::Status => {
+            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            print_status(store.list_status()?);
+        }
+        Command::Checkpoint { command } => {
+            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            match command {
+                CheckpointCommand::Create {
+                    workspace,
+                    session,
+                    message,
+                } => {
+                    let cp = store.checkpoint_create(&workspace, &message.join(" "), session)?;
+                    println!(
+                        "Created checkpoint #{} for {} (ref: {})",
+                        cp.id, workspace, cp.git_ref
+                    );
+                }
+                CheckpointCommand::List { workspace } => {
+                    for cp in store.checkpoint_list(&workspace)? {
+                        println!("#{}\t{}\t{}", cp.id, cp.created_at, cp.message);
+                    }
+                }
+                CheckpointCommand::Restore { workspace, id } => {
+                    let cp = store.checkpoint_restore(&workspace, id)?;
+                    println!(
+                        "Restored {} to checkpoint #{} ({})",
+                        workspace, cp.id, cp.git_ref
+                    );
+                    println!("Warning: untracked files removed. Re-run setup if needed.");
+                }
+            }
+        }
+        Command::Conflicts { workspace } => {
+            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            let conflicts = store.find_conflicting_workspaces(&workspace)?;
+            if conflicts.is_empty() {
+                println!("No file conflicts with other active workspaces.");
+            } else {
+                for (other, files) in &conflicts {
+                    println!("Conflicts with {other}:");
+                    for f in files {
+                        println!("  {f}");
+                    }
+                }
+            }
+        }
     }
 
     Ok(())
@@ -552,6 +643,12 @@ fn print_checks_summary(summary: linux_conductor_core::workspace::ChecksSummary)
         "Review:    {} open comment(s)",
         summary.open_review_comments
     );
+    if !summary.conflicting_workspaces.is_empty() {
+        println!("Conflicts:");
+        for (other, files) in &summary.conflicting_workspaces {
+            println!("  {other}: {}", files.join(", "));
+        }
+    }
 }
 
 fn print_mcp_status(status: linux_conductor_core::mcp::McpStatus) {
@@ -561,6 +658,8 @@ fn print_mcp_status(status: linux_conductor_core::mcp::McpStatus) {
         ("Claude project (.mcp.json)", &status.claude_project),
         ("Codex user (~/.codex/config.toml)", &status.codex_user),
         ("Codex project (.codex/config.toml)", &status.codex_project),
+        ("Cursor user (~/.cursor/mcp.json)", &status.cursor_user),
+        ("Cursor project (.cursor/mcp.json)", &status.cursor_project),
     ];
     for (label, servers) in groups {
         if servers.is_empty() {
@@ -569,6 +668,39 @@ fn print_mcp_status(status: linux_conductor_core::mcp::McpStatus) {
             let names: Vec<_> = servers.iter().map(|s| s.name.as_str()).collect();
             println!("  {label}: {}", names.join(", "));
         }
+    }
+}
+
+fn print_status(lines: Vec<WorkspaceStatusLine>) {
+    if lines.is_empty() {
+        println!("No workspaces found. Run: linux-conductor workspace create <repo> --name <name> --branch <branch>");
+        return;
+    }
+    for line in lines {
+        let ws = &line.workspace;
+        let pr = line
+            .pull_request
+            .as_ref()
+            .map(|pr| format!("PR #{} ({})", pr.number, pr.state))
+            .unwrap_or_else(|| "no PR".to_owned());
+        let push = match &line.branch_push_state {
+            Some(state) if !state.has_upstream => "no upstream".to_owned(),
+            Some(state) => format!("↑{} ↓{}", state.ahead, state.behind),
+            None => String::new(),
+        };
+        let run = if line.run_running {
+            "running"
+        } else {
+            "stopped"
+        };
+        let sessions = match line.active_sessions {
+            0 => "no session".to_owned(),
+            n => format!("{n} session(s)"),
+        };
+        println!(
+            "{:<16} {:<10} {:<28} {:<14} {:<10} {:<12} {} todo(s)  {}",
+            ws.name, ws.status, ws.branch, push, run, sessions, line.open_todos, pr,
+        );
     }
 }
 

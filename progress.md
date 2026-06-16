@@ -62,6 +62,23 @@
 - Added unit tests for run log capture/stop, session process persistence, changed file listing, and unified diff output.
 - Updated the GitHub test workflow with an explicit `cargo test -p linux-conductor --test cli_sessions --locked` step while keeping all Actions jobs on self-hosted runners.
 
+- Added review comments tracking (`review_comments` table) with `add/list/resolve` CLI commands.
+- Added `BranchPushState` (ahead/behind upstream via `git rev-list`) to `ChecksSummary`.
+- Added `workspace list --active` filter and `repo update` command.
+- Added `code` and `cursor` to optional dependency checks in `doctor`.
+- Added `open <workspace> --editor <editor>` top-level command for launching editors.
+- Added Cursor MCP support in `mcp.rs` (reads `~/.cursor/mcp.json` and `.cursor/mcp.json`).
+- Added top-level `archive <workspace>` shortcut (mirrors `workspace archive`).
+- Added `linux-conductor status` dashboard showing all workspaces in compact tabular form.
+- Added Checkpoints feature:
+  - `checkpoints` SQLite table for per-workspace private git refs.
+  - `checkpoint create <workspace> <message>` creates a `refs/linux-conductor/checkpoints/<id>/<ts>` ref at current HEAD.
+  - `checkpoint list <workspace>` shows all checkpoints.
+  - `checkpoint restore <workspace> <id>` hard-resets the workspace to that checkpoint commit.
+- Added `conflicts <workspace>` command that warns when two active workspaces in the same repo have overlapping changed files.
+- Extended `checks <workspace>` output to include conflict warnings.
+- All packaging artifacts, release workflow, and README completed in prior commits.
+
 ## Verification
 
 - Rust is now available at `/Users/kitts/.cargo/bin/cargo`.
