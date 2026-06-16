@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=linux-conductor
+Exec=linux-conductor
+Icon=linux-conductor
+Type=Application
+Categories=Development;
+Terminal=true
+Comment=Linux-native parallel coding-agent workflow tool built around Git worktrees

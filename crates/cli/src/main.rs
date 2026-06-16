@@ -171,6 +171,9 @@ enum TodoCommand {
     Done {
         id: i64,
     },
+    Sync {
+        workspace: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -410,6 +413,10 @@ fn main() -> Result<()> {
                 TodoCommand::Done { id } => {
                     let todo = store.complete_todo(id)?;
                     println!("Completed todo #{}: {}", todo.id, todo.text);
+                }
+                TodoCommand::Sync { workspace } => {
+                    let n = store.sync_todos_from_context(&workspace)?;
+                    println!("Imported {n} todo(s) from .context/todos.md into {workspace}");
                 }
             }
         }

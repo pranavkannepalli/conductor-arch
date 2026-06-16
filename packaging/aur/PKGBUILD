@@ -1,0 +1,24 @@
+# Maintainer: Pranav Kannepalli <pranav.kannepalli@gmail.com>
+pkgname=linux-conductor
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Linux-native parallel coding-agent workflow tool built around Git worktrees"
+arch=('x86_64')
+url="https://github.com/pranavkannepalli/conductor-arch"
+license=('MIT')
+depends=('git' 'github-cli' 'sqlite' 'openssh')
+makedepends=('rust' 'cargo')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+    cd "conductor-arch-$pkgver"
+    cargo build --release --locked --workspace
+}
+
+package() {
+    cd "conductor-arch-$pkgver"
+    install -Dm755 target/release/linux-conductor "$pkgdir/usr/bin/linux-conductor"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

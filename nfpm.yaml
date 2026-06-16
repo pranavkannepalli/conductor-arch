@@ -1,0 +1,38 @@
+name: linux-conductor
+arch: amd64
+platform: linux
+version: ${VERSION}
+release: 1
+section: utils
+priority: optional
+maintainer: Pranav Kannepalli <pranav.kannepalli@gmail.com>
+description: |
+  A Linux-native parallel coding-agent workflow tool built around Git worktrees.
+  Each task gets its own isolated workspace: a branch, a directory, a terminal,
+  agent sessions, run scripts, diffs, checks, and a pull request path.
+vendor: linux-conductor
+homepage: https://github.com/pranavkannepalli/conductor-arch
+license: MIT
+
+contents:
+  - src: target/release/linux-conductor
+    dst: /usr/bin/linux-conductor
+    file_info:
+      mode: 0755
+
+  - src: README.md
+    dst: /usr/share/doc/linux-conductor/README.md
+    file_info:
+      mode: 0644
+
+overrides:
+  deb:
+    depends:
+      - git
+      - gh
+      - openssh-client
+  rpm:
+    depends:
+      - git
+      - gh
+      - openssh-clients

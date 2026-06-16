@@ -517,6 +517,52 @@ impl WorkspaceStore {
         }
     }
 
+    pub fn sync_todos_from_context(&self, name: &str) -> Result<usize> {
+        let workspace = self.get_by_name(name)?;
+        let todos_path = workspace.path.join(".context/todos.md");
+        if !todos_path.exists() {
+            return Ok(0);
+        }
+        let contents = fs::read_to_string(&todos_path)
+            .with_context(|| format!("read {}", todos_path.display()))?;
+
+        let mut imported = 0usize;
+        for line in contents.lines() {
+            let trimmed = line.trim();
+            let (done, text) = if let Some(rest) = trimmed
+                .strip_prefix("- [x] ")
+                .or_else(|| trimmed.strip_prefix("- [X] "))
+            {
+                (true, rest)
+            } else if let Some(rest) = trimmed.strip_prefix("- [ ] ") {
+                (false, rest)
+            } else {
+                continue;
+            };
+            let text = text.trim();
+            if text.is_empty() {
+                continue;
+            }
+            let already_exists: bool = self.conn.query_row(
+                "SELECT COUNT(*) FROM todos
+                 WHERE workspace_id = ?1 AND text = ?2 AND source = 'context'",
+                params![workspace.id, text],
+                |row| row.get::<_, i64>(0),
+            )? > 0;
+            if !already_exists {
+                let now = timestamp();
+                let status = if done { "done" } else { "open" };
+                self.conn.execute(
+                    "INSERT INTO todos (workspace_id, text, status, source, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, 'context', ?4, ?5)",
+                    params![workspace.id, text, status, now, now],
+                )?;
+                imported += 1;
+            }
+        }
+        Ok(imported)
+    }
+
     pub fn add_todo(&self, name: &str, text: &str) -> Result<Todo> {
         let workspace = self.get_by_name(name)?;
         let now = timestamp();
