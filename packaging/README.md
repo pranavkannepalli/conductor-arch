@@ -56,6 +56,27 @@ cd packaging/aur
 makepkg -si
 ```
 
+### Flatpak (experimental)
+
+The Flatpak build requires `flatpak-builder` and the Freedesktop SDK:
+
+```bash
+# Install SDK and Rust extension
+flatpak install flathub org.freedesktop.Sdk//23.08 org.freedesktop.Platform//23.08
+flatpak install flathub org.freedesktop.Sdk.Extension.rust-stable//23.08
+
+# Build and install locally
+flatpak-builder --install --user --force-clean \
+  build-dir \
+  packaging/flatpak/io.github.pranavkannepalli.linux-conductor.yml
+
+# Run
+flatpak run io.github.pranavkannepalli.linux-conductor
+```
+
+> **Note:** The Flatpak sandbox requires `--filesystem=host` to access arbitrary
+> repository paths. The app works best installed from AppImage or native packages.
+
 ## CI release
 
 Push a tag to trigger the publish workflow:

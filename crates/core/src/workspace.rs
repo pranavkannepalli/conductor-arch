@@ -336,6 +336,41 @@ impl WorkspaceStore {
         Ok(lines)
     }
 
+    pub fn rename(&self, name: &str, new_name: &str) -> Result<Workspace> {
+        anyhow::ensure!(!new_name.is_empty(), "new workspace name must not be empty");
+        let workspace = self.get_by_name(name)?;
+        let new_path = workspace
+            .path
+            .parent()
+            .map(|parent| parent.join(new_name))
+            .with_context(|| {
+                format!("workspace path has no parent: {}", workspace.path.display())
+            })?;
+
+        if workspace.path.exists() {
+            fs::rename(&workspace.path, &new_path).with_context(|| {
+                format!(
+                    "rename workspace directory {} to {}",
+                    workspace.path.display(),
+                    new_path.display()
+                )
+            })?;
+        }
+
+        let now = timestamp();
+        let changed = self.conn.execute(
+            "UPDATE workspaces SET name = ?1, path = ?2, updated_at = ?3 WHERE id = ?4",
+            params![
+                new_name,
+                new_path.to_string_lossy().to_string(),
+                now,
+                workspace.id
+            ],
+        )?;
+        anyhow::ensure!(changed > 0, "workspace {name} not found");
+        self.get_by_name(new_name)
+    }
+
     pub fn discard(&self, name: &str) -> Result<Workspace> {
         let workspace = self.archive(name, true)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
@@ -545,6 +580,26 @@ impl WorkspaceStore {
             self.record_pull_request(workspace.id, &url)?;
         }
         Ok(output)
+    }
+
+    pub fn read_context_brief(&self, name: &str) -> Result<Option<String>> {
+        let workspace = self.get_by_name(name)?;
+        let path = workspace.path.join(".context/brief.md");
+        if !path.exists() {
+            return Ok(None);
+        }
+        let contents =
+            fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        // Strip leading H1 heading line ("# Brief") and blank lines
+        let body = contents
+            .lines()
+            .skip_while(|line| line.starts_with('#') || line.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if body.trim().is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(body))
     }
 
     pub fn pull_request_checks(&self, name: &str) -> Result<String> {
@@ -1050,6 +1105,19 @@ impl WorkspaceStore {
             cwd: workspace.path.clone(),
             env: conductor_environment(&settings, &repository, &workspace),
         })
+    }
+
+    pub fn list_sessions(&self, name: &str) -> Result<Vec<ProcessRecord>> {
+        let workspace = self.get_by_name(name)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, workspace_id, kind, command, pid, log_path, status, started_at, ended_at
+             FROM processes WHERE workspace_id = ?1 AND kind = 'session'
+             ORDER BY id DESC",
+        )?;
+        let sessions = stmt
+            .query_map([workspace.id], row_to_process)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(sessions)
     }
 
     pub fn start_session(&self, name: &str, kind: SessionKind) -> Result<ProcessRecord> {

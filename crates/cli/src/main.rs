@@ -163,6 +163,10 @@ enum WorkspaceCommand {
     Discard {
         name: String,
     },
+    Rename {
+        name: String,
+        new_name: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -173,6 +177,9 @@ enum SessionCommand {
         kind: CliSessionKind,
     },
     Stop {
+        workspace: String,
+    },
+    List {
         workspace: String,
     },
 }
@@ -187,6 +194,8 @@ enum PrCommand {
         body: Option<String>,
         #[arg(long)]
         draft: bool,
+        #[arg(long)]
+        from_context: bool,
     },
     Checks {
         workspace: String,
@@ -363,6 +372,15 @@ fn main() -> Result<()> {
                         workspace.name
                     );
                 }
+                WorkspaceCommand::Rename { name, new_name } => {
+                    let workspace = store.rename(&name, &new_name)?;
+                    println!(
+                        "Renamed {} to {} at {}",
+                        name,
+                        workspace.name,
+                        workspace.path.display()
+                    );
+                }
             }
         }
         Command::Run { workspace } => {
@@ -419,7 +437,13 @@ fn main() -> Result<()> {
                     title,
                     body,
                     draft,
+                    from_context,
                 } => {
+                    let body = if from_context && body.is_none() {
+                        store.read_context_brief(&workspace)?
+                    } else {
+                        body
+                    };
                     store.push_branch(&workspace)?;
                     print!(
                         "{}",
@@ -461,6 +485,18 @@ fn main() -> Result<()> {
                 SessionCommand::Stop { workspace } => {
                     let process = store.stop_session(&workspace)?;
                     println!("Stopped session for {} (pid {})", workspace, process.pid);
+                }
+                SessionCommand::List { workspace } => {
+                    for session in store.list_sessions(&workspace)? {
+                        println!(
+                            "#{}\t{}\t{}\t{}\t{}",
+                            session.id,
+                            session.status.as_str(),
+                            session.started_at,
+                            session.ended_at.as_deref().unwrap_or("-"),
+                            session.command,
+                        );
+                    }
                 }
             }
         }

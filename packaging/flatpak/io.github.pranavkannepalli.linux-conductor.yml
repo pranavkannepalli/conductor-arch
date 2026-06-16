@@ -1,0 +1,50 @@
+app-id: io.github.pranavkannepalli.linux-conductor
+runtime: org.freedesktop.Platform
+runtime-version: '23.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+
+command: linux-conductor
+
+finish-args:
+  # Full filesystem access required for arbitrary repository and workspace paths
+  - --filesystem=host
+  # Network access for git fetch, gh CLI, and agent sessions
+  - --share=network
+  # IPC for desktop integration
+  - --share=ipc
+  # Allow launching editors and terminal emulators on the host
+  - --socket=fallback-x11
+  - --socket=wayland
+  # Talk to the host shell environment
+  - --env=SHELL=/bin/bash
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/linux-conductor/cargo
+    RUST_BACKTRACE: '1'
+
+modules:
+  - name: linux-conductor
+    buildsystem: simple
+    build-commands:
+      - cargo build --release --locked --workspace
+      - install -Dm755 target/release/linux-conductor /app/bin/linux-conductor
+      - install -Dm644 README.md /app/share/doc/linux-conductor/README.md
+      - install -Dm644 packaging/flatpak/io.github.pranavkannepalli.linux-conductor.appdata.xml
+          /app/share/metainfo/io.github.pranavkannepalli.linux-conductor.appdata.xml
+      - install -Dm644 packaging/flatpak/io.github.pranavkannepalli.linux-conductor.desktop
+          /app/share/applications/io.github.pranavkannepalli.linux-conductor.desktop
+    sources:
+      - type: dir
+        path: ../..
+      - type: shell
+        commands:
+          - cargo vendor --locked vendor
+    build-options:
+      env:
+        CARGO_NET_OFFLINE: 'true'
+      config-opts:
+        - --replace-deps-source=vendor

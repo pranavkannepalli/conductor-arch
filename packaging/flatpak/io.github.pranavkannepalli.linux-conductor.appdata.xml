@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="console-application">
+  <id>io.github.pranavkannepalli.linux-conductor</id>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Linux Conductor</name>
+  <summary>Linux-native parallel coding-agent workflow tool built around Git worktrees</summary>
+  <description>
+    <p>
+      Linux Conductor gives you the Conductor workflow model on Linux. Each coding
+      task gets its own isolated Git worktree, branch, terminal, agent session,
+      diff viewer, checks panel, and pull request path.
+    </p>
+    <p>
+      Multiple Codex, Claude Code, or shell sessions can run in parallel across
+      separate workspaces from the same repository, each with its own stable port
+      block and environment.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Create and manage Git worktree workspaces</li>
+      <li>Launch Codex, Claude Code, or shell sessions per workspace</li>
+      <li>Run setup and dev scripts with Conductor-compatible environment variables</li>
+      <li>Show changed files and unified diffs</li>
+      <li>Push branches and create GitHub pull requests via gh</li>
+      <li>Track local todos, review comments, and checkpoints</li>
+      <li>Detect file conflicts across parallel workspaces</li>
+      <li>Distro-aware doctor command for dependency guidance</li>
+    </ul>
+  </description>
+  <url type="homepage">https://github.com/pranavkannepalli/conductor-arch</url>
+  <url type="bugtracker">https://github.com/pranavkannepalli/conductor-arch/issues</url>
+  <categories>
+    <category>Development</category>
+  </categories>
+  <keywords>
+    <keyword>git</keyword>
+    <keyword>worktree</keyword>
+    <keyword>codex</keyword>
+    <keyword>claude</keyword>
+    <keyword>agents</keyword>
+    <keyword>workflow</keyword>
+  </keywords>
+  <provides>
+    <binary>linux-conductor</binary>
+  </provides>
+  <releases>
+    <release version="0.1.0" date="2026-06-16">
+      <description>
+        <p>Initial public MVP release.</p>
+      </description>
+    </release>
+  </releases>
+  <content_rating type="oars-1.1"/>
+</component>
