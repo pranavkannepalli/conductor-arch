@@ -82,7 +82,7 @@ pub enum ProcessStatus {
 }
 
 impl ProcessStatus {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Running => "running",
             Self::Stopped => "stopped",
@@ -111,6 +111,84 @@ pub struct ProcessRecord {
     pub status: ProcessStatus,
     pub started_at: String,
     pub ended_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequest {
+    pub id: i64,
+    pub workspace_id: i64,
+    pub provider: String,
+    pub number: i64,
+    pub url: String,
+    pub state: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Todo {
+    pub id: i64,
+    pub workspace_id: i64,
+    pub text: String,
+    pub status: String,
+    pub source: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewComment {
+    pub id: i64,
+    pub workspace_id: i64,
+    pub file_path: String,
+    pub line_number: Option<i64>,
+    pub body: String,
+    pub status: String,
+    pub github_thread_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchPushState {
+    pub ahead: usize,
+    pub behind: usize,
+    pub has_upstream: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChecksSummary {
+    pub workspace: Workspace,
+    pub changed_files: usize,
+    pub run_status: Option<ProcessStatus>,
+    pub session_status: Option<ProcessStatus>,
+    pub active_sessions: usize,
+    pub pull_request: Option<PullRequest>,
+    pub open_todos: usize,
+    pub total_todos: usize,
+    pub branch_push_state: Option<BranchPushState>,
+    pub open_review_comments: usize,
+    pub conflicting_workspaces: Vec<(String, Vec<String>)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceStatusLine {
+    pub workspace: Workspace,
+    pub open_todos: usize,
+    pub pull_request: Option<PullRequest>,
+    pub run_running: bool,
+    pub active_sessions: usize,
+    pub branch_push_state: Option<BranchPushState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Checkpoint {
+    pub id: i64,
+    pub workspace_id: i64,
+    pub session_id: Option<i64>,
+    pub git_ref: String,
+    pub message: String,
+    pub created_at: String,
 }
 
 struct RepositoryRecord {
@@ -187,10 +265,11 @@ impl WorkspaceStore {
         )?;
         std::fs::create_dir_all(path.join(".context"))
             .with_context(|| format!("create workspace context directory {}", path.display()))?;
+        let settings = load_repository_settings(&repository.root_path)?;
+        initialize_context_files(&path, &settings)?;
         copy_included_ignored_files(&repository.root_path, &path)?;
 
         let port_base = self.next_port_base()?;
-        let settings = load_repository_settings(&repository.root_path)?;
         run_setup_script(&settings, &repository, &path, &input.name, port_base)?;
         let now = timestamp();
         self.conn.execute(
@@ -223,7 +302,120 @@ impl WorkspaceStore {
         Ok(workspaces)
     }
 
-    pub fn archive(&self, name: &str) -> Result<Workspace> {
+    pub fn list_status(&self) -> Result<Vec<WorkspaceStatusLine>> {
+        let workspaces = self.list()?;
+        let mut lines = Vec::with_capacity(workspaces.len());
+        for workspace in workspaces {
+            let open_todos: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM todos WHERE workspace_id = ?1 AND status = 'open'",
+                [workspace.id],
+                |row| row.get(0),
+            )?;
+            let pull_request = self.pull_request_by_workspace_id(workspace.id)?;
+            let run_running: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM processes WHERE workspace_id = ?1 AND kind = 'run' AND status = 'running'",
+                [workspace.id],
+                |row| row.get(0),
+            )?;
+            let active_sessions =
+                self.count_running_processes(workspace.id, ProcessKind::Session)?;
+            let branch_push_state = if workspace.status == "active" {
+                self.branch_push_state(&workspace.name).ok()
+            } else {
+                None
+            };
+            lines.push(WorkspaceStatusLine {
+                workspace,
+                open_todos: open_todos as usize,
+                pull_request,
+                run_running: run_running > 0,
+                active_sessions,
+                branch_push_state,
+            });
+        }
+        Ok(lines)
+    }
+
+    pub fn rename(&self, name: &str, new_name: &str) -> Result<Workspace> {
+        anyhow::ensure!(!new_name.is_empty(), "new workspace name must not be empty");
+        let workspace = self.get_by_name(name)?;
+        let new_path = workspace
+            .path
+            .parent()
+            .map(|parent| parent.join(new_name))
+            .with_context(|| {
+                format!("workspace path has no parent: {}", workspace.path.display())
+            })?;
+
+        if workspace.path.exists() {
+            fs::rename(&workspace.path, &new_path).with_context(|| {
+                format!(
+                    "rename workspace directory {} to {}",
+                    workspace.path.display(),
+                    new_path.display()
+                )
+            })?;
+        }
+
+        let now = timestamp();
+        let changed = self.conn.execute(
+            "UPDATE workspaces SET name = ?1, path = ?2, updated_at = ?3 WHERE id = ?4",
+            params![
+                new_name,
+                new_path.to_string_lossy().to_string(),
+                now,
+                workspace.id
+            ],
+        )?;
+        anyhow::ensure!(changed > 0, "workspace {name} not found");
+        self.get_by_name(new_name)
+    }
+
+    pub fn discard(&self, name: &str) -> Result<Workspace> {
+        let workspace = self.archive(name, true)?;
+        let repository = self.load_repository_by_id(workspace.repository_id)?;
+        // Delete the local branch (ignore errors if already gone or not fully merged)
+        let _ = git_dynamic(
+            &repository.root_path,
+            &["branch", "-D", workspace.branch.as_str()],
+        );
+        Ok(workspace)
+    }
+
+    pub fn archive(&self, name: &str, remove_worktree: bool) -> Result<Workspace> {
+        let workspace = self.get_by_name(name)?;
+        let repository = self.load_repository_by_id(workspace.repository_id)?;
+        let settings = load_repository_settings(&repository.root_path)?;
+
+        for kind in [ProcessKind::Run, ProcessKind::Session] {
+            if let Some(process) = self.find_latest_running_process(workspace.id, kind)? {
+                stop_process(process.pid)?;
+                let now = timestamp();
+                self.conn.execute(
+                    "UPDATE processes SET status = ?1, ended_at = ?2 WHERE id = ?3",
+                    params![ProcessStatus::Stopped.as_str(), now, process.id],
+                )?;
+            }
+        }
+
+        if let Some(archive_script) = &settings.scripts.archive {
+            if workspace.path.exists() {
+                run_shell_script(archive_script, &settings, &repository, &workspace)?;
+            }
+        }
+
+        if remove_worktree {
+            git_dynamic(
+                &repository.root_path,
+                &[
+                    "worktree",
+                    "remove",
+                    "--force",
+                    workspace.path.to_string_lossy().as_ref(),
+                ],
+            )?;
+        }
+
         let now = timestamp();
         let changed = self.conn.execute(
             "UPDATE workspaces
@@ -235,6 +427,44 @@ impl WorkspaceStore {
         self.get_by_name(name)
     }
 
+    pub fn restore(&self, name: &str) -> Result<Workspace> {
+        let workspace = self.get_by_name(name)?;
+        anyhow::ensure!(
+            workspace.status == "archived",
+            "workspace {name} is not archived (status: {})",
+            workspace.status
+        );
+
+        if !workspace.path.exists() {
+            let repository = self.load_repository_by_id(workspace.repository_id)?;
+            git_dynamic(
+                &repository.root_path,
+                &[
+                    "worktree",
+                    "add",
+                    workspace.path.to_string_lossy().as_ref(),
+                    workspace.branch.as_str(),
+                ],
+            )?;
+            std::fs::create_dir_all(workspace.path.join(".context")).with_context(|| {
+                format!(
+                    "create workspace context directory {}",
+                    workspace.path.display()
+                )
+            })?;
+            let settings = load_repository_settings(&repository.root_path)?;
+            copy_included_ignored_files(&repository.root_path, &workspace.path)?;
+            initialize_context_files(&workspace.path, &settings)?;
+        }
+
+        let now = timestamp();
+        self.conn.execute(
+            "UPDATE workspaces SET status = 'active', archived_at = NULL, updated_at = ?1 WHERE name = ?2",
+            params![now, name],
+        )?;
+        self.get_by_name(name)
+    }
+
     pub fn run_workspace(&self, name: &str) -> Result<ProcessRecord> {
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
@@ -242,6 +472,18 @@ impl WorkspaceStore {
         let Some(run) = &settings.scripts.run else {
             anyhow::bail!("workspace {name} has no scripts.run configured");
         };
+
+        let run_mode = settings.scripts.run_mode.as_deref().unwrap_or("concurrent");
+        if run_mode == "nonconcurrent" {
+            if let Some(conflicting) =
+                self.find_running_workspace_in_repo(repository.id, workspace.id)?
+            {
+                anyhow::bail!(
+                    "workspace {} is already running in this repository (run_mode = nonconcurrent); stop it first",
+                    conflicting
+                );
+            }
+        }
 
         self.start_process(ProcessKind::Run, run, &settings, &repository, &workspace)
     }
@@ -321,6 +563,12 @@ impl WorkspaceStore {
         draft: bool,
     ) -> Result<String> {
         let workspace = self.get_by_name(name)?;
+        let changed = self.changed_files(name)?;
+        if changed.is_empty() {
+            anyhow::bail!(
+                "workspace {name} has no changed files; commit changes before creating a PR"
+            );
+        }
         let mut args = vec!["pr", "create"];
         if let Some(title) = title {
             args.extend(["--title", title]);
@@ -333,12 +581,547 @@ impl WorkspaceStore {
         if draft {
             args.push("--draft");
         }
-        command_output(&workspace.path, "gh", &args)
+        let output = command_output(&workspace.path, "gh", &args)?;
+        if let Some(url) = extract_pull_request_url(&output) {
+            self.record_pull_request(workspace.id, &url)?;
+        }
+        Ok(output)
+    }
+
+    pub fn create_from_issue(
+        &self,
+        repository_name: &str,
+        issue_number: u64,
+        branch_prefix: Option<&str>,
+    ) -> Result<Workspace> {
+        let repository = self.load_repository(repository_name)?;
+        // Fetch issue title from gh
+        let output = command_output(
+            &repository.root_path,
+            "gh",
+            &[
+                "issue",
+                "view",
+                &issue_number.to_string(),
+                "--json",
+                "title,number",
+            ],
+        )?;
+        let title = extract_json_string_field(&output, "title")
+            .unwrap_or_else(|| format!("issue-{issue_number}"));
+
+        // Slugify title for branch name
+        let slug = slugify(&title);
+        let prefix = branch_prefix.unwrap_or("lc");
+        let branch = format!("{prefix}/{issue_number}/{slug}");
+        let workspace_name = format!("issue-{issue_number}");
+
+        self.create(CreateWorkspace {
+            repository_name: repository_name.to_owned(),
+            name: workspace_name,
+            branch,
+            base_ref: None,
+        })
+    }
+
+    pub fn read_context_brief(&self, name: &str) -> Result<Option<String>> {
+        let workspace = self.get_by_name(name)?;
+        let path = workspace.path.join(".context/brief.md");
+        if !path.exists() {
+            return Ok(None);
+        }
+        let contents =
+            fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        // Strip leading H1 heading line ("# Brief") and blank lines
+        let body = contents
+            .lines()
+            .skip_while(|line| line.starts_with('#') || line.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if body.trim().is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(body))
     }
 
     pub fn pull_request_checks(&self, name: &str) -> Result<String> {
         let workspace = self.get_by_name(name)?;
         command_output(&workspace.path, "gh", &["pr", "checks"])
+    }
+
+    pub fn pull_request(&self, name: &str) -> Result<Option<PullRequest>> {
+        let workspace = self.get_by_name(name)?;
+        self.pull_request_by_workspace_id(workspace.id)
+    }
+
+    pub fn refresh_pull_request_state(&self, name: &str) -> Result<Option<PullRequest>> {
+        let workspace = self.get_by_name(name)?;
+        if self.pull_request_by_workspace_id(workspace.id)?.is_none() {
+            return Ok(None);
+        }
+        let state = command_output(&workspace.path, "gh", &["pr", "view", "--json", "state"])?;
+        let state = extract_json_string_field(&state, "state").unwrap_or_else(|| "open".to_owned());
+        let now = timestamp();
+        self.conn.execute(
+            "UPDATE pull_requests SET state = ?1, updated_at = ?2 WHERE workspace_id = ?3",
+            params![state, now, workspace.id],
+        )?;
+        self.pull_request_by_workspace_id(workspace.id)
+    }
+
+    fn record_pull_request(&self, workspace_id: i64, url: &str) -> Result<PullRequest> {
+        let number = parse_pull_request_number(url)
+            .with_context(|| format!("parse pull request number from {url}"))?;
+        let now = timestamp();
+        self.conn.execute(
+            "INSERT INTO pull_requests (
+                workspace_id, provider, number, url, state, created_at, updated_at
+            ) VALUES (?1, 'github', ?2, ?3, 'open', ?4, ?5)
+            ON CONFLICT(workspace_id) DO UPDATE SET
+                number = excluded.number,
+                url = excluded.url,
+                state = 'open',
+                updated_at = excluded.updated_at",
+            params![workspace_id, number, url, now, now],
+        )?;
+        self.pull_request_by_workspace_id(workspace_id)?
+            .context("load recorded pull request")
+    }
+
+    fn pull_request_by_workspace_id(&self, workspace_id: i64) -> Result<Option<PullRequest>> {
+        let result = self.conn.query_row(
+            "SELECT id, workspace_id, provider, number, url, state, created_at, updated_at
+             FROM pull_requests WHERE workspace_id = ?1",
+            [workspace_id],
+            row_to_pull_request,
+        );
+        match result {
+            Ok(pull_request) => Ok(Some(pull_request)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    pub fn sync_todos_from_context(&self, name: &str) -> Result<usize> {
+        let workspace = self.get_by_name(name)?;
+        let todos_path = workspace.path.join(".context/todos.md");
+        if !todos_path.exists() {
+            return Ok(0);
+        }
+        let contents = fs::read_to_string(&todos_path)
+            .with_context(|| format!("read {}", todos_path.display()))?;
+
+        let mut imported = 0usize;
+        for line in contents.lines() {
+            let trimmed = line.trim();
+            let (done, text) = if let Some(rest) = trimmed
+                .strip_prefix("- [x] ")
+                .or_else(|| trimmed.strip_prefix("- [X] "))
+            {
+                (true, rest)
+            } else if let Some(rest) = trimmed.strip_prefix("- [ ] ") {
+                (false, rest)
+            } else {
+                continue;
+            };
+            let text = text.trim();
+            if text.is_empty() {
+                continue;
+            }
+            let already_exists: bool = self.conn.query_row(
+                "SELECT COUNT(*) FROM todos
+                 WHERE workspace_id = ?1 AND text = ?2 AND source = 'context'",
+                params![workspace.id, text],
+                |row| row.get::<_, i64>(0),
+            )? > 0;
+            if !already_exists {
+                let now = timestamp();
+                let status = if done { "done" } else { "open" };
+                self.conn.execute(
+                    "INSERT INTO todos (workspace_id, text, status, source, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, 'context', ?4, ?5)",
+                    params![workspace.id, text, status, now, now],
+                )?;
+                imported += 1;
+            }
+        }
+        Ok(imported)
+    }
+
+    pub fn add_review_comment(
+        &self,
+        name: &str,
+        file_path: &str,
+        line_number: Option<i64>,
+        body: &str,
+    ) -> Result<ReviewComment> {
+        let workspace = self.get_by_name(name)?;
+        let now = timestamp();
+        self.conn.execute(
+            "INSERT INTO review_comments
+                (workspace_id, file_path, line_number, body, status, github_thread_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, 'open', NULL, ?5, ?6)",
+            params![workspace.id, file_path, line_number, body, now, now],
+        )?;
+        self.get_review_comment(self.conn.last_insert_rowid())
+    }
+
+    pub fn list_review_comments(&self, name: &str) -> Result<Vec<ReviewComment>> {
+        let workspace = self.get_by_name(name)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, workspace_id, file_path, line_number, body, status, github_thread_id, created_at, updated_at
+             FROM review_comments WHERE workspace_id = ?1 ORDER BY file_path, line_number",
+        )?;
+        let comments = stmt
+            .query_map([workspace.id], row_to_review_comment)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(comments)
+    }
+
+    pub fn resolve_review_comment(&self, id: i64) -> Result<ReviewComment> {
+        let now = timestamp();
+        let changed = self.conn.execute(
+            "UPDATE review_comments SET status = 'resolved', updated_at = ?1 WHERE id = ?2",
+            params![now, id],
+        )?;
+        anyhow::ensure!(changed > 0, "review comment {id} not found");
+        self.get_review_comment(id)
+    }
+
+    fn get_review_comment(&self, id: i64) -> Result<ReviewComment> {
+        self.conn
+            .query_row(
+                "SELECT id, workspace_id, file_path, line_number, body, status, github_thread_id, created_at, updated_at
+                 FROM review_comments WHERE id = ?1",
+                [id],
+                row_to_review_comment,
+            )
+            .with_context(|| format!("load review comment {id}"))
+    }
+
+    pub fn checkpoint_create(
+        &self,
+        name: &str,
+        message: &str,
+        session_id: Option<i64>,
+    ) -> Result<Checkpoint> {
+        let workspace = self.get_by_name(name)?;
+        let now = timestamp();
+        let git_ref = format!("refs/linux-conductor/checkpoints/{}/{now}", workspace.id);
+        // Create the ref pointing at the current HEAD of the workspace branch
+        let head = git_output_dynamic(&workspace.path, &["rev-parse", "HEAD"])?;
+        let head = head.trim();
+        git_dynamic(&workspace.path, &["update-ref", &git_ref, head])?;
+
+        self.conn.execute(
+            "INSERT INTO checkpoints (workspace_id, session_id, git_ref, message, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![workspace.id, session_id, git_ref, message, now],
+        )?;
+        self.get_checkpoint(self.conn.last_insert_rowid())
+    }
+
+    pub fn checkpoint_list(&self, name: &str) -> Result<Vec<Checkpoint>> {
+        let workspace = self.get_by_name(name)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, workspace_id, session_id, git_ref, message, created_at
+             FROM checkpoints WHERE workspace_id = ?1 ORDER BY id DESC",
+        )?;
+        let checkpoints = stmt
+            .query_map([workspace.id], row_to_checkpoint)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(checkpoints)
+    }
+
+    pub fn checkpoint_restore(&self, name: &str, checkpoint_id: i64) -> Result<Checkpoint> {
+        let workspace = self.get_by_name(name)?;
+        let checkpoint = self.get_checkpoint(checkpoint_id)?;
+        anyhow::ensure!(
+            checkpoint.workspace_id == workspace.id,
+            "checkpoint {checkpoint_id} does not belong to workspace {name}"
+        );
+
+        // Resolve the checkpoint ref to a commit hash
+        let commit = git_output_dynamic(&workspace.path, &["rev-parse", &checkpoint.git_ref])?;
+        let commit = commit.trim();
+
+        // Hard-reset the workspace to the checkpoint commit
+        git_dynamic(&workspace.path, &["reset", "--hard", commit])?;
+        // Remove untracked files that weren't part of the checkpoint
+        git_dynamic(&workspace.path, &["clean", "-fd"])?;
+
+        Ok(checkpoint)
+    }
+
+    fn get_checkpoint(&self, id: i64) -> Result<Checkpoint> {
+        self.conn
+            .query_row(
+                "SELECT id, workspace_id, session_id, git_ref, message, created_at
+                 FROM checkpoints WHERE id = ?1",
+                [id],
+                row_to_checkpoint,
+            )
+            .with_context(|| format!("load checkpoint {id}"))
+    }
+
+    pub fn branch_push_state(&self, name: &str) -> Result<BranchPushState> {
+        let workspace = self.get_by_name(name)?;
+        let upstream_exists = Command::new("git")
+            .arg("-C")
+            .arg(&workspace.path)
+            .args(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false);
+
+        if !upstream_exists {
+            return Ok(BranchPushState {
+                ahead: 0,
+                behind: 0,
+                has_upstream: false,
+            });
+        }
+
+        let ahead = count_git_rev_list(&workspace.path, "@{u}..HEAD");
+        let behind = count_git_rev_list(&workspace.path, "HEAD..@{u}");
+        Ok(BranchPushState {
+            ahead,
+            behind,
+            has_upstream: true,
+        })
+    }
+
+    pub fn add_todo(&self, name: &str, text: &str) -> Result<Todo> {
+        let workspace = self.get_by_name(name)?;
+        let now = timestamp();
+        self.conn.execute(
+            "INSERT INTO todos (workspace_id, text, status, source, created_at, updated_at)
+             VALUES (?1, ?2, 'open', 'manual', ?3, ?4)",
+            params![workspace.id, text, now, now],
+        )?;
+        self.get_todo(self.conn.last_insert_rowid())
+    }
+
+    pub fn list_todos(&self, name: &str) -> Result<Vec<Todo>> {
+        let workspace = self.get_by_name(name)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, workspace_id, text, status, source, created_at, updated_at
+             FROM todos WHERE workspace_id = ?1 ORDER BY id",
+        )?;
+        let todos = stmt
+            .query_map([workspace.id], row_to_todo)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(todos)
+    }
+
+    pub fn complete_todo(&self, id: i64) -> Result<Todo> {
+        let now = timestamp();
+        let changed = self.conn.execute(
+            "UPDATE todos SET status = 'done', updated_at = ?1 WHERE id = ?2",
+            params![now, id],
+        )?;
+        anyhow::ensure!(changed > 0, "todo {id} not found");
+        self.get_todo(id)
+    }
+
+    fn get_todo(&self, id: i64) -> Result<Todo> {
+        self.conn
+            .query_row(
+                "SELECT id, workspace_id, text, status, source, created_at, updated_at
+                 FROM todos WHERE id = ?1",
+                [id],
+                row_to_todo,
+            )
+            .with_context(|| format!("load todo {id}"))
+    }
+
+    pub fn mcp_status(&self, name: &str) -> Result<crate::mcp::McpStatus> {
+        let workspace = self.get_by_name(name)?;
+        Ok(crate::mcp::workspace_mcp_status(&workspace.path))
+    }
+
+    /// Returns other active workspaces in the same repository that have overlapping changed files.
+    pub fn find_conflicting_workspaces(&self, name: &str) -> Result<Vec<(String, Vec<String>)>> {
+        let workspace = self.get_by_name(name)?;
+        let my_files: std::collections::HashSet<String> =
+            self.changed_files(name)?.into_iter().collect();
+        if my_files.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let siblings: Vec<Workspace> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, repository_id, name, path, branch, base_ref, port_base, status, archived_at, created_at, updated_at
+                 FROM workspaces WHERE repository_id = ?1 AND id != ?2 AND status = 'active'",
+            )?;
+            let rows = stmt
+                .query_map(
+                    params![workspace.repository_id, workspace.id],
+                    row_to_workspace,
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+
+        let mut conflicts = Vec::new();
+        for sibling in siblings {
+            let sibling_files: std::collections::HashSet<String> =
+                self.changed_files(&sibling.name)?.into_iter().collect();
+            let overlap: Vec<String> = my_files.intersection(&sibling_files).cloned().collect();
+            if !overlap.is_empty() {
+                let mut sorted = overlap;
+                sorted.sort();
+                conflicts.push((sibling.name, sorted));
+            }
+        }
+        Ok(conflicts)
+    }
+
+    pub fn checks_summary(&self, name: &str) -> Result<ChecksSummary> {
+        let workspace = self.get_by_name(name)?;
+        let changed_files = self.changed_files(name)?.len();
+        let run_status = self.latest_process_status(workspace.id, ProcessKind::Run)?;
+        let session_status = self.latest_process_status(workspace.id, ProcessKind::Session)?;
+        let active_sessions = self.count_running_processes(workspace.id, ProcessKind::Session)?;
+        let pull_request = self.pull_request_by_workspace_id(workspace.id)?;
+        let todos = self.list_todos(name)?;
+        let open_todos = todos.iter().filter(|todo| todo.status == "open").count();
+        let branch_push_state = self.branch_push_state(name).ok();
+        let comments = self.list_review_comments(name)?;
+        let open_review_comments = comments.iter().filter(|c| c.status == "open").count();
+        let conflicting_workspaces = self.find_conflicting_workspaces(name).unwrap_or_default();
+        Ok(ChecksSummary {
+            workspace,
+            changed_files,
+            run_status,
+            session_status,
+            active_sessions,
+            pull_request,
+            open_todos,
+            total_todos: todos.len(),
+            branch_push_state,
+            open_review_comments,
+            conflicting_workspaces,
+        })
+    }
+
+    fn count_running_processes(&self, workspace_id: i64, kind: ProcessKind) -> Result<usize> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM processes
+             WHERE workspace_id = ?1 AND kind = ?2 AND status = 'running'",
+            params![workspace_id, kind.as_str()],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
+    fn latest_process_status(
+        &self,
+        workspace_id: i64,
+        kind: ProcessKind,
+    ) -> Result<Option<ProcessStatus>> {
+        let result = self.conn.query_row(
+            "SELECT status FROM processes
+             WHERE workspace_id = ?1 AND kind = ?2
+             ORDER BY id DESC LIMIT 1",
+            params![workspace_id, kind.as_str()],
+            |row| row.get::<_, String>(0),
+        );
+        match result {
+            Ok(status) => Ok(Some(ProcessStatus::from_str(&status)?)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    fn find_latest_running_process(
+        &self,
+        workspace_id: i64,
+        kind: ProcessKind,
+    ) -> Result<Option<ProcessRecord>> {
+        let result = self.conn.query_row(
+            "SELECT id, workspace_id, kind, command, pid, log_path, status, started_at, ended_at
+             FROM processes
+             WHERE workspace_id = ?1 AND kind = ?2 AND status = 'running'
+             ORDER BY id DESC LIMIT 1",
+            params![workspace_id, kind.as_str()],
+            row_to_process,
+        );
+        match result {
+            Ok(process) => Ok(Some(process)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    fn find_running_workspace_in_repo(
+        &self,
+        repository_id: i64,
+        exclude_workspace_id: i64,
+    ) -> Result<Option<String>> {
+        let result = self.conn.query_row(
+            "SELECT w.name FROM workspaces w
+             INNER JOIN processes p ON p.workspace_id = w.id
+             WHERE w.repository_id = ?1
+               AND w.id != ?2
+               AND p.kind = 'run'
+               AND p.status = 'running'
+             ORDER BY p.id DESC LIMIT 1",
+            params![repository_id, exclude_workspace_id],
+            |row| row.get::<_, String>(0),
+        );
+        match result {
+            Ok(name) => Ok(Some(name)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    pub fn merge_pull_request(&self, name: &str, method: &str) -> Result<String> {
+        let workspace = self.get_by_name(name)?;
+        let pr = self
+            .pull_request_by_workspace_id(workspace.id)?
+            .with_context(|| format!("no pull request recorded for workspace {name}"))?;
+
+        let todos = self.list_todos(name)?;
+        let open_todos = todos.iter().filter(|t| t.status == "open").count();
+        if open_todos > 0 {
+            anyhow::bail!(
+                "{open_todos} open todo(s) remain in workspace {name}; complete them before merging"
+            );
+        }
+
+        let output = command_output(
+            &workspace.path,
+            "gh",
+            &[
+                "pr",
+                "merge",
+                pr.number.to_string().as_str(),
+                &format!("--{method}"),
+            ],
+        )?;
+
+        let now = timestamp();
+        self.conn.execute(
+            "UPDATE pull_requests SET state = 'merged', updated_at = ?1 WHERE workspace_id = ?2",
+            params![now, workspace.id],
+        )?;
+
+        Ok(output)
+    }
+
+    pub fn editor_launch(&self, name: &str, editor: &str) -> Result<SessionLaunch> {
+        let workspace = self.get_by_name(name)?;
+        let repository = self.load_repository_by_id(workspace.repository_id)?;
+        let settings = load_repository_settings(&repository.root_path)?;
+        Ok(SessionLaunch {
+            kind: SessionKind::Shell,
+            program: PathBuf::from(editor),
+            args: vec![workspace.path.to_string_lossy().to_string()],
+            cwd: workspace.path.clone(),
+            env: conductor_environment(&settings, &repository, &workspace),
+        })
     }
 
     pub fn session_launch(&self, name: &str, kind: SessionKind) -> Result<SessionLaunch> {
@@ -364,6 +1147,27 @@ impl WorkspaceStore {
             cwd: workspace.path.clone(),
             env: conductor_environment(&settings, &repository, &workspace),
         })
+    }
+
+    pub fn list_sessions(&self, name: &str) -> Result<Vec<ProcessRecord>> {
+        self.list_processes(name, ProcessKind::Session)
+    }
+
+    pub fn list_runs(&self, name: &str) -> Result<Vec<ProcessRecord>> {
+        self.list_processes(name, ProcessKind::Run)
+    }
+
+    fn list_processes(&self, name: &str, kind: ProcessKind) -> Result<Vec<ProcessRecord>> {
+        let workspace = self.get_by_name(name)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, workspace_id, kind, command, pid, log_path, status, started_at, ended_at
+             FROM processes WHERE workspace_id = ?1 AND kind = ?2
+             ORDER BY id DESC",
+        )?;
+        let records = stmt
+            .query_map(params![workspace.id, kind.as_str()], row_to_process)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(records)
     }
 
     pub fn start_session(&self, name: &str, kind: SessionKind) -> Result<ProcessRecord> {
@@ -518,15 +1322,7 @@ impl WorkspaceStore {
         workspace_id: i64,
         kind: ProcessKind,
     ) -> Result<ProcessRecord> {
-        self.conn
-            .query_row(
-                "SELECT id, workspace_id, kind, command, pid, log_path, status, started_at, ended_at
-                 FROM processes
-                 WHERE workspace_id = ?1 AND kind = ?2 AND status = 'running'
-                 ORDER BY id DESC LIMIT 1",
-                params![workspace_id, kind.as_str()],
-                row_to_process,
-            )
+        self.find_latest_running_process(workspace_id, kind)?
             .context("load latest running process")
     }
 
@@ -593,6 +1389,48 @@ impl WorkspaceStore {
               started_at TEXT NOT NULL,
               ended_at TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS pull_requests (
+              id INTEGER PRIMARY KEY,
+              workspace_id INTEGER NOT NULL UNIQUE REFERENCES workspaces(id),
+              provider TEXT NOT NULL,
+              number INTEGER NOT NULL,
+              url TEXT NOT NULL,
+              state TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS todos (
+              id INTEGER PRIMARY KEY,
+              workspace_id INTEGER NOT NULL REFERENCES workspaces(id),
+              text TEXT NOT NULL,
+              status TEXT NOT NULL,
+              source TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS review_comments (
+              id INTEGER PRIMARY KEY,
+              workspace_id INTEGER NOT NULL REFERENCES workspaces(id),
+              file_path TEXT NOT NULL,
+              line_number INTEGER,
+              body TEXT NOT NULL,
+              status TEXT NOT NULL,
+              github_thread_id TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS checkpoints (
+              id INTEGER PRIMARY KEY,
+              workspace_id INTEGER NOT NULL REFERENCES workspaces(id),
+              session_id INTEGER REFERENCES processes(id),
+              git_ref TEXT NOT NULL,
+              message TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            );
             ",
         )?;
         Ok(())
@@ -646,6 +1484,159 @@ fn row_to_process(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProcessRecord> {
         started_at: row.get(7)?,
         ended_at: row.get(8)?,
     })
+}
+
+fn row_to_pull_request(row: &rusqlite::Row<'_>) -> rusqlite::Result<PullRequest> {
+    Ok(PullRequest {
+        id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        provider: row.get(2)?,
+        number: row.get(3)?,
+        url: row.get(4)?,
+        state: row.get(5)?,
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
+    })
+}
+
+fn row_to_todo(row: &rusqlite::Row<'_>) -> rusqlite::Result<Todo> {
+    Ok(Todo {
+        id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        text: row.get(2)?,
+        status: row.get(3)?,
+        source: row.get(4)?,
+        created_at: row.get(5)?,
+        updated_at: row.get(6)?,
+    })
+}
+
+fn row_to_review_comment(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReviewComment> {
+    Ok(ReviewComment {
+        id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        file_path: row.get(2)?,
+        line_number: row.get(3)?,
+        body: row.get(4)?,
+        status: row.get(5)?,
+        github_thread_id: row.get(6)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
+    })
+}
+
+fn row_to_checkpoint(row: &rusqlite::Row<'_>) -> rusqlite::Result<Checkpoint> {
+    Ok(Checkpoint {
+        id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        session_id: row.get(2)?,
+        git_ref: row.get(3)?,
+        message: row.get(4)?,
+        created_at: row.get(5)?,
+    })
+}
+
+fn count_git_rev_list(cwd: &Path, range: &str) -> usize {
+    Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["rev-list", "--count", range])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .unwrap_or(0)
+}
+
+fn extract_pull_request_url(output: &str) -> Option<String> {
+    output
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| line.starts_with("https://"))
+        .map(str::to_owned)
+}
+
+fn parse_pull_request_number(url: &str) -> Option<i64> {
+    url.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .and_then(|segment| segment.parse::<i64>().ok())
+}
+
+fn extract_json_string_field(json: &str, field: &str) -> Option<String> {
+    let needle = format!("\"{field}\"");
+    let field_start = json.find(&needle)? + needle.len();
+    let after_colon = json[field_start..].trim_start();
+    let after_colon = after_colon.strip_prefix(':')?.trim_start();
+    let after_quote = after_colon.strip_prefix('"')?;
+    let end = after_quote.find('"')?;
+    Some(after_quote[..end].to_owned())
+}
+
+fn slugify(text: &str) -> String {
+    let slug: String = text
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    if slug.len() > 40 {
+        slug[..40].trim_end_matches('-').to_owned()
+    } else {
+        slug
+    }
+}
+
+fn initialize_context_files(
+    workspace_path: &Path,
+    settings: &crate::settings::RepositorySettings,
+) -> Result<()> {
+    let context_dir = workspace_path.join(".context");
+
+    let brief = "# Brief\n\nDescribe the task for this workspace.\n";
+    let agent_notes =
+        "# Agent Notes\n\nHandoff notes and context for agents working in this workspace.\n";
+    let todos = "# Todos\n\n- [ ] Define task scope\n";
+
+    fs::write(context_dir.join("brief.md"), brief).context("write .context/brief.md")?;
+    fs::write(context_dir.join("agent-notes.md"), agent_notes)
+        .context("write .context/agent-notes.md")?;
+    fs::write(context_dir.join("todos.md"), todos).context("write .context/todos.md")?;
+
+    let mut prompts_lines = Vec::new();
+    if let Some(general) = settings.prompts.as_ref().and_then(|p| p.general.as_deref()) {
+        prompts_lines.push(format!("## General\n\n{general}\n"));
+    }
+    if let Some(code_review) = settings
+        .prompts
+        .as_ref()
+        .and_then(|p| p.code_review.as_deref())
+    {
+        prompts_lines.push(format!("## Code Review\n\n{code_review}\n"));
+    }
+    if let Some(create_pr) = settings
+        .prompts
+        .as_ref()
+        .and_then(|p| p.create_pr.as_deref())
+    {
+        prompts_lines.push(format!("## Create PR\n\n{create_pr}\n"));
+    }
+    if !prompts_lines.is_empty() {
+        let content = format!("# Prompts\n\n{}", prompts_lines.join("\n"));
+        fs::write(context_dir.join("PROMPTS.md"), content).context("write .context/PROMPTS.md")?;
+    }
+
+    Ok(())
 }
 
 fn remote_exists(root_path: &Path, remote_name: &str) -> bool {
@@ -1058,6 +2049,8 @@ notes.local
                 "user.name=Linux Conductor",
                 "-c",
                 "user.email=linux-conductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
                 "commit",
                 "-m",
                 "add conductor settings",
@@ -1128,6 +2121,8 @@ CUSTOM_VALUE = "from-settings"
                 "user.name=Linux Conductor",
                 "-c",
                 "user.email=linux-conductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
                 "commit",
                 "-m",
                 "add setup script",
@@ -1200,11 +2195,80 @@ CUSTOM_VALUE = "from-settings"
             })
             .unwrap();
 
-        let archived = store.archive("berlin").unwrap();
+        let archived = store.archive("berlin", false).unwrap();
 
         assert_eq!(archived.status, "archived");
         assert!(archived.archived_at.is_some());
         assert_eq!(store.list().unwrap()[0], archived);
+    }
+
+    #[test]
+    fn archive_stops_running_processes_and_removes_worktree() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::write(
+            repo_path.join(".conductor/settings.toml"),
+            r#"
+[scripts]
+run = "printf 'started\n'; while true; do sleep 1; done"
+"#,
+        )
+        .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", ".conductor/settings.toml"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args([
+                "-c",
+                "user.name=Linux Conductor",
+                "-c",
+                "user.email=linux-conductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "add run script",
+            ])
+            .status()
+            .unwrap();
+
+        let db_path = temp.path().join("state.db");
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        let run = store.run_workspace("berlin").unwrap();
+        wait_for_log(&run.log_path, "started");
+
+        let archived = store.archive("berlin", true).unwrap();
+
+        assert_eq!(archived.status, "archived");
+        assert!(!workspace.path.exists());
+        let summary = store.checks_summary("berlin").unwrap();
+        assert_eq!(summary.run_status, Some(ProcessStatus::Stopped));
     }
 
     #[test]
@@ -1237,6 +2301,8 @@ CUSTOM_VALUE = "from-settings"
                 "user.name=Linux Conductor",
                 "-c",
                 "user.email=linux-conductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
                 "commit",
                 "-m",
                 "add run script",
@@ -1316,6 +2382,8 @@ run = "printf 'started\n'; while true; do sleep 1; done"
                 "user.name=Linux Conductor",
                 "-c",
                 "user.email=linux-conductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
                 "commit",
                 "-m",
                 "add run script",
@@ -1525,6 +2593,313 @@ run = "printf 'started\n'; while true; do sleep 1; done"
         assert!(diff.contains("+changed"));
     }
 
+    #[test]
+    fn extract_pull_request_url_finds_last_url_line() {
+        let output = "Creating pull request for lc/berlin into main\nhttps://github.com/example/demo/pull/42\n";
+        assert_eq!(
+            extract_pull_request_url(output),
+            Some("https://github.com/example/demo/pull/42".to_owned())
+        );
+    }
+
+    #[test]
+    fn parse_pull_request_number_reads_trailing_segment() {
+        assert_eq!(
+            parse_pull_request_number("https://github.com/example/demo/pull/42"),
+            Some(42)
+        );
+        assert_eq!(parse_pull_request_number("not-a-url"), None);
+    }
+
+    #[test]
+    fn record_pull_request_persists_number_and_is_visible_in_checks_summary() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        let recorded = store
+            .record_pull_request(workspace.id, "https://github.com/example/demo/pull/42")
+            .unwrap();
+
+        assert_eq!(recorded.number, 42);
+        assert_eq!(recorded.state, "open");
+
+        let fetched = store.pull_request("berlin").unwrap().unwrap();
+        assert_eq!(fetched, recorded);
+
+        let summary = store.checks_summary("berlin").unwrap();
+        assert_eq!(summary.pull_request, Some(recorded));
+    }
+
+    #[test]
+    fn todos_can_be_added_listed_and_completed() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        let todo = store.add_todo("berlin", "write tests").unwrap();
+        assert_eq!(todo.status, "open");
+
+        let todos = store.list_todos("berlin").unwrap();
+        assert_eq!(todos, vec![todo.clone()]);
+
+        let done = store.complete_todo(todo.id).unwrap();
+        assert_eq!(done.status, "done");
+
+        let summary = store.checks_summary("berlin").unwrap();
+        assert_eq!(summary.total_todos, 1);
+        assert_eq!(summary.open_todos, 0);
+    }
+
+    #[test]
+    fn rename_updates_name_path_and_moves_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        let old_path = workspace.path.clone();
+        let renamed = store.rename("berlin", "oslo").unwrap();
+
+        assert_eq!(renamed.name, "oslo");
+        assert!(!old_path.exists());
+        assert!(renamed.path.exists());
+        assert!(renamed.path.join(".context").is_dir());
+
+        // Should appear under new name in list
+        let list = store.list().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].name, "oslo");
+    }
+
+    #[test]
+    fn checkpoint_create_makes_git_ref_and_list_returns_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        let cp = store
+            .checkpoint_create("berlin", "before refactor", None)
+            .unwrap();
+        assert_eq!(cp.message, "before refactor");
+        assert!(cp.git_ref.starts_with("refs/linux-conductor/checkpoints/"));
+        assert!(cp.session_id.is_none());
+
+        let list = store.checkpoint_list("berlin").unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, cp.id);
+    }
+
+    #[test]
+    fn checkpoint_restore_resets_workspace_to_checkpoint_commit() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        // Take checkpoint at initial state
+        let cp = store
+            .checkpoint_create("berlin", "clean state", None)
+            .unwrap();
+
+        // Make a change and commit it
+        fs::write(workspace.path.join("added.txt"), "new content\n").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&workspace.path)
+            .args(["add", "added.txt"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&workspace.path)
+            .args([
+                "-c",
+                "user.name=Linux Conductor",
+                "-c",
+                "user.email=linux-conductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "added file",
+            ])
+            .status()
+            .unwrap();
+        assert!(workspace.path.join("added.txt").exists());
+
+        // Restore to checkpoint
+        store.checkpoint_restore("berlin", cp.id).unwrap();
+
+        // The added file should be gone
+        assert!(!workspace.path.join("added.txt").exists());
+    }
+
+    #[test]
+    fn find_conflicting_workspaces_detects_same_changed_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let berlin = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let tokyo = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "tokyo".to_owned(),
+                branch: "lc/tokyo".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        // Both workspaces modify the same file
+        fs::write(berlin.path.join("README.md"), "berlin changes\n").unwrap();
+        fs::write(tokyo.path.join("README.md"), "tokyo changes\n").unwrap();
+        // Berlin also modifies a unique file
+        fs::write(berlin.path.join("berlin-only.txt"), "unique\n").unwrap();
+
+        let conflicts = store.find_conflicting_workspaces("berlin").unwrap();
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].0, "tokyo");
+        assert!(conflicts[0].1.contains(&"README.md".to_owned()));
+        assert!(!conflicts[0].1.contains(&"berlin-only.txt".to_owned()));
+
+        // Tokyo sees the same conflict
+        let conflicts_from_tokyo = store.find_conflicting_workspaces("tokyo").unwrap();
+        assert_eq!(conflicts_from_tokyo.len(), 1);
+        assert_eq!(conflicts_from_tokyo[0].0, "berlin");
+    }
+
+    #[test]
+    fn slugify_converts_to_kebab_case() {
+        assert_eq!(slugify("Add search feature"), "add-search-feature");
+        assert_eq!(slugify("Fix: weird  spaces"), "fix-weird-spaces");
+        assert_eq!(slugify("feat/cool-thing"), "feat-cool-thing");
+        let long = "a".repeat(50);
+        assert!(slugify(&long).len() <= 40);
+    }
+
     fn init_repo(path: PathBuf) -> PathBuf {
         fs::create_dir(&path).unwrap();
         Command::new("git")
@@ -1547,6 +2922,8 @@ run = "printf 'started\n'; while true; do sleep 1; done"
                 "user.name=Linux Conductor",
                 "-c",
                 "user.email=linux-conductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
                 "commit",
                 "-m",
                 "initial",

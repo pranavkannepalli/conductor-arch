@@ -8,6 +8,14 @@ pub struct RepositorySettings {
     pub file_include_globs: Vec<String>,
     pub scripts: ScriptSettings,
     pub environment_variables: Vec<(String, String)>,
+    pub prompts: Option<PromptSettings>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PromptSettings {
+    pub general: Option<String>,
+    pub code_review: Option<String>,
+    pub create_pr: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -29,6 +37,14 @@ struct RawRepositorySettings {
     file_include_globs: Option<String>,
     scripts: Option<RawScriptSettings>,
     environment_variables: Option<BTreeMap<String, String>>,
+    prompts: Option<RawPromptSettings>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct RawPromptSettings {
+    general: Option<String>,
+    code_review: Option<String>,
+    create_pr: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -52,6 +68,7 @@ impl RawRepositorySettings {
                 self.environment_variables.unwrap_or_default(),
                 local.environment_variables.unwrap_or_default(),
             )),
+            prompts: local.prompts.or(self.prompts),
         }
     }
 
@@ -70,6 +87,11 @@ impl RawRepositorySettings {
                 .unwrap_or_default()
                 .into_iter()
                 .collect(),
+            prompts: self.prompts.map(|p| PromptSettings {
+                general: p.general,
+                code_review: p.code_review,
+                create_pr: p.create_pr,
+            }),
         }
     }
 }

@@ -102,6 +102,8 @@ fn init_repo(path: PathBuf) -> PathBuf {
             "user.name=Linux Conductor",
             "-c",
             "user.email=linux-conductor@example.test",
+            "-c",
+            "commit.gpgsign=false",
             "commit",
             "-m",
             "initial",

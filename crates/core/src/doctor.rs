@@ -79,6 +79,8 @@ fn dependency_checks() -> Vec<DependencyCheck> {
         ("ssh", true),
         ("codex", false),
         ("claude", false),
+        ("code", false),
+        ("cursor", false),
     ]
     .into_iter()
     .map(|(name, required)| DependencyCheck {
