@@ -1,13 +1,15 @@
 use adw::prelude::*;
 use adw::{Application, ApplicationWindow, HeaderBar};
 use gtk::{
-    Align, Box as GBox, Button, CssProvider, Label, ListBox, ListBoxRow, Orientation, PolicyType,
-    ScrolledWindow, Separator, Stack, StackSwitcher, TextView, STYLE_PROVIDER_PRIORITY_APPLICATION,
+    Align, Box as GBox, Button, CssProvider, Entry, Label, ListBox, ListBoxRow, Orientation,
+    PolicyType, ScrolledWindow, Separator, Stack, StackSwitcher, TextView,
+    STYLE_PROVIDER_PRIORITY_APPLICATION,
 };
 use linux_conductor_core::paths::AppPaths;
 use linux_conductor_core::workspace::WorkspaceStore;
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::time::SystemTime;
 
 const APP_ID: &str = "io.github.pranavkannepalli.linux-conductor";
 
@@ -59,7 +61,7 @@ fn build_ui(app: &Application) {
     center_panel.set_vexpand(true);
 
     // Sidebar — triggers both center and right refresh on selection
-    let sidebar = build_sidebar(
+    let (sidebar, refresh_sidebar) = build_sidebar(
         &paths,
         Rc::clone(&selected),
         refresh_center.clone(),
@@ -86,7 +88,9 @@ fn build_ui(app: &Application) {
     refresh_btn.set_tooltip_text(Some("Refresh workspace state"));
     let rc = refresh_center.clone();
     let rr = refresh_right.clone();
+    let rs = refresh_sidebar.clone();
     refresh_btn.connect_clicked(move |_| {
+        rs();
         rc();
         rr();
     });
@@ -103,7 +107,9 @@ fn build_ui(app: &Application) {
     // Auto-refresh panels every 5 seconds
     let rc = refresh_center.clone();
     let rr = refresh_right.clone();
+    let rs = refresh_sidebar.clone();
     glib::timeout_add_seconds_local(5, move || {
+        rs();
         rc();
         rr();
         glib::ControlFlow::Continue
@@ -117,7 +123,7 @@ fn build_sidebar(
     selected: Rc<RefCell<Option<String>>>,
     refresh_center: impl Fn() + Clone + 'static,
     refresh_right: impl Fn() + Clone + 'static,
-) -> GBox {
+) -> (GBox, impl Fn() + Clone + 'static) {
     let sidebar_box = GBox::new(Orientation::Vertical, 0);
     sidebar_box.add_css_class("sidebar");
     sidebar_box.set_width_request(220);
@@ -138,35 +144,73 @@ fn build_sidebar(
     list.add_css_class("workspace-list");
     list.set_selection_mode(gtk::SelectionMode::Single);
 
-    // Store (name, index) map for row → workspace name lookup
+    // row index → workspace name
     let names: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
 
-    if let Ok(store) = WorkspaceStore::open(paths.database_path.clone()) {
-        if let Ok(workspaces) = store.list() {
-            for ws in &workspaces {
-                let row = build_workspace_row(
-                    ws.name.as_str(),
-                    ws.branch.as_str(),
-                    ws.status.as_str(),
-                    ws.port_base as i64,
-                );
-                list.append(&row);
-                names.borrow_mut().push(ws.name.clone());
+    let db_path = paths.database_path.clone();
+
+    // Populate list from DB
+    let populate = {
+        let list = list.clone();
+        let names = Rc::clone(&names);
+        let db_path = db_path.clone();
+        let selected = Rc::clone(&selected);
+        move || {
+            // Clear existing rows
+            while let Some(child) = list.first_child() {
+                list.remove(&child);
+            }
+            names.borrow_mut().clear();
+
+            let prev_selected = selected.borrow().clone();
+
+            if let Ok(store) = WorkspaceStore::open(db_path.clone()) {
+                if let Ok(workspaces) = store.list() {
+                    for ws in &workspaces {
+                        let row = build_workspace_row(
+                            ws.name.as_str(),
+                            ws.branch.as_str(),
+                            ws.status.as_str(),
+                            ws.port_base as i64,
+                        );
+                        list.append(&row);
+                        names.borrow_mut().push(ws.name.clone());
+                    }
+                }
+            }
+
+            if list.first_child().is_none() {
+                let empty = Label::new(Some(
+                    "No workspaces yet.\n\nRun:\nlinux-conductor workspace create",
+                ));
+                empty.add_css_class("empty-label");
+                empty.set_wrap(true);
+                empty.set_margin_start(12);
+                empty.set_margin_end(12);
+                empty.set_margin_top(16);
+                list.append(&ListBoxRow::builder().child(&empty).build());
+            }
+
+            // Re-select previously selected workspace if still present
+            let names_ref = names.borrow();
+            let target_idx = prev_selected
+                .as_deref()
+                .and_then(|n| names_ref.iter().position(|x| x == n));
+            drop(names_ref);
+
+            if let Some(idx) = target_idx {
+                if let Some(row) = list.row_at_index(idx as i32) {
+                    list.select_row(Some(&row));
+                }
+            } else if list.selected_row().is_none() {
+                if let Some(first) = list.row_at_index(0) {
+                    list.select_row(Some(&first));
+                }
             }
         }
-    }
+    };
 
-    if list.first_child().is_none() {
-        let empty = Label::new(Some(
-            "No workspaces yet.\n\nRun:\nlinux-conductor workspace create",
-        ));
-        empty.add_css_class("empty-label");
-        empty.set_wrap(true);
-        empty.set_margin_start(12);
-        empty.set_margin_end(12);
-        empty.set_margin_top(16);
-        list.append(&ListBoxRow::builder().child(&empty).build());
-    }
+    populate();
 
     // On selection change: update shared state and refresh panels
     let sel_clone = Rc::clone(&selected);
@@ -180,11 +224,6 @@ fn build_sidebar(
         refresh_center();
         refresh_right();
     });
-
-    // Select first workspace by default
-    if let Some(first) = list.row_at_index(0) {
-        list.select_row(Some(&first));
-    }
 
     scroll.set_child(Some(&list));
     sidebar_box.append(&scroll);
@@ -222,7 +261,7 @@ echo; echo 'Run linux-conductor-gtk to see the updated workspace list.'"#,
     });
     sidebar_box.append(&repo_btn);
 
-    sidebar_box
+    (sidebar_box, populate)
 }
 
 fn build_workspace_row(name: &str, branch: &str, status: &str, port: i64) -> ListBoxRow {
@@ -315,6 +354,17 @@ fn build_center_panel(
         }
     });
 
+    let merge_btn = Button::with_label("⇓ Merge");
+    merge_btn.set_tooltip_text(Some("Merge GitHub PR (squash)"));
+    let sel = Rc::clone(&selected);
+    let rr = refresh_right.clone();
+    merge_btn.connect_clicked(move |_| {
+        if let Some(ws) = sel.borrow().clone() {
+            spawn_terminal_command(&format!("linux-conductor pr merge {ws} --method squash"));
+            rr();
+        }
+    });
+
     let archive_btn = Button::with_label("✕ Archive");
     archive_btn.add_css_class("destructive-action");
     archive_btn.set_tooltip_text(Some("Archive workspace"));
@@ -331,6 +381,7 @@ fn build_center_panel(
     toolbar.append(&stop_btn);
     toolbar.append(&editor_btn);
     toolbar.append(&pr_btn);
+    toolbar.append(&merge_btn);
     toolbar.append(&archive_btn);
 
     let toolbar_box = GBox::new(Orientation::Vertical, 0);
@@ -368,6 +419,67 @@ fn build_center_panel(
 
     info_scroll.set_child(Some(&info_box));
     center.append(&info_scroll);
+
+    // Agent prompt composer bar (bottom of center panel)
+    center.append(&Separator::new(Orientation::Horizontal));
+    let composer_box = GBox::new(Orientation::Horizontal, 8);
+    composer_box.add_css_class("composer-bar");
+    composer_box.set_margin_start(12);
+    composer_box.set_margin_end(12);
+    composer_box.set_margin_top(8);
+    composer_box.set_margin_bottom(8);
+
+    let prompt_entry = Entry::new();
+    prompt_entry.set_placeholder_text(Some("Prompt to agent (saved to .context/agent-notes.md)…"));
+    prompt_entry.set_hexpand(true);
+
+    let send_btn = Button::with_label("Send");
+    send_btn.add_css_class("suggested-action");
+
+    let sel_c = Rc::clone(&selected);
+    let db_path_c = paths.database_path.clone();
+    let entry_c = prompt_entry.clone();
+    let do_send = move || {
+        let text = entry_c.text().to_string();
+        if text.trim().is_empty() {
+            return;
+        }
+        let ws_name = match sel_c.borrow().clone() {
+            Some(n) => n,
+            None => return,
+        };
+        if let Ok(store) = WorkspaceStore::open(db_path_c.clone()) {
+            if let Ok(ws_path) = store.workspace_path(&ws_name) {
+                let notes_path = ws_path.join(".context").join("agent-notes.md");
+                if let Some(parent) = notes_path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&notes_path)
+                {
+                    let ts = SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let _ = writeln!(f, "\n---\n*t={ts}*\n\n{text}\n");
+                }
+                entry_c.set_text("");
+            }
+        }
+    };
+
+    let do_send_rc = std::rc::Rc::new(do_send);
+    let ds1 = do_send_rc.clone();
+    send_btn.connect_clicked(move |_| ds1());
+    let ds2 = do_send_rc.clone();
+    prompt_entry.connect_activate(move |_| ds2());
+
+    composer_box.append(&prompt_entry);
+    composer_box.append(&send_btn);
+    center.append(&composer_box);
 
     let db_path = paths.database_path.clone();
     let ws_title_clone = ws_title.clone();
@@ -1030,5 +1142,22 @@ separator {
     background-color: #313244;
     min-width: 1px;
     min-height: 1px;
+}
+
+.composer-bar {
+    background-color: #1e1e2e;
+    border-top: 1px solid #313244;
+}
+
+.composer-bar entry {
+    background-color: #181825;
+    color: #cdd6f4;
+    border: 1px solid #313244;
+    border-radius: 6px;
+    font-size: 13px;
+}
+
+.composer-bar entry:focus {
+    border-color: #89b4fa;
 }
 "#;

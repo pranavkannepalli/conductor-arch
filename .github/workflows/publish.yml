@@ -94,18 +94,7 @@ jobs:
           APPDIR="packaging/appimage/linux-conductor.AppDir"
           install -Dm755 target/release/linux-conductor "$APPDIR/usr/bin/linux-conductor"
           install -Dm755 target/release/linux-conductor-gtk "$APPDIR/usr/bin/linux-conductor-gtk"
-          # Generate a placeholder icon if none is committed
-          if [ ! -f "$APPDIR/linux-conductor.png" ]; then
-            if command -v convert >/dev/null 2>&1; then
-              convert -size 256x256 xc:'#1a1a2e' -fill white \
-                -font DejaVu-Sans-Bold -pointsize 18 -gravity center \
-                -annotate 0 "conductor" "$APPDIR/linux-conductor.png"
-            else
-              # Fall back to a 1x1 transparent PNG (valid but invisible icon)
-              printf '\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82' \
-                > "$APPDIR/linux-conductor.png"
-            fi
-          fi
+          # SVG icon is committed at $APPDIR/linux-conductor.svg
 
       - name: Build AppImage
         env:

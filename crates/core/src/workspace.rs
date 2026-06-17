@@ -8,7 +8,7 @@ use std::fs::{self, OpenOptions};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1213,6 +1213,10 @@ impl WorkspaceStore {
             .context("load workspace")
     }
 
+    pub fn workspace_path(&self, name: &str) -> Result<PathBuf> {
+        Ok(self.get_by_name(name)?.path)
+    }
+
     fn get_by_name(&self, name: &str) -> Result<Workspace> {
         self.conn
             .query_row(
@@ -1808,21 +1812,52 @@ fn git_ignored(repo_path: &Path, relative_path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+fn process_alive(pid: u32) -> bool {
+    Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 fn stop_process(pid: u32) -> Result<()> {
-    let group_status = Command::new("kill")
+    // Try SIGTERM to process group first, then to process directly.
+    let group_ok = Command::new("kill")
         .arg("-TERM")
         .arg(format!("-{pid}"))
         .status()
-        .context("run kill")?;
-    if group_status.success() {
-        return Ok(());
+        .context("run kill")?
+        .success();
+    if !group_ok {
+        let _ = Command::new("kill")
+            .arg("-TERM")
+            .arg(pid.to_string())
+            .status();
     }
-    let status = Command::new("kill")
-        .arg("-TERM")
-        .arg(pid.to_string())
-        .status()
-        .context("run kill")?;
-    anyhow::ensure!(status.success(), "failed to stop process {pid}");
+
+    // Give the process up to 3 seconds to exit gracefully.
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while std::time::Instant::now() < deadline {
+        if !process_alive(pid) {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    // Still alive — send SIGKILL to process group, then process.
+    if process_alive(pid) {
+        let _ = Command::new("kill")
+            .arg("-KILL")
+            .arg(format!("-{pid}"))
+            .status();
+        std::thread::sleep(Duration::from_millis(200));
+        let _ = Command::new("kill")
+            .arg("-KILL")
+            .arg(pid.to_string())
+            .status();
+    }
+
     Ok(())
 }
 

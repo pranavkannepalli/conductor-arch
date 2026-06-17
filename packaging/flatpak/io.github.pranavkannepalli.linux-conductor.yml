@@ -38,6 +38,8 @@ modules:
           /app/share/metainfo/io.github.pranavkannepalli.linux-conductor.appdata.xml
       - install -Dm644 packaging/flatpak/io.github.pranavkannepalli.linux-conductor.desktop
           /app/share/applications/io.github.pranavkannepalli.linux-conductor.desktop
+      - install -Dm644 packaging/linux-conductor.svg
+          /app/share/icons/hicolor/scalable/apps/io.github.pranavkannepalli.linux-conductor.svg
     sources:
       - type: dir
         path: ../..

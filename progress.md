@@ -273,9 +273,30 @@ All plan phases are addressed and complete:
 - Updated README known limits (Flatpak now experimental, not blocked)
 - All 31 tests pass; all crates build clean; cargo fmt clean
 
+## 2026-06-17 (session 5) — continued
+
+- Sidebar workspace list now auto-reloads (5s GLib timeout + manual refresh button):
+  - `build_sidebar` returns `(GBox, impl Fn() + Clone + 'static)` refresh closure
+  - Refresh clears and repopulates ListBox from DB, preserves selected workspace if still present
+  - Falls back to first row if previous selection no longer exists
+- Added "⇓ Merge" PR button to center toolbar (`linux-conductor pr merge <ws> --method squash`)
+- Created `packaging/linux-conductor.svg` — Catppuccin-themed app icon (3 worktree bars + session dot)
+- Icon wired into all distribution formats:
+  - nfpm.yaml → `/usr/share/icons/hicolor/scalable/apps/linux-conductor.svg`
+  - AUR PKGBUILD → same hicolor path
+  - Flatpak manifest → `/app/share/icons/hicolor/scalable/apps/io.github.pranavkannepalli.linux-conductor.svg`
+  - AppImage AppDir → `packaging/appimage/linux-conductor.AppDir/linux-conductor.svg` (committed)
+  - AppImage CI step simplified (no more fallback PNG generation)
+
+- SIGKILL fallback in `stop_process`: after SIGTERM, wait up to 3s then SIGKILL process group + process
+- Added `WorkspaceStore::workspace_path(name)` public method
+- Added agent prompt composer bar to center panel bottom:
+  - `Entry` + "Send" button at bottom of center panel
+  - On submit (Enter or button click): appends prompt to `.context/agent-notes.md` in workspace
+  - Dark composer bar CSS matches overall theme
+- All 31 tests pass; all crates build clean; cargo fmt clean
+
 ## Remaining Polish (not blocking MVP)
 
 - VTE embedded terminal (requires `sudo pacman -S vte4` — not installable in this session)
-- AppImage icon (placeholder 1×1 PNG; replace with a real icon before public release)
-- Workspace renaming, restore, PR merge dialogs in GUI (all available via CLI)
-- Periodic auto-reload of sidebar workspace list (currently static; reload requires restart)
+- Workspace renaming, restore dialogs in GUI (all available via CLI)

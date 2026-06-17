@@ -22,6 +22,8 @@ package() {
     install -Dm755 target/release/linux-conductor-gtk "$pkgdir/usr/bin/linux-conductor-gtk"
     install -Dm644 packaging/linux-conductor-gtk.desktop \
         "$pkgdir/usr/share/applications/linux-conductor-gtk.desktop"
+    install -Dm644 packaging/linux-conductor.svg \
+        "$pkgdir/usr/share/icons/hicolor/scalable/apps/linux-conductor.svg"
     install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
     install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }
