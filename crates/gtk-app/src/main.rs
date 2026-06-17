@@ -613,12 +613,37 @@ fn build_center_panel(
     let rename_btn = Button::with_label("✎ Rename");
     rename_btn.set_tooltip_text(Some("Rename workspace"));
     let sel = Rc::clone(&selected);
+    let win_r = window.clone();
     rename_btn.connect_clicked(move |_| {
         if let Some(ws) = sel.borrow().clone() {
-            spawn_terminal_command(&format!(
-                "read -rp 'New name for \"{ws}\": ' NEW_NAME\n\
-                 linux-conductor workspace rename {ws} \"$NEW_NAME\""
-            ));
+            let name_entry = Entry::new();
+            name_entry.set_placeholder_text(Some("new-workspace-name"));
+            name_entry.set_text(&ws);
+            name_entry.set_width_chars(28);
+            let dialog = adw::MessageDialog::new(
+                Some(&win_r),
+                Some("Rename Workspace"),
+                Some(&format!("Enter a new name for \"{ws}\".")),
+            );
+            dialog.set_extra_child(Some(&name_entry));
+            dialog.add_response("cancel", "Cancel");
+            dialog.add_response("rename", "Rename");
+            dialog.set_response_appearance("rename", adw::ResponseAppearance::Suggested);
+            dialog.set_default_response(Some("rename"));
+            dialog.set_close_response("cancel");
+            let entry_c = name_entry.clone();
+            dialog.connect_response(None, move |_, response| {
+                if response == "rename" {
+                    let new_name = entry_c.text().to_string();
+                    if !new_name.trim().is_empty() && new_name != ws {
+                        spawn_terminal_command(&format!(
+                            "linux-conductor workspace rename {ws} {new_name}"
+                        ));
+                    }
+                }
+            });
+            dialog.present();
+            name_entry.select_region(0, -1);
         }
     });
 
