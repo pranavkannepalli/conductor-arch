@@ -296,7 +296,20 @@ All plan phases are addressed and complete:
   - Dark composer bar CSS matches overall theme
 - All 31 tests pass; all crates build clean; cargo fmt clean
 
+## 2026-06-17 (session 6)
+
+- Todos tab: "✓ Done" button per todo, inline row removal without full refresh
+- Todos tab: "Add" entry + button at bottom for in-app todo creation
+- Sidebar: workspaces grouped by repository with non-selectable section headers
+- Sidebar: run-state indicator (▶/■) and PR# badge on each workspace row
+- Sidebar: switched from Vec index to HashMap<i32,String> for header-safe row→name lookup
+- WorkspaceStatusLine: added `repository_name` field (fetched from DB in list_status)
+- Action toolbar: added "⊗ Discard" button alongside Archive
+- Right panel: added "Review" tab showing open review comments with "Resolve" button
+- populate_review_box: resolves comment inline (removes row widget)
+- All 31 tests pass; all crates build clean; cargo fmt clean
+
 ## Remaining Polish (not blocking MVP)
 
 - VTE embedded terminal (requires `sudo pacman -S vte4` — not installable in this session)
-- Workspace renaming, restore dialogs in GUI (all available via CLI)
+- Workspace renaming dialog in GUI (available via CLI)
