@@ -319,6 +319,20 @@ All plan phases are addressed and complete:
 - Right panel: added "Sessions" tab — shows active sessions & runs with kind, PID, start time; "■ Stop" button for running processes
 - All crates build clean; cargo fmt clean
 
+## 2026-06-17 (session 8)
+
+- Sidebar: search/filter box — filters workspace list by name or branch in real-time
+- Sidebar: "From Issue" button — opens terminal wizard with `--from-issue <url>` workflow
+- Center panel: workspace path subtitle shows resolved path below workspace title
+- Center panel: "⎘ Path" button in toolbar — copies workspace path to clipboard via GDK clipboard
+- Center panel: "Repository Overview" replaces "All Workspaces" — filters to same-repo siblings
+- Checks tab: colored syntax highlighting via TextBuffer tags — green for running, red for errors, blue for workspace info, yellow for push state
+- Checks tab: "↻ Live PR Checks" and "⇄ Sync PR State" pill buttons for live GitHub data
+- Todos tab: "⇄ Sync from .context/" pill button — calls sync_todos_from_context
+- Sessions tab: new tab showing active sessions & runs with stop buttons
+- Keyboard shortcut: Ctrl+R refreshes all panels
+- All 30 tests pass; all crates build clean; cargo fmt clean
+
 ## Remaining Polish (not blocking MVP)
 
 - VTE embedded terminal (requires `sudo pacman -S vte4` — not installable in this session)
