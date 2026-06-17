@@ -700,7 +700,9 @@ fn build_center_panel(
     center.append(&Separator::new(Orientation::Horizontal));
 
     // Archived workspace banner (hidden by default)
-    let archive_banner = Label::new(Some("⚠ This workspace is archived. Click ↺ Restore to reactivate it."));
+    let archive_banner = Label::new(Some(
+        "⚠ This workspace is archived. Click ↺ Restore to reactivate it.",
+    ));
     archive_banner.add_css_class("archive-banner");
     archive_banner.set_xalign(0.0);
     archive_banner.set_margin_start(16);
@@ -878,19 +880,24 @@ fn build_center_panel(
         ws_title_clone.set_text(&title_text);
 
         // Show Restore for archived workspaces, Archive for active
-        let is_archived = ws_name.as_deref().and_then(|n| {
-            WorkspaceStore::open(db_path2.clone()).ok()
-                .and_then(|store| store.list_status().ok())
-                .and_then(|lines| lines.into_iter().find(|l| l.workspace.name == n))
-                .map(|l| l.workspace.status == "archived")
-        }).unwrap_or(false);
+        let is_archived = ws_name
+            .as_deref()
+            .and_then(|n| {
+                WorkspaceStore::open(db_path2.clone())
+                    .ok()
+                    .and_then(|store| store.list_status().ok())
+                    .and_then(|lines| lines.into_iter().find(|l| l.workspace.name == n))
+                    .map(|l| l.workspace.status == "archived")
+            })
+            .unwrap_or(false);
         restore_btn_clone.set_visible(is_archived);
         archive_btn_clone.set_visible(!is_archived);
         archive_banner_clone.set_visible(is_archived);
 
         // Update quick stats strip
         if let Some(n) = ws_name.as_deref() {
-            if let Some(line) = WorkspaceStore::open(db_path3.clone()).ok()
+            if let Some(line) = WorkspaceStore::open(db_path3.clone())
+                .ok()
                 .and_then(|store| store.list_status().ok())
                 .and_then(|lines| lines.into_iter().find(|l| l.workspace.name == n))
             {
@@ -903,9 +910,11 @@ fn build_center_panel(
                 }
                 sess_stat_clone.set_text(&format!("{} session(s)", line.active_sessions));
                 pr_stat_clone.set_text(
-                    &line.pull_request.as_ref()
+                    &line
+                        .pull_request
+                        .as_ref()
                         .map(|p| format!("PR #{} ({})", p.number, p.state))
-                        .unwrap_or_else(|| "no PR".to_owned())
+                        .unwrap_or_else(|| "no PR".to_owned()),
                 );
                 todo_stat_clone.set_text(&format!("{} todo(s)", line.open_todos));
             }
@@ -2113,7 +2122,11 @@ fn populate_sessions_box(container: &GBox, db_path: &std::path::PathBuf, ws_name
             let ws_log = name.to_owned();
             let log_kind = kind_name;
             logs_btn.connect_clicked(move |_| {
-                let flag = if log_kind == "run" { "--run" } else { "--session" };
+                let flag = if log_kind == "run" {
+                    "--run"
+                } else {
+                    "--session"
+                };
                 spawn_terminal_command(&format!("linux-conductor logs {ws_log} {flag}"));
             });
             row.append(&logs_btn);
