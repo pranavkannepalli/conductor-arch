@@ -255,6 +255,8 @@ fn build_sidebar(
                             pr_num,
                             run_active,
                             has_conflicts,
+                            line.active_sessions,
+                            line.open_todos,
                         );
                         list.append(&row);
                         names.borrow_mut().insert(row_idx, ws.name.clone());
@@ -381,6 +383,8 @@ fn build_workspace_row(
     pr_number: Option<i64>,
     run_active: bool,
     has_conflicts: bool,
+    active_sessions: usize,
+    open_todos: usize,
 ) -> ListBoxRow {
     let row_box = GBox::new(Orientation::Vertical, 2);
     row_box.set_margin_start(12);
@@ -411,6 +415,16 @@ fn build_workspace_row(
         let pr_badge = Label::new(Some(&format!("PR#{pr}")));
         pr_badge.add_css_class("pr-badge");
         name_row.append(&pr_badge);
+    }
+    if active_sessions > 0 {
+        let sess_badge = Label::new(Some(&format!("⚡{active_sessions}")));
+        sess_badge.add_css_class("session-badge");
+        name_row.append(&sess_badge);
+    }
+    if open_todos > 0 {
+        let todo_badge = Label::new(Some(&format!("✓{open_todos}")));
+        todo_badge.add_css_class("todo-count-badge");
+        name_row.append(&todo_badge);
     }
 
     let meta_text = format!("{branch} · :{port}");
@@ -541,6 +555,18 @@ fn build_center_panel(
         }
     });
 
+    let restore_btn = Button::with_label("↺ Restore");
+    restore_btn.set_tooltip_text(Some("Restore archived workspace"));
+    restore_btn.set_visible(false);
+    let sel = Rc::clone(&selected);
+    let rr = refresh_right.clone();
+    restore_btn.connect_clicked(move |_| {
+        if let Some(ws) = sel.borrow().clone() {
+            spawn_terminal_command(&format!("linux-conductor workspace restore {ws}"));
+            rr();
+        }
+    });
+
     let rename_btn = Button::with_label("✎ Rename");
     rename_btn.set_tooltip_text(Some("Rename workspace"));
     let sel = Rc::clone(&selected);
@@ -586,6 +612,7 @@ fn build_center_panel(
     toolbar.append(&Separator::new(Orientation::Vertical));
     toolbar.append(&rename_btn);
     toolbar.append(&spacer);
+    toolbar.append(&restore_btn);
     toolbar.append(&archive_btn);
     toolbar.append(&discard_btn);
 
@@ -723,6 +750,9 @@ fn build_center_panel(
     let mcp_container_clone = mcp_container.clone();
     let brief_label_clone = brief_label.clone();
     let sel_clone = Rc::clone(&selected);
+    let restore_btn_clone = restore_btn.clone();
+    let archive_btn_clone = archive_btn.clone();
+    let db_path2 = paths.database_path.clone();
 
     let refresh = move || {
         // Update workspace title and path subtitle
@@ -732,6 +762,16 @@ fn build_center_panel(
             .map(|n| format!("▶ {n}"))
             .unwrap_or_else(|| "Select a workspace".to_owned());
         ws_title_clone.set_text(&title_text);
+
+        // Show Restore for archived workspaces, Archive for active
+        let is_archived = ws_name.as_deref().and_then(|n| {
+            WorkspaceStore::open(db_path2.clone()).ok()
+                .and_then(|store| store.list_status().ok())
+                .and_then(|lines| lines.into_iter().find(|l| l.workspace.name == n))
+                .map(|l| l.workspace.status == "archived")
+        }).unwrap_or(false);
+        restore_btn_clone.set_visible(is_archived);
+        archive_btn_clone.set_visible(!is_archived);
 
         let path_text = ws_name
             .as_deref()
@@ -2205,6 +2245,26 @@ separator {
     color: #f9e2af;
     font-size: 11px;
     font-weight: bold;
+}
+
+.session-badge {
+    font-size: 9px;
+    font-weight: bold;
+    color: #a6e3a1;
+    background-color: #1e1e2e;
+    border: 1px solid #45475a;
+    border-radius: 4px;
+    padding: 0 3px;
+}
+
+.todo-count-badge {
+    font-size: 9px;
+    font-weight: bold;
+    color: #f9e2af;
+    background-color: #1e1e2e;
+    border: 1px solid #45475a;
+    border-radius: 4px;
+    padding: 0 3px;
 }
 
 .workspace-path-label {
