@@ -14,12 +14,20 @@ use std::time::SystemTime;
 const APP_ID: &str = "io.github.pranavkannepalli.linux-conductor";
 
 fn main() {
+    // Parse --workspace <name> before GTK takes over argv
+    let initial_workspace: Option<String> = {
+        let args: Vec<String> = std::env::args().collect();
+        args.windows(2)
+            .find(|w| w[0] == "--workspace")
+            .map(|w| w[1].clone())
+    };
+
     let app = Application::builder().application_id(APP_ID).build();
-    app.connect_activate(build_ui);
+    app.connect_activate(move |app| build_ui(app, initial_workspace.clone()));
     app.run();
 }
 
-fn build_ui(app: &Application) {
+fn build_ui(app: &Application, initial_workspace: Option<String>) {
     let paths = AppPaths::from_env();
 
     let window = ApplicationWindow::builder()
@@ -37,8 +45,8 @@ fn build_ui(app: &Application) {
         STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
 
-    // Shared state: selected workspace name
-    let selected: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    // Shared state: selected workspace name (pre-seeded from --workspace flag if given)
+    let selected: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(initial_workspace));
 
     // ── LAYOUT ───────────────────────────────────────────────────────
     let split = adw::OverlaySplitView::new();
@@ -666,6 +674,17 @@ fn build_center_panel(
     center.append(&toolbar_box);
     center.append(&Separator::new(Orientation::Horizontal));
 
+    // Archived workspace banner (hidden by default)
+    let archive_banner = Label::new(Some("⚠ This workspace is archived. Click ↺ Restore to reactivate it."));
+    archive_banner.add_css_class("archive-banner");
+    archive_banner.set_xalign(0.0);
+    archive_banner.set_margin_start(16);
+    archive_banner.set_margin_end(16);
+    archive_banner.set_margin_top(6);
+    archive_banner.set_margin_bottom(6);
+    archive_banner.set_visible(false);
+    center.append(&archive_banner);
+
     // Info scroll area
     let info_scroll = ScrolledWindow::new();
     info_scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
@@ -787,6 +806,7 @@ fn build_center_panel(
     let sel_clone = Rc::clone(&selected);
     let restore_btn_clone = restore_btn.clone();
     let archive_btn_clone = archive_btn.clone();
+    let archive_banner_clone = archive_banner.clone();
     let db_path2 = paths.database_path.clone();
 
     let refresh = move || {
@@ -807,6 +827,7 @@ fn build_center_panel(
         }).unwrap_or(false);
         restore_btn_clone.set_visible(is_archived);
         archive_btn_clone.set_visible(!is_archived);
+        archive_banner_clone.set_visible(is_archived);
 
         let path_text = ws_name
             .as_deref()
@@ -2104,6 +2125,15 @@ window {
     font-size: 10px;
     color: #45475a;
     font-style: italic;
+}
+
+.archive-banner {
+    background-color: #2a2830;
+    color: #f9e2af;
+    font-size: 12px;
+    border-left: 3px solid #f9e2af;
+    padding: 6px 10px;
+    border-radius: 4px;
 }
 
 .workspace-title {
