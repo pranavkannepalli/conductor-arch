@@ -333,6 +333,18 @@ All plan phases are addressed and complete:
 - Keyboard shortcut: Ctrl+R refreshes all panels
 - All 30 tests pass; all crates build clean; cargo fmt clean
 
+## 2026-06-17 (session 9)
+
+- Diff tab: colored syntax highlighting (green additions, red deletions, blue @@ headers, purple file headers)
+- Checks tab: "👁 PR View" button shows stored PR metadata inline
+- GUI: dynamic window title shows "{workspace} — Linux Conductor" when workspace selected
+- GUI: AdwToastOverlay wraps main content; toasts on copy-path and agent prompt send
+- GUI: toolbar visually grouped with separators (Run/Stop/Editor/Path | PR/Merge | Rename ... Archive/Discard)
+- GUI: smart editor detection (cursor > code > codium > vim) on Editor button click
+- Logs tab: auto-scrolls to end on refresh
+- README: updated GUI section with comprehensive feature list
+- All 30 tests pass; all crates build clean; cargo fmt clean
+
 ## Remaining Polish (not blocking MVP)
 
 - VTE embedded terminal (requires `sudo pacman -S vte4` — not installable in this session)
