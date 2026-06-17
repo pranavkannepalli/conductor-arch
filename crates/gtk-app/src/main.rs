@@ -1601,6 +1601,20 @@ fn build_diff_text(db_path: &std::path::PathBuf, ws_name: Option<&str>) -> Strin
                 Ok(s) => text.push_str(&s),
                 Err(_) => text.push_str("(git status unavailable)\n"),
             }
+            // git diff --stat summary (files changed, insertions, deletions)
+            if let Ok(ws_path) = store.workspace_path(name) {
+                let stat_out = std::process::Command::new("git")
+                    .args(["diff", "--stat"])
+                    .current_dir(&ws_path)
+                    .output()
+                    .ok()
+                    .and_then(|o| String::from_utf8(o.stdout).ok())
+                    .unwrap_or_default();
+                let stat = stat_out.trim();
+                if !stat.is_empty() {
+                    text.push_str(&format!("\n{stat}\n"));
+                }
+            }
             text.push_str("\n── Unified Diff ──\n\n");
             match store.unified_diff(name, None) {
                 Ok(diff) if diff.trim().is_empty() => text.push_str("(no unstaged changes)\n"),
