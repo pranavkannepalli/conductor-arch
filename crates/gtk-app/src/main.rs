@@ -578,7 +578,7 @@ fn build_center_panel(
     mcp_container.add_css_class("status-container");
     info_box.append(&mcp_container);
 
-    let status_section_title = Label::new(Some("All Workspaces"));
+    let status_section_title = Label::new(Some("Repository Overview"));
     status_section_title.add_css_class("section-title");
     status_section_title.set_xalign(0.0);
     info_box.append(&status_section_title);
@@ -696,11 +696,11 @@ fn build_center_panel(
         }
         populate_mcp_section(&mcp_container_clone, &db_path, ws_name.as_deref());
 
-        // Refresh status grid
+        // Refresh status grid (siblings in same repo)
         while let Some(child) = status_container_clone.first_child() {
             status_container_clone.remove(&child);
         }
-        populate_status_grid(&status_container_clone, &db_path);
+        populate_status_grid(&status_container_clone, &db_path, ws_name.as_deref());
     };
 
     // Initial populate
@@ -755,7 +755,11 @@ fn populate_mcp_section(container: &GBox, db_path: &std::path::PathBuf, ws_name:
     }
 }
 
-fn populate_status_grid(container: &GBox, db_path: &std::path::PathBuf) {
+fn populate_status_grid(
+    container: &GBox,
+    db_path: &std::path::PathBuf,
+    selected_name: Option<&str>,
+) {
     if let Ok(store) = WorkspaceStore::open(db_path.clone()) {
         if let Ok(statuses) = store.list_status() {
             if statuses.is_empty() {
@@ -768,7 +772,28 @@ fn populate_status_grid(container: &GBox, db_path: &std::path::PathBuf) {
                 container.append(&lbl);
                 return;
             }
-            for line in &statuses {
+            // Find the repo name of the selected workspace to filter siblings
+            let selected_repo = selected_name.and_then(|sel| {
+                statuses
+                    .iter()
+                    .find(|l| l.workspace.name == sel)
+                    .map(|l| l.repository_name.clone())
+            });
+            let visible: Vec<_> = statuses
+                .iter()
+                .filter(|l| match &selected_repo {
+                    Some(repo) => &l.repository_name == repo,
+                    None => true,
+                })
+                .collect();
+            if visible.is_empty() {
+                let lbl = Label::new(Some("No other workspaces in this repository."));
+                lbl.add_css_class("info-text");
+                lbl.set_xalign(0.0);
+                container.append(&lbl);
+                return;
+            }
+            for line in &visible {
                 let ws = &line.workspace;
                 let row = GBox::new(Orientation::Horizontal, 8);
 
