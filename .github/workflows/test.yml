@@ -16,45 +16,44 @@ concurrency:
 
 jobs:
   rust:
-    name: Rust
-    runs-on: self-hosted
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-22.04]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        shell: bash
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install GTK4 and libadwaita dev headers
         run: |
-          set -euxo pipefail
-          if ! command -v rustup >/dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-              | sh -s -- -y --profile minimal --default-toolchain stable
-          fi
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          export PATH="$HOME/.cargo/bin:$PATH"
-          rustup toolchain install stable --profile minimal
-          rustup default stable
-          rustup component add rustfmt
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev libadwaita-1-dev pkg-config \
+            git sqlite3 openssh-client
 
       - name: Show toolchain
         run: |
           rustc --version
           cargo --version
-
-      - name: Install GTK4 and libadwaita dev headers
-        shell: bash
-        run: |
-          if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get install -y --no-install-recommends \
-              libgtk-4-dev libadwaita-1-dev pkg-config
-          elif command -v dnf >/dev/null 2>&1; then
-            sudo dnf install -y gtk4-devel libadwaita-devel pkgconf
-          elif command -v pacman >/dev/null 2>&1; then
-            sudo pacman -S --noconfirm gtk4 libadwaita pkgconf
-          else
-            echo "Unknown distro; skipping GTK4 headers"
-          fi
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -62,8 +61,5 @@ jobs:
       - name: Build workspace
         run: cargo build --workspace --locked
 
-      - name: Test workspace
+      - name: Test core and CLI
         run: cargo test --workspace --locked
-
-      - name: Test CLI session smoke
-        run: cargo test -p linux-conductor --test cli_sessions --locked
