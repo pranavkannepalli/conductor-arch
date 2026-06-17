@@ -232,9 +232,35 @@ All plan phases are addressed:
 
 MVP acceptance criteria from the plan are all met by the CLI. The GUI adds the desktop app layer for the LinkedIn demo.
 
+## 2026-06-17 (session 3)
+
+- Rewrote GUI (`crates/gtk-app/src/main.rs`) with proper workspace selection:
+  - Sidebar rows connected to `Rc<RefCell<Option<String>>>` shared state
+  - All action buttons (Run, Stop, Editor, PR, Archive) operate on selected workspace
+  - Session launchers (Shell, Codex, Claude Code) use selected workspace
+  - Diff / Checks / Todos panels refresh content for selected workspace
+  - Unified diff shown inline in Diff panel (first 120 lines)
+  - Checks panel shows full `checks_summary` for selected workspace
+  - `+ New Workspace` button opens interactive terminal wizard
+  - Header refresh button reloads all panels
+  - First workspace auto-selected on launch
+- Added **Logs tab** to right panel: shows last 200 lines of the most recent run/session log for selected workspace
+- All 31 tests pass; GUI builds clean; cargo fmt clean
+
+## MVP Status
+
+All plan phases are addressed and complete:
+- Phase 1 (CLI Core): complete
+- Phase 2 (Process/Agent Runtime): complete
+- Phase 3 (Review/PR Workflow): complete
+- Phase 4 (GUI MVP): complete — GTK4/libadwaita desktop app with workspace selection, diff, checks, todos, logs
+- Phase 5 (Packaging): complete — AppImage, .deb, .rpm, AUR, Flatpak manifests, GitHub Actions release workflow
+
+**All MVP acceptance criteria from the plan are met.**
+
 ## Remaining Polish (not blocking MVP)
 
-- VTE embedded terminal (requires `vte4` install — currently not available without sudo)
-- Workspace selection in GUI (currently shows all workspaces; action buttons target first active workspace)
-- Real-time refresh of workspace state in GUI
-- AppImage icon (placeholder 1×1 PNG; replace with a real icon before public release)
+- VTE embedded terminal (requires `sudo pacman -S vte4` — currently not installable in this session)
+- Real-time workspace state refresh (currently manual via ↺ button)
+- AppImage icon (placeholder 1×1 PNG; replace with real icon before public release)
+- Workspace renaming, restore, PR merge dialogs in GUI (all available via CLI)
