@@ -2853,9 +2853,7 @@ run = "printf 'started\n'; while true; do sleep 1; done"
 
         let err = store.checkpoint_create("berlin", "   ", None).unwrap_err();
 
-        assert!(err
-            .to_string()
-            .contains("checkpoint message is required"));
+        assert!(err.to_string().contains("checkpoint message is required"));
         assert!(store.checkpoint_list("berlin").unwrap().is_empty());
     }
 

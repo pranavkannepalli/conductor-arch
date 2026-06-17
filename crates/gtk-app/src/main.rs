@@ -1,9 +1,8 @@
 use adw::prelude::*;
 use adw::{Application, ApplicationWindow, HeaderBar};
 use gtk::{
-    Align, Box as GBox, Button, Label, ListBox, ListBoxRow, Orientation, PolicyType,
-    ScrolledWindow, Separator, Stack, StackSwitcher, TextView,
-    CssProvider, STYLE_PROVIDER_PRIORITY_APPLICATION,
+    Align, Box as GBox, Button, CssProvider, Label, ListBox, ListBoxRow, Orientation, PolicyType,
+    ScrolledWindow, Separator, Stack, StackSwitcher, TextView, STYLE_PROVIDER_PRIORITY_APPLICATION,
 };
 use linux_conductor_core::paths::AppPaths;
 use linux_conductor_core::workspace::WorkspaceStore;
@@ -112,14 +111,21 @@ fn build_sidebar(paths: &AppPaths) -> GBox {
     if let Ok(store) = WorkspaceStore::open(paths.database_path.clone()) {
         if let Ok(workspaces) = store.list() {
             for ws in &workspaces {
-                let row = build_workspace_row(ws.name.as_str(), ws.branch.as_str(), ws.status.as_str(), ws.port_base as i64);
+                let row = build_workspace_row(
+                    ws.name.as_str(),
+                    ws.branch.as_str(),
+                    ws.status.as_str(),
+                    ws.port_base as i64,
+                );
                 list.append(&row);
             }
         }
     }
 
     if list.first_child().is_none() {
-        let empty = Label::new(Some("No workspaces yet.\nRun: linux-conductor workspace create"));
+        let empty = Label::new(Some(
+            "No workspaces yet.\nRun: linux-conductor workspace create",
+        ));
         empty.add_css_class("empty-label");
         empty.set_wrap(true);
         empty.set_margin_start(12);
@@ -220,13 +226,17 @@ fn build_workspace_toolbar(_paths: &AppPaths) -> GBox {
     run_btn.add_css_class("suggested-action");
     run_btn.set_tooltip_text(Some("Start run script (linux-conductor run <workspace>)"));
     run_btn.connect_clicked(move |_| {
-        spawn_terminal_command("linux-conductor run $(linux-conductor workspace list | head -1 | awk '{print $1}')");
+        spawn_terminal_command(
+            "linux-conductor run $(linux-conductor workspace list | head -1 | awk '{print $1}')",
+        );
     });
 
     let stop_btn = Button::with_label("■ Stop");
     stop_btn.set_tooltip_text(Some("Stop run script"));
     stop_btn.connect_clicked(|_| {
-        spawn_terminal_command("linux-conductor stop $(linux-conductor workspace list | head -1 | awk '{print $1}')");
+        spawn_terminal_command(
+            "linux-conductor stop $(linux-conductor workspace list | head -1 | awk '{print $1}')",
+        );
     });
 
     let editor_btn = Button::with_label("⎋ Editor");
@@ -266,11 +276,20 @@ fn build_status_grid(paths: &AppPaths) -> GBox {
         if let Ok(statuses) = store.list_status() {
             for line in statuses.iter().take(5) {
                 let ws = &line.workspace;
-                let pr_text = line.pull_request.as_ref()
+                let pr_text = line
+                    .pull_request
+                    .as_ref()
                     .map(|p| format!("PR #{}", p.number))
                     .unwrap_or_else(|| "no PR".to_owned());
-                let run_text = if line.run_running { "running" } else { "stopped" };
-                lines.push((ws.name.clone(), format!("{} · {} · {}", ws.branch, run_text, pr_text)));
+                let run_text = if line.run_running {
+                    "running"
+                } else {
+                    "stopped"
+                };
+                lines.push((
+                    ws.name.clone(),
+                    format!("{} · {} · {}", ws.branch, run_text, pr_text),
+                ));
             }
         }
     }
@@ -324,7 +343,9 @@ fn build_session_controls(_paths: &AppPaths) -> GBox {
     title_lbl.set_xalign(0.0);
     section.append(&title_lbl);
 
-    let hint = Label::new(Some("Sessions launch in your default terminal.\nSelect a workspace from the sidebar first."));
+    let hint = Label::new(Some(
+        "Sessions launch in your default terminal.\nSelect a workspace from the sidebar first.",
+    ));
     hint.add_css_class("info-text");
     hint.set_xalign(0.0);
     hint.set_wrap(true);
@@ -456,7 +477,11 @@ fn build_checks_page(paths: &AppPaths) -> ScrolledWindow {
                 } else {
                     text.push_str("  PR: none\n");
                 }
-                let run = if line.run_running { "running" } else { "stopped" };
+                let run = if line.run_running {
+                    "running"
+                } else {
+                    "stopped"
+                };
                 text.push_str(&format!("  Run: {run}\n"));
                 text.push_str(&format!("  Sessions: {} active\n", line.active_sessions));
                 text.push_str(&format!("  Todos: {} open\n", line.open_todos));
@@ -509,7 +534,9 @@ fn build_todos_page(paths: &AppPaths) -> ScrolledWindow {
                 }
             }
             if !any {
-                let empty = Label::new(Some("No open todos.\n\nAdd one:\n  linux-conductor todo add <workspace> <text>"));
+                let empty = Label::new(Some(
+                    "No open todos.\n\nAdd one:\n  linux-conductor todo add <workspace> <text>",
+                ));
                 empty.add_css_class("info-text");
                 empty.set_xalign(0.0);
                 empty.set_wrap(true);
