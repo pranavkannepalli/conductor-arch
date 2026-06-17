@@ -1171,7 +1171,7 @@ fn build_right_panel(
 
         // Diff
         let diff_text = build_diff_text(&db_path, ws_name.as_deref());
-        diff_buf.set_text(&diff_text);
+        apply_colored_diff(&diff_buf, &diff_text);
 
         // Checks (with color tags)
         let checks_text = build_checks_text(&db_path, ws_name.as_deref());
@@ -1368,6 +1368,64 @@ fn build_diff_text(db_path: &std::path::PathBuf, ws_name: Option<&str>) -> Strin
         }
     }
     text
+}
+
+fn apply_colored_diff(buf: &gtk::TextBuffer, text: &str) {
+    buf.set_text(text);
+
+    let ensure_tag = |name: &str, fg: &str, weight: Option<i32>| -> gtk::TextTag {
+        let table = buf.tag_table();
+        if let Some(t) = table.lookup(name) {
+            return t;
+        }
+        let tag = gtk::TextTag::new(Some(name));
+        tag.set_foreground(Some(fg));
+        if let Some(w) = weight {
+            tag.set_weight(w);
+        }
+        table.add(&tag);
+        tag
+    };
+
+    let add_tag = ensure_tag("diff-add", "#a6e3a1", None);
+    let del_tag = ensure_tag("diff-del", "#f38ba8", None);
+    let hunk_tag = ensure_tag("diff-hunk", "#89b4fa", Some(700));
+    let header_tag = ensure_tag("diff-header", "#cba6f7", Some(700));
+    let section_tag = ensure_tag("diff-section", "#f9e2af", Some(700));
+    let meta_tag = ensure_tag("diff-meta", "#6c7086", None);
+
+    for (line_num, line) in text.lines().enumerate() {
+        let tag = if line.starts_with('+') && !line.starts_with("+++") {
+            Some(&add_tag)
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            Some(&del_tag)
+        } else if line.starts_with("@@") {
+            Some(&hunk_tag)
+        } else if line.starts_with("diff --git")
+            || line.starts_with("+++")
+            || line.starts_with("---")
+        {
+            Some(&header_tag)
+        } else if line.starts_with("──") {
+            Some(&section_tag)
+        } else if line.starts_with("M ") || line.starts_with(" M") || line.starts_with("??") {
+            Some(&meta_tag)
+        } else {
+            None
+        };
+
+        if let Some(t) = tag {
+            let line_n = line_num as i32;
+            if let Some(start) = buf.iter_at_line(line_n) {
+                if let Some(end) = buf.iter_at_line(line_n + 1) {
+                    buf.apply_tag(t, &start, &end);
+                } else {
+                    let end = buf.end_iter();
+                    buf.apply_tag(t, &start, &end);
+                }
+            }
+        }
+    }
 }
 
 fn apply_colored_checks(buf: &gtk::TextBuffer, text: &str) {
