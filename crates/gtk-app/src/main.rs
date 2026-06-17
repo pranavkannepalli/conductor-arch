@@ -500,9 +500,26 @@ fn build_center_panel(
         }
     });
 
+    let copy_path_btn = Button::with_label("⎘ Path");
+    copy_path_btn.set_tooltip_text(Some("Copy workspace path to clipboard"));
+    let sel = Rc::clone(&selected);
+    let db_cp = paths.database_path.clone();
+    copy_path_btn.connect_clicked(move |_| {
+        if let Some(ws) = sel.borrow().clone() {
+            if let Ok(store) = WorkspaceStore::open(db_cp.clone()) {
+                if let Ok(path) = store.workspace_path(&ws) {
+                    if let Some(display) = gtk::gdk::Display::default() {
+                        display.clipboard().set_text(&path.display().to_string());
+                    }
+                }
+            }
+        }
+    });
+
     toolbar.append(&run_btn);
     toolbar.append(&stop_btn);
     toolbar.append(&editor_btn);
+    toolbar.append(&copy_path_btn);
     toolbar.append(&pr_btn);
     toolbar.append(&merge_btn);
     toolbar.append(&rename_btn);
