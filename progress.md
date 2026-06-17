@@ -258,9 +258,24 @@ All plan phases are addressed and complete:
 
 **All MVP acceptance criteria from the plan are met.**
 
+## 2026-06-17 (session 4)
+
+- Added auto-refresh (5s GLib timeout) to GUI panels
+- Added "+ Add Repository" button in sidebar (opens terminal wizard)
+- Fixed Flatpak manifest: switch to org.gnome.Platform/Sdk 47 (has GTK4+libadwaita); install GUI binary; default command = GUI
+- Updated Flatpak desktop: Exec=linux-conductor-gtk, Terminal=false, desktop-application type
+- Updated AUR PKGBUILD: add gtk4/libadwaita/pkgconf deps; install GUI binary + desktop file
+- Created MIT LICENSE file
+- Updated test.yml CI: install GTK4 dev headers before build (distro-aware apt/dnf/pacman)
+- Updated AppImage AppRun: no-args → launches GUI; with args → CLI passthrough
+- Updated AppImage desktop file: GUI as default, no Terminal
+- Added GUI quickstart section to README
+- Updated README known limits (Flatpak now experimental, not blocked)
+- All 31 tests pass; all crates build clean; cargo fmt clean
+
 ## Remaining Polish (not blocking MVP)
 
-- VTE embedded terminal (requires `sudo pacman -S vte4` — currently not installable in this session)
-- Real-time workspace state refresh (currently manual via ↺ button)
-- AppImage icon (placeholder 1×1 PNG; replace with real icon before public release)
+- VTE embedded terminal (requires `sudo pacman -S vte4` — not installable in this session)
+- AppImage icon (placeholder 1×1 PNG; replace with a real icon before public release)
 - Workspace renaming, restore, PR merge dialogs in GUI (all available via CLI)
+- Periodic auto-reload of sidebar workspace list (currently static; reload requires restart)
