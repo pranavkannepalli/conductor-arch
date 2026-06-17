@@ -189,6 +189,10 @@ fn build_sidebar(
                         }
                         let pr_num = line.pull_request.as_ref().map(|p| p.number);
                         let run_active = line.run_running;
+                        let has_conflicts = store
+                            .find_conflicting_workspaces(&ws.name)
+                            .map(|v| !v.is_empty())
+                            .unwrap_or(false);
                         let row = build_workspace_row(
                             ws.name.as_str(),
                             ws.branch.as_str(),
@@ -196,6 +200,7 @@ fn build_sidebar(
                             ws.port_base as i64,
                             pr_num,
                             run_active,
+                            has_conflicts,
                         );
                         list.append(&row);
                         names.borrow_mut().insert(row_idx, ws.name.clone());
@@ -301,6 +306,7 @@ fn build_workspace_row(
     port: i64,
     pr_number: Option<i64>,
     run_active: bool,
+    has_conflicts: bool,
 ) -> ListBoxRow {
     let row_box = GBox::new(Orientation::Vertical, 2);
     row_box.set_margin_start(12);
@@ -322,6 +328,11 @@ fn build_workspace_row(
     name_label.set_hexpand(true);
     name_row.append(&run_dot);
     name_row.append(&name_label);
+    if has_conflicts {
+        let conflict_badge = Label::new(Some("⚠"));
+        conflict_badge.add_css_class("conflict-badge");
+        name_row.append(&conflict_badge);
+    }
     if let Some(pr) = pr_number {
         let pr_badge = Label::new(Some(&format!("PR#{pr}")));
         pr_badge.add_css_class("pr-badge");
@@ -461,9 +472,16 @@ fn build_center_panel(
     toolbar.append(&archive_btn);
     toolbar.append(&discard_btn);
 
+    let ws_path_label = Label::new(None);
+    ws_path_label.add_css_class("workspace-path-label");
+    ws_path_label.set_xalign(0.0);
+    ws_path_label.set_margin_start(12);
+    ws_path_label.set_ellipsize(gtk::pango::EllipsizeMode::Start);
+
     let toolbar_box = GBox::new(Orientation::Vertical, 0);
     toolbar_box.add_css_class("workspace-toolbar");
     toolbar_box.append(&ws_title);
+    toolbar_box.append(&ws_path_label);
     toolbar_box.append(&toolbar);
 
     center.append(&toolbar_box);
@@ -581,19 +599,31 @@ fn build_center_panel(
 
     let db_path = paths.database_path.clone();
     let ws_title_clone = ws_title.clone();
+    let ws_path_label_clone = ws_path_label.clone();
     let status_container_clone = status_container.clone();
     let mcp_container_clone = mcp_container.clone();
     let brief_label_clone = brief_label.clone();
     let sel_clone = Rc::clone(&selected);
 
     let refresh = move || {
-        // Update workspace title
+        // Update workspace title and path subtitle
         let ws_name = sel_clone.borrow().clone();
         let title_text = ws_name
             .as_deref()
             .map(|n| format!("▶ {n}"))
             .unwrap_or_else(|| "Select a workspace".to_owned());
         ws_title_clone.set_text(&title_text);
+
+        let path_text = ws_name
+            .as_deref()
+            .and_then(|n| {
+                WorkspaceStore::open(db_path.clone())
+                    .ok()
+                    .and_then(|store| store.workspace_path(n).ok())
+                    .map(|p| p.display().to_string())
+            })
+            .unwrap_or_default();
+        ws_path_label_clone.set_text(&path_text);
 
         // Update task brief
         let brief_text = ws_name
@@ -815,6 +845,20 @@ fn build_right_panel(
     stack.add_titled(&diff_scroll, Some("diff"), "Diff");
 
     // Checks page
+    let checks_outer = GBox::new(Orientation::Vertical, 0);
+    let checks_btn_bar = GBox::new(Orientation::Horizontal, 8);
+    checks_btn_bar.set_margin_start(12);
+    checks_btn_bar.set_margin_end(12);
+    checks_btn_bar.set_margin_top(6);
+    checks_btn_bar.set_margin_bottom(6);
+    let refresh_pr_btn = Button::with_label("↻ Live PR Checks");
+    refresh_pr_btn.add_css_class("pill-button");
+    let sync_pr_btn = Button::with_label("⇄ Sync PR State");
+    sync_pr_btn.add_css_class("pill-button");
+    checks_btn_bar.append(&refresh_pr_btn);
+    checks_btn_bar.append(&sync_pr_btn);
+    checks_outer.append(&checks_btn_bar);
+    checks_outer.append(&Separator::new(Orientation::Horizontal));
     let checks_view = TextView::new();
     checks_view.set_editable(false);
     checks_view.set_monospace(true);
@@ -825,7 +869,9 @@ fn build_right_panel(
     let checks_scroll = ScrolledWindow::new();
     checks_scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
     checks_scroll.set_child(Some(&checks_view));
-    stack.add_titled(&checks_scroll, Some("checks"), "Checks");
+    checks_scroll.set_vexpand(true);
+    checks_outer.append(&checks_scroll);
+    stack.add_titled(&checks_outer, Some("checks"), "Checks");
 
     // Todos page
     let todos_outer = GBox::new(Orientation::Vertical, 0);
@@ -838,6 +884,17 @@ fn build_right_panel(
     todos_scroll.set_child(Some(&todos_box));
     todos_scroll.set_vexpand(true);
     todos_outer.append(&todos_scroll);
+    // Todos button bar (Sync from context)
+    let todos_btn_bar = GBox::new(Orientation::Horizontal, 8);
+    todos_btn_bar.set_margin_start(12);
+    todos_btn_bar.set_margin_end(12);
+    todos_btn_bar.set_margin_top(6);
+    todos_btn_bar.set_margin_bottom(2);
+    let sync_todos_btn = Button::with_label("⇄ Sync from .context/");
+    sync_todos_btn.add_css_class("pill-button");
+    sync_todos_btn.set_tooltip_text(Some("Import todos from .context/ files"));
+    todos_btn_bar.append(&sync_todos_btn);
+    todos_outer.append(&todos_btn_bar);
     // Add-todo entry row at bottom of todos tab
     todos_outer.append(&Separator::new(Orientation::Horizontal));
     let todo_add_row = GBox::new(Orientation::Horizontal, 8);
@@ -927,6 +984,80 @@ fn build_right_panel(
     let checkpoints_box_clone = checkpoints_box.clone();
     let db_path2 = db_path.clone();
     let db_path3 = db_path.clone();
+    let db_path4 = db_path.clone();
+    let db_path5 = db_path.clone();
+    let db_path6 = db_path.clone();
+
+    // Wire up "↻ Live PR Checks" — calls gh pr checks and appends live output
+    {
+        let sel = Rc::clone(&selected);
+        let buf = checks_view.buffer();
+        let db = db_path4.clone();
+        refresh_pr_btn.connect_clicked(move |_| {
+            if let Some(ws_name) = sel.borrow().clone() {
+                if let Ok(store) = WorkspaceStore::open(db.clone()) {
+                    let live = match store.pull_request_checks(&ws_name) {
+                        Ok(s) => s,
+                        Err(e) => format!("gh pr checks failed: {e}\n"),
+                    };
+                    let current = buf.text(&buf.start_iter(), &buf.end_iter(), false);
+                    buf.set_text(&format!("{current}\n── Live gh pr checks ──\n\n{live}"));
+                }
+            }
+        });
+    }
+
+    // Wire up "⇄ Sync PR State" — refreshes PR metadata from GitHub API
+    {
+        let sel = Rc::clone(&selected);
+        let buf = checks_view.buffer();
+        let db = db_path5.clone();
+        sync_pr_btn.connect_clicked(move |_| {
+            if let Some(ws_name) = sel.borrow().clone() {
+                if let Ok(store) = WorkspaceStore::open(db.clone()) {
+                    match store.refresh_pull_request_state(&ws_name) {
+                        Ok(Some(pr)) => {
+                            let current = buf.text(&buf.start_iter(), &buf.end_iter(), false);
+                            buf.set_text(&format!(
+                                "{current}\n── PR State Refreshed ──\n\nPR #{} ({})\n{}",
+                                pr.number, pr.state, pr.url
+                            ));
+                        }
+                        Ok(None) => {
+                            let current = buf.text(&buf.start_iter(), &buf.end_iter(), false);
+                            buf.set_text(&format!("{current}\n── No PR found for branch ──\n"));
+                        }
+                        Err(e) => {
+                            let current = buf.text(&buf.start_iter(), &buf.end_iter(), false);
+                            buf.set_text(&format!("{current}\n── Sync error: {e} ──\n"));
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    // Wire up "⇄ Sync from .context/" todos button
+    {
+        let sel = Rc::clone(&selected);
+        let todos_box_c = todos_box.clone();
+        let db = db_path6.clone();
+        sync_todos_btn.connect_clicked(move |_| {
+            if let Some(ws_name) = sel.borrow().clone() {
+                if let Ok(store) = WorkspaceStore::open(db.clone()) {
+                    let _ = store.sync_todos_from_context(&ws_name);
+                    // Refresh todos box inline
+                    while let Some(child) = todos_box_c.first_child() {
+                        todos_box_c.remove(&child);
+                    }
+                    let title = Label::new(Some("── Open Todos ──"));
+                    title.set_xalign(0.0);
+                    todos_box_c.append(&title);
+                    populate_todos_box(&todos_box_c, &db, Some(&ws_name));
+                }
+            }
+        });
+    }
 
     let refresh: Rc<dyn Fn()> = Rc::new(move || {
         let ws_name = sel.borrow().clone();
@@ -1652,5 +1783,31 @@ separator {
 
 .composer-bar entry:focus {
     border-color: #89b4fa;
+}
+
+.pill-button {
+    background-color: #313244;
+    color: #cdd6f4;
+    border: 1px solid #45475a;
+    border-radius: 6px;
+    padding: 2px 10px;
+    font-size: 12px;
+}
+
+.pill-button:hover {
+    background-color: #45475a;
+}
+
+.conflict-badge {
+    color: #f9e2af;
+    font-size: 11px;
+    font-weight: bold;
+}
+
+.workspace-path-label {
+    color: #6c7086;
+    font-size: 11px;
+    font-family: monospace;
+    margin-bottom: 2px;
 }
 "#;
