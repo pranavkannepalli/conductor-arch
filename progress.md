@@ -345,6 +345,15 @@ All plan phases are addressed and complete:
 - README: updated GUI section with comprehensive feature list
 - All 30 tests pass; all crates build clean; cargo fmt clean
 
+## 2026-06-17 (session 10)
+
+- Sidebar: session count badge (⚡N, green) and open-todo count badge (✓N, yellow) on workspace rows
+- Toolbar: "↺ Restore" button — shown only for archived workspaces, hidden otherwise; archive_btn hides when archived
+- Toolbar: Archive and Discard now open `adw::MessageDialog` confirmation dialogs before running CLI command
+- CI: test.yml updated to use ubuntu-24.04 / ubuntu-22.04 matrix, `dtolnay/rust-toolchain@stable`, Cargo cache
+- CI: publish.yml updated to use ubuntu-24.04 runner with GTK4 deps instead of self-hosted
+- All 30 tests pass; all crates build clean; cargo fmt clean
+
 ## Remaining Polish (not blocking MVP)
 
 - VTE embedded terminal (requires `sudo pacman -S vte4` — not installable in this session)
