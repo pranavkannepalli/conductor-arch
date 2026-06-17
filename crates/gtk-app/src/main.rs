@@ -104,6 +104,22 @@ fn build_ui(app: &Application) {
     window.set_content(Some(&toolbar_view));
     window.present();
 
+    // Keyboard shortcut: Ctrl+R → refresh all panels
+    let evk = gtk::EventControllerKey::new();
+    let rc_kb = refresh_center.clone();
+    let rr_kb = refresh_right.clone();
+    let rs_kb = refresh_sidebar.clone();
+    evk.connect_key_pressed(move |_, keyval, _, modifiers| {
+        if modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK) && keyval == gtk::gdk::Key::r {
+            rs_kb();
+            rc_kb();
+            rr_kb();
+            return gtk::glib::Propagation::Stop;
+        }
+        gtk::glib::Propagation::Proceed
+    });
+    window.add_controller(evk);
+
     // Auto-refresh panels every 5 seconds
     let rc = refresh_center.clone();
     let rr = refresh_right.clone();
