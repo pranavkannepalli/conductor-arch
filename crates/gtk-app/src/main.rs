@@ -349,8 +349,8 @@ linux-conductor workspace create "$REPO" --name "$NAME" --branch "$BRANCH""#,
         spawn_terminal_command(
             r#"echo 'Available repos:'; linux-conductor repo list; echo;
 read -rp 'Repo name: ' REPO
-read -rp 'GitHub issue URL: ' ISSUE_URL
-linux-conductor workspace create "$REPO" --from-issue "$ISSUE_URL""#,
+read -rp 'GitHub issue number: ' ISSUE_NUM
+linux-conductor workspace create "$REPO" --from-issue "$ISSUE_NUM""#,
         );
     });
     sidebar_box.append(&issue_btn);
