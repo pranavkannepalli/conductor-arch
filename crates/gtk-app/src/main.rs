@@ -99,6 +99,15 @@ fn build_ui(app: &Application) {
 
     window.set_content(Some(&toolbar_view));
     window.present();
+
+    // Auto-refresh panels every 5 seconds
+    let rc = refresh_center.clone();
+    let rr = refresh_right.clone();
+    glib::timeout_add_seconds_local(5, move || {
+        rc();
+        rr();
+        glib::ControlFlow::Continue
+    });
 }
 
 // ── SIDEBAR ───────────────────────────────────────────────────────────────
@@ -197,6 +206,21 @@ linux-conductor workspace create "$REPO" --name "$NAME" --branch "$BRANCH""#,
         );
     });
     sidebar_box.append(&add_btn);
+
+    // "Add repo" button for onboarding
+    let repo_btn = Button::with_label("+ Add Repository");
+    repo_btn.add_css_class("add-workspace-btn");
+    repo_btn.set_margin_start(8);
+    repo_btn.set_margin_end(8);
+    repo_btn.set_margin_bottom(8);
+    repo_btn.connect_clicked(|_| {
+        spawn_terminal_command(
+            r#"read -rp 'Repository path: ' PATH
+linux-conductor repo add "$PATH"
+echo; echo 'Run linux-conductor-gtk to see the updated workspace list.'"#,
+        );
+    });
+    sidebar_box.append(&repo_btn);
 
     sidebar_box
 }

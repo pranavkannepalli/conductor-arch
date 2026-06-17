@@ -1,11 +1,11 @@
 app-id: io.github.pranavkannepalli.linux-conductor
-runtime: org.freedesktop.Platform
-runtime-version: '23.08'
-sdk: org.freedesktop.Sdk
+runtime: org.gnome.Platform
+runtime-version: '47'
+sdk: org.gnome.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
 
-command: linux-conductor
+command: linux-conductor-gtk
 
 finish-args:
   # Full filesystem access required for arbitrary repository and workspace paths
@@ -32,6 +32,7 @@ modules:
     build-commands:
       - cargo build --release --locked --workspace
       - install -Dm755 target/release/linux-conductor /app/bin/linux-conductor
+      - install -Dm755 target/release/linux-conductor-gtk /app/bin/linux-conductor-gtk
       - install -Dm644 README.md /app/share/doc/linux-conductor/README.md
       - install -Dm644 packaging/flatpak/io.github.pranavkannepalli.linux-conductor.appdata.xml
           /app/share/metainfo/io.github.pranavkannepalli.linux-conductor.appdata.xml
