@@ -984,8 +984,11 @@ fn build_right_panel(
     refresh_pr_btn.add_css_class("pill-button");
     let sync_pr_btn = Button::with_label("⇄ Sync PR State");
     sync_pr_btn.add_css_class("pill-button");
+    let pr_view_btn = Button::with_label("👁 PR View");
+    pr_view_btn.add_css_class("pill-button");
     checks_btn_bar.append(&refresh_pr_btn);
     checks_btn_bar.append(&sync_pr_btn);
+    checks_btn_bar.append(&pr_view_btn);
     checks_outer.append(&checks_btn_bar);
     checks_outer.append(&Separator::new(Orientation::Horizontal));
     let checks_view = TextView::new();
@@ -1128,6 +1131,7 @@ fn build_right_panel(
     let db_path4 = db_path.clone();
     let db_path5 = db_path.clone();
     let db_path6 = db_path.clone();
+    let db_path7 = db_path.clone();
 
     // Wire up "↻ Live PR Checks" — calls gh pr checks and appends live output
     {
@@ -1195,6 +1199,29 @@ fn build_right_panel(
                     title.set_xalign(0.0);
                     todos_box_c.append(&title);
                     populate_todos_box(&todos_box_c, &db, Some(&ws_name));
+                }
+            }
+        });
+    }
+
+    // Wire up "👁 PR View" — calls store.pull_request (gh pr view) and appends output
+    {
+        let sel = Rc::clone(&selected);
+        let buf = checks_view.buffer();
+        let db = db_path7.clone();
+        pr_view_btn.connect_clicked(move |_| {
+            if let Some(ws_name) = sel.borrow().clone() {
+                if let Ok(store) = WorkspaceStore::open(db.clone()) {
+                    let output = match store.pull_request(&ws_name) {
+                        Ok(Some(pr)) => format!(
+                            "PR #{} ({})\n{}\nCreated: {}\nUpdated: {}",
+                            pr.number, pr.state, pr.url, pr.created_at, pr.updated_at
+                        ),
+                        Ok(None) => "No PR found for this workspace branch.".to_owned(),
+                        Err(e) => format!("Error: {e}"),
+                    };
+                    let current = buf.text(&buf.start_iter(), &buf.end_iter(), false);
+                    buf.set_text(&format!("{current}\n── PR View ──\n\n{output}\n"));
                 }
             }
         });
