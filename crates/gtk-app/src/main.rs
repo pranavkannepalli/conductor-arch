@@ -430,12 +430,23 @@ fn build_center_panel(
         }
     });
 
+    let discard_btn = Button::with_label("⊗ Discard");
+    discard_btn.add_css_class("destructive-action");
+    discard_btn.set_tooltip_text(Some("Discard workspace and remove worktree"));
+    let sel = Rc::clone(&selected);
+    discard_btn.connect_clicked(move |_| {
+        if let Some(ws) = sel.borrow().clone() {
+            spawn_terminal_command(&format!("linux-conductor discard {ws}"));
+        }
+    });
+
     toolbar.append(&run_btn);
     toolbar.append(&stop_btn);
     toolbar.append(&editor_btn);
     toolbar.append(&pr_btn);
     toolbar.append(&merge_btn);
     toolbar.append(&archive_btn);
+    toolbar.append(&discard_btn);
 
     let toolbar_box = GBox::new(Orientation::Vertical, 0);
     toolbar_box.add_css_class("workspace-toolbar");
@@ -757,6 +768,17 @@ fn build_right_panel(
     logs_scroll.set_child(Some(&logs_view));
     stack.add_titled(&logs_scroll, Some("logs"), "Logs");
 
+    // Review comments page
+    let review_box = GBox::new(Orientation::Vertical, 8);
+    review_box.set_margin_start(12);
+    review_box.set_margin_end(12);
+    review_box.set_margin_top(12);
+    let review_scroll = ScrolledWindow::new();
+    review_scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
+    review_scroll.set_child(Some(&review_box));
+    review_scroll.set_vexpand(true);
+    stack.add_titled(&review_scroll, Some("review"), "Review");
+
     let switcher = StackSwitcher::new();
     switcher.set_stack(Some(&stack));
     switcher.add_css_class("panel-switcher");
@@ -775,6 +797,7 @@ fn build_right_panel(
     let checks_buf = checks_view.buffer();
     let logs_buf = logs_view.buffer();
     let todos_box_clone = todos_box.clone();
+    let review_box_clone = review_box.clone();
     let db_path2 = db_path.clone();
 
     let refresh: Rc<dyn Fn()> = Rc::new(move || {
@@ -796,6 +819,12 @@ fn build_right_panel(
         title.set_xalign(0.0);
         todos_box_clone.append(&title);
         populate_todos_box(&todos_box_clone, &db_path, ws_name.as_deref());
+
+        // Review comments
+        while let Some(child) = review_box_clone.first_child() {
+            review_box_clone.remove(&child);
+        }
+        populate_review_box(&review_box_clone, &db_path, ws_name.as_deref());
 
         // Logs
         let logs_text = build_logs_text(&logs_dir, ws_name.as_deref());
@@ -1078,6 +1107,69 @@ fn populate_todos_box(container: &GBox, db_path: &std::path::PathBuf, ws_name: O
             empty.set_xalign(0.0);
             empty.set_wrap(true);
             container.append(&empty);
+        }
+    }
+}
+
+fn populate_review_box(container: &GBox, db_path: &std::path::PathBuf, ws_name: Option<&str>) {
+    let title = Label::new(Some("── Review Comments ──"));
+    title.set_xalign(0.0);
+    container.append(&title);
+
+    let Some(name) = ws_name else {
+        let lbl = Label::new(Some("Select a workspace to view review comments."));
+        lbl.add_css_class("info-text");
+        lbl.set_xalign(0.0);
+        container.append(&lbl);
+        return;
+    };
+
+    if let Ok(store) = WorkspaceStore::open(db_path.clone()) {
+        if let Ok(comments) = store.list_review_comments(name) {
+            let open: Vec<_> = comments.iter().filter(|c| c.status == "open").collect();
+            if open.is_empty() {
+                let lbl = Label::new(Some(
+                    "No open review comments.\n\nAdd one:\n  linux-conductor review add <ws> <file> <body>",
+                ));
+                lbl.add_css_class("info-text");
+                lbl.set_xalign(0.0);
+                lbl.set_wrap(true);
+                container.append(&lbl);
+            } else {
+                for comment in open {
+                    let row = GBox::new(Orientation::Vertical, 4);
+                    let file_text = match comment.line_number {
+                        Some(ln) => format!("{}:{}", comment.file_path, ln),
+                        None => comment.file_path.clone(),
+                    };
+                    let file_lbl = Label::new(Some(&file_text));
+                    file_lbl.add_css_class("workspace-meta");
+                    file_lbl.set_xalign(0.0);
+                    let body_lbl = Label::new(Some(&comment.body));
+                    body_lbl.set_xalign(0.0);
+                    body_lbl.set_wrap(true);
+                    let resolve_btn = Button::with_label("Resolve");
+                    resolve_btn.add_css_class("flat");
+                    let comment_id = comment.id;
+                    let db = db_path.clone();
+                    let row_clone = row.clone();
+                    resolve_btn.connect_clicked(move |_| {
+                        if let Ok(store) = WorkspaceStore::open(db.clone()) {
+                            let _ = store.resolve_review_comment(comment_id);
+                        }
+                        if let Some(parent) = row_clone.parent() {
+                            if let Ok(p) = parent.downcast::<GBox>() {
+                                p.remove(&row_clone);
+                            }
+                        }
+                    });
+                    row.append(&file_lbl);
+                    row.append(&body_lbl);
+                    row.append(&resolve_btn);
+                    container.append(&row);
+                    container.append(&Separator::new(Orientation::Horizontal));
+                }
+            }
         }
     }
 }
