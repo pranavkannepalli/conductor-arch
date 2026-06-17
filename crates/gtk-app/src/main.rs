@@ -55,10 +55,23 @@ fn build_ui(app: &Application) {
     right_panel.set_vexpand(true);
 
     // Center panel — workspace header + action toolbar + status grid
-    let (center_panel, refresh_center) =
+    let (center_panel, refresh_center_raw) =
         build_center_panel(&paths, Rc::clone(&selected), refresh_right.clone());
     center_panel.set_hexpand(true);
     center_panel.set_vexpand(true);
+
+    // Wrap refresh_center to also update window title
+    let window_title_ref = window.clone();
+    let sel_for_title = Rc::clone(&selected);
+    let refresh_center = move || {
+        refresh_center_raw();
+        let title = sel_for_title
+            .borrow()
+            .as_deref()
+            .map(|n| format!("{n} — Linux Conductor"))
+            .unwrap_or_else(|| "Linux Conductor".to_owned());
+        window_title_ref.set_title(Some(&title));
+    };
 
     // Sidebar — triggers both center and right refresh on selection
     let (sidebar, refresh_sidebar) = build_sidebar(
