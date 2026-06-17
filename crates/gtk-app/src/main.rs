@@ -472,6 +472,16 @@ fn build_center_panel(
     info_box.append(&session_section);
 
     // Status grid (all workspaces overview)
+    // MCP status section
+    let mcp_section_title = Label::new(Some("MCP Servers"));
+    mcp_section_title.add_css_class("section-title");
+    mcp_section_title.set_xalign(0.0);
+    info_box.append(&mcp_section_title);
+
+    let mcp_container = GBox::new(Orientation::Vertical, 4);
+    mcp_container.add_css_class("status-container");
+    info_box.append(&mcp_container);
+
     let status_section_title = Label::new(Some("All Workspaces"));
     status_section_title.add_css_class("section-title");
     status_section_title.set_xalign(0.0);
@@ -548,16 +558,23 @@ fn build_center_panel(
     let db_path = paths.database_path.clone();
     let ws_title_clone = ws_title.clone();
     let status_container_clone = status_container.clone();
+    let mcp_container_clone = mcp_container.clone();
     let sel_clone = Rc::clone(&selected);
 
     let refresh = move || {
         // Update workspace title
-        let title_text = sel_clone
-            .borrow()
+        let ws_name = sel_clone.borrow().clone();
+        let title_text = ws_name
             .as_deref()
             .map(|n| format!("▶ {n}"))
             .unwrap_or_else(|| "Select a workspace".to_owned());
         ws_title_clone.set_text(&title_text);
+
+        // Refresh MCP status for selected workspace
+        while let Some(child) = mcp_container_clone.first_child() {
+            mcp_container_clone.remove(&child);
+        }
+        populate_mcp_section(&mcp_container_clone, &db_path, ws_name.as_deref());
 
         // Refresh status grid
         while let Some(child) = status_container_clone.first_child() {
@@ -570,6 +587,52 @@ fn build_center_panel(
     refresh();
 
     (center, refresh)
+}
+
+fn populate_mcp_section(container: &GBox, db_path: &std::path::PathBuf, ws_name: Option<&str>) {
+    use linux_conductor_core::mcp::workspace_mcp_status;
+
+    let Some(name) = ws_name else {
+        let lbl = Label::new(Some("Select a workspace to see MCP servers."));
+        lbl.add_css_class("info-text");
+        lbl.set_xalign(0.0);
+        container.append(&lbl);
+        return;
+    };
+
+    if let Ok(store) = WorkspaceStore::open(db_path.clone()) {
+        if let Ok(ws_path) = store.workspace_path(name) {
+            let status = workspace_mcp_status(&ws_path);
+            let all: Vec<_> = status
+                .claude_user
+                .iter()
+                .chain(&status.claude_project)
+                .chain(&status.codex_user)
+                .chain(&status.codex_project)
+                .chain(&status.cursor_user)
+                .chain(&status.cursor_project)
+                .collect();
+            if all.is_empty() {
+                let lbl = Label::new(Some("No MCP servers configured."));
+                lbl.add_css_class("info-text");
+                lbl.set_xalign(0.0);
+                container.append(&lbl);
+            } else {
+                for srv in &all {
+                    let row = GBox::new(Orientation::Horizontal, 8);
+                    let name_lbl = Label::new(Some(&srv.name));
+                    name_lbl.add_css_class("status-name");
+                    name_lbl.set_xalign(0.0);
+                    name_lbl.set_hexpand(true);
+                    let src_lbl = Label::new(Some(&srv.source));
+                    src_lbl.add_css_class("workspace-meta");
+                    row.append(&name_lbl);
+                    row.append(&src_lbl);
+                    container.append(&row);
+                }
+            }
+        }
+    }
 }
 
 fn populate_status_grid(container: &GBox, db_path: &std::path::PathBuf) {
@@ -779,6 +842,33 @@ fn build_right_panel(
     review_scroll.set_vexpand(true);
     stack.add_titled(&review_scroll, Some("review"), "Review");
 
+    // Checkpoints page
+    let checkpoints_outer = GBox::new(Orientation::Vertical, 0);
+    let checkpoints_box = GBox::new(Orientation::Vertical, 8);
+    checkpoints_box.set_margin_start(12);
+    checkpoints_box.set_margin_end(12);
+    checkpoints_box.set_margin_top(12);
+    let checkpoints_scroll = ScrolledWindow::new();
+    checkpoints_scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
+    checkpoints_scroll.set_child(Some(&checkpoints_box));
+    checkpoints_scroll.set_vexpand(true);
+    checkpoints_outer.append(&checkpoints_scroll);
+    checkpoints_outer.append(&Separator::new(Orientation::Horizontal));
+    // "Create checkpoint" entry row
+    let cp_add_row = GBox::new(Orientation::Horizontal, 8);
+    cp_add_row.set_margin_start(12);
+    cp_add_row.set_margin_end(12);
+    cp_add_row.set_margin_top(6);
+    cp_add_row.set_margin_bottom(6);
+    let cp_entry = Entry::new();
+    cp_entry.set_placeholder_text(Some("Checkpoint message…"));
+    cp_entry.set_hexpand(true);
+    let cp_save_btn = Button::with_label("Save");
+    cp_add_row.append(&cp_entry);
+    cp_add_row.append(&cp_save_btn);
+    checkpoints_outer.append(&cp_add_row);
+    stack.add_titled(&checkpoints_outer, Some("checkpoints"), "Checkpoints");
+
     let switcher = StackSwitcher::new();
     switcher.set_stack(Some(&stack));
     switcher.add_css_class("panel-switcher");
@@ -798,7 +888,9 @@ fn build_right_panel(
     let logs_buf = logs_view.buffer();
     let todos_box_clone = todos_box.clone();
     let review_box_clone = review_box.clone();
+    let checkpoints_box_clone = checkpoints_box.clone();
     let db_path2 = db_path.clone();
+    let db_path3 = db_path.clone();
 
     let refresh: Rc<dyn Fn()> = Rc::new(move || {
         let ws_name = sel.borrow().clone();
@@ -825,6 +917,12 @@ fn build_right_panel(
             review_box_clone.remove(&child);
         }
         populate_review_box(&review_box_clone, &db_path, ws_name.as_deref());
+
+        // Checkpoints
+        while let Some(child) = checkpoints_box_clone.first_child() {
+            checkpoints_box_clone.remove(&child);
+        }
+        populate_checkpoints_box(&checkpoints_box_clone, &db_path, ws_name.as_deref());
 
         // Logs
         let logs_text = build_logs_text(&logs_dir, ws_name.as_deref());
@@ -854,6 +952,31 @@ fn build_right_panel(
         let d2 = do_add.clone();
         todo_add_btn.connect_clicked(move |_| d1());
         todo_entry.connect_activate(move |_| d2());
+    }
+
+    // Wire up "Save checkpoint" entry
+    {
+        let sel = Rc::clone(&selected);
+        let entry = cp_entry.clone();
+        let rf = Rc::clone(&refresh);
+        let db = db_path3.clone();
+        let do_save = Rc::new(move || {
+            let msg = entry.text().to_string();
+            if msg.trim().is_empty() {
+                return;
+            }
+            if let Some(ws_name) = sel.borrow().clone() {
+                if let Ok(store) = WorkspaceStore::open(db.clone()) {
+                    let _ = store.checkpoint_create(&ws_name, &msg, None);
+                    entry.set_text("");
+                    rf();
+                }
+            }
+        });
+        let s1 = do_save.clone();
+        let s2 = do_save.clone();
+        cp_save_btn.connect_clicked(move |_| s1());
+        cp_entry.connect_activate(move |_| s2());
     }
 
     // Initial populate
@@ -1107,6 +1230,71 @@ fn populate_todos_box(container: &GBox, db_path: &std::path::PathBuf, ws_name: O
             empty.set_xalign(0.0);
             empty.set_wrap(true);
             container.append(&empty);
+        }
+    }
+}
+
+fn populate_checkpoints_box(container: &GBox, db_path: &std::path::PathBuf, ws_name: Option<&str>) {
+    let title = Label::new(Some("── Checkpoints ──"));
+    title.set_xalign(0.0);
+    container.append(&title);
+
+    let Some(name) = ws_name else {
+        let lbl = Label::new(Some("Select a workspace to view its checkpoints."));
+        lbl.add_css_class("info-text");
+        lbl.set_xalign(0.0);
+        container.append(&lbl);
+        return;
+    };
+
+    if let Ok(store) = WorkspaceStore::open(db_path.clone()) {
+        match store.checkpoint_list(name) {
+            Ok(checkpoints) if checkpoints.is_empty() => {
+                let lbl = Label::new(Some(
+                    "No checkpoints yet.\nType a message below and click Save.",
+                ));
+                lbl.add_css_class("info-text");
+                lbl.set_xalign(0.0);
+                lbl.set_wrap(true);
+                container.append(&lbl);
+            }
+            Ok(checkpoints) => {
+                for cp in checkpoints.iter().rev().take(20) {
+                    let row = GBox::new(Orientation::Vertical, 4);
+                    let ts = Label::new(Some(&cp.created_at));
+                    ts.add_css_class("workspace-meta");
+                    ts.set_xalign(0.0);
+                    let msg_lbl = Label::new(Some(&cp.message));
+                    msg_lbl.set_xalign(0.0);
+                    msg_lbl.set_wrap(true);
+                    let btn_row = GBox::new(Orientation::Horizontal, 4);
+                    let restore_btn = Button::with_label("↩ Restore");
+                    restore_btn.add_css_class("flat");
+                    restore_btn.set_tooltip_text(Some(
+                        "Hard-reset workspace to this checkpoint (destructive)",
+                    ));
+                    let cp_id = cp.id;
+                    let ws = name.to_owned();
+                    let db = db_path.clone();
+                    restore_btn.connect_clicked(move |_| {
+                        spawn_terminal_command(&format!(
+                            "linux-conductor checkpoint restore {ws} {cp_id}"
+                        ));
+                        let _ = WorkspaceStore::open(db.clone());
+                    });
+                    btn_row.append(&restore_btn);
+                    row.append(&ts);
+                    row.append(&msg_lbl);
+                    row.append(&btn_row);
+                    container.append(&row);
+                    container.append(&Separator::new(Orientation::Horizontal));
+                }
+            }
+            Err(e) => {
+                let lbl = Label::new(Some(&format!("Error: {e}")));
+                lbl.set_xalign(0.0);
+                container.append(&lbl);
+            }
         }
     }
 }
