@@ -440,11 +440,24 @@ fn build_center_panel(
         }
     });
 
+    let rename_btn = Button::with_label("✎ Rename");
+    rename_btn.set_tooltip_text(Some("Rename workspace"));
+    let sel = Rc::clone(&selected);
+    rename_btn.connect_clicked(move |_| {
+        if let Some(ws) = sel.borrow().clone() {
+            spawn_terminal_command(&format!(
+                "read -rp 'New name for \"{ws}\": ' NEW_NAME\n\
+                 linux-conductor workspace rename {ws} \"$NEW_NAME\""
+            ));
+        }
+    });
+
     toolbar.append(&run_btn);
     toolbar.append(&stop_btn);
     toolbar.append(&editor_btn);
     toolbar.append(&pr_btn);
     toolbar.append(&merge_btn);
+    toolbar.append(&rename_btn);
     toolbar.append(&archive_btn);
     toolbar.append(&discard_btn);
 
@@ -1064,26 +1077,25 @@ fn build_logs_text(logs_dir: &std::path::PathBuf, ws_name: Option<&str>) -> Stri
 }
 
 fn build_diff_text(db_path: &std::path::PathBuf, ws_name: Option<&str>) -> String {
-    let mut text = String::from("── Changed Files ──\n\n");
+    let mut text = String::from("── Status ──\n\n");
     if let Ok(store) = WorkspaceStore::open(db_path.clone()) {
         if let Some(name) = ws_name {
-            match store.changed_files(name) {
-                Ok(files) if files.is_empty() => text.push_str("(no changes)\n"),
-                Ok(files) => {
-                    for f in files {
-                        text.push_str(&format!("  {f}\n"));
-                    }
-                    text.push('\n');
-                    // Also show unified diff (first 60 lines to keep it readable)
-                    if let Ok(diff) = store.unified_diff(name, None) {
-                        text.push_str("── Unified Diff ──\n\n");
-                        let lines: Vec<_> = diff.lines().take(120).collect();
-                        text.push_str(&lines.join("\n"));
-                        if diff.lines().count() > 120 {
-                            text.push_str("\n\n… (truncated, run: linux-conductor diff ");
-                            text.push_str(name);
-                            text.push(')');
-                        }
+            // git status --short (staged/unstaged/untracked indicators)
+            match store.git_status_short(name) {
+                Ok(s) if s.trim().is_empty() => text.push_str("(working tree clean)\n"),
+                Ok(s) => text.push_str(&s),
+                Err(_) => text.push_str("(git status unavailable)\n"),
+            }
+            text.push_str("\n── Unified Diff ──\n\n");
+            match store.unified_diff(name, None) {
+                Ok(diff) if diff.trim().is_empty() => text.push_str("(no unstaged changes)\n"),
+                Ok(diff) => {
+                    let lines: Vec<_> = diff.lines().take(150).collect();
+                    text.push_str(&lines.join("\n"));
+                    if diff.lines().count() > 150 {
+                        text.push_str("\n\n… (truncated — run: linux-conductor diff ");
+                        text.push_str(name);
+                        text.push(')');
                     }
                 }
                 Err(e) => text.push_str(&format!("Error: {e}\n")),

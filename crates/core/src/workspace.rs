@@ -548,6 +548,11 @@ impl WorkspaceStore {
             .collect())
     }
 
+    pub fn git_status_short(&self, name: &str) -> Result<String> {
+        let workspace = self.get_by_name(name)?;
+        git_output_dynamic(&workspace.path, &["status", "--short"])
+    }
+
     pub fn unified_diff(&self, name: &str, path: Option<&Path>) -> Result<String> {
         let workspace = self.get_by_name(name)?;
         if let Some(path) = path {
