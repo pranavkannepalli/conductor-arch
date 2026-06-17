@@ -20,7 +20,27 @@ chmod +x linux-conductor.AppImage
 sudo mv linux-conductor.AppImage /usr/local/bin/linux-conductor
 ```
 
-### Build from source
+### GTK4 GUI (native desktop app)
+
+The GUI binary is included in the AppImage and native packages.
+Build it from source with GTK4 and libadwaita installed:
+
+```bash
+# Arch Linux
+sudo pacman -S gtk4 libadwaita
+
+# Ubuntu / Debian
+sudo apt install libgtk-4-dev libadwaita-1-dev
+
+# Fedora
+sudo dnf install gtk4-devel libadwaita-devel
+
+# Build and run
+cargo build --release
+./target/release/linux-conductor-gtk
+```
+
+### Build from source (CLI only)
 
 ```bash
 # Install Rust if needed
@@ -31,6 +51,7 @@ git clone https://github.com/pranavkannepalli/conductor-arch
 cd conductor-arch
 cargo build --release
 sudo cp target/release/linux-conductor /usr/local/bin/
+# Optionally: sudo cp target/release/linux-conductor-gtk /usr/local/bin/
 ```
 
 ---

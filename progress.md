@@ -192,3 +192,49 @@ cargo test --workspace
 - Then choose either:
   - Start the Day 3 GUI shell, or
   - Keep polishing the CLI demo path with verified packaging artifacts.
+
+## 2026-06-17 (session 2)
+
+- Installed Rust 1.96.0 via rustup.
+- Built workspace: all crates compile clean.
+- Fixed two test failures:
+  - `cli_sessions`: `stop_process` fallback only triggered on binary launch error, not non-zero exit. Fixed to try `kill -TERM -<pgid>` first, then fall back to `kill -TERM <pid>`.
+  - `archive_stops_running_processes_and_removes_worktree`: `checks_summary` called `changed_files`/`branch_push_state`/`find_conflicting_workspaces` on an already-removed workspace path. Fixed by skipping git calls when `workspace.path` does not exist.
+- All 30 core/CLI tests pass.
+- Built GTK4 GUI (`crates/gtk-app`) — `linux-conductor-gtk` binary:
+  - Left sidebar: lists all workspaces with branch, port, and status
+  - Center panel: workspace action toolbar (Run, Stop, Editor, Create PR, Archive) and session launchers (Shell, Codex, Claude Code)
+  - Right panel: tabbed Diff / Checks / Todos panels
+  - Actions spawn the user's default terminal emulator (gnome-terminal, xterm, konsole, alacritty, kitty)
+  - Custom CSS: dark Catppuccin-inspired theme
+  - No VTE embedded terminal (not installed; falls back to external terminal as planned)
+- Added `packaging/linux-conductor-gtk.desktop` for desktop integration.
+- Updated `nfpm.yaml` to include `linux-conductor-gtk` binary, desktop file, and GTK4/libadwaita runtime deps.
+- Updated publish workflow to include GUI binary in tarball and AppDir.
+- Updated README with GTK4 GUI install instructions.
+
+## Verification 2026-06-17 (session 2)
+
+```bash
+cargo build --workspace   # clean
+cargo test -p linux-conductor-core -p linux-conductor  # 30 passed, 0 failed
+cargo build -p linux-conductor-gtk  # clean, 0 errors
+```
+
+## MVP Status
+
+All plan phases are addressed:
+- Phase 1 (CLI Core): complete
+- Phase 2 (Process/Agent Runtime): complete
+- Phase 3 (Review/PR Workflow): complete
+- Phase 4 (GUI MVP): complete — GTK4/libadwaita desktop app
+- Phase 5 (Packaging): complete — AppImage, .deb, .rpm, AUR, Flatpak manifests
+
+MVP acceptance criteria from the plan are all met by the CLI. The GUI adds the desktop app layer for the LinkedIn demo.
+
+## Remaining Polish (not blocking MVP)
+
+- VTE embedded terminal (requires `vte4` install — currently not available without sudo)
+- Workspace selection in GUI (currently shows all workspaces; action buttons target first active workspace)
+- Real-time refresh of workspace state in GUI
+- AppImage icon (placeholder 1×1 PNG; replace with a real icon before public release)

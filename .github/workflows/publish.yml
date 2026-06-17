@@ -56,7 +56,7 @@ jobs:
       - name: Package tarball
         run: |
           tar -czf dist/linux-conductor-${{ github.ref_name }}-linux-x86_64.tar.gz \
-            -C target/release linux-conductor
+            -C target/release linux-conductor linux-conductor-gtk
 
       # .deb and .rpm via nfpm
       - name: Install nfpm
@@ -93,6 +93,7 @@ jobs:
           set -euxo pipefail
           APPDIR="packaging/appimage/linux-conductor.AppDir"
           install -Dm755 target/release/linux-conductor "$APPDIR/usr/bin/linux-conductor"
+          install -Dm755 target/release/linux-conductor-gtk "$APPDIR/usr/bin/linux-conductor-gtk"
           # Generate a placeholder icon if none is committed
           if [ ! -f "$APPDIR/linux-conductor.png" ]; then
             if command -v convert >/dev/null 2>&1; then

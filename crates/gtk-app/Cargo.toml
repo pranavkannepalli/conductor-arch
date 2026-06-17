@@ -1,0 +1,17 @@
+[package]
+name = "linux-conductor-gtk"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "linux-conductor-gtk"
+path = "src/main.rs"
+
+[dependencies]
+linux-conductor-core = { path = "../core" }
+gtk = { package = "gtk4", version = "0.11" }
+adw = { package = "libadwaita", version = "0.9", features = ["v1_4"] }
+glib = "0.20"
+anyhow = "1"

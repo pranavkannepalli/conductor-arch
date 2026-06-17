@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Linux Conductor
+GenericName=Coding Agent Workspace Manager
+Comment=Linux-native parallel coding-agent workflow built around Git worktrees
+Exec=linux-conductor-gtk
+Icon=linux-conductor
+Type=Application
+Categories=Development;IDE;
+Keywords=git;worktree;agent;codex;claude;
+StartupNotify=true

@@ -2,6 +2,7 @@
 members = [
   "crates/core",
   "crates/cli",
+  "crates/gtk-app",
 ]
 resolver = "2"
 

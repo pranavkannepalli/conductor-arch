@@ -983,17 +983,30 @@ impl WorkspaceStore {
 
     pub fn checks_summary(&self, name: &str) -> Result<ChecksSummary> {
         let workspace = self.get_by_name(name)?;
-        let changed_files = self.changed_files(name)?.len();
+        let path_exists = workspace.path.exists();
+        let changed_files = if path_exists {
+            self.changed_files(name)?.len()
+        } else {
+            0
+        };
         let run_status = self.latest_process_status(workspace.id, ProcessKind::Run)?;
         let session_status = self.latest_process_status(workspace.id, ProcessKind::Session)?;
         let active_sessions = self.count_running_processes(workspace.id, ProcessKind::Session)?;
         let pull_request = self.pull_request_by_workspace_id(workspace.id)?;
         let todos = self.list_todos(name)?;
         let open_todos = todos.iter().filter(|todo| todo.status == "open").count();
-        let branch_push_state = self.branch_push_state(name).ok();
+        let branch_push_state = if path_exists {
+            self.branch_push_state(name).ok()
+        } else {
+            None
+        };
         let comments = self.list_review_comments(name)?;
         let open_review_comments = comments.iter().filter(|c| c.status == "open").count();
-        let conflicting_workspaces = self.find_conflicting_workspaces(name).unwrap_or_default();
+        let conflicting_workspaces = if path_exists {
+            self.find_conflicting_workspaces(name).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         Ok(ChecksSummary {
             workspace,
             changed_files,
@@ -1796,17 +1809,18 @@ fn git_ignored(repo_path: &Path, relative_path: &Path) -> bool {
 }
 
 fn stop_process(pid: u32) -> Result<()> {
-    let target = format!("-{pid}");
+    let group_status = Command::new("kill")
+        .arg("-TERM")
+        .arg(format!("-{pid}"))
+        .status()
+        .context("run kill")?;
+    if group_status.success() {
+        return Ok(());
+    }
     let status = Command::new("kill")
         .arg("-TERM")
-        .arg(&target)
+        .arg(pid.to_string())
         .status()
-        .or_else(|_| {
-            Command::new("kill")
-                .arg("-TERM")
-                .arg(pid.to_string())
-                .status()
-        })
         .context("run kill")?;
     anyhow::ensure!(status.success(), "failed to stop process {pid}");
     Ok(())

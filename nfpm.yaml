@@ -20,6 +20,16 @@ contents:
     file_info:
       mode: 0755
 
+  - src: target/release/linux-conductor-gtk
+    dst: /usr/bin/linux-conductor-gtk
+    file_info:
+      mode: 0755
+
+  - src: packaging/linux-conductor-gtk.desktop
+    dst: /usr/share/applications/linux-conductor-gtk.desktop
+    file_info:
+      mode: 0644
+
   - src: README.md
     dst: /usr/share/doc/linux-conductor/README.md
     file_info:
@@ -31,8 +41,12 @@ overrides:
       - git
       - gh
       - openssh-client
+      - libgtk-4-1
+      - libadwaita-1-0
   rpm:
     depends:
       - git
       - gh
       - openssh-clients
+      - gtk4
+      - libadwaita
