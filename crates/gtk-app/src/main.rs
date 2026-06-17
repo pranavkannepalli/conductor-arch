@@ -133,8 +133,16 @@ fn build_sidebar(
     header.set_xalign(0.0);
     header.set_margin_start(12);
     header.set_margin_top(10);
-    header.set_margin_bottom(6);
+    header.set_margin_bottom(4);
     sidebar_box.append(&header);
+
+    let search_entry = Entry::new();
+    search_entry.set_placeholder_text(Some("Filter workspaces…"));
+    search_entry.add_css_class("sidebar-search");
+    search_entry.set_margin_start(8);
+    search_entry.set_margin_end(8);
+    search_entry.set_margin_bottom(6);
+    sidebar_box.append(&search_entry);
 
     let scroll = ScrolledWindow::new();
     scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
@@ -156,7 +164,9 @@ fn build_sidebar(
         let names = Rc::clone(&names);
         let db_path = db_path.clone();
         let selected = Rc::clone(&selected);
+        let search_entry_c = search_entry.clone();
         move || {
+            let filter = search_entry_c.text().to_string().to_lowercase();
             // Clear existing rows
             while let Some(child) = list.first_child() {
                 list.remove(&child);
@@ -171,6 +181,13 @@ fn build_sidebar(
                     let mut current_repo = String::new();
                     for line in &statuses {
                         let ws = &line.workspace;
+                        // Apply search filter
+                        if !filter.is_empty()
+                            && !ws.name.to_lowercase().contains(&filter)
+                            && !ws.branch.to_lowercase().contains(&filter)
+                        {
+                            continue;
+                        }
                         // Repo section header when repo changes
                         if line.repository_name != current_repo {
                             current_repo = line.repository_name.clone();
@@ -249,6 +266,10 @@ fn build_sidebar(
     };
 
     populate();
+
+    // Re-populate on search input
+    let pop_search = populate.clone();
+    search_entry.connect_changed(move |_| pop_search());
 
     // On selection change: update shared state and refresh panels
     let sel_clone = Rc::clone(&selected);
@@ -1901,5 +1922,17 @@ separator {
     font-size: 11px;
     font-family: monospace;
     margin-bottom: 2px;
+}
+
+.sidebar-search {
+    background-color: #181825;
+    color: #cdd6f4;
+    border: 1px solid #313244;
+    border-radius: 6px;
+    font-size: 12px;
+}
+
+.sidebar-search:focus {
+    border-color: #89b4fa;
 }
 "#;
