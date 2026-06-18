@@ -284,6 +284,8 @@ Manual GUI smoke:
   paths in Processes instead of reusing one shared terminal log.
 - Confirm PTY shell command echoes and output are appended to that terminal
   process log, not only shown in the on-screen transcript.
+- Confirm terminal history search finds matching persisted transcript lines and
+  appends process/line matches into the terminal transcript.
 - Confirm a terminal shell that exits outside the app is eventually marked
   exited in Processes after the app-wide reconciliation poller runs.
 - Confirm stale terminal process rows from an earlier app crash are marked
@@ -318,7 +320,7 @@ Known GUI MVP gaps:
   I/O and process records but renders as raw transcript text. Stale process
   rows reconcile at startup and while the app is open, and shell records get
   distinct searchable raw transcript logs, but this is not full terminal session
-  restoration and does not yet expose GUI terminal history search.
+  restoration or a polished terminal history browser.
 - Full Spotlight watching/checkpoint sync is not implemented; the current
   Spotlight slice is manual checkpoint/apply/restore/switch/sync with
   dirty-root refusal before patch reversal plus app-wide polling sync.

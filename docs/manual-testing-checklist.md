@@ -204,6 +204,8 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
   in the Processes tab instead of reusing one shared terminal log.
 - [ ] PTY shell command echoes and output appear in that terminal process log,
   not only in the on-screen transcript.
+- [ ] Terminal history search finds matching persisted transcript lines and
+  appends process/line matches into the terminal transcript.
 - [ ] If an embedded terminal shell exits outside the app, the Processes tab
   eventually marks its terminal row exited after the app-wide reconciliation
   poller runs.
@@ -235,8 +237,7 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
   has a PTY-backed shell but still renders as raw transcript text; stale
   process rows reconcile at startup and while the app is open, and shell records
   get distinct searchable raw transcript logs, but this is not a full
-  emulator/session restoration model and does not yet expose GUI terminal
-  history search.
+  emulator/session restoration model or polished terminal history browser.
 - [ ] Full Spotlight parity is not implemented. The current slice manually
   checkpoints/applies/restores/switches/syncs tracked changes plus app-wide
   polling sync, and does not run event-driven file watching or repair root

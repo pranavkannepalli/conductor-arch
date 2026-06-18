@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use gtk::prelude::*;
 use gtk::{Box as GBox, Button, Entry, Label, Orientation, ScrolledWindow, TextBuffer, TextView};
 use linux_conductor_core::pty::PtySession;
-use linux_conductor_core::workspace::{SessionKind, WorkspaceStore};
+use linux_conductor_core::workspace::{SessionKind, TerminalLogMatch, WorkspaceStore};
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -154,7 +154,7 @@ pub fn embedded_terminal_panel(
     let run_btn = Button::with_label("Run");
     let buffer = transcript.buffer();
     let workspace = workspace_name.to_owned();
-    let db = database_path;
+    let db = database_path.clone();
     let pty = active_pty;
     let entry_clone = entry.clone();
     run_btn.connect_clicked(move |_| {
@@ -175,6 +175,31 @@ pub fn embedded_terminal_panel(
     command_row.append(&entry);
     command_row.append(&run_btn);
     root.append(&command_row);
+
+    let search_row = GBox::new(Orientation::Horizontal, 8);
+    let search_entry = Entry::new();
+    search_entry.set_placeholder_text(Some("search terminal history"));
+    search_entry.set_hexpand(true);
+    let search_btn = Button::with_label("Search Logs");
+    let search_buffer = transcript.buffer();
+    let search_workspace = workspace_name.to_owned();
+    let search_db = database_path;
+    let search_entry_clone = search_entry.clone();
+    search_btn.connect_clicked(move |_| {
+        let query = search_entry_clone.text().trim().to_owned();
+        if query.is_empty() {
+            return;
+        }
+        run_terminal_log_search(
+            search_db.clone(),
+            search_workspace.clone(),
+            query,
+            search_buffer.clone(),
+        );
+    });
+    search_row.append(&search_entry);
+    search_row.append(&search_btn);
+    root.append(&search_row);
     root
 }
 
@@ -247,6 +272,60 @@ fn run_terminal_command(
     });
 }
 
+fn run_terminal_log_search(
+    database_path: PathBuf,
+    workspace_name: String,
+    query: String,
+    buffer: TextBuffer,
+) {
+    append_text(
+        &buffer,
+        &format!("\n[terminal search] {query}\n[searching]\n"),
+    );
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let message = match WorkspaceStore::open(database_path)
+            .and_then(|store| store.search_terminal_logs(&workspace_name, &query))
+        {
+            Ok(matches) => format_terminal_search_results(&query, &matches),
+            Err(err) => format!("[terminal search error]\n{err:#}\n"),
+        };
+        let _ = tx.send(message);
+    });
+
+    glib::timeout_add_local(Duration::from_millis(100), move || match rx.try_recv() {
+        Ok(message) => {
+            append_text(&buffer, &message);
+            glib::ControlFlow::Break
+        }
+        Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+        Err(mpsc::TryRecvError::Disconnected) => {
+            append_text(&buffer, "[error]\nterminal search worker disconnected\n");
+            glib::ControlFlow::Break
+        }
+    });
+}
+
+fn format_terminal_search_results(query: &str, matches: &[TerminalLogMatch]) -> String {
+    let mut text = format!("\n[terminal search] {query}\n");
+    if matches.is_empty() {
+        text.push_str("No terminal transcript matches.\n");
+        return text;
+    }
+    for item in matches {
+        let file_name = item
+            .log_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("terminal.log");
+        text.push_str(&format!(
+            "#{} {} {}:{}\n{}\n",
+            item.process_id, item.command, file_name, item.line_number, item.line
+        ));
+    }
+    text
+}
+
 fn append_text(buffer: &TextBuffer, text: &str) {
     let mut end = buffer.end_iter();
     buffer.insert(&mut end, text);
@@ -294,4 +373,31 @@ fn display_command(program: &Path, args: &[String]) -> String {
         .chain(args.iter().cloned())
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_search_results_render_process_line_and_empty_state() {
+        let matches = vec![TerminalLogMatch {
+            process_id: 42,
+            command: "/bin/sh".to_owned(),
+            log_path: PathBuf::from("/tmp/logs/terminal.log"),
+            line_number: 3,
+            line: "needle found".to_owned(),
+        }];
+
+        let rendered = format_terminal_search_results("needle", &matches);
+
+        assert!(rendered.contains("[terminal search] needle"));
+        assert!(rendered.contains("#42 /bin/sh"));
+        assert!(rendered.contains("terminal.log:3"));
+        assert!(rendered.contains("needle found"));
+        assert_eq!(
+            format_terminal_search_results("missing", &[]),
+            "\n[terminal search] missing\nNo terminal transcript matches.\n"
+        );
+    }
 }
