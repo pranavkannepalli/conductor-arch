@@ -38,14 +38,23 @@ curl -fsSL -o /usr/local/bin/appimagetool \
   https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
 chmod +x /usr/local/bin/appimagetool
 
-# Copy binary into AppDir
+# Copy binaries into AppDir
 install -Dm755 target/release/linux-conductor \
   packaging/appimage/linux-conductor.AppDir/usr/bin/linux-conductor
+install -Dm755 target/release/linux-conductor-gtk \
+  packaging/appimage/linux-conductor.AppDir/usr/bin/linux-conductor-gtk
 
 # Build AppImage
 appimagetool --appimage-extract-and-run \
   packaging/appimage/linux-conductor.AppDir \
   dist/linux-conductor-0.1.0-x86_64.AppImage
+```
+
+With no arguments, the AppImage launches the GTK GUI. With arguments, it passes
+through to the CLI, for example:
+
+```bash
+./dist/linux-conductor-0.1.0-x86_64.AppImage doctor
 ```
 
 ### AUR (Arch Linux)
@@ -58,12 +67,12 @@ makepkg -si
 
 ### Flatpak (experimental)
 
-The Flatpak build requires `flatpak-builder` and the Freedesktop SDK:
+The Flatpak build requires `flatpak-builder`, the GNOME 47 SDK, and the Rust SDK
+extension:
 
 ```bash
-# Install SDK and Rust extension
-flatpak install flathub org.freedesktop.Sdk//23.08 org.freedesktop.Platform//23.08
-flatpak install flathub org.freedesktop.Sdk.Extension.rust-stable//23.08
+flatpak install flathub org.gnome.Platform//47 org.gnome.Sdk//47
+flatpak install flathub org.freedesktop.Sdk.Extension.rust-stable//24.08
 
 # Build and install locally
 flatpak-builder --install --user --force-clean \
@@ -86,5 +95,5 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-The workflow builds tarball + .deb + .rpm + AppImage on self-hosted runners
-and attaches all artifacts to the GitHub release.
+The workflow builds tarball + .deb + .rpm + AppImage on `ubuntu-24.04` GitHub
+hosted runners and attaches all artifacts to the GitHub release.

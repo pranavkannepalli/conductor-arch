@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use adw::prelude::*;
 use adw::{Application, ApplicationWindow, HeaderBar};
 use gtk::{
@@ -5,9 +7,13 @@ use gtk::{
     PolicyType, ScrolledWindow, Separator, Stack, StackSwitcher, TextView,
     STYLE_PROVIDER_PRIORITY_APPLICATION,
 };
+use linux_conductor_core::import::default_conductor_app_database;
 use linux_conductor_core::paths::AppPaths;
-use linux_conductor_core::workspace::WorkspaceStore;
+use linux_conductor_core::repository::{AddRepository, RepositoryStore};
+use linux_conductor_core::workspace::{CreateWorkspace, WorkspaceStore};
+use rusqlite::Connection;
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::SystemTime;
 
@@ -45,63 +51,45 @@ fn build_ui(app: &Application, initial_workspace: Option<String>) {
         STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
 
-    // Shared state: selected workspace name (pre-seeded from --workspace flag if given)
     let selected: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(initial_workspace));
 
-    // ── LAYOUT ───────────────────────────────────────────────────────
     let split = adw::OverlaySplitView::new();
     split.set_min_sidebar_width(220.0);
     split.set_max_sidebar_width(280.0);
     split.set_show_sidebar(true);
 
-    // Toast overlay wraps the main content area for action notifications
     let toast_overlay = adw::ToastOverlay::new();
+    let (dashboard, refresh_dashboard) = build_dashboard_panel(&paths);
+    dashboard.set_hexpand(true);
+    dashboard.set_vexpand(true);
 
-    let main_box = GBox::new(Orientation::Horizontal, 0);
-
-    // Right panel built first — its refresh fn is passed into center/sidebar
-    let (right_panel, refresh_right) =
-        build_right_panel(&paths.database_path, &paths.logs_dir, Rc::clone(&selected));
-    right_panel.set_width_request(340);
-    right_panel.set_vexpand(true);
-
-    // Center panel — workspace header + action toolbar + status grid
-    let (center_panel, refresh_center_raw) = build_center_panel(
+    let (workspace_detail, refresh_workspace_detail) =
+        build_workspace_detail_page(&paths, Rc::clone(&selected));
+    let (projects_page, refresh_projects) = build_projects_page(
         &paths,
-        Rc::clone(&selected),
-        refresh_right.clone(),
-        toast_overlay.clone(),
-        window.clone(),
+        refresh_dashboard.clone(),
+        refresh_workspace_detail.clone(),
     );
-    center_panel.set_hexpand(true);
-    center_panel.set_vexpand(true);
+    let (history_page, refresh_history) = build_history_page();
 
-    // Wrap refresh_center to also update window title
-    let window_title_ref = window.clone();
-    let sel_for_title = Rc::clone(&selected);
-    let refresh_center = move || {
-        refresh_center_raw();
-        let title = sel_for_title
-            .borrow()
-            .as_deref()
-            .map(|n| format!("{n} — Linux Conductor"))
-            .unwrap_or_else(|| "Linux Conductor".to_owned());
-        window_title_ref.set_title(Some(&title));
-    };
+    let main_stack = Stack::new();
+    main_stack.set_hexpand(true);
+    main_stack.set_vexpand(true);
+    main_stack.add_named(&dashboard, Some("dashboard"));
+    main_stack.add_named(&projects_page, Some("projects"));
+    main_stack.add_named(&history_page, Some("history"));
+    main_stack.add_named(&workspace_detail, Some("workspace"));
+    main_stack.set_visible_child_name("dashboard");
 
-    // Sidebar — triggers both center and right refresh on selection
-    let (sidebar, refresh_sidebar) = build_sidebar(
+    let (sidebar, refresh_sidebar) = build_app_sidebar(
         &paths,
         Rc::clone(&selected),
-        refresh_center.clone(),
-        refresh_right.clone(),
+        main_stack.clone(),
+        refresh_workspace_detail.clone(),
     );
 
     split.set_sidebar(Some(&sidebar));
-    main_box.append(&center_panel);
-    main_box.append(&Separator::new(Orientation::Vertical));
-    main_box.append(&right_panel);
-    toast_overlay.set_child(Some(&main_box));
+    toast_overlay.set_child(Some(&main_stack));
     split.set_content(Some(&toast_overlay));
 
     // Header bar
@@ -116,13 +104,17 @@ fn build_ui(app: &Application, initial_workspace: Option<String>) {
     // Refresh button
     let refresh_btn = Button::from_icon_name("view-refresh-symbolic");
     refresh_btn.set_tooltip_text(Some("Refresh workspace state"));
-    let rc = refresh_center.clone();
-    let rr = refresh_right.clone();
+    let rd = refresh_dashboard.clone();
     let rs = refresh_sidebar.clone();
+    let rp = refresh_projects.clone();
+    let rh = refresh_history.clone();
+    let rw = refresh_workspace_detail.clone();
     refresh_btn.connect_clicked(move |_| {
         rs();
-        rc();
-        rr();
+        rd();
+        rp();
+        rh();
+        rw();
     });
     header.pack_start(&toggle_btn);
     header.pack_end(&refresh_btn);
@@ -136,14 +128,18 @@ fn build_ui(app: &Application, initial_workspace: Option<String>) {
 
     // Keyboard shortcut: Ctrl+R → refresh all panels
     let evk = gtk::EventControllerKey::new();
-    let rc_kb = refresh_center.clone();
-    let rr_kb = refresh_right.clone();
+    let rd_kb = refresh_dashboard.clone();
     let rs_kb = refresh_sidebar.clone();
+    let rp_kb = refresh_projects.clone();
+    let rh_kb = refresh_history.clone();
+    let rw_kb = refresh_workspace_detail.clone();
     evk.connect_key_pressed(move |_, keyval, _, modifiers| {
         if modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK) && keyval == gtk::gdk::Key::r {
             rs_kb();
-            rc_kb();
-            rr_kb();
+            rd_kb();
+            rp_kb();
+            rh_kb();
+            rw_kb();
             return gtk::glib::Propagation::Stop;
         }
         gtk::glib::Propagation::Proceed
@@ -151,15 +147,1238 @@ fn build_ui(app: &Application, initial_workspace: Option<String>) {
     window.add_controller(evk);
 
     // Auto-refresh panels every 5 seconds
-    let rc = refresh_center.clone();
-    let rr = refresh_right.clone();
+    let rd = refresh_dashboard.clone();
     let rs = refresh_sidebar.clone();
+    let rp = refresh_projects.clone();
+    let rw = refresh_workspace_detail.clone();
     glib::timeout_add_seconds_local(5, move || {
         rs();
-        rc();
-        rr();
+        rd();
+        rp();
+        rw();
         glib::ControlFlow::Continue
     });
+}
+
+// ── APP SHELL ─────────────────────────────────────────────────────────────
+
+fn build_app_sidebar(
+    paths: &AppPaths,
+    selected: Rc<RefCell<Option<String>>>,
+    stack: Stack,
+    refresh_workspace: impl Fn() + Clone + 'static,
+) -> (GBox, impl Fn() + Clone + 'static) {
+    let sidebar_box = GBox::new(Orientation::Vertical, 0);
+    sidebar_box.add_css_class("sidebar");
+    sidebar_box.set_width_request(240);
+
+    let dashboard_btn = Button::with_label("Dashboard");
+    dashboard_btn.add_css_class("nav-button-active");
+    let stack_dashboard = stack.clone();
+    dashboard_btn.connect_clicked(move |_| stack_dashboard.set_visible_child_name("dashboard"));
+    sidebar_box.append(&dashboard_btn);
+
+    let history_btn = Button::with_label("History");
+    history_btn.add_css_class("nav-button");
+    let stack_history = stack.clone();
+    history_btn.connect_clicked(move |_| stack_history.set_visible_child_name("history"));
+    sidebar_box.append(&history_btn);
+
+    let projects_btn = Button::with_label("Projects");
+    projects_btn.add_css_class("nav-button");
+    let stack_projects = stack.clone();
+    projects_btn.connect_clicked(move |_| stack_projects.set_visible_child_name("projects"));
+    sidebar_box.append(&projects_btn);
+
+    let divider = Separator::new(Orientation::Horizontal);
+    sidebar_box.append(&divider);
+
+    let projects_header = GBox::new(Orientation::Horizontal, 8);
+    projects_header.add_css_class("projects-header");
+    let header = Label::new(Some("Workspaces"));
+    header.add_css_class("sidebar-header");
+    header.set_xalign(0.0);
+    header.set_hexpand(true);
+    projects_header.append(&header);
+    sidebar_box.append(&projects_header);
+
+    let search_entry = Entry::new();
+    search_entry.set_placeholder_text(Some("Filter workspaces..."));
+    search_entry.add_css_class("sidebar-search");
+    search_entry.set_margin_start(12);
+    search_entry.set_margin_end(12);
+    search_entry.set_margin_bottom(8);
+    sidebar_box.append(&search_entry);
+
+    let scroll = ScrolledWindow::new();
+    scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
+    scroll.set_vexpand(true);
+
+    let list = ListBox::new();
+    list.add_css_class("workspace-list");
+    list.set_selection_mode(gtk::SelectionMode::Single);
+    let names: Rc<RefCell<std::collections::HashMap<i32, String>>> =
+        Rc::new(RefCell::new(std::collections::HashMap::new()));
+    let db_path = paths.database_path.clone();
+
+    let populate = {
+        let list = list.clone();
+        let names = Rc::clone(&names);
+        let selected = Rc::clone(&selected);
+        let search_entry = search_entry.clone();
+        move || {
+            while let Some(child) = list.first_child() {
+                list.remove(&child);
+            }
+            names.borrow_mut().clear();
+            let filter = search_entry.text().to_string().to_lowercase();
+            let prev_selected = selected.borrow().clone();
+            let mut row_idx = 0;
+
+            if let Ok(store) = WorkspaceStore::open(db_path.clone()) {
+                if let Ok(statuses) = store.list_status() {
+                    let mut current_repo = String::new();
+                    for line in statuses {
+                        let ws = &line.workspace;
+                        if !filter.is_empty()
+                            && !ws.name.to_lowercase().contains(&filter)
+                            && !ws.branch.to_lowercase().contains(&filter)
+                            && !line.repository_name.to_lowercase().contains(&filter)
+                        {
+                            continue;
+                        }
+
+                        if line.repository_name != current_repo {
+                            current_repo = line.repository_name.clone();
+                            let repo_lbl = Label::new(Some(&current_repo));
+                            repo_lbl.add_css_class("repo-section-header");
+                            repo_lbl.set_xalign(0.0);
+                            repo_lbl.set_margin_start(8);
+                            repo_lbl.set_margin_top(8);
+                            repo_lbl.set_margin_bottom(2);
+                            let header_row = ListBoxRow::builder().child(&repo_lbl).build();
+                            header_row.set_selectable(false);
+                            header_row.set_activatable(false);
+                            list.append(&header_row);
+                            row_idx += 1;
+                        }
+
+                        let row = build_workspace_row(
+                            &ws.name,
+                            &ws.branch,
+                            &ws.status,
+                            i64::from(ws.port_base),
+                            line.pull_request.as_ref().map(|p| p.number),
+                            line.run_running,
+                            false,
+                            line.active_sessions,
+                            line.open_todos,
+                        );
+                        list.append(&row);
+                        names.borrow_mut().insert(row_idx, ws.name.clone());
+                        row_idx += 1;
+                    }
+                }
+            }
+
+            if list.first_child().is_none() {
+                let empty = Label::new(Some("No workspaces."));
+                empty.add_css_class("empty-label");
+                empty.set_margin_start(12);
+                empty.set_margin_top(16);
+                list.append(&ListBoxRow::builder().child(&empty).build());
+            }
+
+            let names_ref = names.borrow();
+            let target_idx = prev_selected.as_deref().and_then(|name| {
+                names_ref
+                    .iter()
+                    .find_map(|(&idx, row_name)| (row_name == name).then_some(idx))
+            });
+            drop(names_ref);
+            if let Some(idx) = target_idx {
+                if let Some(row) = list.row_at_index(idx) {
+                    list.select_row(Some(&row));
+                }
+            }
+        }
+    };
+
+    populate();
+    let pop_search = populate.clone();
+    search_entry.connect_changed(move |_| pop_search());
+
+    let names_select = Rc::clone(&names);
+    let selected_select = Rc::clone(&selected);
+    let stack_select = stack.clone();
+    list.connect_row_selected(move |_, row| {
+        let Some(name) = row.and_then(|r| names_select.borrow().get(&r.index()).cloned()) else {
+            return;
+        };
+        *selected_select.borrow_mut() = Some(name);
+        refresh_workspace();
+        stack_select.set_visible_child_name("workspace");
+    });
+
+    scroll.set_child(Some(&list));
+    sidebar_box.append(&scroll);
+    (sidebar_box, populate)
+}
+
+fn build_workspace_detail_page(
+    paths: &AppPaths,
+    selected: Rc<RefCell<Option<String>>>,
+) -> (GBox, impl Fn() + Clone + 'static) {
+    let root = GBox::new(Orientation::Vertical, 0);
+    root.add_css_class("dashboard");
+
+    let header = GBox::new(Orientation::Vertical, 8);
+    header.add_css_class("dashboard-header");
+    let title = Label::new(Some("Workspace"));
+    title.add_css_class("dashboard-title");
+    title.set_xalign(0.0);
+    let subtitle = Label::new(None);
+    subtitle.add_css_class("card-meta");
+    subtitle.set_xalign(0.0);
+    header.append(&title);
+    header.append(&subtitle);
+    root.append(&header);
+
+    let body = GBox::new(Orientation::Vertical, 14);
+    body.add_css_class("detail-body");
+    root.append(&body);
+
+    let db_path = paths.database_path.clone();
+    let refresh = move || {
+        while let Some(child) = body.first_child() {
+            body.remove(&child);
+        }
+
+        let Some(name) = selected.borrow().clone() else {
+            title.set_text("Workspace");
+            subtitle.set_text("Select a workspace from the sidebar.");
+            return;
+        };
+        let Ok(store) = WorkspaceStore::open(db_path.clone()) else {
+            title.set_text("Workspace");
+            subtitle.set_text("Could not open workspace database.");
+            return;
+        };
+        let Ok(Some(line)) = store
+            .list_status()
+            .map(|lines| lines.into_iter().find(|line| line.workspace.name == name))
+        else {
+            title.set_text("Workspace");
+            subtitle.set_text("Workspace not found.");
+            return;
+        };
+
+        let ws = line.workspace;
+        title.set_text(&title_case_workspace(&ws.name));
+        subtitle.set_text(&format!(
+            "{} / {} / {}",
+            line.repository_name,
+            ws.branch,
+            ws.path.display()
+        ));
+
+        let actions = GBox::new(Orientation::Horizontal, 8);
+        let shell_btn = Button::with_label("Shell");
+        let codex_btn = Button::with_label("New Codex Chat");
+        let claude_btn = Button::with_label("New Claude Chat");
+        let cursor_btn = Button::with_label("New Cursor Chat");
+        let run_btn = Button::with_label("Run");
+        let stop_btn = Button::with_label("Stop");
+        let open_btn = Button::with_label("Open Folder");
+        for (button, kind) in [
+            (shell_btn.clone(), "shell"),
+            (codex_btn.clone(), "codex"),
+            (claude_btn.clone(), "claude"),
+            (cursor_btn.clone(), "cursor"),
+        ] {
+            let workspace = ws.name.clone();
+            button.connect_clicked(move |_| {
+                spawn_terminal_command(&format!(
+                    "{} session open {} --kind {}",
+                    cli_binary().display(),
+                    shell_quote(&workspace),
+                    kind
+                ));
+            });
+        }
+        let run_workspace = ws.name.clone();
+        let db_path_run = db_path.clone();
+        run_btn.connect_clicked(move |_| {
+            if let Ok(store) = WorkspaceStore::open(db_path_run.clone()) {
+                let _ = store.run_workspace(&run_workspace);
+            }
+        });
+        let stop_workspace = ws.name.clone();
+        let db_path_stop = db_path.clone();
+        stop_btn.connect_clicked(move |_| {
+            if let Ok(store) = WorkspaceStore::open(db_path_stop.clone()) {
+                let _ = store.stop_workspace(&stop_workspace);
+            }
+        });
+        let path = ws.path.clone();
+        open_btn.connect_clicked(move |_| {
+            let _ = std::process::Command::new("open").arg(&path).spawn();
+        });
+        actions.append(&shell_btn);
+        actions.append(&codex_btn);
+        actions.append(&claude_btn);
+        actions.append(&cursor_btn);
+        actions.append(&run_btn);
+        actions.append(&stop_btn);
+        actions.append(&open_btn);
+        body.append(&actions);
+
+        body.append(&detail_row("Status", &ws.status));
+        body.append(&detail_row("Port", &ws.port_base.to_string()));
+        body.append(&detail_row("Todos", &line.open_todos.to_string()));
+        body.append(&detail_row(
+            "Activity",
+            if line.run_running {
+                "Run active"
+            } else if line.active_sessions > 0 {
+                "Agent active"
+            } else {
+                "Idle"
+            },
+        ));
+        if let Some(pr) = line.pull_request {
+            body.append(&detail_row(
+                "Pull request",
+                &format!("#{} {} {}", pr.number, pr.state, pr.url),
+            ));
+        }
+
+        let lifecycle = GBox::new(Orientation::Horizontal, 8);
+        let archive_btn = Button::with_label("Archive");
+        let restore_btn = Button::with_label("Restore");
+        let discard_btn = Button::with_label("Discard");
+        for (button, action) in [
+            (archive_btn.clone(), "archive"),
+            (restore_btn.clone(), "restore"),
+            (discard_btn.clone(), "discard"),
+        ] {
+            let workspace = ws.name.clone();
+            let db_path_action = db_path.clone();
+            button.connect_clicked(move |_| {
+                if let Ok(store) = WorkspaceStore::open(db_path_action.clone()) {
+                    let _ = match action {
+                        "archive" => store.archive(&workspace, false),
+                        "restore" => store.restore(&workspace),
+                        "discard" => store.discard(&workspace),
+                        _ => unreachable!(),
+                    };
+                }
+            });
+        }
+        lifecycle.append(&archive_btn);
+        lifecycle.append(&restore_btn);
+        lifecycle.append(&discard_btn);
+        body.append(&lifecycle);
+
+        let tabs = Stack::new();
+        tabs.set_vexpand(true);
+        let switcher = StackSwitcher::new();
+        switcher.set_stack(Some(&tabs));
+        switcher.add_css_class("panel-switcher");
+        body.append(&switcher);
+
+        let chat_box = GBox::new(Orientation::Vertical, 8);
+        for chat in conductor_sessions_for_workspace_path(&ws.path)
+            .into_iter()
+            .take(8)
+        {
+            chat_box.append(&session_summary_row(&chat));
+        }
+        tabs.add_titled(&chat_box, Some("chats"), "Chats");
+        tabs.add_titled(
+            &text_panel(&workspace_changes_text(&store, &ws.name)),
+            Some("changes"),
+            "Changes",
+        );
+        tabs.add_titled(
+            &text_panel(&workspace_checks_text(&store, &ws.name)),
+            Some("checks"),
+            "Checks",
+        );
+        tabs.add_titled(
+            &workspace_todos_panel(&store, &ws.name),
+            Some("todos"),
+            "Todos",
+        );
+        tabs.add_titled(
+            &text_panel(&workspace_processes_text(&store, &ws.name)),
+            Some("processes"),
+            "Processes",
+        );
+        body.append(&tabs);
+    };
+    refresh();
+    (root, refresh)
+}
+
+fn build_projects_page(
+    paths: &AppPaths,
+    refresh_dashboard: impl Fn() + Clone + 'static,
+    refresh_workspace: impl Fn() + Clone + 'static,
+) -> (GBox, impl Fn() + Clone + 'static) {
+    let root = GBox::new(Orientation::Vertical, 0);
+    root.add_css_class("dashboard");
+    let header = GBox::new(Orientation::Vertical, 8);
+    header.add_css_class("dashboard-header");
+    let title = Label::new(Some("Projects"));
+    title.add_css_class("dashboard-title");
+    title.set_xalign(0.0);
+    let subtitle = Label::new(Some("Create workspaces and inspect imported repositories."));
+    subtitle.add_css_class("card-meta");
+    subtitle.set_xalign(0.0);
+    header.append(&title);
+    header.append(&subtitle);
+    root.append(&header);
+
+    let body = GBox::new(Orientation::Vertical, 14);
+    body.add_css_class("detail-body");
+    root.append(&body);
+
+    let repo_title = Label::new(Some("Add Repository"));
+    repo_title.add_css_class("section-title");
+    repo_title.set_xalign(0.0);
+    body.append(&repo_title);
+
+    let repo_box = GBox::new(Orientation::Horizontal, 8);
+    let repo_path_entry = Entry::new();
+    repo_path_entry.set_placeholder_text(Some("local path or git URL"));
+    let repo_name_entry = Entry::new();
+    repo_name_entry.set_placeholder_text(Some("project name"));
+    let add_repo_btn = Button::with_label("Add Local");
+    let clone_repo_btn = Button::with_label("Clone");
+    let repo_result = Label::new(None);
+    repo_result.add_css_class("card-meta");
+    repo_result.set_xalign(0.0);
+    repo_box.append(&repo_path_entry);
+    repo_box.append(&repo_name_entry);
+    repo_box.append(&add_repo_btn);
+    repo_box.append(&clone_repo_btn);
+    body.append(&repo_box);
+    body.append(&repo_result);
+
+    let workspace_title = Label::new(Some("New Workspace"));
+    workspace_title.add_css_class("section-title");
+    workspace_title.set_xalign(0.0);
+    workspace_title.set_margin_top(10);
+    body.append(&workspace_title);
+
+    let create_box = GBox::new(Orientation::Horizontal, 8);
+    let repo_entry = Entry::new();
+    repo_entry.set_placeholder_text(Some("repository name"));
+    let name_entry = Entry::new();
+    name_entry.set_placeholder_text(Some("workspace name"));
+    let branch_entry = Entry::new();
+    branch_entry.set_placeholder_text(Some("branch name"));
+    let create_btn = Button::with_label("Create Workspace");
+    let result = Label::new(None);
+    result.add_css_class("card-meta");
+    result.set_xalign(0.0);
+    create_box.append(&repo_entry);
+    create_box.append(&name_entry);
+    create_box.append(&branch_entry);
+    create_box.append(&create_btn);
+    body.append(&create_box);
+    body.append(&result);
+
+    let repo_list = GBox::new(Orientation::Vertical, 8);
+    body.append(&repo_list);
+
+    let db_path = paths.database_path.clone();
+    let refresh = {
+        let repo_list = repo_list.clone();
+        move || {
+            while let Some(child) = repo_list.first_child() {
+                repo_list.remove(&child);
+            }
+            if let Ok(store) = RepositoryStore::open(db_path.clone()) {
+                if let Ok(repos) = store.list_with_workspace_counts() {
+                    for (repo, active, total) in repos {
+                        repo_list.append(&detail_row(
+                            &repo.name,
+                            &format!(
+                                "{} active / {} total / {}",
+                                active,
+                                total,
+                                repo.root_path.display()
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+    };
+
+    let db_path_repo = paths.database_path.clone();
+    let refresh_after_repo = refresh.clone();
+    let repo_result_add = repo_result.clone();
+    let repo_path_add = repo_path_entry.clone();
+    let repo_name_add = repo_name_entry.clone();
+    add_repo_btn.connect_clicked(move |_| {
+        let path = repo_path_add.text().trim().to_owned();
+        let name = repo_name_add.text().trim().to_owned();
+        if path.is_empty() {
+            repo_result_add.set_text("Local repository path is required.");
+            return;
+        }
+        match RepositoryStore::open(db_path_repo.clone()).and_then(|store| {
+            store.add(AddRepository {
+                name: (!name.is_empty()).then_some(name),
+                root_path: PathBuf::from(path),
+                default_branch: None,
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: None,
+            })
+        }) {
+            Ok(repo) => {
+                repo_result_add.set_text(&format!("Added {}", repo.name));
+                refresh_after_repo();
+            }
+            Err(err) => repo_result_add.set_text(&format!("Add failed: {err:#}")),
+        }
+    });
+
+    let db_path_clone = paths.database_path.clone();
+    let refresh_after_clone = refresh.clone();
+    clone_repo_btn.connect_clicked(move |_| {
+        let url = repo_path_entry.text().trim().to_owned();
+        let explicit_name = repo_name_entry.text().trim().to_owned();
+        if url.is_empty() {
+            repo_result.set_text("Git URL is required.");
+            return;
+        }
+        let name = if explicit_name.is_empty() {
+            repo_name_from_url(&url)
+        } else {
+            explicit_name
+        };
+        let clone_path = default_clone_parent().join(&name);
+        if let Some(parent) = clone_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let clone_result = if clone_path.exists() {
+            Ok(())
+        } else {
+            std::process::Command::new("git")
+                .args(["clone", &url])
+                .arg(&clone_path)
+                .status()
+                .map(|status| {
+                    if status.success() {
+                        Ok(())
+                    } else {
+                        Err(anyhow::anyhow!("git clone exited with {status}"))
+                    }
+                })
+                .unwrap_or_else(|err| Err(err.into()))
+        };
+        match clone_result.and_then(|_| {
+            RepositoryStore::open(db_path_clone.clone()).and_then(|store| {
+                store.add(AddRepository {
+                    name: Some(name),
+                    root_path: clone_path,
+                    default_branch: None,
+                    remote_name: "origin".to_owned(),
+                    workspace_parent_path: None,
+                })
+            })
+        }) {
+            Ok(repo) => {
+                repo_result.set_text(&format!("Cloned and added {}", repo.name));
+                refresh_after_clone();
+            }
+            Err(err) => repo_result.set_text(&format!("Clone failed: {err:#}")),
+        }
+    });
+
+    let db_path_create = paths.database_path.clone();
+    let refresh_after_create = refresh.clone();
+    create_btn.connect_clicked(move |_| {
+        let repo = repo_entry.text().trim().to_owned();
+        let name = name_entry.text().trim().to_owned();
+        let branch = branch_entry.text().trim().to_owned();
+        if repo.is_empty() || name.is_empty() || branch.is_empty() {
+            result.set_text("Repository, workspace name, and branch are required.");
+            return;
+        }
+        match WorkspaceStore::open(db_path_create.clone()).and_then(|store| {
+            store.create(CreateWorkspace {
+                repository_name: repo,
+                name,
+                branch,
+                base_ref: None,
+            })
+        }) {
+            Ok(workspace) => {
+                result.set_text(&format!("Created {}", workspace.path.display()));
+                refresh_after_create();
+                refresh_dashboard();
+                refresh_workspace();
+            }
+            Err(err) => result.set_text(&format!("Create failed: {err:#}")),
+        }
+    });
+
+    refresh();
+    (root, refresh)
+}
+
+fn build_history_page() -> (GBox, impl Fn() + Clone + 'static) {
+    let root = GBox::new(Orientation::Vertical, 0);
+    root.add_css_class("dashboard");
+    let header = GBox::new(Orientation::Vertical, 8);
+    header.add_css_class("dashboard-header");
+    let title = Label::new(Some("History"));
+    title.add_css_class("dashboard-title");
+    title.set_xalign(0.0);
+    let subtitle = Label::new(Some("Old Conductor chats from the macOS app database."));
+    subtitle.add_css_class("card-meta");
+    subtitle.set_xalign(0.0);
+    header.append(&title);
+    header.append(&subtitle);
+    root.append(&header);
+
+    let split = GBox::new(Orientation::Horizontal, 0);
+    split.set_vexpand(true);
+    let list_scroll = ScrolledWindow::new();
+    list_scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
+    list_scroll.set_width_request(380);
+    let list = ListBox::new();
+    list.add_css_class("workspace-list");
+    list_scroll.set_child(Some(&list));
+    let message_view = TextView::new();
+    message_view.set_editable(false);
+    message_view.set_monospace(false);
+    message_view.add_css_class("history-view");
+    let message_scroll = ScrolledWindow::new();
+    message_scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
+    message_scroll.set_child(Some(&message_view));
+    split.append(&list_scroll);
+    split.append(&Separator::new(Orientation::Vertical));
+    split.append(&message_scroll);
+    root.append(&split);
+
+    let session_ids: Rc<RefCell<std::collections::HashMap<i32, String>>> =
+        Rc::new(RefCell::new(std::collections::HashMap::new()));
+    let refresh = {
+        let list = list.clone();
+        let session_ids = Rc::clone(&session_ids);
+        move || {
+            while let Some(child) = list.first_child() {
+                list.remove(&child);
+            }
+            session_ids.borrow_mut().clear();
+            for (idx, session) in conductor_recent_sessions().into_iter().enumerate() {
+                list.append(&session_summary_row(&session));
+                session_ids
+                    .borrow_mut()
+                    .insert(i32::try_from(idx).unwrap_or(i32::MAX), session.id);
+            }
+        }
+    };
+
+    let session_ids_select = Rc::clone(&session_ids);
+    list.connect_row_selected(move |_, row| {
+        let Some(session_id) =
+            row.and_then(|r| session_ids_select.borrow().get(&r.index()).cloned())
+        else {
+            return;
+        };
+        let buffer = message_view.buffer();
+        buffer.set_text(&conductor_session_messages(&session_id));
+    });
+
+    refresh();
+    (root, refresh)
+}
+
+// ── DASHBOARD ─────────────────────────────────────────────────────────────
+
+fn build_dashboard_panel(paths: &AppPaths) -> (GBox, impl Fn() + Clone + 'static) {
+    let root = GBox::new(Orientation::Vertical, 0);
+    root.add_css_class("dashboard");
+
+    let header = GBox::new(Orientation::Vertical, 14);
+    header.add_css_class("dashboard-header");
+
+    let title = Label::new(Some("Dashboard"));
+    title.add_css_class("dashboard-title");
+    title.set_xalign(0.0);
+    header.append(&title);
+
+    let project_tabs = GBox::new(Orientation::Horizontal, 18);
+    project_tabs.add_css_class("project-tabs");
+    header.append(&project_tabs);
+    root.append(&header);
+
+    let scroll = ScrolledWindow::new();
+    scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
+    scroll.set_vexpand(true);
+
+    let board = GBox::new(Orientation::Horizontal, 22);
+    board.add_css_class("kanban-board");
+    scroll.set_child(Some(&board));
+    root.append(&scroll);
+
+    let db_path = paths.database_path.clone();
+    let refresh = move || {
+        while let Some(child) = project_tabs.first_child() {
+            project_tabs.remove(&child);
+        }
+        while let Some(child) = board.first_child() {
+            board.remove(&child);
+        }
+
+        let Ok(store) = WorkspaceStore::open(db_path.clone()) else {
+            append_empty_dashboard(&project_tabs, &board, "No workspace database yet.");
+            return;
+        };
+        let Ok(statuses) = store.list_status() else {
+            append_empty_dashboard(&project_tabs, &board, "Could not read workspace state.");
+            return;
+        };
+
+        let mut repo_names = statuses
+            .iter()
+            .map(|line| line.repository_name.clone())
+            .filter(|name| !name.is_empty())
+            .collect::<Vec<_>>();
+        repo_names.sort();
+        repo_names.dedup();
+
+        let all_tab = Label::new(Some("All projects"));
+        all_tab.add_css_class("project-tab-active");
+        project_tabs.append(&all_tab);
+        for repo in repo_names.iter().take(5) {
+            let tab = Label::new(Some(repo));
+            tab.add_css_class("project-tab");
+            project_tabs.append(&tab);
+        }
+
+        let mut backlog = Vec::new();
+        let mut in_progress = Vec::new();
+        let mut in_review = Vec::new();
+        let mut done = Vec::new();
+
+        for line in &statuses {
+            if line.workspace.status == "archived" {
+                done.push(line);
+            } else if line.pull_request.is_some() {
+                in_review.push(line);
+            } else if line.run_running || line.active_sessions > 0 {
+                in_progress.push(line);
+            } else {
+                backlog.push(line);
+            }
+        }
+
+        append_dashboard_column(&board, "Backlog", &backlog, &store);
+        append_dashboard_column(&board, "In progress", &in_progress, &store);
+        append_dashboard_column(&board, "In review", &in_review, &store);
+        append_dashboard_column(&board, "Done", &done, &store);
+    };
+
+    refresh();
+    (root, refresh)
+}
+
+fn append_empty_dashboard(project_tabs: &GBox, board: &GBox, message: &str) {
+    let all_tab = Label::new(Some("All projects"));
+    all_tab.add_css_class("project-tab-active");
+    project_tabs.append(&all_tab);
+
+    let empty = Label::new(Some(message));
+    empty.add_css_class("empty-label");
+    empty.set_xalign(0.0);
+    empty.set_margin_start(24);
+    empty.set_margin_top(24);
+    board.append(&empty);
+}
+
+fn append_dashboard_column(
+    board: &GBox,
+    title: &str,
+    lines: &[&linux_conductor_core::workspace::WorkspaceStatusLine],
+    store: &WorkspaceStore,
+) {
+    let column = GBox::new(Orientation::Vertical, 12);
+    column.add_css_class("kanban-column");
+    column.set_hexpand(true);
+
+    let header = GBox::new(Orientation::Horizontal, 8);
+    let title_label = Label::new(Some(title));
+    title_label.add_css_class("column-title");
+    title_label.set_xalign(0.0);
+    title_label.set_hexpand(true);
+    let count = Label::new(Some(&lines.len().to_string()));
+    count.add_css_class("column-count");
+    header.append(&title_label);
+    header.append(&count);
+    column.append(&header);
+
+    if lines.is_empty() {
+        let empty = Label::new(Some("No workspaces"));
+        empty.add_css_class("column-empty");
+        empty.set_xalign(0.0);
+        column.append(&empty);
+    } else {
+        for line in lines.iter().take(12) {
+            column.append(&build_dashboard_card(line, store));
+        }
+    }
+
+    board.append(&column);
+}
+
+fn build_dashboard_card(
+    line: &linux_conductor_core::workspace::WorkspaceStatusLine,
+    store: &WorkspaceStore,
+) -> GBox {
+    let ws = &line.workspace;
+    let card = GBox::new(Orientation::Vertical, 10);
+    card.add_css_class("workspace-card");
+
+    let top = GBox::new(Orientation::Horizontal, 8);
+    let branch = Label::new(Some(&ws.branch));
+    branch.add_css_class("card-branch");
+    branch.set_xalign(0.0);
+    branch.set_hexpand(true);
+    let diff = store.changed_files(&ws.name).map(|f| f.len()).unwrap_or(0);
+    let diff_text = if diff > 0 {
+        format!("+{diff}")
+    } else {
+        "clean".to_owned()
+    };
+    let diff_label = Label::new(Some(&diff_text));
+    diff_label.add_css_class(if diff > 0 {
+        "card-diff-hot"
+    } else {
+        "card-diff"
+    });
+    top.append(&branch);
+    top.append(&diff_label);
+    card.append(&top);
+
+    let name = Label::new(Some(&title_case_workspace(&ws.name)));
+    name.add_css_class("card-title");
+    name.set_xalign(0.0);
+    name.set_wrap(true);
+    card.append(&name);
+
+    let meta = match &line.pull_request {
+        Some(pr) => format!(
+            "{} · PR #{} · {}",
+            line.repository_name, pr.number, pr.state
+        ),
+        None => format!("{} · port {}", line.repository_name, ws.port_base),
+    };
+    let meta_label = Label::new(Some(&meta));
+    meta_label.add_css_class("card-meta");
+    meta_label.set_xalign(0.0);
+    meta_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    card.append(&meta_label);
+
+    let foot = GBox::new(Orientation::Horizontal, 8);
+    let activity = if line.run_running {
+        "Running"
+    } else if line.active_sessions > 0 {
+        "Agent active"
+    } else if ws.status == "archived" {
+        "Archived"
+    } else {
+        "Ready"
+    };
+    let activity_label = Label::new(Some(activity));
+    activity_label.add_css_class("card-activity");
+    activity_label.set_xalign(0.0);
+    activity_label.set_hexpand(true);
+    let todo_label = Label::new(Some(&format!("{} todos", line.open_todos)));
+    todo_label.add_css_class("card-meta");
+    foot.append(&activity_label);
+    foot.append(&todo_label);
+    card.append(&foot);
+
+    card
+}
+
+fn title_case_workspace(name: &str) -> String {
+    name.split(['-', '_'])
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[derive(Debug, Clone)]
+struct ChatSummary {
+    id: String,
+    title: String,
+    agent_type: String,
+    status: String,
+    repository_name: String,
+    workspace_name: String,
+    workspace_path: String,
+    updated_at: String,
+    message_count: i64,
+}
+
+fn detail_row(label: &str, value: &str) -> GBox {
+    let row = GBox::new(Orientation::Horizontal, 12);
+    row.add_css_class("detail-row");
+    let label_widget = Label::new(Some(label));
+    label_widget.add_css_class("detail-label");
+    label_widget.set_xalign(0.0);
+    label_widget.set_width_chars(18);
+    let value_widget = Label::new(Some(value));
+    value_widget.add_css_class("detail-value");
+    value_widget.set_xalign(0.0);
+    value_widget.set_wrap(true);
+    value_widget.set_hexpand(true);
+    row.append(&label_widget);
+    row.append(&value_widget);
+    row
+}
+
+fn session_summary_row(session: &ChatSummary) -> GBox {
+    let row = GBox::new(Orientation::Vertical, 3);
+    row.add_css_class("history-row");
+    let title = Label::new(Some(&session.title));
+    title.add_css_class("workspace-name");
+    title.set_xalign(0.0);
+    title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    let meta = Label::new(Some(&format!(
+        "{} · {} · {} · {} messages",
+        session.repository_name, session.workspace_name, session.agent_type, session.message_count
+    )));
+    meta.add_css_class("workspace-meta");
+    meta.set_xalign(0.0);
+    meta.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    let status = Label::new(Some(&format!(
+        "{} · {}",
+        session.status, session.updated_at
+    )));
+    status.add_css_class("card-meta");
+    status.set_xalign(0.0);
+    status.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    row.append(&title);
+    row.append(&meta);
+    row.append(&status);
+    row
+}
+
+fn text_panel(text: &str) -> ScrolledWindow {
+    let view = TextView::new();
+    view.set_editable(false);
+    view.set_monospace(true);
+    view.add_css_class("history-view");
+    view.buffer().set_text(text);
+    let scroll = ScrolledWindow::new();
+    scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
+    scroll.set_vexpand(true);
+    scroll.set_child(Some(&view));
+    scroll
+}
+
+fn workspace_changes_text(store: &WorkspaceStore, name: &str) -> String {
+    let mut out = String::new();
+    out.push_str("Recent commits\n");
+    out.push_str(
+        &store
+            .git_log_oneline(name, 12)
+            .unwrap_or_else(|err| format!("Could not read log: {err:#}\n")),
+    );
+    out.push_str("\n\nStatus\n");
+    out.push_str(
+        &store
+            .git_status_short(name)
+            .unwrap_or_else(|err| format!("Could not read status: {err:#}\n")),
+    );
+    out.push_str("\n\nDiff\n");
+    out.push_str(
+        &store
+            .unified_diff(name, None)
+            .unwrap_or_else(|err| format!("Could not read diff: {err:#}\n")),
+    );
+    out
+}
+
+fn workspace_checks_text(store: &WorkspaceStore, name: &str) -> String {
+    match store.checks_summary(name) {
+        Ok(summary) => {
+            let push = summary
+                .branch_push_state
+                .as_ref()
+                .map(|state| {
+                    if state.has_upstream {
+                        format!("ahead {} / behind {}", state.ahead, state.behind)
+                    } else {
+                        "no upstream".to_owned()
+                    }
+                })
+                .unwrap_or_else(|| "unavailable".to_owned());
+            let pr = summary
+                .pull_request
+                .as_ref()
+                .map(|pr| format!("#{} {} {}", pr.number, pr.state, pr.url))
+                .unwrap_or_else(|| "none".to_owned());
+            let conflicts = if summary.conflicting_workspaces.is_empty() {
+                "none".to_owned()
+            } else {
+                summary
+                    .conflicting_workspaces
+                    .iter()
+                    .map(|(workspace, files)| format!("{workspace}: {}", files.join(", ")))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            format!(
+                "Changed files: {}\nRun: {}\nSessions: {}\nPR: {}\nTodos: {} open / {} total\nReview comments: {} open\nBranch: {}\nConflicts:\n{}",
+                summary.changed_files,
+                summary
+                    .run_status
+                    .map(|status| status.as_str().to_owned())
+                    .unwrap_or_else(|| "none".to_owned()),
+                summary.active_sessions,
+                pr,
+                summary.open_todos,
+                summary.total_todos,
+                summary.open_review_comments,
+                push,
+                conflicts
+            )
+        }
+        Err(err) => format!("Could not read checks: {err:#}"),
+    }
+}
+
+fn workspace_todos_panel(store: &WorkspaceStore, name: &str) -> GBox {
+    let panel = GBox::new(Orientation::Vertical, 8);
+    match store.list_todos(name) {
+        Ok(todos) if todos.is_empty() => panel.append(&detail_row("Todos", "No todos")),
+        Ok(todos) => {
+            for todo in todos {
+                panel.append(&detail_row(
+                    &format!("#{} {}", todo.id, todo.status),
+                    &todo.text,
+                ));
+            }
+        }
+        Err(err) => panel.append(&detail_row(
+            "Todos",
+            &format!("Could not read todos: {err:#}"),
+        )),
+    }
+    let entry_row = GBox::new(Orientation::Horizontal, 8);
+    let entry = Entry::new();
+    entry.set_placeholder_text(Some("Add todo..."));
+    let add_btn = Button::with_label("Add Todo");
+    let db_path = AppPaths::from_env().database_path;
+    let workspace = name.to_owned();
+    let entry_clone = entry.clone();
+    add_btn.connect_clicked(move |_| {
+        let text = entry_clone.text().trim().to_owned();
+        if text.is_empty() {
+            return;
+        }
+        if let Ok(store) = WorkspaceStore::open(db_path.clone()) {
+            let _ = store.add_todo(&workspace, &text);
+            entry_clone.set_text("");
+        }
+    });
+    entry_row.append(&entry);
+    entry_row.append(&add_btn);
+    panel.append(&entry_row);
+    panel
+}
+
+fn workspace_processes_text(store: &WorkspaceStore, name: &str) -> String {
+    let mut out = String::new();
+    out.push_str("Runs\n");
+    match store.list_runs(name) {
+        Ok(records) if records.is_empty() => out.push_str("No runs recorded.\n"),
+        Ok(records) => {
+            for record in records {
+                out.push_str(&format!(
+                    "#{} {} pid={} started={} log={}\n",
+                    record.id,
+                    record.status.as_str(),
+                    record.pid,
+                    record.started_at,
+                    record.log_path.display()
+                ));
+            }
+        }
+        Err(err) => out.push_str(&format!("Could not read runs: {err:#}\n")),
+    }
+    out.push_str("\nSessions\n");
+    match store.list_sessions(name) {
+        Ok(records) if records.is_empty() => out.push_str("No sessions recorded.\n"),
+        Ok(records) => {
+            for record in records {
+                out.push_str(&format!(
+                    "#{} {} {} pid={} started={} log={}\n",
+                    record.id,
+                    record.command,
+                    record.status.as_str(),
+                    record.pid,
+                    record.started_at,
+                    record.log_path.display()
+                ));
+            }
+        }
+        Err(err) => out.push_str(&format!("Could not read sessions: {err:#}\n")),
+    }
+    out
+}
+
+fn conductor_recent_sessions() -> Vec<ChatSummary> {
+    query_conductor_sessions(None).unwrap_or_default()
+}
+
+fn conductor_sessions_for_workspace_path(path: &std::path::Path) -> Vec<ChatSummary> {
+    query_conductor_sessions(Some(path)).unwrap_or_default()
+}
+
+fn query_conductor_sessions(path: Option<&std::path::Path>) -> rusqlite::Result<Vec<ChatSummary>> {
+    let db_path = default_conductor_app_database();
+    let conn = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut sql = String::from(
+        "SELECT s.id,
+                COALESCE(s.title, 'Untitled'),
+                COALESCE(s.agent_type, ''),
+                COALESCE(s.status, ''),
+                COALESCE(r.name, ''),
+                COALESCE(w.directory_name, ''),
+                COALESCE(w.workspace_path, ''),
+                COALESCE(s.updated_at, s.created_at, ''),
+                COUNT(m.id)
+         FROM sessions s
+         LEFT JOIN workspaces w ON w.id = s.workspace_id
+         LEFT JOIN repos r ON r.id = w.repository_id
+         LEFT JOIN session_messages m ON m.session_id = s.id",
+    );
+    if path.is_some() {
+        sql.push_str(" WHERE w.workspace_path = ?1");
+    }
+    sql.push_str(" GROUP BY s.id ORDER BY COALESCE(s.updated_at, s.created_at) DESC LIMIT 200");
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = if let Some(path) = path {
+        stmt.query_map([path.to_string_lossy().to_string()], row_to_chat_summary)?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    } else {
+        stmt.query_map([], row_to_chat_summary)?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    Ok(rows)
+}
+
+fn row_to_chat_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatSummary> {
+    Ok(ChatSummary {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        agent_type: row.get(2)?,
+        status: row.get(3)?,
+        repository_name: row.get(4)?,
+        workspace_name: row.get(5)?,
+        workspace_path: row.get(6)?,
+        updated_at: row.get(7)?,
+        message_count: row.get(8)?,
+    })
+}
+
+fn conductor_session_messages(session_id: &str) -> String {
+    let db_path = default_conductor_app_database();
+    let Ok(conn) = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+    else {
+        return "Could not open Conductor chat database.".to_owned();
+    };
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT COALESCE(role, ''), COALESCE(content, full_message, ''), COALESCE(created_at, '')
+         FROM session_messages
+         WHERE session_id = ?1
+         ORDER BY COALESCE(sent_at, created_at), queue_order
+         LIMIT 160",
+    ) else {
+        return "Could not read chat messages.".to_owned();
+    };
+    let Ok(rows) = stmt.query_map([session_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    }) else {
+        return "Could not load chat messages.".to_owned();
+    };
+
+    let mut text = String::new();
+    for row in rows.flatten() {
+        let (role, content, created_at) = row;
+        text.push_str(&format!(
+            "{} · {}\n{}\n\n",
+            role,
+            created_at,
+            truncate_message(&content, 2200)
+        ));
+    }
+    if text.is_empty() {
+        "No messages in this chat.".to_owned()
+    } else {
+        text
+    }
+}
+
+fn truncate_message(content: &str, max_chars: usize) -> String {
+    let mut truncated = content.chars().take(max_chars).collect::<String>();
+    if content.chars().count() > max_chars {
+        truncated.push_str("\n...");
+    }
+    truncated
+}
+
+fn cli_binary() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|parent| parent.join("linux-conductor")))
+        .filter(|path| path.exists())
+        .unwrap_or_else(|| PathBuf::from("linux-conductor"))
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn default_clone_parent() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("conductor")
+        .join("repos")
+}
+
+fn repo_name_from_url(url: &str) -> String {
+    url.trim_end_matches('/')
+        .rsplit(['/', ':'])
+        .next()
+        .unwrap_or("repository")
+        .trim_end_matches(".git")
+        .to_owned()
 }
 
 // ── SIDEBAR ───────────────────────────────────────────────────────────────
@@ -174,20 +1393,34 @@ fn build_sidebar(
     sidebar_box.add_css_class("sidebar");
     sidebar_box.set_width_request(220);
 
-    let header = Label::new(Some("Workspaces"));
+    let dashboard_nav = Label::new(Some("Dashboard"));
+    dashboard_nav.add_css_class("nav-row-active");
+    dashboard_nav.set_xalign(0.0);
+    sidebar_box.append(&dashboard_nav);
+
+    let history_nav = Label::new(Some("History"));
+    history_nav.add_css_class("nav-row");
+    history_nav.set_xalign(0.0);
+    sidebar_box.append(&history_nav);
+
+    let divider = Separator::new(Orientation::Horizontal);
+    sidebar_box.append(&divider);
+
+    let projects_header = GBox::new(Orientation::Horizontal, 8);
+    projects_header.add_css_class("projects-header");
+    let header = Label::new(Some("Projects"));
     header.add_css_class("sidebar-header");
     header.set_xalign(0.0);
-    header.set_margin_start(12);
-    header.set_margin_top(10);
-    header.set_margin_bottom(4);
-    sidebar_box.append(&header);
+    header.set_hexpand(true);
+    projects_header.append(&header);
+    sidebar_box.append(&projects_header);
 
     let search_entry = Entry::new();
-    search_entry.set_placeholder_text(Some("Filter workspaces…"));
+    search_entry.set_placeholder_text(Some("Filter projects…"));
     search_entry.add_css_class("sidebar-search");
-    search_entry.set_margin_start(8);
-    search_entry.set_margin_end(8);
-    search_entry.set_margin_bottom(6);
+    search_entry.set_margin_start(12);
+    search_entry.set_margin_end(12);
+    search_entry.set_margin_bottom(8);
     sidebar_box.append(&search_entry);
 
     let scroll = ScrolledWindow::new();
@@ -275,9 +1508,7 @@ fn build_sidebar(
             }
 
             if list.first_child().is_none() {
-                let empty = Label::new(Some(
-                    "No workspaces yet.\n\nRun:\nlinux-conductor workspace create",
-                ));
+                let empty = Label::new(Some("No workspaces yet."));
                 empty.add_css_class("empty-label");
                 empty.set_wrap(true);
                 empty.set_margin_start(12);
@@ -332,55 +1563,6 @@ fn build_sidebar(
     scroll.set_child(Some(&list));
     sidebar_box.append(&scroll);
 
-    // "New workspace" opens terminal with create wizard
-    let add_btn = Button::with_label("+ New Workspace");
-    add_btn.add_css_class("add-workspace-btn");
-    add_btn.set_margin_start(8);
-    add_btn.set_margin_end(8);
-    add_btn.set_margin_top(8);
-    add_btn.set_margin_bottom(8);
-    add_btn.connect_clicked(|_| {
-        spawn_terminal_command(
-            r#"echo 'Available repos:'; linux-conductor repo list; echo;
-read -rp 'Repo name: ' REPO
-read -rp 'Workspace name: ' NAME
-read -rp 'Branch name: ' BRANCH
-linux-conductor workspace create "$REPO" --name "$NAME" --branch "$BRANCH""#,
-        );
-    });
-    sidebar_box.append(&add_btn);
-
-    // "New workspace from issue" shortcut
-    let issue_btn = Button::with_label("+ From Issue");
-    issue_btn.add_css_class("add-workspace-btn");
-    issue_btn.set_margin_start(8);
-    issue_btn.set_margin_end(8);
-    issue_btn.set_margin_bottom(4);
-    issue_btn.connect_clicked(|_| {
-        spawn_terminal_command(
-            r#"echo 'Available repos:'; linux-conductor repo list; echo;
-read -rp 'Repo name: ' REPO
-read -rp 'GitHub issue number: ' ISSUE_NUM
-linux-conductor workspace create "$REPO" --from-issue "$ISSUE_NUM""#,
-        );
-    });
-    sidebar_box.append(&issue_btn);
-
-    // "Add repo" button for onboarding
-    let repo_btn = Button::with_label("+ Add Repository");
-    repo_btn.add_css_class("add-workspace-btn");
-    repo_btn.set_margin_start(8);
-    repo_btn.set_margin_end(8);
-    repo_btn.set_margin_bottom(8);
-    repo_btn.connect_clicked(|_| {
-        spawn_terminal_command(
-            r#"read -rp 'Repository path: ' PATH
-linux-conductor repo add "$PATH"
-echo; echo 'Run linux-conductor-gtk to see the updated workspace list.'"#,
-        );
-    });
-    sidebar_box.append(&repo_btn);
-
     (sidebar_box, populate)
 }
 
@@ -395,63 +1577,48 @@ fn build_workspace_row(
     active_sessions: usize,
     open_todos: usize,
 ) -> ListBoxRow {
-    let row_box = GBox::new(Orientation::Vertical, 2);
-    row_box.set_margin_start(12);
-    row_box.set_margin_end(8);
-    row_box.set_margin_top(6);
-    row_box.set_margin_bottom(6);
+    let row_box = GBox::new(Orientation::Horizontal, 10);
+    row_box.add_css_class("project-row");
 
-    // Name row with run indicator
-    let name_row = GBox::new(Orientation::Horizontal, 4);
-    let run_dot = Label::new(Some(if run_active { "▶" } else { "■" }));
-    run_dot.add_css_class(if run_active {
-        "run-dot-active"
+    let icon = Label::new(Some(if run_active { "◐" } else { "◦" }));
+    icon.add_css_class(if run_active {
+        "project-icon-hot"
     } else {
-        "run-dot"
+        "project-icon"
     });
+
+    let text_box = GBox::new(Orientation::Vertical, 2);
+    text_box.set_hexpand(true);
     let name_label = Label::new(Some(name));
     name_label.add_css_class("workspace-name");
     name_label.set_xalign(0.0);
     name_label.set_hexpand(true);
-    name_row.append(&run_dot);
-    name_row.append(&name_label);
-    if has_conflicts {
-        let conflict_badge = Label::new(Some("⚠"));
-        conflict_badge.add_css_class("conflict-badge");
-        name_row.append(&conflict_badge);
-    }
-    if let Some(pr) = pr_number {
-        let pr_badge = Label::new(Some(&format!("PR#{pr}")));
-        pr_badge.add_css_class("pr-badge");
-        name_row.append(&pr_badge);
-    }
-    if active_sessions > 0 {
-        let sess_badge = Label::new(Some(&format!("⚡{active_sessions}")));
-        sess_badge.add_css_class("session-badge");
-        name_row.append(&sess_badge);
-    }
-    if open_todos > 0 {
-        let todo_badge = Label::new(Some(&format!("✓{open_todos}")));
-        todo_badge.add_css_class("todo-count-badge");
-        name_row.append(&todo_badge);
-    }
 
-    let meta_text = format!("{branch} · :{port}");
+    let mut meta_parts = vec![branch.to_owned()];
+    if let Some(pr) = pr_number {
+        meta_parts.push(format!("PR #{pr}"));
+    } else if active_sessions > 0 {
+        meta_parts.push(format!("{active_sessions} session"));
+    } else if open_todos > 0 {
+        meta_parts.push(format!("{open_todos} todos"));
+    } else if has_conflicts {
+        meta_parts.push("conflict".to_owned());
+    } else {
+        meta_parts.push(format!(":{port}"));
+    }
+    if status == "archived" {
+        meta_parts.push("archived".to_owned());
+    }
+    let meta_text = meta_parts.join(" · ");
     let meta_label = Label::new(Some(&meta_text));
     meta_label.add_css_class("workspace-meta");
     meta_label.set_xalign(0.0);
+    meta_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
 
-    let status_label = Label::new(Some(status));
-    status_label.add_css_class(if status == "archived" {
-        "workspace-status-archived"
-    } else {
-        "workspace-status"
-    });
-    status_label.set_xalign(0.0);
-
-    row_box.append(&name_row);
-    row_box.append(&meta_label);
-    row_box.append(&status_label);
+    text_box.append(&name_label);
+    text_box.append(&meta_label);
+    row_box.append(&icon);
+    row_box.append(&text_box);
 
     ListBoxRow::builder().child(&row_box).build()
 }
@@ -1107,7 +2274,7 @@ fn build_session_controls(selected: Rc<RefCell<Option<String>>>) -> GBox {
     let sel = Rc::clone(&selected);
     shell_btn.connect_clicked(move |_| {
         if let Some(ws) = sel.borrow().clone() {
-            spawn_terminal_command(&format!("linux-conductor session start {ws} --kind shell"));
+            spawn_terminal_command(&format!("linux-conductor session open {ws} --kind shell"));
         }
     });
 
@@ -1115,7 +2282,7 @@ fn build_session_controls(selected: Rc<RefCell<Option<String>>>) -> GBox {
     let sel = Rc::clone(&selected);
     codex_btn.connect_clicked(move |_| {
         if let Some(ws) = sel.borrow().clone() {
-            spawn_terminal_command(&format!("linux-conductor session start {ws} --kind codex"));
+            spawn_terminal_command(&format!("linux-conductor session open {ws} --kind codex"));
         }
     });
 
@@ -1123,7 +2290,7 @@ fn build_session_controls(selected: Rc<RefCell<Option<String>>>) -> GBox {
     let sel = Rc::clone(&selected);
     claude_btn.connect_clicked(move |_| {
         if let Some(ws) = sel.borrow().clone() {
-            spawn_terminal_command(&format!("linux-conductor session start {ws} --kind claude"));
+            spawn_terminal_command(&format!("linux-conductor session open {ws} --kind claude"));
         }
     });
 
@@ -2287,6 +3454,24 @@ fn populate_sessions_box(container: &GBox, db_path: &std::path::PathBuf, ws_name
 fn spawn_terminal_command(cmd: &str) {
     let full_cmd = format!("{cmd}; echo; echo '--- Press Enter to close ---'; read");
 
+    #[cfg(target_os = "macos")]
+    {
+        let escaped = full_cmd.replace('\\', "\\\\").replace('"', "\\\"");
+        if std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(format!(
+                "tell application \"Terminal\" to do script \"{}\"",
+                escaped
+            ))
+            .arg("-e")
+            .arg("tell application \"Terminal\" to activate")
+            .spawn()
+            .is_ok()
+        {
+            return;
+        }
+    }
+
     // Respect $TERMINAL env var if set
     if let Ok(term) = std::env::var("TERMINAL") {
         if std::process::Command::new(&term)
@@ -2330,21 +3515,46 @@ fn spawn_terminal_command(cmd: &str) {
 
 const APP_CSS: &str = r#"
 window {
-    background-color: #181825;
-    color: #cdd6f4;
+    background-color: #141111;
+    color: #f5f0ed;
 }
 
 .sidebar {
-    background-color: #1e1e2e;
-    border-right: 1px solid #313244;
+    background-color: #171313;
+    border-right: 1px solid #302b2b;
+    padding-top: 12px;
 }
 
 .sidebar-header {
     font-size: 10px;
     font-weight: bold;
-    color: #6c7086;
+    color: #8b8582;
     text-transform: uppercase;
     letter-spacing: 1px;
+}
+
+.nav-row, .nav-row-active, .nav-button, .nav-button-active {
+    font-size: 15px;
+    padding: 10px 14px;
+    margin: 2px 10px;
+    border-radius: 8px;
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    text-shadow: none;
+}
+
+.nav-row, .nav-button {
+    color: #b8b0ac;
+}
+
+.nav-row-active, .nav-button-active, .nav-button:hover {
+    color: #f5f0ed;
+    background-color: #292523;
+}
+
+.projects-header {
+    padding: 16px 14px 8px 14px;
 }
 
 .workspace-list {
@@ -2352,28 +3562,28 @@ window {
 }
 
 .workspace-list row {
-    border-radius: 6px;
-    margin: 2px 6px;
-    padding: 2px 0;
+    border-radius: 8px;
+    margin: 2px 10px;
+    padding: 0;
 }
 
 .workspace-list row:selected {
-    background-color: #313244;
+    background-color: #292523;
 }
 
 .workspace-list row:hover {
-    background-color: #2a2a3e;
+    background-color: #211d1b;
 }
 
 .workspace-name {
-    font-size: 13px;
+    font-size: 14px;
     font-weight: 600;
-    color: #cdd6f4;
+    color: #f5f0ed;
 }
 
 .workspace-meta {
     font-size: 11px;
-    color: #585b70;
+    color: #8b8582;
     font-family: monospace;
 }
 
@@ -2437,6 +3647,158 @@ window {
 
 .center-panel {
     background-color: #181825;
+}
+
+.dashboard {
+    background-color: #141111;
+}
+
+.dashboard-header {
+    padding: 20px 26px 0 26px;
+    border-bottom: 1px solid #302b2b;
+}
+
+.dashboard-title {
+    font-size: 17px;
+    font-weight: 700;
+    color: #f5f0ed;
+}
+
+.project-tabs {
+    padding-bottom: 10px;
+}
+
+.project-tab, .project-tab-active {
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.project-tab {
+    color: #8b8582;
+}
+
+.project-tab-active {
+    color: #f5f0ed;
+    border-bottom: 2px solid #d7bfb4;
+    padding-bottom: 10px;
+}
+
+.kanban-board {
+    padding: 28px 28px;
+}
+
+.kanban-column {
+    min-width: 235px;
+}
+
+.column-icon {
+    color: #f5d90a;
+    font-size: 14px;
+}
+
+.column-title {
+    color: #f5f0ed;
+    font-size: 15px;
+    font-weight: 700;
+}
+
+.column-count {
+    color: #8b8582;
+    font-size: 13px;
+}
+
+.column-empty {
+    color: #6f6966;
+    font-size: 12px;
+    padding: 18px 0;
+}
+
+.workspace-card {
+    background-color: #292523;
+    border: 1px solid #49413d;
+    border-radius: 8px;
+    padding: 12px;
+    min-height: 116px;
+}
+
+.card-branch {
+    color: #9d9691;
+    font-size: 12px;
+}
+
+.card-diff {
+    color: #8b8582;
+    font-size: 12px;
+}
+
+.card-diff-hot {
+    color: #4ade80;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.card-title {
+    color: #f5f0ed;
+    font-size: 15px;
+    font-weight: 700;
+}
+
+.card-meta, .card-activity {
+    color: #9d9691;
+    font-size: 12px;
+}
+
+.card-activity {
+    color: #d7bfb4;
+}
+
+.project-row {
+    padding: 8px 10px;
+}
+
+.project-icon, .project-icon-hot {
+    font-size: 15px;
+}
+
+.project-icon {
+    color: #6f6966;
+}
+
+.project-icon-hot {
+    color: #f5d90a;
+}
+
+.detail-body {
+    padding: 24px 28px;
+}
+
+.detail-row {
+    background-color: #211d1b;
+    border: 1px solid #3a3330;
+    border-radius: 8px;
+    padding: 10px 12px;
+}
+
+.detail-label {
+    color: #8b8582;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.detail-value {
+    color: #f5f0ed;
+    font-size: 13px;
+}
+
+.history-row {
+    padding: 10px 12px;
+}
+
+.history-view {
+    background-color: #141111;
+    color: #f5f0ed;
+    font-size: 13px;
+    padding: 18px;
 }
 
 .workspace-toolbar {

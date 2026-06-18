@@ -39,6 +39,7 @@ pub enum SessionKind {
     Shell,
     Codex,
     Claude,
+    Cursor,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -232,6 +233,7 @@ impl WorkspaceStore {
     }
 
     pub fn create(&self, input: CreateWorkspace) -> Result<Workspace> {
+        validate_workspace_name(&input.name)?;
         let repository = self.load_repository(&input.repository_name)?;
         let base_ref = input.base_ref.unwrap_or_else(|| {
             if remote_exists(&repository.root_path, &repository.remote_name) {
@@ -347,7 +349,7 @@ impl WorkspaceStore {
     }
 
     pub fn rename(&self, name: &str, new_name: &str) -> Result<Workspace> {
-        anyhow::ensure!(!new_name.is_empty(), "new workspace name must not be empty");
+        validate_workspace_name(new_name)?;
         let workspace = self.get_by_name(name)?;
         let new_path = workspace
             .path
@@ -1184,6 +1186,10 @@ impl WorkspaceStore {
             ),
             SessionKind::Codex => (PathBuf::from("codex"), Vec::new()),
             SessionKind::Claude => (PathBuf::from("claude"), Vec::new()),
+            SessionKind::Cursor => (
+                PathBuf::from("cursor"),
+                vec![workspace.path.to_string_lossy().to_string()],
+            ),
         };
 
         Ok(SessionLaunch {
@@ -1647,6 +1653,16 @@ fn slugify(text: &str) -> String {
     }
 }
 
+fn validate_workspace_name(name: &str) -> Result<()> {
+    anyhow::ensure!(!name.trim().is_empty(), "workspace name must not be empty");
+    anyhow::ensure!(
+        name.chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_')),
+        "workspace name may only contain ASCII letters, numbers, '-' and '_'"
+    );
+    Ok(())
+}
+
 fn initialize_context_files(
     workspace_path: &Path,
     settings: &crate::settings::RepositorySettings,
@@ -2046,6 +2062,44 @@ mod tests {
 
         let workspaces = store.list().unwrap();
         assert_eq!(workspaces, vec![workspace]);
+    }
+
+    #[test]
+    fn workspace_names_must_be_shell_safe() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let unsafe_create = store.create(CreateWorkspace {
+            repository_name: "demo".to_owned(),
+            name: "bad name; rm -rf /".to_owned(),
+            branch: "lc/bad".to_owned(),
+            base_ref: Some("main".to_owned()),
+        });
+        assert!(unsafe_create.is_err());
+
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        assert!(store.rename("berlin", "../bad").is_err());
+        assert!(store.rename("berlin", "oslo_2").is_ok());
     }
 
     #[test]
@@ -2547,6 +2601,44 @@ run = "printf 'started\n'; while true; do sleep 1; done"
             launch.env_value("CONDUCTOR_ROOT_PATH"),
             repo_path.canonicalize().unwrap().to_str()
         );
+    }
+
+    #[test]
+    fn session_launch_for_cursor_opens_workspace_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        let launch = store.session_launch("berlin", SessionKind::Cursor).unwrap();
+
+        assert_eq!(launch.program, PathBuf::from("cursor"));
+        assert_eq!(
+            launch.args,
+            vec![workspace.path.to_string_lossy().to_string()]
+        );
+        assert_eq!(launch.cwd, workspace.path);
+        assert_eq!(launch.env_value("CONDUCTOR_WORKSPACE_NAME"), Some("berlin"));
     }
 
     #[test]

@@ -15,3 +15,4 @@ gtk = { package = "gtk4", version = "0.11" }
 adw = { package = "libadwaita", version = "0.9", features = ["v1_4"] }
 glib = "0.20"
 anyhow = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }

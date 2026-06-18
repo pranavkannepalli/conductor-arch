@@ -844,6 +844,7 @@ dependencies = [
  "gtk4",
  "libadwaita",
  "linux-conductor-core",
+ "rusqlite",
 ]
 
 [[package]]

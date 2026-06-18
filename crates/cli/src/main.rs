@@ -1,12 +1,14 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use linux_conductor_core::doctor;
+use linux_conductor_core::import::{default_conductor_app_database, import_conductor_app_database};
 use linux_conductor_core::paths::AppPaths;
 use linux_conductor_core::repository::{AddRepository, RepositoryStore};
 use linux_conductor_core::workspace::{
-    CreateWorkspace, SessionKind, WorkspaceStatusLine, WorkspaceStore,
+    CreateWorkspace, SessionKind, SessionLaunch, WorkspaceStatusLine, WorkspaceStore,
 };
 use std::path::PathBuf;
+use std::process::Command as ProcessCommand;
 
 #[derive(Debug, Parser)]
 #[command(name = "linux-conductor")]
@@ -93,6 +95,18 @@ enum Command {
     },
     Discard {
         name: String,
+    },
+    Import {
+        #[command(subcommand)]
+        command: ImportCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ImportCommand {
+    Conductor {
+        #[arg(long)]
+        source: Option<PathBuf>,
     },
 }
 
@@ -183,6 +197,15 @@ enum SessionCommand {
         #[arg(long, value_enum, default_value_t = CliSessionKind::Shell)]
         kind: CliSessionKind,
     },
+    Open {
+        workspace: String,
+        #[arg(long, value_enum, default_value_t = CliSessionKind::Shell)]
+        kind: CliSessionKind,
+        #[arg(long)]
+        terminal: Option<String>,
+        #[arg(long)]
+        print_command: bool,
+    },
     Stop {
         workspace: String,
     },
@@ -256,6 +279,7 @@ enum CliSessionKind {
     Shell,
     Codex,
     Claude,
+    Cursor,
 }
 
 fn main() -> Result<()> {
@@ -264,6 +288,30 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Doctor => print_doctor(doctor::report_from_host()),
+        Command::Import { command } => match command {
+            ImportCommand::Conductor { source } => {
+                let source = source.unwrap_or_else(default_conductor_app_database);
+                let summary = import_conductor_app_database(&source, &paths.database_path)?;
+                println!(
+                    "Imported {} repositories and {} workspaces from {}",
+                    summary.repositories_imported,
+                    summary.workspaces_imported,
+                    source.display()
+                );
+                if summary.renamed_duplicate_workspaces > 0 {
+                    println!(
+                        "Renamed {} duplicate workspace(s) with repository prefixes for CLI safety.",
+                        summary.renamed_duplicate_workspaces
+                    );
+                }
+                if summary.skipped_workspaces > 0 {
+                    println!(
+                        "Skipped {} workspace(s) with missing repository or name data.",
+                        summary.skipped_workspaces
+                    );
+                }
+            }
+        },
         Command::Repo { command } => {
             let store = RepositoryStore::open(paths.database_path)?;
             match command {
@@ -513,6 +561,19 @@ fn main() -> Result<()> {
                         process.pid,
                         process.log_path.display()
                     );
+                }
+                SessionCommand::Open {
+                    workspace,
+                    kind,
+                    terminal,
+                    print_command,
+                } => {
+                    let launch = store.session_launch(&workspace, kind.into())?;
+                    if print_command {
+                        println!("{}", render_manual_session_command(&launch));
+                    } else {
+                        open_interactive_session(&launch, terminal.as_deref())?;
+                    }
                 }
                 SessionCommand::Stop { workspace } => {
                     let process = store.stop_session(&workspace)?;
@@ -799,8 +860,184 @@ impl From<CliSessionKind> for SessionKind {
             CliSessionKind::Shell => Self::Shell,
             CliSessionKind::Codex => Self::Codex,
             CliSessionKind::Claude => Self::Claude,
+            CliSessionKind::Cursor => Self::Cursor,
         }
     }
+}
+
+fn open_interactive_session(launch: &SessionLaunch, terminal: Option<&str>) -> Result<()> {
+    let terminal = terminal
+        .map(str::to_owned)
+        .or_else(detect_terminal)
+        .with_context(|| {
+            format!(
+                "no supported terminal emulator found; run manually:\n{}",
+                render_manual_session_command(launch)
+            )
+        })?;
+    let invocation = build_terminal_invocation(&terminal, &render_manual_session_command(launch))
+        .with_context(|| format!("unsupported terminal emulator: {terminal}"))?;
+    ProcessCommand::new(&invocation.program)
+        .args(&invocation.args)
+        .current_dir(&launch.cwd)
+        .envs(launch.env.iter().map(|(key, value)| (key, value)))
+        .spawn()
+        .with_context(|| format!("open interactive session in {}", launch.cwd.display()))?;
+    println!(
+        "Opened {} session in {}",
+        session_kind_label(launch.kind),
+        launch.cwd.display()
+    );
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct TerminalInvocation {
+    program: String,
+    args: Vec<String>,
+}
+
+fn build_terminal_invocation(terminal: &str, command: &str) -> Option<TerminalInvocation> {
+    let args = match terminal {
+        "gnome-terminal" | "kgx" => vec![
+            "--".to_owned(),
+            "bash".to_owned(),
+            "-lc".to_owned(),
+            command.to_owned(),
+        ],
+        "konsole" | "alacritty" | "kitty" | "xterm" => {
+            vec![
+                "-e".to_owned(),
+                "bash".to_owned(),
+                "-lc".to_owned(),
+                command.to_owned(),
+            ]
+        }
+        "tilix" | "terminator" => {
+            vec![
+                "-e".to_owned(),
+                format!("bash -lc {}", quote_shell_word(command)),
+            ]
+        }
+        "macos-terminal" | "terminal.app" => {
+            return Some(TerminalInvocation {
+                program: "osascript".to_owned(),
+                args: vec![
+                    "-e".to_owned(),
+                    format!(
+                        "tell application \"Terminal\" to do script \"{}\"",
+                        escape_applescript_string(command)
+                    ),
+                    "-e".to_owned(),
+                    "tell application \"Terminal\" to activate".to_owned(),
+                ],
+            });
+        }
+        "xfce4-terminal" => {
+            vec![
+                "--command".to_owned(),
+                format!("bash -lc {}", quote_shell_word(command)),
+            ]
+        }
+        _ => return None,
+    };
+    Some(TerminalInvocation {
+        program: terminal.to_owned(),
+        args,
+    })
+}
+
+fn detect_terminal() -> Option<String> {
+    if let Ok(term) = std::env::var("TERMINAL") {
+        if !term.trim().is_empty() && command_exists(&term) {
+            return Some(term);
+        }
+    }
+    [
+        "gnome-terminal",
+        "kgx",
+        "konsole",
+        "alacritty",
+        "kitty",
+        "xterm",
+        "tilix",
+        "terminator",
+        "xfce4-terminal",
+    ]
+    .into_iter()
+    .find(|candidate| command_exists(candidate))
+    .map(str::to_owned)
+    .or_else(|| {
+        if cfg!(target_os = "macos") && command_exists("osascript") {
+            Some("macos-terminal".to_owned())
+        } else {
+            None
+        }
+    })
+}
+
+fn command_exists(command: &str) -> bool {
+    ProcessCommand::new("which")
+        .arg(command)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn interactive_session_command(launch: &SessionLaunch) -> String {
+    format!("exec {}", shell_words(&launch.program, &launch.args))
+}
+
+fn render_manual_session_command(launch: &SessionLaunch) -> String {
+    let mut env_parts = Vec::new();
+    for (key, value) in &launch.env {
+        if let Some(value) = value.to_str() {
+            env_parts.push(format!("{key}={}", quote_shell_word(value)));
+        }
+    }
+    let launch_command = if env_parts.is_empty() {
+        interactive_session_command(launch)
+    } else {
+        format!(
+            "{} {}",
+            env_parts.join(" "),
+            interactive_session_command(launch)
+        )
+    };
+    format!(
+        "cd {} && {}",
+        quote_shell_word(&launch.cwd.to_string_lossy()),
+        launch_command
+    )
+}
+
+fn session_kind_label(kind: SessionKind) -> &'static str {
+    match kind {
+        SessionKind::Shell => "shell",
+        SessionKind::Codex => "codex",
+        SessionKind::Claude => "claude",
+        SessionKind::Cursor => "cursor",
+    }
+}
+
+fn shell_words(program: &std::path::Path, args: &[String]) -> String {
+    let mut words = vec![quote_shell_word(&program.to_string_lossy())];
+    words.extend(args.iter().map(|arg| quote_shell_word(arg)));
+    words.join(" ")
+}
+
+fn quote_shell_word(value: &str) -> String {
+    if value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-'))
+    {
+        return value.to_owned();
+    }
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn escape_applescript_string(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn print_doctor(report: doctor::DoctorReport) {
@@ -827,5 +1064,68 @@ fn print_doctor(report: doctor::DoctorReport) {
             "missing"
         };
         println!("{:<8} {:<8} {}", dependency.name, required, status);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+
+    #[test]
+    fn terminal_invocation_wraps_interactive_command() {
+        let invocation =
+            build_terminal_invocation("gnome-terminal", "cd /tmp && exec codex").unwrap();
+        assert_eq!(invocation.program, "gnome-terminal");
+        assert_eq!(
+            invocation.args,
+            vec!["--", "bash", "-lc", "cd /tmp && exec codex"]
+        );
+
+        let invocation = build_terminal_invocation("kitty", "cd /tmp && exec claude").unwrap();
+        assert_eq!(
+            invocation.args,
+            vec!["-e", "bash", "-lc", "cd /tmp && exec claude"]
+        );
+    }
+
+    #[test]
+    fn terminal_invocation_supports_macos_terminal() {
+        let invocation =
+            build_terminal_invocation("macos-terminal", "cd \"/tmp/work\" && exec codex").unwrap();
+        assert_eq!(invocation.program, "osascript");
+        assert_eq!(
+            invocation.args,
+            vec![
+                "-e",
+                "tell application \"Terminal\" to do script \"cd \\\"/tmp/work\\\" && exec codex\"",
+                "-e",
+                "tell application \"Terminal\" to activate"
+            ]
+        );
+    }
+
+    #[test]
+    fn manual_session_command_includes_workspace_env_and_program() {
+        let launch = SessionLaunch {
+            kind: SessionKind::Codex,
+            program: PathBuf::from("codex"),
+            args: Vec::new(),
+            cwd: PathBuf::from("/tmp/work space"),
+            env: vec![
+                (
+                    "CONDUCTOR_WORKSPACE_NAME".to_owned(),
+                    OsString::from("berlin"),
+                ),
+                ("CONDUCTOR_PORT".to_owned(), OsString::from("3000")),
+            ],
+        };
+
+        let command = render_manual_session_command(&launch);
+        assert!(command.contains("cd '/tmp/work space'"));
+        assert!(command.contains("CONDUCTOR_WORKSPACE_NAME=berlin"));
+        assert!(command.contains("CONDUCTOR_PORT=3000"));
+        assert!(command.contains("CONDUCTOR_PORT=3000 exec codex"));
+        assert!(command.ends_with("exec codex"));
     }
 }

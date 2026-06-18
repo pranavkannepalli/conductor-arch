@@ -11,7 +11,7 @@ Arch Linux, and other common Linux distributions.
 
 ## Install
 
-### AppImage (fastest, any distro)
+### AppImage (fastest release artifact)
 
 ```bash
 curl -Lo linux-conductor.AppImage \
@@ -19,6 +19,11 @@ curl -Lo linux-conductor.AppImage \
 chmod +x linux-conductor.AppImage
 sudo mv linux-conductor.AppImage /usr/local/bin/linux-conductor
 ```
+
+The MVP AppImage launches the GTK GUI with no arguments and passes arguments
+through to the CLI. It expects common GTK4/libadwaita runtime libraries to be
+available on the host; use native packages if your distro does not provide them
+by default.
 
 ### GTK4 GUI (native desktop app)
 
@@ -104,40 +109,42 @@ linux-conductor repo add ~/src/my-app
 This registers the repository, detects the default branch, and sets up a
 workspace parent at `~/conductor/workspaces/my-app/`.
 
-### 1b. Launch the GUI (optional)
+### 1b. Launch the GUI
 
 ```bash
 linux-conductor-gtk
 ```
 
-The GUI shows all workspaces grouped by repository in the sidebar. Sidebar rows show:
-- ▶/■ run state indicator, PR# badge, ⚡N active-session badge, ✓N open-todo badge
-- ⚠ conflict badge when the workspace has file conflicts with siblings
+The GTK app is currently a prototype toward the real GUI-first Conductor MVP.
+It has navigable Dashboard, Projects, History, and Workspace pages, but it is
+not yet a finished Conductor clone.
 
-Click a workspace to select it. The center panel shows a **quick stats strip** (run state · sessions · PR · todos) and a task brief from `.context/brief.md`.
+Current GUI capabilities:
+- Dashboard with workspace columns.
+- Sidebar workspace search/grouping.
+- Projects page for adding local repos, cloning Git URLs, listing projects, and
+  creating workspaces.
+- Workspace page with basic Shell/Codex/Claude/Cursor launch actions, run/stop,
+  open-folder, archive/restore/discard, and rough tabs for chats, changes,
+  checks, todos, and processes.
+- History page that can read old macOS Conductor chats when
+  `~/Library/Application Support/com.conductor.app/conductor.db` exists.
 
-**Toolbar:** Run · Stop · Editor · ⎘ Path | ↑ PR · ⇓ Merge | ✎ Rename · ↺ Restore · ✕ Archive · ⊗ Discard
+Still missing from the real MVP:
+- Embedded Conductor-native agent chat.
+- Embedded terminal.
+- Full project settings editor.
+- Rich diff/review/comment UI.
+- GUI-first GitHub PR/check/merge workflow.
+- Polished Conductor visual parity.
 
-Archive and Discard show confirmation dialogs. Restore is shown only for archived workspaces.
-
-**Right panel tabs** (counts update live):
-- **Diff** — `git diff --stat` summary, colored git status + unified diff
-- **Checks** — colored workspace status; "↻ Live PR Checks", "⇄ Sync PR State", "👁 PR View" buttons
-- **Todos (N)** — view/add/complete todos inline; "⇄ Sync from .context/" imports agent-written todos
-- **Sessions (N)** — active sessions and runs; "📋 Logs" per process, "■ Stop" for running sessions
-- **Logs** — last 200 lines of latest log, auto-scrolled to end
-- **Review (N)** — open review comments with "→ Agent" (appends to agent-notes.md) and "Resolve"
-- **Checkpoints** — save/restore Git checkpoints with a message entry
-
-The agent prompt bar at the bottom sends notes to `.context/agent-notes.md`.
-Keyboard shortcut: **Ctrl+R** refreshes all panels. Auto-refresh every 5 seconds.
+For the corrected MVP spec and handoff, read
+[`docs/conductor-gui-mvp-handoff.md`](docs/conductor-gui-mvp-handoff.md).
 
 Launch the GUI pre-selecting a workspace:
 ```bash
 linux-conductor-gtk --workspace berlin
 ```
-
-All interactive actions (new workspace, new repo, agent sessions) open your default terminal emulator.
 
 ### 2. Create workspaces
 
@@ -153,6 +160,17 @@ Each workspace gets:
 - A stable port range (`berlin` → 3000, `tokyo` → 3010, …)
 
 ### 3. Launch agents or a shell
+
+Interactive sessions open in your terminal emulator and use your existing local
+`codex` / `claude` authentication:
+
+```bash
+linux-conductor session open berlin --kind codex
+linux-conductor session open tokyo  --kind claude
+linux-conductor session open berlin --kind shell
+```
+
+For supervised background sessions with captured logs:
 
 ```bash
 linux-conductor session start berlin --kind codex
@@ -283,6 +301,8 @@ linux-conductor repo add <path> [--name <name>] [--default-branch <branch>]
 linux-conductor repo list
 linux-conductor repo doctor [<name>]
 
+linux-conductor import conductor [--source <path-to-conductor.db>]
+
 linux-conductor workspace create <repo> --name <name> --branch <branch> [--base <ref>]
 linux-conductor workspace create <repo> --from-issue <number> [--branch-prefix <prefix>]
 linux-conductor workspace list
@@ -297,7 +317,9 @@ linux-conductor runs <workspace>
 linux-conductor stop <workspace>
 linux-conductor logs <workspace> --run|--session
 
-linux-conductor session start <workspace> --kind shell|codex|claude
+linux-conductor session start <workspace> --kind shell|codex|claude|cursor
+linux-conductor session open <workspace> --kind shell|codex|claude|cursor [--terminal <terminal>]
+linux-conductor session open <workspace> --kind shell|codex|claude|cursor --print-command
 linux-conductor session stop <workspace>
 linux-conductor session list <workspace>
 
@@ -360,16 +382,24 @@ linux-conductor checkpoint restore <workspace> <id>
 | Alpine | Not yet tested |
 | WSL | Not yet tested |
 
+## Manual testing
+
+Before cutting a public release, run the MVP smoke path in
+[docs/manual-testing-checklist.md](docs/manual-testing-checklist.md). It covers
+the CLI demo, GTK GUI workflow, PR/checks path, and package smoke checks.
+
+For a complete local deployment walkthrough, including Claude Code, Codex, and Cursor
+interactive sessions, see [docs/deploy-and-local-test.md](docs/deploy-and-local-test.md).
+
 ---
 
 ## Known limits
 
-- **No PTY / interactive terminal.** Sessions are spawned as background
-  processes with stdout/stderr captured to log files. Interactive terminal
-  multiplexing (Codex inline diff, Claude conversation UI) requires launching
-  from a real terminal window. Use `linux-conductor session start … --kind shell`
-  to get a shell in the workspace, then run `codex` or `claude` manually for
-  the full interactive experience.
+- **No embedded terminal or native agent chat yet.** The GUI can launch Shell,
+  Codex, Claude Code, and Cursor through the current process/terminal path, but
+  the real Conductor-style embedded chat/terminal experience is still MVP work.
+  Background `session start` remains available when you want supervised process
+  records and captured logs.
 - **`gh` required for PR operations.** `pr create`, `pr checks`, and `pr merge`
   shell out to the `gh` CLI. Run `gh auth login` before using these commands.
 - **Flatpak is experimental.** The Flatpak build uses `--filesystem=host` for
