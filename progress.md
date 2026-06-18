@@ -220,6 +220,8 @@ Verified Phase 3 evidence so far:
   accepts input after spawn, and streams output back to the app.
 - Core now records PTY terminal shells as process rows and can mark them stopped
   with the same signal-style exit code used by other stopped runtime processes.
+- Core can reconcile terminal process rows whose recorded PTY shell PID is no
+  longer alive, marking those stale rows exited instead of leaving them running.
 - Core now tracks setup script runs as a separate process kind and can read the
   latest setup log.
 - GTK terminal panels now execute real workspace commands asynchronously instead
@@ -228,6 +230,9 @@ Verified Phase 3 evidence so far:
   workspace shell.
 - GTK terminal panels create terminal process records on Start Shell and mark
   them stopped on Stop Shell or panel teardown.
+- GTK app shell periodically reconciles stale terminal process records while
+  the app is open, so crashed or externally-ended shells stop showing as
+  running after refresh.
 - GTK terminal presets expose `CONDUCTOR_*` environment, git status, git diff,
   and a short file list; when a PTY shell is active, presets are sent into that
   shell.
@@ -256,7 +261,8 @@ Still needs Phase 4 work:
 
 - Terminal emulator polish: resize events, cursor/ANSI handling beyond raw text
   transcript, multiple terminal sessions, persisted terminal history, and
-  stronger automatic reconciliation for PTY processes if the whole app crashes.
+  stronger startup reconciliation after a full app crash before the first timer
+  refresh.
 - Full Spotlight parity: event-driven filesystem watching and automatic root
   repair flows. Current support is manual checkpoint/apply/restore/switch/sync
   plus app-wide polling sync of tracked changes with dirty-root refusal before

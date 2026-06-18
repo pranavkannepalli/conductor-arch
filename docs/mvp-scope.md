@@ -163,7 +163,9 @@ MVP is not complete until the normal workflow can be driven from the app.
 - Embedded terminal support now has a PTY-backed shell, but the UI is still a
   raw transcript/input surface rather than a polished terminal emulator with
   resize/cursor/scrollback/session management. Terminal process records are
-  created and stopped, but app-crash reconciliation is still rough.
+  created, stopped, and periodically reconciled to exited when their recorded
+  shell PID is no longer alive; startup recovery before the first refresh is
+  still rough.
 - Spotlight support is manual checkpoint/apply/restore/switch/sync with
   dirty-root refusal before patch reversal plus app-wide polling sync. It does
   not yet run event-driven file watching or repair root conflicts.

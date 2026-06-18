@@ -155,14 +155,18 @@ fn build_ui(app: &Application, initial_workspace: Option<String>) {
         glib::ControlFlow::Continue
     });
 
-    let db_path_spotlight_auto = app_state.workspace_database_path();
-    let hub_spotlight_auto = refresh_hub.clone();
+    let db_path_runtime_auto = app_state.workspace_database_path();
+    let hub_runtime_auto = refresh_hub.clone();
     glib::timeout_add_seconds_local(5, move || {
-        if let Ok(synced) = WorkspaceStore::open(db_path_spotlight_auto.clone())
-            .and_then(|store| store.spotlight_sync_active_sessions())
+        if let Ok((synced, reconciled)) = WorkspaceStore::open(db_path_runtime_auto.clone())
+            .and_then(|store| {
+                let synced = store.spotlight_sync_active_sessions()?;
+                let reconciled = store.reconcile_terminal_processes()?;
+                Ok::<_, anyhow::Error>((synced, reconciled))
+            })
         {
-            if !synced.is_empty() {
-                hub_spotlight_auto.refresh(RefreshScope::All);
+            if !synced.is_empty() || !reconciled.is_empty() {
+                hub_runtime_auto.refresh(RefreshScope::All);
             }
         }
         glib::ControlFlow::Continue

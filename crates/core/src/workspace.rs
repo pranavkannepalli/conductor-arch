@@ -669,6 +669,35 @@ impl WorkspaceStore {
         self.get_process(process_id)
     }
 
+    pub fn reconcile_terminal_processes(&self) -> Result<Vec<ProcessRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, workspace_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at
+             FROM processes
+             WHERE kind = ?1 AND status = 'running'
+             ORDER BY id",
+        )?;
+        let running = stmt
+            .query_map([ProcessKind::Terminal.as_str()], row_to_process)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+
+        let mut reconciled = Vec::new();
+        for process in running {
+            if process_alive(process.pid) {
+                continue;
+            }
+            let now = timestamp();
+            self.conn.execute(
+                "UPDATE processes
+                 SET status = ?1, ended_at = ?2, exit_code = NULL
+                 WHERE id = ?3 AND status = 'running'",
+                params![ProcessStatus::Exited.as_str(), now, process.id],
+            )?;
+            reconciled.push(self.get_process(process.id)?);
+        }
+        Ok(reconciled)
+    }
+
     pub fn terminal_command(&self, name: &str, command: &str) -> Result<TerminalCommandResult> {
         let command = command.trim();
         anyhow::ensure!(!command.is_empty(), "terminal command is required");
@@ -3947,6 +3976,48 @@ CUSTOM_VALUE = "from-settings"
         assert_eq!(stopped.status, ProcessStatus::Stopped);
         assert_eq!(stopped.exit_code, Some(143));
         assert!(stopped.ended_at.is_some());
+    }
+
+    #[test]
+    fn terminal_process_reconciliation_marks_dead_shells_exited() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let stale = store
+            .record_terminal_process("berlin", "shell", 999_999)
+            .unwrap();
+
+        let reconciled = store.reconcile_terminal_processes().unwrap();
+
+        assert_eq!(reconciled.len(), 1);
+        assert_eq!(reconciled[0].id, stale.id);
+        assert_eq!(reconciled[0].status, ProcessStatus::Exited);
+        assert_eq!(reconciled[0].exit_code, None);
+        assert!(reconciled[0].ended_at.is_some());
+        assert_eq!(
+            store.list_terminals("berlin").unwrap()[0].status,
+            ProcessStatus::Exited
+        );
     }
 
     #[test]

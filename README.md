@@ -172,8 +172,10 @@ Current GUI capabilities:
 - Basic embedded terminal scoped to the workspace. It can run one-shot commands
   with `CONDUCTOR_*` environment variables and can start a PTY-backed workspace
   shell that accepts input after launch and streams output. Started/stopped
-  embedded shells are visible in the Processes tab. The UI is still raw
-  transcript text, not a polished terminal emulator yet.
+  embedded shells are visible in the Processes tab, and the app periodically
+  marks stale terminal process rows exited when their recorded shell PID is no
+  longer alive. The UI is still raw transcript text, not a polished terminal
+  emulator yet.
 - First-slice Spotlight testing can apply tracked workspace changes to a clean
   repository root when `spotlight_testing = true`, then reverse that patch on
   stop. Starting Spotlight creates a checkpoint commit for the tracked workspace
@@ -503,7 +505,8 @@ Cursor interactive sessions, see
 - **No native agent chat or polished terminal emulator yet.** The GUI has a
   PTY-backed workspace shell and one-shot command runner, but Claude/Codex/Cursor
   chat, resize/cursor/scrollback polish, multiple terminal sessions, and
-  crash-recovery reconciliation for terminal process records are still MVP work.
+  startup crash-recovery polish before the first reconciliation refresh are still
+  MVP work.
   Background `session start` remains available when you want supervised process
   records and captured logs.
 - **Conductor app controls are incomplete.** Command palette, shortcut coverage,

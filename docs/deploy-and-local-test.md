@@ -280,6 +280,8 @@ Manual GUI smoke:
   command, streams output, and Stop Shell terminates it.
 - Confirm the Processes tab shows that terminal shell as running after Start
   Shell and stopped with exit code `143` after Stop Shell.
+- Confirm a terminal shell that exits outside the app is eventually marked
+  exited in Processes after the app-wide reconciliation poller runs.
 - Confirm Setup, Run, and Stop controls call the current runtime APIs and show
   latest setup/run log previews.
 - With `spotlight_testing = true` and a clean repository root, confirm
@@ -307,7 +309,9 @@ Known GUI MVP gaps:
 
 - No embedded Conductor-native agent chat yet.
 - No polished terminal emulator yet; the current terminal has PTY-backed shell
-  I/O and process records but renders as raw transcript text.
+  I/O and process records but renders as raw transcript text. Stale process
+  rows reconcile while the app is open, but this is not full terminal session
+  recovery.
 - Full Spotlight watching/checkpoint sync is not implemented; the current
   Spotlight slice is manual checkpoint/apply/restore/switch/sync with
   dirty-root refusal before patch reversal plus app-wide polling sync.
