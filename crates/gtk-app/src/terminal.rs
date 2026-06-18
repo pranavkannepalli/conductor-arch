@@ -350,14 +350,53 @@ fn format_initial_terminal_text(
     );
     if let Some(transcript) = restored_transcript {
         text.push_str("\n\n[restored latest terminal transcript]\n");
-        text.push_str(transcript);
+        text.push_str(&terminal_display_text(transcript));
     }
     text
 }
 
 fn append_text(buffer: &TextBuffer, text: &str) {
     let mut end = buffer.end_iter();
-    buffer.insert(&mut end, text);
+    buffer.insert(&mut end, &terminal_display_text(text));
+}
+
+fn terminal_display_text(text: &str) -> String {
+    let mut rendered = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\u{1b}' {
+            rendered.push(ch);
+            continue;
+        }
+
+        match chars.peek().copied() {
+            Some('[') => {
+                chars.next();
+                for code in chars.by_ref() {
+                    if ('@'..='~').contains(&code) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                chars.next();
+                while let Some(code) = chars.next() {
+                    if code == '\u{7}' {
+                        break;
+                    }
+                    if code == '\u{1b}' && matches!(chars.peek(), Some('\\')) {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            Some(_) => {
+                chars.next();
+            }
+            None => {}
+        }
+    }
+    rendered
 }
 
 struct TerminalSession {
@@ -441,5 +480,12 @@ mod tests {
         assert!(text.contains("workspace: berlin"));
         assert!(text.contains("[restored latest terminal transcript]"));
         assert!(text.contains("last shell output"));
+    }
+
+    #[test]
+    fn terminal_display_text_strips_common_ansi_escape_sequences() {
+        let rendered = terminal_display_text("\u{1b}[32mok\u{1b}[0m\r\u{1b}[Kdone\n");
+
+        assert_eq!(rendered, "ok\rdone\n");
     }
 }

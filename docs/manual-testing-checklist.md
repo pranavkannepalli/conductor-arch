@@ -209,6 +209,8 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
   appends process/line matches into the terminal transcript.
 - [ ] Reopening the GTK app after terminal output exists restores the latest
   terminal transcript into the terminal view.
+- [ ] Terminal commands that emit ANSI color/control sequences show readable
+  text in the GTK transcript instead of raw escape codes.
 - [ ] If an embedded terminal shell exits outside the app, the Processes tab
   eventually marks its terminal row exited after the app-wide reconciliation
   poller runs.
@@ -239,11 +241,11 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
 
 - [ ] Embedded Conductor-native agent chat is not implemented.
 - [ ] Polished PTY terminal emulation is not implemented. The current terminal
-  has a PTY-backed shell but still renders as raw transcript text; stale
-  process rows reconcile at startup and while the app is open, and shell records
-  get distinct searchable raw transcript logs with latest-transcript restore,
-  but this is not a full emulator/live PTY reattach model or polished terminal
-  history browser.
+  has a PTY-backed shell but still renders as transcript text with basic
+  ANSI-control stripping; stale process rows reconcile at startup and while the
+  app is open, and shell records get distinct searchable raw transcript logs
+  with latest-transcript restore, but this is not a full emulator/live PTY
+  reattach model or polished terminal history browser.
 - [ ] Full Spotlight parity is not implemented. The current slice manually
   checkpoints/applies/restores/switches/syncs tracked changes plus app-wide
   polling sync, app-open recursive file watching for active Spotlight workspace
