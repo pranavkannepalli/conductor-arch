@@ -345,8 +345,9 @@ treated as merge blockers unless the user explicitly clears or overrides them.
   polished terminal history browser, and true terminal session restoration after
   app restart are still missing.
 - Spotlight testing has a first manual checkpoint/apply/restore/switch/sync
-  slice with app-wide polling sync and dirty-root refusal before patch reversal,
-  but not event-driven file watching/checkpoint sync or automatic root repair.
+  slice with app-wide polling sync, dirty-root refusal before patch reversal,
+  and explicit destructive root repair, but not event-driven file
+  watching/checkpoint sync.
 - Changes/checks/todos/process panels are basic, not review-grade.
 - GitHub integration is backend/CLI-heavy and not a real GUI workflow.
 - History reads old Conductor DB but is not a first-class app history model.

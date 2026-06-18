@@ -207,6 +207,7 @@ fn runtime_panel(
     let stop_btn = Button::with_label("Stop");
     let spotlight_on_btn = Button::with_label("Spotlight On");
     let spotlight_sync_btn = Button::with_label("Spotlight Sync");
+    let spotlight_repair_btn = Button::with_label("Repair Spotlight");
     let spotlight_off_btn = Button::with_label("Spotlight Off");
     let folder_btn = Button::with_label("Open Folder");
     let status = Label::new(None);
@@ -318,6 +319,26 @@ fn runtime_panel(
         refresh_spotlight_sync.refresh(RefreshScope::All);
     });
 
+    let spotlight_repair_workspace = ws.name.clone();
+    let db_path_spotlight_repair = db_path.to_path_buf();
+    let refresh_spotlight_repair = refresh_hub.clone();
+    let status_spotlight_repair = status.clone();
+    spotlight_repair_btn.connect_clicked(move |_| {
+        status_spotlight_repair.set_text("Repairing Spotlight root: discarding root-only edits...");
+        match WorkspaceStore::open(db_path_spotlight_repair.clone())
+            .and_then(|store| store.spotlight_repair_root(&spotlight_repair_workspace))
+        {
+            Ok(session) => status_spotlight_repair.set_text(&format!(
+                "Spotlight root repaired for {}",
+                session.workspace_name
+            )),
+            Err(err) => {
+                status_spotlight_repair.set_text(&format!("Spotlight repair failed: {err:#}"))
+            }
+        }
+        refresh_spotlight_repair.refresh(RefreshScope::All);
+    });
+
     let spotlight_stop_workspace = ws.name.clone();
     let db_path_spotlight_off = db_path.to_path_buf();
     let refresh_spotlight_off = refresh_hub.clone();
@@ -344,6 +365,7 @@ fn runtime_panel(
     actions.append(&stop_btn);
     actions.append(&spotlight_on_btn);
     actions.append(&spotlight_sync_btn);
+    actions.append(&spotlight_repair_btn);
     actions.append(&spotlight_off_btn);
     actions.append(&folder_btn);
     panel.append(&actions);

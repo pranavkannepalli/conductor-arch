@@ -171,8 +171,8 @@ MVP is not complete until the normal workflow can be driven from the app.
   polished terminal history browser, and true terminal session restoration after
   app restart are still missing.
 - Spotlight support is manual checkpoint/apply/restore/switch/sync with
-  dirty-root refusal before patch reversal plus app-wide polling sync. It does
-  not yet run event-driven file watching or repair root conflicts.
+  dirty-root refusal before patch reversal, explicit destructive root repair,
+  and app-wide polling sync. It does not yet run event-driven file watching.
 - Projects/workspace creation forms are basic text fields, not polished
   Conductor flows.
 - Run/Stop and lifecycle buttons perform actions but need confirmation,

@@ -262,7 +262,10 @@ Verified Phase 3 evidence so far:
 - Spotlight state changes now verify the root diff still matches the active
   Spotlight patch before reversing it, protecting root-only edits from being
   silently mixed into Spotlight cleanup.
-- GTK Runtime now exposes Spotlight On/Sync/Off controls and active status.
+- Core can explicitly repair an active Spotlight root by resetting/cleaning the
+  repository root and reapplying the stored active Spotlight patch.
+- GTK Runtime now exposes Spotlight On/Sync/Repair/Off controls and active
+  status.
 - GTK Runtime polls the selected active Spotlight workspace and auto-syncs when
   its tracked patch changes while that workspace page is open.
 - GTK app shell also polls all active Spotlight sessions, so active workspaces
@@ -274,10 +277,10 @@ Still needs Phase 4 work:
   transcript, multiple managed terminal tabs/sessions in the UI, a polished
   terminal history browser beyond basic transcript search, and true terminal
   session restoration after app restart.
-- Full Spotlight parity: event-driven filesystem watching and automatic root
-  repair flows. Current support is manual checkpoint/apply/restore/switch/sync
-  plus app-wide polling sync of tracked changes with dirty-root refusal before
-  patch reversal.
+- Full Spotlight parity: event-driven filesystem watching/checkpoint sync.
+  Current support is manual checkpoint/apply/restore/switch/sync plus app-wide
+  polling sync of tracked changes, dirty-root refusal before patch reversal, and
+  an explicit destructive root repair action.
 - Toasts and richer error/progress state.
 
 ## Next Step

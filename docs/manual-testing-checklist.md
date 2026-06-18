@@ -225,6 +225,8 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
   still auto-sync changed tracked patches through the app-wide poller.
 - [ ] If the repository root has extra edits outside the active Spotlight patch,
   Spotlight Off/Sync fails without marking the session stopped.
+- [ ] Repair Spotlight explicitly discards root-only edits, reapplies the active
+  Spotlight patch, and then Spotlight Off can restore the clean root.
 - [ ] Archive, Restore, and Discard buttons call the current lifecycle APIs.
 - [ ] History page lists old Conductor chats if the macOS Conductor database is
   available.
@@ -240,8 +242,8 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
   emulator/session restoration model or polished terminal history browser.
 - [ ] Full Spotlight parity is not implemented. The current slice manually
   checkpoints/applies/restores/switches/syncs tracked changes plus app-wide
-  polling sync, and does not run event-driven file watching or repair root
-  conflicts.
+  polling sync and explicit destructive root repair, but does not run
+  event-driven file watching/checkpoint sync.
 - [ ] Project settings editor is functional but still needs polish, validation,
   full user/managed layer visibility, and user-only model defaults.
 - [ ] Monorepo directory selection, linked-directory workflows, and MCP status

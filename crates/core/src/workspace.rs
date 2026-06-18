@@ -856,6 +856,26 @@ impl WorkspaceStore {
         self.get_spotlight_session(active.id)
     }
 
+    pub fn spotlight_repair_root(&self, name: &str) -> Result<SpotlightSession> {
+        let workspace = self.get_by_name(name)?;
+        let repository = self.load_repository_by_id(workspace.repository_id)?;
+        let active = self
+            .active_spotlight_for_repository(repository.id)?
+            .with_context(|| format!("no active spotlight session for workspace {name}"))?;
+        anyhow::ensure!(
+            active.workspace_id == workspace.id,
+            "active spotlight is for workspace {}, not {name}",
+            active.workspace_name
+        );
+
+        let patch = fs::read_to_string(&active.patch_path)
+            .with_context(|| format!("read {}", active.patch_path.display()))?;
+        git_dynamic(&repository.root_path, &["reset", "--hard", "HEAD"])?;
+        git_dynamic(&repository.root_path, &["clean", "-fd"])?;
+        apply_git_patch(&repository.root_path, &patch)?;
+        self.get_spotlight_session(active.id)
+    }
+
     pub fn spotlight_sync(&self, name: &str) -> Result<SpotlightSession> {
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
@@ -4850,6 +4870,91 @@ spotlight_testing = true
         assert_eq!(
             fs::read_to_string(repo_path.join("root-only.txt")).unwrap(),
             "root edit\n"
+        );
+    }
+
+    #[test]
+    fn spotlight_repair_root_discards_root_only_edits_and_reapplies_active_patch() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::write(
+            repo_path.join(".conductor/settings.toml"),
+            r#"
+spotlight_testing = true
+"#,
+        )
+        .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", ".conductor/settings.toml"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args([
+                "-c",
+                "user.name=Linux Conductor",
+                "-c",
+                "user.email=linux-conductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "enable spotlight",
+            ])
+            .status()
+            .unwrap();
+
+        let db_path = temp.path().join("state.db");
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        fs::write(workspace.path.join("README.md"), "spotlight change\n").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&workspace.path)
+            .args(["add", "README.md"])
+            .status()
+            .unwrap();
+        let active = store.spotlight_start("berlin").unwrap();
+        fs::write(repo_path.join("root-only.txt"), "root edit\n").unwrap();
+
+        let repaired = store.spotlight_repair_root("berlin").unwrap();
+
+        assert_eq!(repaired.id, active.id);
+        assert_eq!(
+            fs::read_to_string(repo_path.join("README.md")).unwrap(),
+            "spotlight change\n"
+        );
+        assert!(!repo_path.join("root-only.txt").exists());
+        assert_eq!(
+            git_output(&repo_path, ["diff", "--", "README.md"]),
+            git_output(&workspace.path, ["diff", "--cached", "--", "README.md"])
+        );
+        assert_eq!(store.spotlight_stop("berlin").unwrap().status, "stopped");
+        assert_eq!(
+            fs::read_to_string(repo_path.join("README.md")).unwrap(),
+            "demo\n"
         );
     }
 

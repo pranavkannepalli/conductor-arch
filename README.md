@@ -187,8 +187,9 @@ Current GUI capabilities:
   root checkout from the active workspace; the selected workspace page also
   polls and auto-syncs changed tracked patches. The app shell also polls active
   Spotlight sessions across pages. Stop/Sync/Switch refuse to proceed when the
-  root has extra edits outside the active Spotlight patch. It is not event-driven
-  filesystem watching yet.
+  root has extra edits outside the active Spotlight patch. Repair Spotlight can
+  explicitly discard root-only edits and reapply the active patch. It is not
+  event-driven filesystem watching yet.
 - History page that can read old macOS Conductor chats when
   `~/Library/Application Support/com.conductor.app/conductor.db` exists.
 
@@ -381,7 +382,8 @@ dependencies, and fetched secrets usually belong in `scripts.setup` instead.
   prototype support manually checkpoints and applies/restores/switches/syncs
   tracked workspace changes, and the selected workspace page polls for changed
   active patches; the app shell also polls active Spotlight sessions across
-  pages. Event-driven file watching/checkpoint sync is still MVP work.
+  pages. Repair Spotlight can explicitly discard root-only edits and reapply the
+  active patch. Event-driven file watching/checkpoint sync is still MVP work.
 
 ### Environment variables available in scripts
 
@@ -521,9 +523,9 @@ Cursor interactive sessions, see
   root checkout to that workspace's tracked changes, and Spotlight Sync refreshes
   the active patch manually. The selected workspace page polls for active patch
   changes and auto-syncs them; the app shell also polls active sessions across
-  pages. It refuses to reverse the patch when root-only edits are present, but it
-  does not yet use event-driven filesystem watching or repair root conflicts for
-  you.
+  pages. It refuses to reverse the patch when root-only edits are present, and
+  Repair Spotlight can explicitly discard those root-only edits and reapply the
+  active patch. It does not yet use event-driven filesystem watching.
 - **Project setup UI is functional but not polished.** The Projects page can
   edit shared/local repository settings and preview `.worktreeinclude`
   precedence, but monorepo directory selection, linked-directory flows, and
