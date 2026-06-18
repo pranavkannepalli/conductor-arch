@@ -655,6 +655,131 @@ impl WorkspaceStore {
         })
     }
 
+    pub fn create_from_pull_request(
+        &self,
+        repository_name: &str,
+        pr_number: u64,
+        workspace_name: Option<&str>,
+        branch_name: Option<&str>,
+    ) -> Result<Workspace> {
+        let repository = self.load_repository(repository_name)?;
+        let pr_number_text = pr_number.to_string();
+        let output = command_output(
+            &repository.root_path,
+            "gh",
+            &[
+                "pr",
+                "view",
+                &pr_number_text,
+                "--json",
+                "title,url,state,number",
+            ],
+        )?;
+        let title = extract_json_string_field(&output, "title")
+            .unwrap_or_else(|| format!("pull-request-{pr_number}"));
+        let url = extract_json_string_field(&output, "url");
+        let state =
+            extract_json_string_field(&output, "state").unwrap_or_else(|| "open".to_owned());
+        let slug = slugify(&title);
+        let remote_ref = format!("refs/remotes/{}/pr/{}", repository.remote_name, pr_number);
+        let fetch_refspec = format!("pull/{pr_number}/head:{remote_ref}");
+        git_dynamic(
+            &repository.root_path,
+            &[
+                "fetch",
+                repository.remote_name.as_str(),
+                fetch_refspec.as_str(),
+            ],
+        )?;
+
+        let workspace = self.create(CreateWorkspace {
+            repository_name: repository_name.to_owned(),
+            name: workspace_name
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("pr-{pr_number}")),
+            branch: branch_name
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("lc/pr-{pr_number}-{slug}")),
+            base_ref: Some(remote_ref),
+        })?;
+
+        if let Some(url) = url {
+            self.record_pull_request(workspace.id, &url)?;
+            if state != "open" {
+                let now = timestamp();
+                self.conn.execute(
+                    "UPDATE pull_requests SET state = ?1, updated_at = ?2 WHERE workspace_id = ?3",
+                    params![state, now, workspace.id],
+                )?;
+            }
+        }
+
+        Ok(workspace)
+    }
+
+    pub fn create_from_prompt(
+        &self,
+        repository_name: &str,
+        prompt: &str,
+        workspace_name: Option<&str>,
+        branch_name: Option<&str>,
+        base_ref: Option<&str>,
+    ) -> Result<Workspace> {
+        let prompt = prompt.trim();
+        anyhow::ensure!(!prompt.is_empty(), "prompt is required");
+        let slug = slugify(prompt);
+        let workspace = self.create(CreateWorkspace {
+            repository_name: repository_name.to_owned(),
+            name: workspace_name
+                .map(str::to_owned)
+                .unwrap_or_else(|| slug.clone()),
+            branch: branch_name
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("lc/{slug}")),
+            base_ref: base_ref.map(str::to_owned),
+        })?;
+        write_context_brief(
+            &workspace.path,
+            &format!("# Brief\n\n{prompt}\n\n## Source\n\nPrompt\n"),
+        )?;
+        Ok(workspace)
+    }
+
+    pub fn create_from_linear_issue(
+        &self,
+        repository_name: &str,
+        issue_id: &str,
+        workspace_name: Option<&str>,
+        branch_name: Option<&str>,
+        base_ref: Option<&str>,
+    ) -> Result<Workspace> {
+        let issue_id = issue_id.trim();
+        anyhow::ensure!(!issue_id.is_empty(), "Linear issue id is required");
+        let issue = fetch_linear_issue(issue_id)?;
+        let slug = slugify(&issue.title);
+        let workspace = self.create(CreateWorkspace {
+            repository_name: repository_name.to_owned(),
+            name: workspace_name
+                .map(str::to_owned)
+                .unwrap_or_else(|| issue.identifier.to_ascii_lowercase()),
+            branch: branch_name
+                .map(str::to_owned)
+                .or(issue.branch_name)
+                .unwrap_or_else(|| format!("lc/{}-{slug}", issue.identifier.to_ascii_lowercase())),
+            base_ref: base_ref.map(str::to_owned),
+        })?;
+        write_context_brief(
+            &workspace.path,
+            &format!(
+                "# Brief\n\nLinear {}: {}\n\n{}\n",
+                issue.identifier,
+                issue.title,
+                issue.url.unwrap_or_default()
+            ),
+        )?;
+        Ok(workspace)
+    }
+
     pub fn read_context_brief(&self, name: &str) -> Result<Option<String>> {
         let workspace = self.get_by_name(name)?;
         let path = workspace.path.join(".context/brief.md");
@@ -1184,8 +1309,24 @@ impl WorkspaceStore {
                     .unwrap_or_else(|| PathBuf::from("/bin/sh")),
                 Vec::new(),
             ),
-            SessionKind::Codex => (PathBuf::from("codex"), Vec::new()),
-            SessionKind::Claude => (PathBuf::from("claude"), Vec::new()),
+            SessionKind::Codex => (
+                settings
+                    .providers
+                    .codex_executable_path
+                    .as_deref()
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from("codex")),
+                Vec::new(),
+            ),
+            SessionKind::Claude => (
+                settings
+                    .providers
+                    .claude_code_executable_path
+                    .as_deref()
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from("claude")),
+                Vec::new(),
+            ),
             SessionKind::Cursor => (
                 PathBuf::from("cursor"),
                 vec![workspace.path.to_string_lossy().to_string()],
@@ -1646,11 +1787,82 @@ fn slugify(text: &str) -> String {
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join("-");
-    if slug.len() > 40 {
+    if slug.is_empty() {
+        "workspace".to_owned()
+    } else if slug.len() > 40 {
         slug[..40].trim_end_matches('-').to_owned()
     } else {
         slug
     }
+}
+
+struct LinearIssue {
+    identifier: String,
+    title: String,
+    branch_name: Option<String>,
+    url: Option<String>,
+}
+
+fn fetch_linear_issue(issue_id: &str) -> Result<LinearIssue> {
+    let api_key = std::env::var("LINEAR_API_KEY")
+        .context("LINEAR_API_KEY is required to create a workspace from a Linear issue")?;
+    let payload = format!(
+        r#"{{"query":"query Issue($id: String!) {{ issue(id: $id) {{ identifier title branchName url }} }}","variables":{{"id":"{}"}}}}"#,
+        json_escape(issue_id)
+    );
+    let output = Command::new("curl")
+        .args([
+            "-fsS",
+            "https://api.linear.app/graphql",
+            "-H",
+            "Content-Type: application/json",
+            "-H",
+            &format!("Authorization: {api_key}"),
+            "--data",
+            &payload,
+        ])
+        .output()
+        .context("run curl for Linear API")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "Linear API request failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let body = String::from_utf8_lossy(&output.stdout);
+    if body.contains("\"errors\"") {
+        anyhow::bail!("Linear API returned errors: {body}");
+    }
+    let identifier = extract_json_string_field(&body, "identifier")
+        .unwrap_or_else(|| issue_id.to_ascii_uppercase());
+    let title = extract_json_string_field(&body, "title")
+        .with_context(|| format!("Linear issue {issue_id} did not include a title"))?;
+    let branch_name = extract_json_string_field(&body, "branchName");
+    let url = extract_json_string_field(&body, "url");
+    Ok(LinearIssue {
+        identifier,
+        title,
+        branch_name,
+        url,
+    })
+}
+
+fn json_escape(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(|ch| match ch {
+            '\\' => "\\\\".chars().collect::<Vec<_>>(),
+            '"' => "\\\"".chars().collect(),
+            '\n' => "\\n".chars().collect(),
+            '\r' => "\\r".chars().collect(),
+            '\t' => "\\t".chars().collect(),
+            _ => vec![ch],
+        })
+        .collect()
+}
+
+fn write_context_brief(workspace_path: &Path, content: &str) -> Result<()> {
+    let brief_path = workspace_path.join(".context/brief.md");
+    fs::write(&brief_path, content).with_context(|| format!("write {}", brief_path.display()))
 }
 
 fn validate_workspace_name(name: &str) -> Result<()> {
@@ -2062,6 +2274,105 @@ mod tests {
 
         let workspaces = store.list().unwrap();
         assert_eq!(workspaces, vec![workspace]);
+    }
+
+    #[test]
+    fn create_from_prompt_writes_prompt_to_context_brief() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create_from_prompt(
+                "demo",
+                "Build the real connector flow",
+                None,
+                None,
+                Some("main"),
+            )
+            .unwrap();
+
+        assert_eq!(workspace.name, "build-the-real-connector-flow");
+        assert_eq!(workspace.branch, "lc/build-the-real-connector-flow");
+        let brief = fs::read_to_string(workspace.path.join(".context/brief.md")).unwrap();
+        assert!(brief.contains("Build the real connector flow"));
+        assert!(brief.contains("Prompt"));
+    }
+
+    #[test]
+    fn session_launch_uses_configured_provider_executables() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::write(
+            repo_path.join(".conductor/settings.toml"),
+            r#"
+codex_executable_path = "/opt/bin/codex-custom"
+claude_code_executable_path = "/opt/bin/claude-custom"
+"#,
+        )
+        .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", ".conductor/settings.toml"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["commit", "-m", "add conductor settings"])
+            .status()
+            .unwrap();
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        assert_eq!(
+            store
+                .session_launch("berlin", SessionKind::Codex)
+                .unwrap()
+                .program,
+            PathBuf::from("/opt/bin/codex-custom")
+        );
+        assert_eq!(
+            store
+                .session_launch("berlin", SessionKind::Claude)
+                .unwrap()
+                .program,
+            PathBuf::from("/opt/bin/claude-custom")
+        );
     }
 
     #[test]

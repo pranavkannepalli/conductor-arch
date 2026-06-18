@@ -10,7 +10,8 @@ For the full target spec, see
 [`docs/conductor-gui-mvp-handoff.md`](conductor-gui-mvp-handoff.md).
 
 Use this checklist on a machine with `git`, `gh`, Rust, GTK4, and libadwaita
-development packages installed. Run `gh auth login` before PR tests.
+development packages installed. Run `gh auth login` before GitHub tests. Set
+`LINEAR_API_KEY` before Linear issue tests.
 
 ## Build And Launch
 
@@ -30,6 +31,13 @@ They are intentionally stricter than the current prototype smoke path.
 - [ ] A user can create a workspace from the GUI with branch/base options.
 - [ ] A user can create a workspace from a branch, pull request, GitHub issue,
   Linear issue, or prompt.
+- [ ] GitHub issue and pull request workspace creation fails clearly when
+  `gh auth status` is not authenticated.
+- [ ] GitHub pull request workspace creation fetches the PR head ref before
+  creating the worktree.
+- [ ] Linear issue workspace creation fails clearly when `LINEAR_API_KEY` is
+  missing, and creates from real Linear issue data when it is present.
+- [ ] Prompt workspace creation writes the prompt into `.context/brief.md`.
 - [ ] Workspace creation creates a real Git worktree and maps one workspace to
   one branch.
 - [ ] The app prevents or explains branch/worktree conflicts when a branch is
@@ -93,7 +101,8 @@ They are intentionally stricter than the current prototype smoke path.
 - [x] Shared settings do not encourage committing secrets; local overrides are
   used for machine-specific secrets.
 - [ ] Provider executable/provider fields and action prompts are discoverable
-  from Projects settings. User-only model defaults still need the Settings page.
+  from Projects settings. Codex and Claude executable fields affect session
+  launch. User-only model defaults still need the Settings page.
 - [ ] Todos are editable from the GUI and sync with `.context`.
 - [ ] Open todos, unresolved comments, failed checks, and conflicts block or
   strongly discourage merge until resolved or explicitly overridden.
@@ -170,6 +179,12 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
   columns.
 - [ ] Projects page can list registered repos.
 - [ ] Projects page can create a workspace from a registered repo.
+- [ ] Projects page can create a prompt workspace and the generated
+  `.context/brief.md` contains the prompt.
+- [ ] GitHub issue/PR workspace creation reports local `gh` auth errors when
+  the host is not authenticated.
+- [ ] Linear issue workspace creation reports missing `LINEAR_API_KEY` instead
+  of creating a fake workspace.
 - [ ] Workspace page opens when selecting a workspace.
 - [ ] Workspace page shows metadata and rough tabs for Chats, Changes, Checks,
   Todos, and Processes.

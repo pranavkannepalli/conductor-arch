@@ -167,6 +167,12 @@ enum WorkspaceCommand {
         #[arg(long)]
         from_issue: Option<u64>,
         #[arg(long)]
+        from_pr: Option<u64>,
+        #[arg(long)]
+        from_linear: Option<String>,
+        #[arg(long)]
+        prompt: Option<String>,
+        #[arg(long)]
         branch_prefix: Option<String>,
     },
     List {
@@ -371,15 +377,55 @@ fn main() -> Result<()> {
                     branch,
                     base,
                     from_issue,
+                    from_pr,
+                    from_linear,
+                    prompt,
                     branch_prefix,
                 } => {
+                    let selected_sources = [
+                        from_issue.is_some(),
+                        from_pr.is_some(),
+                        from_linear.is_some(),
+                        prompt.is_some(),
+                    ]
+                    .into_iter()
+                    .filter(|selected| *selected)
+                    .count();
+                    anyhow::ensure!(
+                        selected_sources <= 1,
+                        "choose only one source: --from-issue, --from-pr, --from-linear, or --prompt"
+                    );
                     let workspace = if let Some(issue) = from_issue {
                         store.create_from_issue(&repository, issue, branch_prefix.as_deref())?
+                    } else if let Some(pr) = from_pr {
+                        store.create_from_pull_request(
+                            &repository,
+                            pr,
+                            name.as_deref(),
+                            branch.as_deref(),
+                        )?
+                    } else if let Some(linear) = from_linear {
+                        store.create_from_linear_issue(
+                            &repository,
+                            &linear,
+                            name.as_deref(),
+                            branch.as_deref(),
+                            base.as_deref(),
+                        )?
+                    } else if let Some(prompt) = prompt {
+                        store.create_from_prompt(
+                            &repository,
+                            &prompt,
+                            name.as_deref(),
+                            branch.as_deref(),
+                            base.as_deref(),
+                        )?
                     } else {
-                        let name =
-                            name.with_context(|| "--name is required when not using --from-issue")?;
-                        let branch = branch
-                            .with_context(|| "--branch is required when not using --from-issue")?;
+                        let name = name
+                            .with_context(|| "--name is required when not using a source option")?;
+                        let branch = branch.with_context(|| {
+                            "--branch is required when not using a source option"
+                        })?;
                         store.create(CreateWorkspace {
                             repository_name: repository,
                             name,

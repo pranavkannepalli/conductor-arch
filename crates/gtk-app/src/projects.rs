@@ -394,61 +394,30 @@ pub(crate) fn build_projects_page(
                         .trim_start_matches('#')
                         .parse::<u64>()
                         .map_err(|_| anyhow::anyhow!("GitHub PR number is required"))?;
-                    let name = if typed_name.is_empty() {
-                        format!("pr-{pr}")
-                    } else {
-                        typed_name.clone()
-                    };
-                    let branch = if typed_branch.is_empty() {
-                        format!("pr-{pr}")
-                    } else {
-                        typed_branch.clone()
-                    };
-                    store.create(CreateWorkspace {
-                        repository_name: repo,
-                        name,
-                        branch,
-                        base_ref: base.or_else(|| Some(format!("pull/{pr}/head"))),
-                    })
+                    if base.is_some() {
+                        anyhow::bail!("Base ref is fetched from GitHub for PR workspaces.");
+                    }
+                    store.create_from_pull_request(
+                        &repo,
+                        pr,
+                        (!typed_name.is_empty()).then_some(typed_name.as_str()),
+                        (!typed_branch.is_empty()).then_some(typed_branch.as_str()),
+                    )
                 }
-                "linear_issue" => {
-                    let slug = slugify(&source_value);
-                    let name = if typed_name.is_empty() {
-                        slug.clone()
-                    } else {
-                        typed_name.clone()
-                    };
-                    let branch = if typed_branch.is_empty() {
-                        format!("lc/{slug}")
-                    } else {
-                        typed_branch.clone()
-                    };
-                    store.create(CreateWorkspace {
-                        repository_name: repo,
-                        name,
-                        branch,
-                        base_ref: base,
-                    })
-                }
-                "prompt" => {
-                    let slug = slugify(&source_value);
-                    let name = if typed_name.is_empty() {
-                        slug.clone()
-                    } else {
-                        typed_name.clone()
-                    };
-                    let branch = if typed_branch.is_empty() {
-                        format!("lc/{slug}")
-                    } else {
-                        typed_branch.clone()
-                    };
-                    store.create(CreateWorkspace {
-                        repository_name: repo,
-                        name,
-                        branch,
-                        base_ref: base,
-                    })
-                }
+                "linear_issue" => store.create_from_linear_issue(
+                    &repo,
+                    &source_value,
+                    (!typed_name.is_empty()).then_some(typed_name.as_str()),
+                    (!typed_branch.is_empty()).then_some(typed_branch.as_str()),
+                    base.as_deref(),
+                ),
+                "prompt" => store.create_from_prompt(
+                    &repo,
+                    &source_value,
+                    (!typed_name.is_empty()).then_some(typed_name.as_str()),
+                    (!typed_branch.is_empty()).then_some(typed_branch.as_str()),
+                    base.as_deref(),
+                ),
                 _ => {
                     if typed_name.is_empty() || typed_branch.is_empty() {
                         anyhow::bail!("Workspace name and branch are required for Branch source.");
@@ -695,27 +664,4 @@ fn parse_environment_lines(text: &str) -> Vec<(String, String)> {
             (!key.is_empty()).then(|| (key.to_owned(), value.trim().to_owned()))
         })
         .collect()
-}
-
-fn slugify(value: &str) -> String {
-    let slug = value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>()
-        .split('-')
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join("-");
-
-    if slug.is_empty() {
-        "workspace".to_owned()
-    } else {
-        slug
-    }
 }

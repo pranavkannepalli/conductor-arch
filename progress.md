@@ -39,6 +39,8 @@ security/privacy posture.
 - Stable per-workspace port allocation.
 - Background run scripts and logs.
 - Shell/Codex/Claude/Cursor session launch primitives.
+- Codex and Claude launches honor configured executable paths from repository
+  settings.
 - Git status/diff/log helpers.
 - Todo, review comment, checkpoint, conflict, and checks-summary commands.
 - GitHub PR create/view/checks/merge through local `gh` auth.
@@ -51,8 +53,9 @@ security/privacy posture.
 - Sidebar workspace search/grouping.
 - Dashboard columns.
 - Projects page can add local repos, clone Git URLs, list projects, and create
-  workspaces from branch/base, GitHub issue, GitHub PR ref, Linear issue slug,
-  or prompt slug.
+  workspaces from branch/base, GitHub issue, GitHub PR, Linear issue, or
+  prompt. GitHub-backed sources require working local `gh` auth. Linear-backed
+  sources require `LINEAR_API_KEY`.
 - Workspace page has a command center layout with status header, agents panel,
   runtime panel, changes/checks/review tabs, chat/terminal split, todos,
   processes, and lifecycle controls.
@@ -70,7 +73,8 @@ MVP-critical missing work:
 - Big Terminal Mode direction.
 - More polished project settings/onboarding layout.
 - Monorepo directory selection and linked-directory workflows.
-- MCP status.
+- GUI-visible MCP status. The core can inspect known MCP config files, but the
+  GUI does not expose or validate live MCP reachability yet.
 - Agent controls: Plan Mode, Fast Mode, reasoning/effort, Codex personality,
   Codex goals, checkpoints, skills, and tool approvals where supported.
 - Fully polished repository/workspace creation flows.
@@ -106,6 +110,8 @@ MVP-critical missing work:
   including scripts, run mode, Spotlight testing, Files to copy, environment
   variables, durable action prompts, provider executable/provider fields, and
   Git behavior flags.
+- Codex and Claude session launch now uses configured provider executable paths
+  when present.
 - Core settings inspection now reports shared/local settings presence and
   `.worktreeinclude` precedence, with `.worktreeinclude` winning over
   `file_include_globs`.
@@ -136,8 +142,11 @@ MVP-critical missing work:
 - Lifecycle controls support rename, archive, restore, and discard with visible
   progress text and confirmation gating for destructive archive/discard actions.
 - The Projects page can create workspaces from branch/base, GitHub issue,
-  GitHub PR ref, Linear issue slug, or prompt slug while reusing current core
-  workspace APIs.
+  GitHub PR, Linear issue, or prompt while reusing current core workspace APIs.
+  GitHub PR creation fetches the PR head ref before creating the worktree.
+  Prompt creation writes the prompt into `.context/brief.md`. Linear creation
+  calls Linear's API through `LINEAR_API_KEY`; without that key it fails with a
+  visible error instead of creating a fake workspace.
 
 ## Next Step
 
