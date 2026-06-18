@@ -278,6 +278,8 @@ Manual GUI smoke:
   reports the exit code.
 - Confirm Start Shell opens a PTY-backed workspace shell, accepts a typed
   command, streams output, and Stop Shell terminates it.
+- Confirm starting multiple PTY shells lets you select the active shell, send
+  input to the selected shell, and stop only the selected shell.
 - Confirm the Processes tab shows that terminal shell as running after Start
   Shell and stopped with exit code `143` after Stop Shell without waiting for
   the global polling refresh.
@@ -342,7 +344,8 @@ Known GUI MVP gaps:
   Stale process rows reconcile at startup and while the app is open, and shell
   records get distinct searchable raw transcript logs with capped on-screen
   scrollback and latest-transcript restore, but this is not live PTY process
-  reattach or a polished terminal history/scrollback browser.
+  reattach, a polished terminal tab model, or a polished terminal
+  history/scrollback browser.
 - Full Spotlight parity is not implemented; the current Spotlight slice is
   manual checkpoint/apply/restore/switch/sync with dirty-root refusal before
   patch reversal, explicit destructive root repair, app-wide polling sync, and

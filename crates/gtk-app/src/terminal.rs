@@ -48,14 +48,14 @@ pub fn embedded_terminal_panel(
         workspace_path,
     ));
 
-    let active_pty: Rc<RefCell<Option<TerminalSession>>> = Rc::new(RefCell::new(None));
+    let active_ptys: Rc<RefCell<Vec<Option<TerminalSession>>>> = Rc::new(RefCell::new(Vec::new()));
     let last_pty_size: Rc<RefCell<Option<(u16, u16)>>> = Rc::new(RefCell::new(None));
     let buffer_for_poll = transcript.buffer();
-    let pty_for_poll = active_pty.clone();
+    let ptys_for_poll = active_ptys.clone();
     let transcript_for_poll = transcript.clone();
     let last_size_for_poll = last_pty_size.clone();
     glib::timeout_add_local(Duration::from_millis(100), move || {
-        if let Some(session) = pty_for_poll.borrow_mut().as_mut() {
+        for session in ptys_for_poll.borrow_mut().iter_mut().flatten() {
             let size = terminal_size_from_pixels(
                 transcript_for_poll.allocated_width(),
                 transcript_for_poll.allocated_height(),
@@ -90,17 +90,17 @@ pub fn embedded_terminal_panel(
     let pty_controls = GBox::new(Orientation::Horizontal, 8);
     let start_pty_btn = Button::with_label("Start Shell");
     let stop_pty_btn = Button::with_label("Stop Shell");
+    let active_pty_combo = ComboBoxText::new();
+    active_pty_combo.set_hexpand(true);
     let db_for_pty = database_path.clone();
     let workspace_for_pty = workspace_name.to_owned();
-    let pty_for_start = active_pty.clone();
+    let ptys_for_start = active_ptys.clone();
     let buffer_for_start = transcript.buffer();
     let refresh_for_start = refresh_hub.clone();
+    let active_pty_combo_for_start = active_pty_combo.clone();
+    let last_size_for_start = last_pty_size.clone();
     let cols = if full_mode { 120 } else { 80 };
     start_pty_btn.connect_clicked(move |_| {
-        if pty_for_start.borrow().is_some() {
-            append_text(&buffer_for_start, "\n[pty already running]\n");
-            return;
-        }
         match WorkspaceStore::open(db_for_pty.clone()).and_then(|store| {
             let launch = store.session_launch(&workspace_for_pty, SessionKind::Shell)?;
             let command = display_command(&launch.program, &launch.args);
@@ -116,40 +116,70 @@ pub fn embedded_terminal_panel(
                 .process_id()
                 .context("PTY shell did not report a process id")?;
             let process = store.record_terminal_process(&workspace_for_pty, &command, pid)?;
-            Ok(TerminalSession {
-                session,
-                database_path: db_for_pty.clone(),
-                process_id: Some(process.id),
-            })
+            Ok((
+                TerminalSession {
+                    session,
+                    database_path: db_for_pty.clone(),
+                    process_id: Some(process.id),
+                },
+                process.id,
+            ))
         }) {
-            Ok(terminal) => {
-                *pty_for_start.borrow_mut() = Some(terminal);
-                append_text(&buffer_for_start, "\n[pty shell started]\n");
+            Ok((terminal, process_id)) => {
+                let mut sessions = ptys_for_start.borrow_mut();
+                let index = sessions.len();
+                sessions.push(Some(terminal));
+                active_pty_combo_for_start.append(
+                    Some(&index.to_string()),
+                    &active_terminal_session_option_label(index, Some(process_id)),
+                );
+                active_pty_combo_for_start.set_active(Some(index as u32));
+                *last_size_for_start.borrow_mut() = None;
+                append_text(
+                    &buffer_for_start,
+                    &format!("\n[pty shell {} started]\n", index + 1),
+                );
                 refresh_for_start.refresh(terminal_process_refresh_scope());
             }
             Err(err) => append_text(&buffer_for_start, &format!("\n[pty error]\n{err:#}\n")),
         }
     });
-    let pty_for_stop = active_pty.clone();
+    let ptys_for_stop = active_ptys.clone();
     let buffer_for_stop = transcript.buffer();
     let refresh_for_stop = refresh_hub.clone();
+    let active_pty_combo_for_stop = active_pty_combo.clone();
     stop_pty_btn.connect_clicked(move |_| {
-        if let Some(session) = pty_for_stop.borrow_mut().take() {
+        let Some(active_id) = active_pty_combo_for_stop.active_id() else {
+            append_text(&buffer_for_stop, "\n[no pty shell selected]\n");
+            return;
+        };
+        let Ok(index) = active_id.as_str().parse::<usize>() else {
+            append_text(&buffer_for_stop, "\n[selected pty shell is invalid]\n");
+            return;
+        };
+        let mut sessions = ptys_for_stop.borrow_mut();
+        let Some(session_slot) = sessions.get_mut(index) else {
+            append_text(&buffer_for_stop, "\n[selected pty shell is missing]\n");
+            return;
+        };
+        if let Some(session) = session_slot.take() {
             match session.stop() {
-                Ok(()) => {
-                    append_text(&buffer_for_stop, "\n[pty shell stopped]\n");
-                    refresh_for_stop.refresh(terminal_process_refresh_scope());
-                }
+                Ok(()) => append_text(
+                    &buffer_for_stop,
+                    &format!("\n[pty shell {} stopped]\n", index + 1),
+                ),
                 Err(err) => {
                     append_text(&buffer_for_stop, &format!("\n[pty stop error]\n{err:#}\n"))
                 }
             }
+            refresh_for_stop.refresh(terminal_process_refresh_scope());
         } else {
-            append_text(&buffer_for_stop, "\n[no pty shell running]\n");
+            append_text(&buffer_for_stop, "\n[selected pty shell already stopped]\n");
         }
     });
     pty_controls.append(&start_pty_btn);
     pty_controls.append(&stop_pty_btn);
+    pty_controls.append(&active_pty_combo);
     root.append(&pty_controls);
 
     let presets = GBox::new(Orientation::Horizontal, 8);
@@ -167,14 +197,16 @@ pub fn embedded_terminal_panel(
         let db = database_path.clone();
         let workspace = workspace_name.to_owned();
         let buffer = transcript.buffer();
-        let pty = active_pty.clone();
+        let ptys = active_ptys.clone();
+        let active_pty_combo_for_command = active_pty_combo.clone();
         button.connect_clicked(move |_| {
             send_or_run_terminal_command(
                 db.clone(),
                 workspace.clone(),
                 command.to_owned(),
                 buffer.clone(),
-                pty.clone(),
+                ptys.clone(),
+                active_pty_combo_for_command.clone(),
             );
         });
         presets.append(&button);
@@ -189,7 +221,8 @@ pub fn embedded_terminal_panel(
     let buffer = transcript.buffer();
     let workspace = workspace_name.to_owned();
     let db = database_path.clone();
-    let pty = active_pty;
+    let ptys = active_ptys;
+    let active_pty_combo_for_run = active_pty_combo;
     let entry_clone = entry.clone();
     run_btn.connect_clicked(move |_| {
         let command = entry_clone.text().trim().to_owned();
@@ -201,7 +234,8 @@ pub fn embedded_terminal_panel(
             workspace.clone(),
             command,
             buffer.clone(),
-            pty.clone(),
+            ptys.clone(),
+            active_pty_combo_for_run.clone(),
         );
         entry_clone.set_text("");
     });
@@ -303,9 +337,23 @@ fn send_or_run_terminal_command(
     workspace_name: String,
     command: String,
     buffer: TextBuffer,
-    pty: Rc<RefCell<Option<TerminalSession>>>,
+    ptys: Rc<RefCell<Vec<Option<TerminalSession>>>>,
+    active_pty_combo: ComboBoxText,
 ) {
-    if let Some(session) = pty.borrow_mut().as_mut() {
+    if let Some(active_id) = active_pty_combo.active_id() {
+        let Ok(index) = active_id.as_str().parse::<usize>() else {
+            append_text(&buffer, "\n[selected pty shell is invalid]\n");
+            return;
+        };
+        let mut sessions = ptys.borrow_mut();
+        let Some(session_slot) = sessions.get_mut(index) else {
+            append_text(&buffer, "\n[selected pty shell is missing]\n");
+            return;
+        };
+        let Some(session) = session_slot.as_mut() else {
+            append_text(&buffer, "\n[selected pty shell is stopped]\n");
+            return;
+        };
         let command_line = format!("\n$ {command}\n");
         append_text(&buffer, &command_line);
         if let Err(err) = session.append_output(&command_line) {
@@ -541,6 +589,13 @@ fn terminal_history_option_label(record: &ProcessRecord) -> String {
         record.pid,
         file_name
     )
+}
+
+fn active_terminal_session_option_label(index: usize, process_id: Option<i64>) -> String {
+    match process_id {
+        Some(process_id) => format!("Shell {} #{}", index + 1, process_id),
+        None => format!("Shell {}", index + 1),
+    }
 }
 
 fn format_selected_terminal_transcript(record: &ProcessRecord, transcript: &str) -> String {
@@ -943,6 +998,15 @@ mod tests {
         assert!(rendered.contains("#7 exited pid=4242 exit=0"));
         assert!(rendered.contains("terminal-4242.log"));
         assert!(rendered.contains("/bin/bash"));
+    }
+
+    #[test]
+    fn active_terminal_session_option_labels_include_process_id() {
+        assert_eq!(
+            active_terminal_session_option_label(1, Some(42)),
+            "Shell 2 #42"
+        );
+        assert_eq!(active_terminal_session_option_label(0, None), "Shell 1");
     }
 
     #[test]

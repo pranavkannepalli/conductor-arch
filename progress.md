@@ -235,6 +235,9 @@ Verified Phase 3 evidence so far:
   of queuing placeholder text.
 - GTK terminal panels now have Start Shell/Stop Shell controls for a PTY-backed
   workspace shell.
+- GTK terminal panels now keep a basic active-shell selector, so Start Shell can
+  create multiple live PTY shells and command input/Stop Shell target the
+  selected shell.
 - GTK terminal panels propagate terminal view size changes to the active PTY
   shell, so child processes can observe the resized row/column grid.
 - GTK terminal panels create terminal process records on Start Shell and mark
@@ -300,12 +303,12 @@ Verified Phase 3 evidence so far:
 Still needs Phase 4 work:
 
 - Terminal emulator polish: broader cursor-state/session emulation beyond common
-  escape stripping and carriage-return/cursor-up line redraws, multiple managed
-  terminal tabs/sessions in the UI, a polished terminal history/scrollback
-  browser beyond basic session listing/transcript search/selected transcript
-  loading, and live PTY process reattach after app restart. Latest transcript
-  restore is built, but that is not the same as reattaching to the old shell
-  process.
+  escape stripping and carriage-return/cursor-up line redraws, polished
+  multi-terminal tabs beyond the basic active-shell selector, a polished terminal
+  history/scrollback browser beyond basic session listing/transcript
+  search/selected transcript loading, and live PTY process reattach after app
+  restart. Latest transcript restore is built, but that is not the same as
+  reattaching to the old shell process.
 - Full Spotlight parity: app-open recursive file watching now exists, but there
   is still no app-closed/background watcher, rich conflict UI, or Conductor-level
   parity around every checkpoint/watch edge case. Current support is manual

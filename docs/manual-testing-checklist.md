@@ -199,6 +199,8 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
   reports the exit code without freezing the app.
 - [ ] Terminal tab can start a workspace shell, accept typed input after the
   shell starts, stream output, and stop the shell.
+- [ ] Terminal tab can start multiple PTY shells, select the active shell, send
+  input to the selected shell, and stop only the selected shell.
 - [ ] Processes tab shows the embedded terminal shell as running after Start
   Shell and stopped with exit code `143` after Stop Shell without waiting for
   the global polling refresh.
@@ -260,8 +262,8 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
   propagation; stale process rows reconcile at startup and while the app is
   open, and shell records get distinct searchable raw transcript logs with
   capped on-screen scrollback and latest-transcript restore, but this is not a
-  full emulator/live PTY reattach model or polished terminal history/scrollback
-  browser.
+  full emulator/live PTY reattach model, polished terminal tab model, or
+  polished terminal history/scrollback browser.
 - [ ] Full Spotlight parity is not implemented. The current slice manually
   checkpoints/applies/restores/switches/syncs tracked changes plus app-wide
   polling sync, app-open recursive file watching for active Spotlight workspace
