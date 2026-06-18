@@ -11,6 +11,8 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 
+const SIGTERM_EXIT_CODE: i32 = 143;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Workspace {
     pub id: i64,
@@ -433,8 +435,13 @@ impl WorkspaceStore {
                 stop_process(process.pid)?;
                 let now = timestamp();
                 self.conn.execute(
-                    "UPDATE processes SET status = ?1, ended_at = ?2, exit_code = NULL WHERE id = ?3",
-                    params![ProcessStatus::Stopped.as_str(), now, process.id],
+                    "UPDATE processes SET status = ?1, ended_at = ?2, exit_code = ?3 WHERE id = ?4",
+                    params![
+                        ProcessStatus::Stopped.as_str(),
+                        now,
+                        SIGTERM_EXIT_CODE,
+                        process.id
+                    ],
                 )?;
             }
         }
@@ -552,8 +559,13 @@ impl WorkspaceStore {
         stop_process(process.pid)?;
         let now = timestamp();
         self.conn.execute(
-            "UPDATE processes SET status = ?1, ended_at = ?2, exit_code = NULL WHERE id = ?3",
-            params![ProcessStatus::Stopped.as_str(), now, process.id],
+            "UPDATE processes SET status = ?1, ended_at = ?2, exit_code = ?3 WHERE id = ?4",
+            params![
+                ProcessStatus::Stopped.as_str(),
+                now,
+                SIGTERM_EXIT_CODE,
+                process.id
+            ],
         )?;
         self.get_process(process.id)
     }
@@ -578,8 +590,13 @@ impl WorkspaceStore {
         stop_process(process.pid)?;
         let now = timestamp();
         self.conn.execute(
-            "UPDATE processes SET status = ?1, ended_at = ?2, exit_code = NULL WHERE id = ?3",
-            params![ProcessStatus::Stopped.as_str(), now, process.id],
+            "UPDATE processes SET status = ?1, ended_at = ?2, exit_code = ?3 WHERE id = ?4",
+            params![
+                ProcessStatus::Stopped.as_str(),
+                now,
+                SIGTERM_EXIT_CODE,
+                process.id
+            ],
         )?;
         self.get_process(process.id)
     }
@@ -2419,6 +2436,8 @@ fn process_alive(pid: u32) -> bool {
     Command::new("kill")
         .arg("-0")
         .arg(pid.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
@@ -2429,6 +2448,8 @@ fn stop_process(pid: u32) -> Result<()> {
     let group_ok = Command::new("kill")
         .arg("-TERM")
         .arg(format!("-{pid}"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .context("run kill")?
         .success();
@@ -2436,6 +2457,8 @@ fn stop_process(pid: u32) -> Result<()> {
         let _ = Command::new("kill")
             .arg("-TERM")
             .arg(pid.to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status();
     }
 
@@ -2453,11 +2476,15 @@ fn stop_process(pid: u32) -> Result<()> {
         let _ = Command::new("kill")
             .arg("-KILL")
             .arg(format!("-{pid}"))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status();
         std::thread::sleep(Duration::from_millis(200));
         let _ = Command::new("kill")
             .arg("-KILL")
             .arg(pid.to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status();
     }
 
@@ -3400,6 +3427,7 @@ run = "printf 'started\n'; while true; do sleep 1; done"
 
         assert_eq!(stopped.id, run.id);
         assert_eq!(stopped.status, ProcessStatus::Stopped);
+        assert_eq!(stopped.exit_code, Some(143));
         assert!(stopped.ended_at.is_some());
     }
 

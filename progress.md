@@ -42,6 +42,8 @@ security/privacy posture.
 - Background setup scripts and logs.
 - Background setup/run/session process rows now update to `exited` after
   natural process completion and record exit codes when the OS reports one.
+- Stopped background processes now record signal-style exit code `143` and
+  suppress expected `kill` fallback noise.
 - Workspace-scoped terminal command execution with captured stdout, stderr, and
   exit code.
 - First Spotlight testing slice: when enabled in repository settings, the app
@@ -213,8 +215,6 @@ Still needs Phase 4 work:
 
 - True PTY-backed interactive terminal input/output.
 - Long-running terminal process management beyond setup/run process controls.
-- Exit-code reporting for signal-terminated background processes beyond the
-  current `signal`/missing-code state.
 - Full Spotlight parity: file watching, checkpoint commits, one-way continuous
   sync, switching active Spotlight workspaces, and stronger root dirty-state
   recovery. Current support is manual apply/restore of tracked changes.
