@@ -223,6 +223,8 @@ Verified Phase 3 evidence so far:
 - Core now gives each recorded PTY terminal shell its own log file instead of
   sharing one `terminal-active.log`, which prevents multiple shell records from
   pointing at the same transcript path.
+- Core can search persisted terminal transcript logs for a workspace and return
+  matching process ids, log paths, line numbers, and lines.
 - Core can reconcile terminal process rows whose recorded PTY shell PID is no
   longer alive, marking those stale rows exited instead of leaving them running.
 - Core now tracks setup script runs as a separate process kind and can read the
@@ -266,7 +268,7 @@ Verified Phase 3 evidence so far:
 Still needs Phase 4 work:
 
 - Terminal emulator polish: resize events, cursor/ANSI handling beyond raw text
-  transcript, multiple managed terminal tabs/sessions in the UI, searchable
+  transcript, multiple managed terminal tabs/sessions in the UI, GUI search for
   persisted terminal history, and true terminal session restoration after app
   restart.
 - Full Spotlight parity: event-driven filesystem watching and automatic root

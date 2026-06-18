@@ -133,6 +133,15 @@ pub struct TerminalCommandResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalLogMatch {
+    pub process_id: i64,
+    pub command: String,
+    pub log_path: PathBuf,
+    pub line_number: usize,
+    pub line: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpotlightSession {
     pub id: i64,
     pub repository_id: i64,
@@ -691,6 +700,29 @@ impl WorkspaceStore {
             .with_context(|| format!("open log {}", process.log_path.display()))?
             .write_all(output.as_bytes())
             .with_context(|| format!("write log {}", process.log_path.display()))
+    }
+
+    pub fn search_terminal_logs(&self, name: &str, query: &str) -> Result<Vec<TerminalLogMatch>> {
+        let query = query.trim();
+        anyhow::ensure!(!query.is_empty(), "terminal log search query is required");
+        let needle = query.to_lowercase();
+        let mut matches = Vec::new();
+        for process in self.list_terminals(name)? {
+            let contents = fs::read_to_string(&process.log_path)
+                .with_context(|| format!("read log {}", process.log_path.display()))?;
+            for (index, line) in contents.lines().enumerate() {
+                if line.to_lowercase().contains(&needle) {
+                    matches.push(TerminalLogMatch {
+                        process_id: process.id,
+                        command: process.command.clone(),
+                        log_path: process.log_path.clone(),
+                        line_number: index + 1,
+                        line: line.to_owned(),
+                    });
+                }
+            }
+        }
+        Ok(matches)
     }
 
     pub fn reconcile_terminal_processes(&self) -> Result<Vec<ProcessRecord>> {
@@ -4132,6 +4164,55 @@ CUSTOM_VALUE = "from-settings"
             fs::read_to_string(terminal.log_path).unwrap(),
             "first line\nsecond line\n"
         );
+    }
+
+    #[test]
+    fn terminal_log_search_finds_matching_transcript_lines() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let first = store
+            .record_terminal_process("berlin", "shell", 4242)
+            .unwrap();
+        let second = store
+            .record_terminal_process("berlin", "shell", 4243)
+            .unwrap();
+        store
+            .append_terminal_process_output(first.id, "build ok\nneedle first\n")
+            .unwrap();
+        store
+            .append_terminal_process_output(second.id, "NEEDLE second\nno match\n")
+            .unwrap();
+
+        let matches = store.search_terminal_logs("berlin", "needle").unwrap();
+
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].process_id, second.id);
+        assert_eq!(matches[0].line_number, 1);
+        assert_eq!(matches[0].line, "NEEDLE second");
+        assert_eq!(matches[1].process_id, first.id);
+        assert_eq!(matches[1].line_number, 2);
+        assert_eq!(matches[1].line, "needle first");
     }
 
     #[test]

@@ -317,8 +317,8 @@ Known GUI MVP gaps:
 - No polished terminal emulator yet; the current terminal has PTY-backed shell
   I/O and process records but renders as raw transcript text. Stale process
   rows reconcile at startup and while the app is open, and shell records get
-  distinct raw transcript logs, but this is not full terminal session
-  restoration.
+  distinct searchable raw transcript logs, but this is not full terminal session
+  restoration and does not yet expose GUI terminal history search.
 - Full Spotlight watching/checkpoint sync is not implemented; the current
   Spotlight slice is manual checkpoint/apply/restore/switch/sync with
   dirty-root refusal before patch reversal plus app-wide polling sync.

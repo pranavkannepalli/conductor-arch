@@ -340,8 +340,9 @@ treated as merge blockers unless the user explicitly clears or overrides them.
   polished terminal emulator with resize/cursor/scrollback/session management
   yet. Stale terminal process rows are reconciled on app startup and periodic
   refresh, each terminal process record has a distinct log path, and PTY
-  command/output chunks are appended to that raw transcript log. Managed
-  multi-terminal UI and true terminal session restoration after app restart are
+  command/output chunks are appended to that raw transcript log. Core can search
+  persisted terminal transcript logs; managed multi-terminal UI, GUI terminal
+  history search, and true terminal session restoration after app restart are
   still missing.
 - Spotlight testing has a first manual checkpoint/apply/restore/switch/sync
   slice with app-wide polling sync and dirty-root refusal before patch reversal,
