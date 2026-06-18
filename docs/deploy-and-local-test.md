@@ -276,6 +276,8 @@ Manual GUI smoke:
   Terminal, Changes, Checks, Todos, and Processes tabs.
 - Confirm the Terminal tab runs a short command, shows stdout/stderr, and
   reports the exit code.
+- Confirm Start Shell opens a PTY-backed workspace shell, accepts a typed
+  command, streams output, and Stop Shell terminates it.
 - Confirm Setup, Run, and Stop controls call the current runtime APIs and show
   latest setup/run log previews.
 - With `spotlight_testing = true` and a clean repository root, confirm
@@ -290,7 +292,8 @@ Manual GUI smoke:
 Known GUI MVP gaps:
 
 - No embedded Conductor-native agent chat yet.
-- No PTY-backed interactive terminal yet; the current terminal is command-based.
+- No polished terminal emulator yet; the current terminal has PTY-backed shell
+  I/O but renders as raw transcript text.
 - Full Spotlight watching/checkpoint sync is not implemented; the current
   Spotlight slice is manual apply/restore.
 - No command palette, shortcut coverage, deep links, polished Big Terminal

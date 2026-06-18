@@ -194,8 +194,10 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
   show latest setup/run log previews.
 - [ ] A short setup/run script that exits naturally changes from running to
   exited and shows its exit code in runtime/process views.
-- [ ] Terminal tab runs a short command, shows stdout/stderr, and reports the
-  exit code without freezing the app.
+- [ ] Terminal tab runs a short one-shot command, shows stdout/stderr, and
+  reports the exit code without freezing the app.
+- [ ] Terminal tab can start a workspace shell, accept typed input after the
+  shell starts, stream output, and stop the shell.
 - [ ] Terminal presets show `CONDUCTOR_*` env, git status, diff, and file list.
 - [ ] With `spotlight_testing = true`, Spotlight On applies tracked workspace
   changes to a clean repository root and Spotlight Off restores the root.
@@ -207,8 +209,8 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
 ## Known GUI MVP Gaps To Keep Visible
 
 - [ ] Embedded Conductor-native agent chat is not implemented.
-- [ ] PTY-backed embedded workspace terminal is not implemented. The current
-  terminal is command-based and captures output/exit codes.
+- [ ] Polished PTY terminal emulation is not implemented. The current terminal
+  has a PTY-backed shell but still renders as raw transcript text.
 - [ ] Full Spotlight parity is not implemented. The current slice manually
   applies/restores tracked changes and does not watch files or create
   checkpoint commits.

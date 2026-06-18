@@ -46,6 +46,8 @@ security/privacy posture.
   suppress expected `kill` fallback noise.
 - Workspace-scoped terminal command execution with captured stdout, stderr, and
   exit code.
+- PTY-backed shell session primitive using `portable-pty`, with input writes
+  and streamed output reads.
 - First Spotlight testing slice: when enabled in repository settings, the app
   can apply a workspace's tracked changes to the repository root and later
   reverse that patch.
@@ -72,6 +74,9 @@ security/privacy posture.
   processes, and lifecycle controls.
 - Workspace page has a basic embedded command terminal and a larger Terminal
   tab with presets for Conductor environment, git status, diff, and file list.
+- Terminal panels can start/stop a PTY-backed workspace shell. Presets and
+  typed commands go through the PTY while a shell is active, with the previous
+  one-shot command path still used when no PTY is running.
 - Runtime panel can start setup/run scripts, stop run scripts, and show latest
   setup/run log tails.
 - Runtime panel can start/stop the first Spotlight testing slice and show the
@@ -86,9 +91,10 @@ The actual GUI-first Conductor MVP is not complete.
 MVP-critical missing work:
 
 - Embedded Conductor-native Claude/Codex/Cursor chat.
-- PTY-backed embedded workspace terminal. Current terminal support runs
-  workspace-scoped commands asynchronously and captures output, but it is not a
-  real interactive PTY.
+- Polished PTY terminal UX. A real PTY-backed workspace shell now exists, but
+  it is still a basic transcript/input surface, not a terminal emulator with
+  cursor control, resize handling, scrollback management, or multiple terminal
+  sessions.
 - Polished Big Terminal Mode. Current Terminal tab is the first full-width
   direction/preset slice.
 - More polished project settings/onboarding layout.
@@ -194,12 +200,17 @@ Verified Phase 3 evidence so far:
 - Core now has a `terminal_command` API that runs arbitrary shell commands from
   the workspace directory with Conductor environment variables and returns
   stdout, stderr, timestamps, and exit code.
+- Core now has a PTY session primitive that starts a shell in a workspace,
+  accepts input after spawn, and streams output back to the app.
 - Core now tracks setup script runs as a separate process kind and can read the
   latest setup log.
 - GTK terminal panels now execute real workspace commands asynchronously instead
   of queuing placeholder text.
+- GTK terminal panels now have Start Shell/Stop Shell controls for a PTY-backed
+  workspace shell.
 - GTK terminal presets expose `CONDUCTOR_*` environment, git status, git diff,
-  and a short file list.
+  and a short file list; when a PTY shell is active, presets are sent into that
+  shell.
 - Workspace tabs now include a full-width Terminal tab as the first Big
   Terminal Mode direction slice.
 - Runtime panel now has Setup, Run, Stop, Open Folder actions plus latest
@@ -213,8 +224,9 @@ Verified Phase 3 evidence so far:
 
 Still needs Phase 4 work:
 
-- True PTY-backed interactive terminal input/output.
-- Long-running terminal process management beyond setup/run process controls.
+- Terminal emulator polish: resize events, cursor/ANSI handling beyond raw text
+  transcript, multiple terminal sessions, persisted terminal history, and
+  stronger long-running PTY process status in the process model.
 - Full Spotlight parity: file watching, checkpoint commits, one-way continuous
   sync, switching active Spotlight workspaces, and stronger root dirty-state
   recovery. Current support is manual apply/restore of tracked changes.

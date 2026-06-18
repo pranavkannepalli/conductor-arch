@@ -114,6 +114,8 @@ MVP is not complete until the normal workflow can be driven from the app.
   completion and store exit codes when available.
 - Workspace-scoped terminal command execution with captured stdout, stderr, and
   exit code.
+- PTY-backed workspace shell primitive with post-spawn input and streamed
+  output.
 - First Spotlight testing slice: apply a workspace's tracked changes to the
   clean repository root when `spotlight_testing = true`, then reverse that patch
   on stop.
@@ -135,8 +137,8 @@ MVP is not complete until the normal workflow can be driven from the app.
 - Workspace detail page with metadata and actions for Shell, Codex, Claude Code,
   Cursor, Setup, Run, Stop, Open Folder, Archive, Restore, and Discard.
 - Workspace tabs for Chats, Changes, Terminal, Checks, Todos, and Processes.
-- Basic embedded command terminal with presets for Conductor env, git status,
-  diff, and file list. This is not a PTY yet.
+- Basic embedded terminal with PTY-backed shell controls plus presets for
+  Conductor env, git status, diff, and file list.
 - Runtime controls for Setup, Run, Stop, and first-slice Spotlight On/Off.
 - History page that reads prior Conductor chats/messages from the macOS
   Conductor database when available.
@@ -150,9 +152,9 @@ MVP is not complete until the normal workflow can be driven from the app.
 - Agent sessions still launch through external terminals or supervised log
   capture. The chat composer is only a staged prompt surface, not a live
   bidirectional agent chat.
-- Embedded terminal support is command-based and non-PTY. It captures output and
-  exit codes for completed commands but does not yet manage interactive
-  long-running terminal sessions.
+- Embedded terminal support now has a PTY-backed shell, but the UI is still a
+  raw transcript/input surface rather than a polished terminal emulator with
+  resize/cursor/scrollback/session management.
 - Spotlight support is manual apply/restore only. It does not yet watch files,
   create checkpoint commits, continuously sync, or switch active workspaces.
 - Projects/workspace creation forms are basic text fields, not polished
@@ -174,7 +176,7 @@ MVP is not complete until the normal workflow can be driven from the app.
 - Diff viewer with inline comments that can be sent back to an agent.
 - Full checks tab with CI/deployment/comment/todo aggregation.
 - PR composer/review/merge workflow in the GUI.
-- PTY-backed embedded terminal panes.
+- Polished PTY-backed embedded terminal panes.
 - Project/repository settings editor.
 - Agent status model comparable to Conductor's live session state.
 - Command palette, shortcut coverage, and deep links.

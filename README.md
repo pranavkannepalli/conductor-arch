@@ -169,10 +169,10 @@ Current GUI capabilities:
 - Workspace page with basic Shell/Codex/Claude/Cursor launch actions,
   setup/run/stop, Spotlight On/Off, open-folder, archive/restore/discard, and
   rough tabs for chats, terminal, changes, checks, todos, and processes.
-- Basic embedded command terminal scoped to the workspace. It runs commands with
-  `CONDUCTOR_*` environment variables, captures stdout/stderr, reports exit
-  codes, and includes presets for env, git status, diff, and file list. This is
-  not a PTY-backed interactive terminal yet.
+- Basic embedded terminal scoped to the workspace. It can run one-shot commands
+  with `CONDUCTOR_*` environment variables and can start a PTY-backed workspace
+  shell that accepts input after launch and streams output. The UI is still raw
+  transcript text, not a polished terminal emulator yet.
 - First-slice Spotlight testing can apply tracked workspace changes to a clean
   repository root when `spotlight_testing = true`, then reverse that patch on
   stop. It is not continuous file watching yet.
@@ -181,7 +181,7 @@ Current GUI capabilities:
 
 Still missing from the real MVP:
 - Embedded Conductor-native agent chat.
-- PTY-backed interactive terminal.
+- Polished PTY terminal emulator behavior.
 - More polished project onboarding and settings layout.
 - Full Spotlight testing parity with file watching/checkpoint sync.
 - Command palette, shortcuts, and deep links.
@@ -490,10 +490,11 @@ Cursor interactive sessions, see
 
 ## Known limits
 
-- **No native agent chat or PTY terminal yet.** The GUI has a basic embedded
-  command terminal for workspace commands, but Claude/Codex/Cursor chat and a
-  true interactive PTY terminal are still MVP work. Background `session start`
-  remains available when you want supervised process records and captured logs.
+- **No native agent chat or polished terminal emulator yet.** The GUI has a
+  PTY-backed workspace shell and one-shot command runner, but Claude/Codex/Cursor
+  chat, resize/cursor/scrollback polish, and multiple terminal sessions are
+  still MVP work. Background `session start` remains available when you want
+  supervised process records and captured logs.
 - **Conductor app controls are incomplete.** Command palette, shortcut coverage,
   deep links, Big Terminal Mode, agent controls, MCP status, checkpoint UI, and
   resumable chat history are still MVP work.

@@ -8,6 +8,7 @@ repository.workspace = true
 [dependencies]
 anyhow = "1"
 globset = "0.4"
+portable-pty = "0.9"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "1"
