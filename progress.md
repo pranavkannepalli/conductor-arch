@@ -88,6 +88,9 @@ MVP-critical missing work:
 - `crates/gtk-app/src/main.rs` now has explicit app state for selected
   workspace, active page/tab, selected session, process attention state, and
   settings layer direction.
+- Active GTK surfaces are split into focused modules for dashboard, sidebar,
+  projects, history, session surface, terminal foundation, state, and refresh
+  events; the old unused prototype shell has been removed.
 - GTK refresh wiring now goes through a small refresh/event hub instead of each
   shell control manually carrying every refresh closure.
 - Workspace detail now has an app-native agent session surface that starts
@@ -113,5 +116,5 @@ Recommended next work:
    surfaces, and visible blockers.
 4. Replace the session/terminal foundations with PTY-backed streaming and
    bidirectional app-native chat/terminal I/O.
-5. Continue splitting GTK page/component code out of `main.rs` as each surface
-   is made product-grade.
+5. Continue extracting the workspace detail helpers as that surface is made
+   product-grade.
