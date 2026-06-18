@@ -169,6 +169,7 @@ Current GUI capabilities:
 - Workspace page with basic Shell/Codex/Claude/Cursor launch actions,
   setup/run/stop, Spotlight On/Off, open-folder, archive/restore/discard, and
   rough tabs for chats, terminal, changes, checks, todos, and processes.
+  Runtime button failures now show both inline status text and app toasts.
 - Basic embedded terminal scoped to the workspace. It can run one-shot commands
   with `CONDUCTOR_*` environment variables and can start a PTY-backed workspace
   shell that accepts input after launch and streams output. Started/stopped

@@ -1,3 +1,4 @@
+use adw::{Toast, ToastOverlay};
 use gtk::prelude::*;
 use gtk::{
     Box as GBox, Button, CheckButton, Entry, Label, Orientation, Paned, PolicyType, ScrolledWindow,
@@ -16,6 +17,7 @@ use crate::{
 pub(crate) fn build_workspace_command_center(
     app_state: &AppState,
     refresh_hub: RefreshHub,
+    toast_overlay: ToastOverlay,
 ) -> (GBox, impl Fn() + Clone + 'static) {
     let root = GBox::new(Orientation::Vertical, 0);
     root.add_css_class("dashboard");
@@ -82,7 +84,13 @@ pub(crate) fn build_workspace_command_center(
 
         let top_grid = GBox::new(Orientation::Horizontal, 14);
         top_grid.append(&agents_panel(&db_path, &ws, refresh_hub.clone()));
-        top_grid.append(&runtime_panel(&db_path, &ws, &store, refresh_hub.clone()));
+        top_grid.append(&runtime_panel(
+            &db_path,
+            &ws,
+            &store,
+            refresh_hub.clone(),
+            toast_overlay.clone(),
+        ));
         body.append(&top_grid);
 
         body.append(&lifecycle_panel(&db_path, &ws, &state, refresh_hub.clone()));
@@ -195,6 +203,7 @@ fn runtime_panel(
     ws: &Workspace,
     store: &WorkspaceStore,
     refresh_hub: RefreshHub,
+    toast_overlay: ToastOverlay,
 ) -> GBox {
     let panel = GBox::new(Orientation::Vertical, 10);
     panel.add_css_class("command-panel");
@@ -246,13 +255,18 @@ fn runtime_panel(
     let db_path_setup = db_path.to_path_buf();
     let refresh_setup = refresh_hub.clone();
     let status_setup = status.clone();
+    let toast_setup = toast_overlay.clone();
     setup_btn.connect_clicked(move |_| {
         status_setup.set_text("Starting setup...");
         match WorkspaceStore::open(db_path_setup.clone())
             .and_then(|store| store.setup_workspace(&setup_workspace))
         {
             Ok(record) => status_setup.set_text(&format!("Setup started: pid {}", record.pid)),
-            Err(err) => status_setup.set_text(&format!("Setup failed: {err:#}")),
+            Err(err) => apply_runtime_action_feedback(
+                &status_setup,
+                &toast_setup,
+                runtime_action_failure_feedback("Setup", &err),
+            ),
         }
         refresh_setup.refresh(RefreshScope::All);
     });
@@ -261,13 +275,18 @@ fn runtime_panel(
     let db_path_run = db_path.to_path_buf();
     let refresh_run = refresh_hub.clone();
     let status_run = status.clone();
+    let toast_run = toast_overlay.clone();
     run_btn.connect_clicked(move |_| {
         status_run.set_text("Starting run...");
         match WorkspaceStore::open(db_path_run.clone())
             .and_then(|store| store.run_workspace(&run_workspace))
         {
             Ok(record) => status_run.set_text(&format!("Run started: pid {}", record.pid)),
-            Err(err) => status_run.set_text(&format!("Run failed: {err:#}")),
+            Err(err) => apply_runtime_action_feedback(
+                &status_run,
+                &toast_run,
+                runtime_action_failure_feedback("Run", &err),
+            ),
         }
         refresh_run.refresh(RefreshScope::All);
     });
@@ -276,13 +295,18 @@ fn runtime_panel(
     let db_path_stop = db_path.to_path_buf();
     let refresh_stop = refresh_hub.clone();
     let status_stop = status.clone();
+    let toast_stop = toast_overlay.clone();
     stop_btn.connect_clicked(move |_| {
         status_stop.set_text("Stopping run...");
         match WorkspaceStore::open(db_path_stop.clone())
             .and_then(|store| store.stop_workspace(&stop_workspace))
         {
             Ok(record) => status_stop.set_text(&format!("Stopped pid {}", record.pid)),
-            Err(err) => status_stop.set_text(&format!("Stop failed: {err:#}")),
+            Err(err) => apply_runtime_action_feedback(
+                &status_stop,
+                &toast_stop,
+                runtime_action_failure_feedback("Stop", &err),
+            ),
         }
         refresh_stop.refresh(RefreshScope::All);
     });
@@ -291,6 +315,7 @@ fn runtime_panel(
     let db_path_spotlight_on = db_path.to_path_buf();
     let refresh_spotlight_on = refresh_hub.clone();
     let status_spotlight_on = status.clone();
+    let toast_spotlight_on = toast_overlay.clone();
     spotlight_on_btn.connect_clicked(move |_| {
         status_spotlight_on.set_text("Starting Spotlight...");
         match WorkspaceStore::open(db_path_spotlight_on.clone())
@@ -298,7 +323,11 @@ fn runtime_panel(
         {
             Ok(session) => status_spotlight_on
                 .set_text(&format!("Spotlight active for {}", session.workspace_name)),
-            Err(err) => status_spotlight_on.set_text(&format!("Spotlight failed: {err:#}")),
+            Err(err) => apply_runtime_action_feedback(
+                &status_spotlight_on,
+                &toast_spotlight_on,
+                runtime_action_failure_feedback("Spotlight", &err),
+            ),
         }
         refresh_spotlight_on.refresh(RefreshScope::All);
     });
@@ -307,6 +336,7 @@ fn runtime_panel(
     let db_path_spotlight_sync = db_path.to_path_buf();
     let refresh_spotlight_sync = refresh_hub.clone();
     let status_spotlight_sync = status.clone();
+    let toast_spotlight_sync = toast_overlay.clone();
     spotlight_sync_btn.connect_clicked(move |_| {
         status_spotlight_sync.set_text("Syncing Spotlight...");
         match WorkspaceStore::open(db_path_spotlight_sync.clone())
@@ -314,7 +344,11 @@ fn runtime_panel(
         {
             Ok(session) => status_spotlight_sync
                 .set_text(&format!("Spotlight synced for {}", session.workspace_name)),
-            Err(err) => status_spotlight_sync.set_text(&format!("Spotlight sync failed: {err:#}")),
+            Err(err) => apply_runtime_action_feedback(
+                &status_spotlight_sync,
+                &toast_spotlight_sync,
+                runtime_action_failure_feedback("Spotlight sync", &err),
+            ),
         }
         refresh_spotlight_sync.refresh(RefreshScope::All);
     });
@@ -323,6 +357,7 @@ fn runtime_panel(
     let db_path_spotlight_repair = db_path.to_path_buf();
     let refresh_spotlight_repair = refresh_hub.clone();
     let status_spotlight_repair = status.clone();
+    let toast_spotlight_repair = toast_overlay.clone();
     spotlight_repair_btn.connect_clicked(move |_| {
         status_spotlight_repair.set_text("Repairing Spotlight root: discarding root-only edits...");
         match WorkspaceStore::open(db_path_spotlight_repair.clone())
@@ -332,9 +367,11 @@ fn runtime_panel(
                 "Spotlight root repaired for {}",
                 session.workspace_name
             )),
-            Err(err) => {
-                status_spotlight_repair.set_text(&format!("Spotlight repair failed: {err:#}"))
-            }
+            Err(err) => apply_runtime_action_feedback(
+                &status_spotlight_repair,
+                &toast_spotlight_repair,
+                runtime_action_failure_feedback("Spotlight repair", &err),
+            ),
         }
         refresh_spotlight_repair.refresh(RefreshScope::All);
     });
@@ -343,6 +380,7 @@ fn runtime_panel(
     let db_path_spotlight_off = db_path.to_path_buf();
     let refresh_spotlight_off = refresh_hub.clone();
     let status_spotlight_off = status.clone();
+    let toast_spotlight_off = toast_overlay;
     spotlight_off_btn.connect_clicked(move |_| {
         status_spotlight_off.set_text("Stopping Spotlight...");
         match WorkspaceStore::open(db_path_spotlight_off.clone())
@@ -350,7 +388,11 @@ fn runtime_panel(
         {
             Ok(session) => status_spotlight_off
                 .set_text(&format!("Spotlight stopped for {}", session.workspace_name)),
-            Err(err) => status_spotlight_off.set_text(&format!("Spotlight stop failed: {err:#}")),
+            Err(err) => apply_runtime_action_feedback(
+                &status_spotlight_off,
+                &toast_spotlight_off,
+                runtime_action_failure_feedback("Spotlight stop", &err),
+            ),
         }
         refresh_spotlight_off.refresh(RefreshScope::All);
     });
@@ -908,4 +950,45 @@ fn exit_code_label(exit_code: Option<i32>) -> String {
     exit_code
         .map(|code| code.to_string())
         .unwrap_or_else(|| "-".to_owned())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeActionFeedback {
+    status_text: String,
+    toast_text: Option<String>,
+}
+
+fn runtime_action_failure_feedback(action: &str, err: &anyhow::Error) -> RuntimeActionFeedback {
+    let text = format!("{action} failed: {err:#}");
+    RuntimeActionFeedback {
+        status_text: text.clone(),
+        toast_text: Some(text),
+    }
+}
+
+fn apply_runtime_action_feedback(
+    status: &Label,
+    toast_overlay: &ToastOverlay,
+    feedback: RuntimeActionFeedback,
+) {
+    status.set_text(&feedback.status_text);
+    if let Some(toast_text) = feedback.toast_text {
+        toast_overlay.add_toast(Toast::new(&toast_text));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_action_failure_feedback_includes_status_and_toast() {
+        let feedback = runtime_action_failure_feedback("Setup", &anyhow::anyhow!("missing setup"));
+
+        assert_eq!(feedback.status_text, "Setup failed: missing setup");
+        assert_eq!(
+            feedback.toast_text.as_deref(),
+            Some("Setup failed: missing setup")
+        );
+    }
 }

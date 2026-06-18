@@ -74,7 +74,11 @@ fn build_ui(app: &Application, initial_workspace: Option<String>) {
     dashboard.set_vexpand(true);
 
     let (workspace_detail, refresh_workspace_detail) =
-        workspace_command_center::build_workspace_command_center(&app_state, refresh_hub.clone());
+        workspace_command_center::build_workspace_command_center(
+            &app_state,
+            refresh_hub.clone(),
+            toast_overlay.clone(),
+        );
     let (projects_page, refresh_projects) = projects::build_projects_page(
         &app_state.paths,
         refresh_dashboard.clone(),

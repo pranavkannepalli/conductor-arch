@@ -251,6 +251,8 @@ Verified Phase 3 evidence so far:
   Terminal Mode direction slice.
 - Runtime panel now has Setup, Run, Stop, Open Folder actions plus latest
   setup/run process and log previews.
+- Runtime panel button failures for Setup, Run, Stop, and Spotlight controls now
+  show both inline status text and app toasts.
 - Process rows and runtime summaries show exit codes after background processes
   exit naturally.
 - Core can start/stop a Spotlight session when `spotlight_testing = true`,
@@ -287,7 +289,8 @@ Still needs Phase 4 work:
   checkpoint/apply/restore/switch/sync plus event-triggered and app-wide polling
   sync of tracked changes, dirty-root refusal before patch reversal, and an
   explicit destructive root repair action.
-- Toasts and richer error/progress state.
+- Toasts and richer error/progress state beyond first-slice Runtime button
+  failure toasts.
 
 ## Next Step
 

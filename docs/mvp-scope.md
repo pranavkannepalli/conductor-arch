@@ -148,6 +148,7 @@ MVP is not complete until the normal workflow can be driven from the app.
 - Processes tab lists embedded terminal shells alongside setup, run, and agent
   session processes.
 - Runtime controls for Setup, Run, Stop, and first-slice Spotlight On/Sync/Off.
+  Runtime button failures surface as inline status text and app toasts.
 - History page that reads prior Conductor chats/messages from the macOS
   Conductor database when available.
 - Imported Conductor repositories/workspaces are visible in the app.
@@ -176,8 +177,9 @@ MVP is not complete until the normal workflow can be driven from the app.
   Spotlight workspace trees.
 - Projects/workspace creation forms are basic text fields, not polished
   Conductor flows.
-- Run/Stop and lifecycle buttons perform actions but need confirmation,
-  progress, error toasts, and automatic targeted refresh.
+- Run/Stop and lifecycle buttons perform actions, and Runtime button failures
+  have first-slice error toasts, but confirmation, richer progress, lifecycle
+  toasts, and automatic targeted refresh still need polish.
 - Changes/Checks/Todos/Processes are basic panels, not full Conductor review
   surfaces.
 - Settings, provider, MCP, command palette, keyboard shortcut, deep-link,

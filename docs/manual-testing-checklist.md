@@ -190,8 +190,9 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
   Todos, and Processes.
 - [ ] Workspace page buttons can launch Shell, Codex, Claude Code, and Cursor
   through the current external-process path.
-- [ ] Setup, Run, and Stop buttons call the current runtime process APIs and
-  show latest setup/run log previews.
+- [ ] Setup, Run, and Stop buttons call the current runtime process APIs, show
+  latest setup/run log previews, and show an app toast when the button action
+  fails.
 - [ ] A short setup/run script that exits naturally changes from running to
   exited and shows its exit code in runtime/process views.
 - [ ] Terminal tab runs a short one-shot command, shows stdout/stderr, and

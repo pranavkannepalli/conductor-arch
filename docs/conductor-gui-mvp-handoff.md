@@ -358,7 +358,8 @@ treated as merge blockers unless the user explicitly clears or overrides them.
   missing or incomplete.
 - MCP/agent-control surfaces are incomplete.
 - Monorepo directory selection and linked-directory flows are missing.
-- Error handling, progress, confirmations, refresh, and toasts are incomplete.
+- Error handling, progress, confirmations, refresh, and toasts are incomplete;
+  Runtime button failures now have first-slice app toasts.
 
 ## What Is Not Built Yet
 

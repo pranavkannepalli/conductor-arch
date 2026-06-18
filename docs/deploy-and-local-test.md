@@ -290,8 +290,9 @@ Manual GUI smoke:
   exited in Processes after the app-wide reconciliation poller runs.
 - Confirm stale terminal process rows from an earlier app crash are marked
   exited during app startup reconciliation.
-- Confirm Setup, Run, and Stop controls call the current runtime APIs and show
-  latest setup/run log previews.
+- Confirm Setup, Run, and Stop controls call the current runtime APIs, show
+  latest setup/run log previews, and show an app toast when the button action
+  fails.
 - With `spotlight_testing = true` and a clean repository root, confirm
   Spotlight On applies tracked workspace changes to the root and Spotlight Off
   restores them.
