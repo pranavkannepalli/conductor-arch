@@ -291,6 +291,8 @@ Manual GUI smoke:
   workspace's root patch and applies the second workspace's tracked changes.
 - Confirm Spotlight Sync refreshes the root patch after tracked workspace edits
   and creates another checkpoint.
+- Confirm root-only edits make Spotlight Off/Sync fail without marking the
+  active session stopped.
 - Confirm Shell, Codex, Claude Code, and Cursor actions use the current
   external-process launch path.
 - Confirm History lists old Conductor chats when the macOS Conductor database is
@@ -303,7 +305,8 @@ Known GUI MVP gaps:
 - No polished terminal emulator yet; the current terminal has PTY-backed shell
   I/O and process records but renders as raw transcript text.
 - Full Spotlight watching/checkpoint sync is not implemented; the current
-  Spotlight slice is manual checkpoint/apply/restore/switch/sync.
+  Spotlight slice is manual checkpoint/apply/restore/switch/sync with
+  dirty-root refusal before patch reversal.
 - No command palette, shortcut coverage, deep links, polished Big Terminal
   Mode, MCP status, checkpoint UI, or resumable session history yet.
 - Project settings can be edited from Projects for shared/local repository

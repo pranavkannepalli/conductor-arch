@@ -340,7 +340,8 @@ treated as merge blockers unless the user explicitly clears or overrides them.
   polished terminal emulator with resize/cursor/scrollback/session management
   yet.
 - Spotlight testing has a first manual checkpoint/apply/restore/switch/sync
-  slice, but not continuous file watching/checkpoint sync.
+  slice with dirty-root refusal before patch reversal, but not continuous file
+  watching/checkpoint sync or automatic root repair.
 - Changes/checks/todos/process panels are basic, not review-grade.
 - GitHub integration is backend/CLI-heavy and not a real GUI workflow.
 - History reads old Conductor DB but is not a first-class app history model.

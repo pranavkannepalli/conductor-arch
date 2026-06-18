@@ -761,6 +761,7 @@ impl WorkspaceStore {
 
         let patch = fs::read_to_string(&active.patch_path)
             .with_context(|| format!("read {}", active.patch_path.display()))?;
+        ensure_root_matches_spotlight_patch(&repository.root_path, &patch)?;
         reverse_git_patch(&repository.root_path, &patch)?;
         let now = timestamp();
         self.conn.execute(
@@ -784,6 +785,7 @@ impl WorkspaceStore {
 
         let old_patch = fs::read_to_string(&active.patch_path)
             .with_context(|| format!("read {}", active.patch_path.display()))?;
+        ensure_root_matches_spotlight_patch(&repository.root_path, &old_patch)?;
         reverse_git_patch(&repository.root_path, &old_patch)?;
         ensure_clean_git_tree(&repository.root_path, "repository root")?;
 
@@ -1326,6 +1328,7 @@ impl WorkspaceStore {
     ) -> Result<SpotlightSession> {
         let patch = fs::read_to_string(&active.patch_path)
             .with_context(|| format!("read {}", active.patch_path.display()))?;
+        ensure_root_matches_spotlight_patch(&repository.root_path, &patch)?;
         reverse_git_patch(&repository.root_path, &patch)?;
         let now = timestamp();
         self.conn.execute(
@@ -2439,6 +2442,24 @@ fn workspace_tracked_patch(workspace: &Workspace) -> Result<String> {
     )?);
     patch.push_str(&git_output_dynamic(&workspace.path, &["diff", "--binary"])?);
     Ok(patch)
+}
+
+fn ensure_root_matches_spotlight_patch(root_path: &Path, expected_patch: &str) -> Result<()> {
+    let index_path =
+        std::env::temp_dir().join(format!("linux-conductor-root-index-{}", timestamp_nanos()));
+    git_with_index(root_path, &index_path, &["read-tree", "HEAD"])?;
+    git_with_index(root_path, &index_path, &["add", "-A"])?;
+    let current_patch = git_with_index_output(
+        root_path,
+        &index_path,
+        &["diff", "--cached", "--binary", "HEAD"],
+    )?;
+    let _ = fs::remove_file(&index_path);
+    anyhow::ensure!(
+        current_patch.trim() == expected_patch.trim(),
+        "repository root has changes outside the active Spotlight patch; clean or save root changes before changing Spotlight state"
+    );
+    Ok(())
 }
 
 fn apply_git_patch(cwd: &Path, patch: &str) -> Result<()> {
@@ -4266,6 +4287,88 @@ spotlight_testing = true
                 ["show", &format!("{}:README.md", checkpoints[0].git_ref)]
             ),
             "second change\n"
+        );
+    }
+
+    #[test]
+    fn spotlight_stop_refuses_when_root_has_extra_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::write(
+            repo_path.join(".conductor/settings.toml"),
+            r#"
+spotlight_testing = true
+"#,
+        )
+        .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", ".conductor/settings.toml"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args([
+                "-c",
+                "user.name=Linux Conductor",
+                "-c",
+                "user.email=linux-conductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "enable spotlight",
+            ])
+            .status()
+            .unwrap();
+
+        let db_path = temp.path().join("state.db");
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        fs::write(workspace.path.join("README.md"), "spotlight change\n").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&workspace.path)
+            .args(["add", "README.md"])
+            .status()
+            .unwrap();
+        let active = store.spotlight_start("berlin").unwrap();
+        fs::write(repo_path.join("root-only.txt"), "root edit\n").unwrap();
+
+        let err = store.spotlight_stop("berlin").unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("repository root has changes outside the active Spotlight patch"));
+        assert_eq!(store.spotlight_status("berlin").unwrap().unwrap(), active);
+        assert_eq!(
+            fs::read_to_string(repo_path.join("README.md")).unwrap(),
+            "spotlight change\n"
+        );
+        assert_eq!(
+            fs::read_to_string(repo_path.join("root-only.txt")).unwrap(),
+            "root edit\n"
         );
     }
 

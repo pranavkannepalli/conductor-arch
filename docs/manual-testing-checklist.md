@@ -208,6 +208,8 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
   root patch and applies the second workspace's tracked changes.
 - [ ] After editing tracked files in the active workspace, Spotlight Sync
   refreshes the root patch and creates another checkpoint.
+- [ ] If the repository root has extra edits outside the active Spotlight patch,
+  Spotlight Off/Sync fails without marking the session stopped.
 - [ ] Archive, Restore, and Discard buttons call the current lifecycle APIs.
 - [ ] History page lists old Conductor chats if the macOS Conductor database is
   available.
@@ -220,7 +222,8 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
   has a PTY-backed shell but still renders as raw transcript text.
 - [ ] Full Spotlight parity is not implemented. The current slice manually
   checkpoints/applies/restores/switches/syncs tracked changes and does not
-  watch files or automatically create checkpoint commits.
+  watch files, automatically create checkpoint commits, or repair root
+  conflicts.
 - [ ] Project settings editor is functional but still needs polish, validation,
   full user/managed layer visibility, and user-only model defaults.
 - [ ] Monorepo directory selection, linked-directory workflows, and MCP status

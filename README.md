@@ -179,8 +179,9 @@ Current GUI capabilities:
   stop. Starting Spotlight creates a checkpoint commit for the tracked workspace
   state, and starting Spotlight for another workspace switches the root checkout
   to that workspace's tracked changes. Spotlight Sync manually refreshes the
-  root checkout from the active workspace. It is not continuous file watching
-  yet.
+  root checkout from the active workspace. Stop/Sync/Switch refuse to proceed
+  when the root has extra edits outside the active Spotlight patch. It is not
+  continuous file watching yet.
 - History page that can read old macOS Conductor chats when
   `~/Library/Application Support/com.conductor.app/conductor.db` exists.
 
@@ -509,8 +510,9 @@ Cursor interactive sessions, see
   changes against a clean repository root and creates a checkpoint when
   Spotlight starts. Starting Spotlight for a different workspace switches the
   root checkout to that workspace's tracked changes, and Spotlight Sync refreshes
-  the active patch manually, but it does not yet watch files or automatically
-  sync new checkpoint commits.
+  the active patch manually. It refuses to reverse the patch when root-only edits
+  are present, but it does not yet watch files, automatically sync new
+  checkpoint commits, or repair root conflicts for you.
 - **Project setup UI is functional but not polished.** The Projects page can
   edit shared/local repository settings and preview `.worktreeinclude`
   precedence, but monorepo directory selection, linked-directory flows, and
