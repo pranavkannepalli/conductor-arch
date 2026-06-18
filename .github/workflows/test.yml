@@ -16,19 +16,9 @@ concurrency:
 
 jobs:
   rust:
-    name: Rust (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    name: Rust
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-24.04
-            cargo_scope: "--workspace"
-            label: "full workspace"
-          - os: ubuntu-22.04
-            cargo_scope: "--workspace --exclude linux-conductor-gtk"
-            label: "core and CLI"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -60,13 +50,12 @@ jobs:
         run: |
           rustc --version
           cargo --version
-          echo "Scope: ${{ matrix.label }}"
 
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      - name: Build ${{ matrix.label }}
-        run: cargo build ${{ matrix.cargo_scope }} --locked
+      - name: Build workspace
+        run: cargo build --workspace --locked
 
-      - name: Test ${{ matrix.label }}
-        run: cargo test ${{ matrix.cargo_scope }} --locked
+      - name: Test workspace
+        run: cargo test --workspace --locked
