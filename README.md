@@ -176,7 +176,8 @@ Current GUI capabilities:
   transcript text, not a polished terminal emulator yet.
 - First-slice Spotlight testing can apply tracked workspace changes to a clean
   repository root when `spotlight_testing = true`, then reverse that patch on
-  stop. It is not continuous file watching yet.
+  stop. Starting Spotlight creates a checkpoint commit for the tracked workspace
+  state. It is not continuous file watching yet.
 - History page that can read old macOS Conductor chats when
   `~/Library/Application Support/com.conductor.app/conductor.db` exists.
 
@@ -366,8 +367,9 @@ dependencies, and fetched secrets usually belong in `scripts.setup` instead.
   script; `linux-conductor run` will refuse to start if another is running
 - Spotlight testing — use when the project must run from the repository root or
   one shared local stack instead of one app process per workspace. Current
-  prototype support manually applies/restores tracked workspace changes; full
-  file watching/checkpoint sync is still MVP work.
+  prototype support creates a start-time checkpoint and manually
+  applies/restores tracked workspace changes; full file watching/checkpoint sync
+  is still MVP work.
 
 ### Environment variables available in scripts
 
@@ -501,8 +503,9 @@ Cursor interactive sessions, see
   deep links, Big Terminal Mode, agent controls, MCP status, checkpoint UI, and
   resumable chat history are still MVP work.
 - **Spotlight is partial.** It can manually apply and restore tracked workspace
-  changes against a clean repository root, but it does not yet watch files,
-  create checkpoint commits, or continuously sync.
+  changes against a clean repository root and creates a checkpoint when
+  Spotlight starts, but it does not yet watch files or continuously sync new
+  checkpoint commits.
 - **Project setup UI is functional but not polished.** The Projects page can
   edit shared/local repository settings and preview `.worktreeinclude`
   precedence, but monorepo directory selection, linked-directory flows, and

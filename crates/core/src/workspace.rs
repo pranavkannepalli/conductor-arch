@@ -714,6 +714,7 @@ impl WorkspaceStore {
             "workspace {name} has no tracked changes to spotlight"
         );
 
+        self.spotlight_checkpoint(&workspace, &patch)?;
         apply_git_patch(&repository.root_path, &patch)?;
         let now = timestamp();
         let patch_path = self
@@ -1269,6 +1270,48 @@ impl WorkspaceStore {
                 row_to_checkpoint,
             )
             .with_context(|| format!("load checkpoint {id}"))
+    }
+
+    fn spotlight_checkpoint(&self, workspace: &Workspace, patch: &str) -> Result<Checkpoint> {
+        let now = timestamp();
+        let git_ref = format!(
+            "refs/linux-conductor/checkpoints/{}/spotlight-{now}",
+            workspace.id
+        );
+        let message = "Spotlight checkpoint";
+        let index_path = self
+            .logs_dir
+            .join(&workspace.name)
+            .join(format!("spotlight-index-{now}"));
+        if let Some(parent) = index_path.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!("create spotlight index directory {}", parent.display())
+            })?;
+        }
+
+        git_with_index(
+            &workspace.path,
+            &index_path,
+            &["read-tree", &workspace.base_ref],
+        )?;
+        git_patch_with_index(
+            &workspace.path,
+            &index_path,
+            &["apply", "--cached", "--binary", "-"],
+            patch,
+        )?;
+        let tree = git_with_index_output(&workspace.path, &index_path, &["write-tree"])?;
+        let head = git_output_dynamic(&workspace.path, &["rev-parse", "HEAD"])?;
+        let commit = git_commit_tree(&workspace.path, tree.trim(), head.trim(), message)?;
+        git_dynamic(&workspace.path, &["update-ref", &git_ref, commit.trim()])?;
+        let _ = fs::remove_file(&index_path);
+
+        self.conn.execute(
+            "INSERT INTO checkpoints (workspace_id, session_id, git_ref, message, created_at)
+             VALUES (?1, NULL, ?2, ?3, ?4)",
+            params![workspace.id, git_ref, message, now],
+        )?;
+        self.get_checkpoint(self.conn.last_insert_rowid())
     }
 
     pub fn branch_push_state(&self, name: &str) -> Result<BranchPushState> {
@@ -2383,6 +2426,102 @@ fn git_patch(cwd: &Path, args: &[&str], patch: &str) -> Result<()> {
         String::from_utf8_lossy(&output.stdout)
     );
     Ok(())
+}
+
+fn git_with_index(cwd: &Path, index_path: &Path, args: &[&str]) -> Result<()> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .env("GIT_INDEX_FILE", index_path)
+        .args(args)
+        .output()
+        .with_context(|| format!("run git with temp index in {}", cwd.display()))?;
+    anyhow::ensure!(
+        output.status.success(),
+        "git command failed in {}: {}\n{}",
+        cwd.display(),
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    Ok(())
+}
+
+fn git_with_index_output(cwd: &Path, index_path: &Path, args: &[&str]) -> Result<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .env("GIT_INDEX_FILE", index_path)
+        .args(args)
+        .output()
+        .with_context(|| format!("run git with temp index in {}", cwd.display()))?;
+    anyhow::ensure!(
+        output.status.success(),
+        "git command failed in {}: {}\n{}",
+        cwd.display(),
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn git_patch_with_index(cwd: &Path, index_path: &Path, args: &[&str], patch: &str) -> Result<()> {
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .env("GIT_INDEX_FILE", index_path)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("run git patch command with temp index in {}", cwd.display()))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        stdin
+            .write_all(patch.as_bytes())
+            .context("write patch to git apply")?;
+    }
+    let output = child
+        .wait_with_output()
+        .with_context(|| format!("wait for git patch command in {}", cwd.display()))?;
+    anyhow::ensure!(
+        output.status.success(),
+        "git patch command failed in {}: {}\n{}",
+        cwd.display(),
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    Ok(())
+}
+
+fn git_commit_tree(cwd: &Path, tree: &str, parent: &str, message: &str) -> Result<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args([
+            "-c",
+            "user.name=Linux Conductor",
+            "-c",
+            "user.email=linux-conductor@example.test",
+            "-c",
+            "commit.gpgsign=false",
+            "commit-tree",
+            tree,
+            "-p",
+            parent,
+            "-m",
+            message,
+        ])
+        .output()
+        .with_context(|| format!("create git checkpoint commit in {}", cwd.display()))?;
+    anyhow::ensure!(
+        output.status.success(),
+        "git commit-tree failed in {}: {}\n{}",
+        cwd.display(),
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 fn command_output(cwd: &Path, program: &str, args: &[&str]) -> Result<String> {
@@ -3839,6 +3978,26 @@ spotlight_testing = true
             "new file\n"
         );
         assert_eq!(store.spotlight_status("berlin").unwrap().unwrap(), active);
+        let checkpoints = store.checkpoint_list("berlin").unwrap();
+        assert_eq!(checkpoints.len(), 1);
+        assert_eq!(checkpoints[0].message, "Spotlight checkpoint");
+        assert_eq!(
+            git_output(
+                &workspace.path,
+                ["show", &format!("{}:README.md", checkpoints[0].git_ref)]
+            ),
+            "spotlight change\n"
+        );
+        assert_eq!(
+            git_output(
+                &workspace.path,
+                [
+                    "show",
+                    &format!("{}:new-tracked.txt", checkpoints[0].git_ref)
+                ]
+            ),
+            "new file\n"
+        );
 
         let stopped = store.spotlight_stop("berlin").unwrap();
 

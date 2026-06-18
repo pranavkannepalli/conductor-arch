@@ -203,6 +203,7 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
 - [ ] Terminal presets show `CONDUCTOR_*` env, git status, diff, and file list.
 - [ ] With `spotlight_testing = true`, Spotlight On applies tracked workspace
   changes to a clean repository root and Spotlight Off restores the root.
+- [ ] Spotlight On creates a checkpoint entry for the tracked workspace state.
 - [ ] Archive, Restore, and Discard buttons call the current lifecycle APIs.
 - [ ] History page lists old Conductor chats if the macOS Conductor database is
   available.
@@ -214,8 +215,8 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
 - [ ] Polished PTY terminal emulation is not implemented. The current terminal
   has a PTY-backed shell but still renders as raw transcript text.
 - [ ] Full Spotlight parity is not implemented. The current slice manually
-  applies/restores tracked changes and does not watch files or create
-  checkpoint commits.
+  applies/restores tracked changes with a start-time checkpoint and does not
+  watch files or continuously create checkpoint commits.
 - [ ] Project settings editor is functional but still needs polish, validation,
   full user/managed layer visibility, and user-only model defaults.
 - [ ] Monorepo directory selection, linked-directory workflows, and MCP status

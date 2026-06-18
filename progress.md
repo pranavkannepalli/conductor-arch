@@ -53,6 +53,8 @@ security/privacy posture.
 - First Spotlight testing slice: when enabled in repository settings, the app
   can apply a workspace's tracked changes to the repository root and later
   reverse that patch.
+- Spotlight start now creates a checkpoint commit for the tracked workspace
+  state before applying it to the repository root.
 - Shell/Codex/Claude/Cursor session launch primitives.
 - Codex and Claude launches honor configured executable paths from repository
   settings.
@@ -227,7 +229,8 @@ Verified Phase 3 evidence so far:
   exit naturally.
 - Core can start/stop a Spotlight session when `spotlight_testing = true`,
   requiring a clean repository root, applying the workspace's tracked patch to
-  the root checkout, recording the patch, and reversing it on stop.
+  the root checkout, recording the patch, creating a workspace checkpoint
+  commit, and reversing the patch on stop.
 - GTK Runtime now exposes Spotlight On/Off controls and active status.
 
 Still needs Phase 4 work:
@@ -235,9 +238,10 @@ Still needs Phase 4 work:
 - Terminal emulator polish: resize events, cursor/ANSI handling beyond raw text
   transcript, multiple terminal sessions, persisted terminal history, and
   stronger automatic reconciliation for PTY processes if the whole app crashes.
-- Full Spotlight parity: file watching, checkpoint commits, one-way continuous
-  sync, switching active Spotlight workspaces, and stronger root dirty-state
-  recovery. Current support is manual apply/restore of tracked changes.
+- Full Spotlight parity: file watching, repeated checkpoint sync after changes,
+  one-way continuous sync, switching active Spotlight workspaces, and stronger
+  root dirty-state recovery. Current support is start-time checkpoint plus
+  manual apply/restore of tracked changes.
 - Toasts and richer error/progress state.
 
 ## Next Step
