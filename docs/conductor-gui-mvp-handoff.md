@@ -324,6 +324,8 @@ treated as merge blockers unless the user explicitly clears or overrides them.
 - Dashboard columns.
 - Projects page can add local repo, clone repo, list projects, and create a
   workspace.
+- Projects page can edit shared/local repository settings and preview
+  `.worktreeinclude` precedence.
 - Workspace page has basic metadata/actions/tabs.
 - History page reads old macOS Conductor chats directly from the Conductor DB.
 - Some workspace actions are wired to core APIs.
@@ -338,12 +340,12 @@ treated as merge blockers unless the user explicitly clears or overrides them.
 - Changes/checks/todos/process panels are basic, not review-grade.
 - GitHub integration is backend/CLI-heavy and not a real GUI workflow.
 - History reads old Conductor DB but is not a first-class app history model.
-- Project settings editor is missing.
+- Project settings editor is functional but still needs Conductor-level polish,
+  validation, and full managed/user layer visibility.
 - Command palette, keyboard shortcut coverage, and deep-link handling are
   missing or incomplete.
-- MCP/provider/agent-control surfaces are incomplete.
-- Spotlight testing, monorepo directory selection, and linked-directory flows
-  are missing.
+- MCP/agent-control surfaces are incomplete.
+- Monorepo directory selection and linked-directory flows are missing.
 - Error handling, progress, confirmations, refresh, and toasts are incomplete.
 
 ## What Is Not Built Yet

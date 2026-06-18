@@ -284,12 +284,14 @@ Known GUI MVP gaps:
 
 - No embedded Conductor-native agent chat yet.
 - No embedded terminal yet.
-- No full project settings editor yet.
 - No command palette, shortcut coverage, deep links, Big Terminal Mode,
-  provider settings, MCP status, checkpoint UI, or resumable session history
-  yet.
-- No Files to copy / `.worktreeinclude` UI, Spotlight testing, settings-layer
-  visibility, monorepo directory selection, or linked-directory workflows yet.
+  MCP status, checkpoint UI, or resumable session history yet.
+- Project settings can be edited from Projects for shared/local repository
+  settings, including Files to copy, `.worktreeinclude` precedence, Spotlight
+  testing, provider executable/provider fields, durable prompts, environment
+  variables, and script settings. Full user/managed settings, richer
+  validation, monorepo directory selection, and linked-directory workflows are
+  still pending.
 - No rich diff/review/comment GUI yet.
 - No full GUI-first GitHub PR/check/merge workflow yet.
 

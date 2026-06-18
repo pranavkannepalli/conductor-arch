@@ -65,10 +65,9 @@ MVP-critical missing work:
 - Embedded Conductor-native Claude/Codex/Cursor chat.
 - Embedded workspace terminal.
 - Big Terminal Mode direction.
-- GUI-first project settings editor.
-- Files to copy / `.worktreeinclude` UI and settings-layer visibility.
-- Spotlight testing.
-- Provider settings and MCP status.
+- More polished project settings/onboarding layout.
+- Monorepo directory selection and linked-directory workflows.
+- MCP status.
 - Agent controls: Plan Mode, Fast Mode, reasoning/effort, Codex personality,
   Codex goals, checkpoints, skills, and tool approvals where supported.
 - Polished repository/workspace creation flows.
@@ -99,6 +98,28 @@ MVP-critical missing work:
 - Workspace detail now has an embedded terminal foundation tab scoped to the
   workspace, ready for PTY-backed execution.
 
+## Phase 2 Project Settings Slice Done
+
+- Core settings now load and save Conductor-compatible repository settings,
+  including scripts, run mode, Spotlight testing, Files to copy, environment
+  variables, durable action prompts, provider executable/provider fields, and
+  Git behavior flags.
+- Core settings inspection now reports shared/local settings presence and
+  `.worktreeinclude` precedence, with `.worktreeinclude` winning over
+  `file_include_globs`.
+- Settings saves validate run mode and environment variable names before
+  writing repository settings.
+- The GTK Projects page now has a repository settings editor for shared
+  `.conductor/settings.toml` and local `.conductor/settings.local.toml`, plus a
+  visible settings-layer and file-copy precedence summary.
+- When `.worktreeinclude` exists, the GUI shows its active patterns as the
+  read-only Files to copy source.
+- Add/clone repository onboarding now shows the default clone location, reports
+  detected base branch and workspace parent after success, and carries the
+  selected repository into workspace creation and settings editing.
+- Repository rows now show default branch metadata, which helps users create
+  workspaces from the correct base.
+
 ## Next Step
 
 Do not continue adding backend-only commands unless they unblock the GUI-first
@@ -108,9 +129,7 @@ Recommended next work:
 
 1. Keep local docs aligned with the official Conductor docs before adding
    better-than-Conductor product ideas.
-2. Build polished project onboarding and repository settings, including setup,
-   run, archive, files-to-copy, `.worktreeinclude`, Spotlight, environment, and
-   layered settings visibility.
+2. Continue polishing project onboarding and settings validation.
 3. Turn the workspace page into the command center: confirmations, progress,
    targeted refresh, richer runtime logs, agent controls, review/check/PR
    surfaces, and visible blockers.

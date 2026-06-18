@@ -160,6 +160,12 @@ Current GUI capabilities:
 - Sidebar workspace search/grouping.
 - Projects page for adding local repos, cloning Git URLs, listing projects, and
   creating workspaces.
+- Projects page includes a repository settings editor for shared/local
+  `.conductor` settings: setup/run/archive scripts, run mode, Spotlight
+  testing, Files to copy, `.worktreeinclude` precedence preview, environment
+  variables, provider executable/provider hints, durable action prompts, and
+  basic Git behavior flags. Saves validate run mode and environment variable
+  names.
 - Workspace page with basic Shell/Codex/Claude/Cursor launch actions, run/stop,
   open-folder, archive/restore/discard, and rough tabs for chats, changes,
   checks, todos, and processes.
@@ -169,12 +175,11 @@ Current GUI capabilities:
 Still missing from the real MVP:
 - Embedded Conductor-native agent chat.
 - Embedded terminal.
-- Full project settings editor.
+- More polished project onboarding and settings layout.
 - Command palette, shortcuts, and deep links.
-- Agent controls, provider settings, MCP status, checkpoints, and resumable
+- Agent controls, MCP status, checkpoints, and resumable
   session history.
-- Files to copy / `.worktreeinclude` UI, Spotlight testing, monorepo directory
-  selection, and linked-directory workflows.
+- Monorepo directory selection and linked-directory workflows.
 - Rich diff/review/comment UI.
 - GUI-first GitHub PR/check/merge workflow.
 - Polished Conductor visual parity.
@@ -482,11 +487,12 @@ Cursor interactive sessions, see
   Background `session start` remains available when you want supervised process
   records and captured logs.
 - **Conductor app controls are incomplete.** Command palette, shortcut coverage,
-  deep links, Big Terminal Mode, agent controls, provider settings, MCP status,
-  checkpoint UI, and resumable chat history are still MVP work.
-- **Project setup UI is incomplete.** Files to copy, `.worktreeinclude`
-  precedence, Spotlight testing, layered settings, durable prompts, monorepo
-  directory selection, and linked-directory flows need GUI support.
+  deep links, Big Terminal Mode, agent controls, MCP status, checkpoint UI, and
+  resumable chat history are still MVP work.
+- **Project setup UI is functional but not polished.** The Projects page can
+  edit shared/local repository settings and preview `.worktreeinclude`
+  precedence, but monorepo directory selection, linked-directory flows, and
+  Conductor-level visual polish remain.
 - **`gh` required for PR operations.** `pr create`, `pr checks`, and `pr merge`
   shell out to the `gh` CLI. Run `gh auth login` before using these commands.
 - **Flatpak is experimental.** The Flatpak build uses `--filesystem=host` for

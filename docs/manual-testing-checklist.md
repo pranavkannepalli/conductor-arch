@@ -81,18 +81,19 @@ They are intentionally stricter than the current prototype smoke path.
   archive after merge.
 - [ ] Failing checks, unresolved comments, open todos, and conflicts can be sent
   to an agent with the relevant context.
-- [ ] Project settings can be viewed and edited from the GUI: setup/run/archive
+- [x] Project settings can be viewed and edited from the GUI: setup/run/archive
   scripts, run mode, environment variables, files to copy/include globs, and
   durable prompts/instructions.
-- [ ] Project settings display the active settings layer and precedence:
-  managed, local project override, repository shared, user shared, built-in
-  defaults.
-- [ ] `.worktreeinclude` takes precedence over Files to copy settings and is
+- [ ] Project settings display the full settings layer precedence: managed,
+  local project override, repository shared, user shared, built-in defaults.
+  The GUI currently edits local/shared repository layers and shows whether each
+  file exists.
+- [x] `.worktreeinclude` takes precedence over Files to copy settings and is
   shown read-only when present.
-- [ ] Shared settings do not encourage committing secrets; local overrides are
+- [x] Shared settings do not encourage committing secrets; local overrides are
   used for machine-specific secrets.
-- [ ] Provider settings, model defaults, and action prompts are discoverable
-  from Settings.
+- [ ] Provider executable/provider fields and action prompts are discoverable
+  from Projects settings. User-only model defaults still need the Settings page.
 - [ ] Todos are editable from the GUI and sync with `.context`.
 - [ ] Open todos, unresolved comments, failed checks, and conflicts block or
   strongly discourage merge until resolved or explicitly overridden.
@@ -184,9 +185,10 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
 
 - [ ] Embedded Conductor-native agent chat is not implemented.
 - [ ] Embedded workspace terminal is not implemented.
-- [ ] Full project settings editor is not implemented.
-- [ ] Files to copy, `.worktreeinclude`, Spotlight testing, settings layers,
-  provider settings, and MCP status are not fully implemented.
+- [ ] Project settings editor is functional but still needs polish, validation,
+  full user/managed layer visibility, and user-only model defaults.
+- [ ] Monorepo directory selection, linked-directory workflows, and MCP status
+  are not fully implemented.
 - [ ] Rich diff viewer with inline comments is not implemented.
 - [ ] GitHub PR/check/merge workflow is not fully available from the GUI.
 - [ ] Command palette, shortcuts, deep links, Big Terminal Mode, monorepo
