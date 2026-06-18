@@ -339,8 +339,8 @@ treated as merge blockers unless the user explicitly clears or overrides them.
 - There is a basic PTY-backed workspace shell with process records, but not a
   polished terminal emulator with resize/cursor/scrollback/session management
   yet.
-- Spotlight testing has a first start-time checkpoint plus manual
-  apply/restore/switch slice, but not continuous file watching/checkpoint sync.
+- Spotlight testing has a first manual checkpoint/apply/restore/switch/sync
+  slice, but not continuous file watching/checkpoint sync.
 - Changes/checks/todos/process panels are basic, not review-grade.
 - GitHub integration is backend/CLI-heavy and not a real GUI workflow.
 - History reads old Conductor DB but is not a first-class app history model.

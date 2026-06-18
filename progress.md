@@ -57,6 +57,8 @@ security/privacy posture.
   state before applying it to the repository root.
 - Spotlight start can switch the active Spotlight workspace by restoring the
   previous workspace patch and applying the newly selected workspace patch.
+- Spotlight sync can manually refresh the active root checkout from the active
+  workspace's latest tracked changes and create another checkpoint.
 - Shell/Codex/Claude/Cursor session launch primitives.
 - Codex and Claude launches honor configured executable paths from repository
   settings.
@@ -87,8 +89,8 @@ security/privacy posture.
   no longer treats embedded PTY shells as invisible runtime state.
 - Runtime panel can start setup/run scripts, stop run scripts, and show latest
   setup/run log tails.
-- Runtime panel can start/stop the first Spotlight testing slice and show the
-  active Spotlight patch/status.
+- Runtime panel can start/sync/stop the first Spotlight testing slice and show
+  the active Spotlight patch/status.
 - History page can read old chats from the macOS Conductor database when
   available.
 
@@ -235,17 +237,16 @@ Verified Phase 3 evidence so far:
   commit, and reversing the patch on stop.
 - Starting Spotlight for a different workspace in the same repository now
   replaces the root checkout state with that workspace's tracked changes.
-- GTK Runtime now exposes Spotlight On/Off controls and active status.
+- GTK Runtime now exposes Spotlight On/Sync/Off controls and active status.
 
 Still needs Phase 4 work:
 
 - Terminal emulator polish: resize events, cursor/ANSI handling beyond raw text
   transcript, multiple terminal sessions, persisted terminal history, and
   stronger automatic reconciliation for PTY processes if the whole app crashes.
-- Full Spotlight parity: file watching, repeated checkpoint sync after changes,
-  one-way continuous sync, and stronger root dirty-state recovery. Current
-  support is start-time checkpoint plus manual apply/restore/switching of
-  tracked changes.
+- Full Spotlight parity: automatic file watching, automatic repeated checkpoint
+  sync after changes, and stronger root dirty-state recovery. Current support
+  is manual checkpoint/apply/restore/switch/sync of tracked changes.
 - Toasts and richer error/progress state.
 
 ## Next Step

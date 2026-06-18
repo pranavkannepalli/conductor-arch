@@ -206,6 +206,7 @@ fn runtime_panel(
     let run_btn = Button::with_label("Run");
     let stop_btn = Button::with_label("Stop");
     let spotlight_on_btn = Button::with_label("Spotlight On");
+    let spotlight_sync_btn = Button::with_label("Spotlight Sync");
     let spotlight_off_btn = Button::with_label("Spotlight Off");
     let folder_btn = Button::with_label("Open Folder");
     let status = Label::new(None);
@@ -274,6 +275,22 @@ fn runtime_panel(
         refresh_spotlight_on.refresh(RefreshScope::All);
     });
 
+    let spotlight_sync_workspace = ws.name.clone();
+    let db_path_spotlight_sync = db_path.to_path_buf();
+    let refresh_spotlight_sync = refresh_hub.clone();
+    let status_spotlight_sync = status.clone();
+    spotlight_sync_btn.connect_clicked(move |_| {
+        status_spotlight_sync.set_text("Syncing Spotlight...");
+        match WorkspaceStore::open(db_path_spotlight_sync.clone())
+            .and_then(|store| store.spotlight_sync(&spotlight_sync_workspace))
+        {
+            Ok(session) => status_spotlight_sync
+                .set_text(&format!("Spotlight synced for {}", session.workspace_name)),
+            Err(err) => status_spotlight_sync.set_text(&format!("Spotlight sync failed: {err:#}")),
+        }
+        refresh_spotlight_sync.refresh(RefreshScope::All);
+    });
+
     let spotlight_stop_workspace = ws.name.clone();
     let db_path_spotlight_off = db_path.to_path_buf();
     let refresh_spotlight_off = refresh_hub.clone();
@@ -299,6 +316,7 @@ fn runtime_panel(
     actions.append(&run_btn);
     actions.append(&stop_btn);
     actions.append(&spotlight_on_btn);
+    actions.append(&spotlight_sync_btn);
     actions.append(&spotlight_off_btn);
     actions.append(&folder_btn);
     panel.append(&actions);

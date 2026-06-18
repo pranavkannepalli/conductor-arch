@@ -206,6 +206,8 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
 - [ ] Spotlight On creates a checkpoint entry for the tracked workspace state.
 - [ ] Starting Spotlight for a second workspace restores the first workspace's
   root patch and applies the second workspace's tracked changes.
+- [ ] After editing tracked files in the active workspace, Spotlight Sync
+  refreshes the root patch and creates another checkpoint.
 - [ ] Archive, Restore, and Discard buttons call the current lifecycle APIs.
 - [ ] History page lists old Conductor chats if the macOS Conductor database is
   available.
@@ -217,8 +219,8 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
 - [ ] Polished PTY terminal emulation is not implemented. The current terminal
   has a PTY-backed shell but still renders as raw transcript text.
 - [ ] Full Spotlight parity is not implemented. The current slice manually
-  applies/restores/switches tracked changes with a start-time checkpoint and
-  does not watch files or continuously create checkpoint commits.
+  checkpoints/applies/restores/switches/syncs tracked changes and does not
+  watch files or automatically create checkpoint commits.
 - [ ] Project settings editor is functional but still needs polish, validation,
   full user/managed layer visibility, and user-only model defaults.
 - [ ] Monorepo directory selection, linked-directory workflows, and MCP status

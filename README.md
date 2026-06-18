@@ -178,7 +178,9 @@ Current GUI capabilities:
   repository root when `spotlight_testing = true`, then reverse that patch on
   stop. Starting Spotlight creates a checkpoint commit for the tracked workspace
   state, and starting Spotlight for another workspace switches the root checkout
-  to that workspace's tracked changes. It is not continuous file watching yet.
+  to that workspace's tracked changes. Spotlight Sync manually refreshes the
+  root checkout from the active workspace. It is not continuous file watching
+  yet.
 - History page that can read old macOS Conductor chats when
   `~/Library/Application Support/com.conductor.app/conductor.db` exists.
 
@@ -368,9 +370,9 @@ dependencies, and fetched secrets usually belong in `scripts.setup` instead.
   script; `linux-conductor run` will refuse to start if another is running
 - Spotlight testing — use when the project must run from the repository root or
   one shared local stack instead of one app process per workspace. Current
-  prototype support creates a start-time checkpoint and manually
-  applies/restores/switches tracked workspace changes; full file
-  watching/checkpoint sync is still MVP work.
+  prototype support manually checkpoints and applies/restores/switches/syncs
+  tracked workspace changes; automatic file watching/checkpoint sync is still
+  MVP work.
 
 ### Environment variables available in scripts
 
@@ -506,8 +508,9 @@ Cursor interactive sessions, see
 - **Spotlight is partial.** It can manually apply and restore tracked workspace
   changes against a clean repository root and creates a checkpoint when
   Spotlight starts. Starting Spotlight for a different workspace switches the
-  root checkout to that workspace's tracked changes, but it does not yet watch
-  files or continuously sync new checkpoint commits.
+  root checkout to that workspace's tracked changes, and Spotlight Sync refreshes
+  the active patch manually, but it does not yet watch files or automatically
+  sync new checkpoint commits.
 - **Project setup UI is functional but not polished.** The Projects page can
   edit shared/local repository settings and preview `.worktreeinclude`
   precedence, but monorepo directory selection, linked-directory flows, and

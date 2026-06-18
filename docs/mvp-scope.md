@@ -121,7 +121,7 @@ MVP is not complete until the normal workflow can be driven from the app.
 - First Spotlight testing slice: apply a workspace's tracked changes to the
   clean repository root when `spotlight_testing = true`, then reverse that patch
   on stop, with a start-time checkpoint commit of the tracked workspace state
-  and switching between active Spotlight workspaces.
+  and manual sync/switching between active Spotlight workspaces.
 - Interactive terminal launch for Shell, Codex, Claude Code, and Cursor.
 - Supervised background sessions with process records and logs.
 - Git diff/status/log helpers.
@@ -144,7 +144,7 @@ MVP is not complete until the normal workflow can be driven from the app.
   Conductor env, git status, diff, and file list.
 - Processes tab lists embedded terminal shells alongside setup, run, and agent
   session processes.
-- Runtime controls for Setup, Run, Stop, and first-slice Spotlight On/Off.
+- Runtime controls for Setup, Run, Stop, and first-slice Spotlight On/Sync/Off.
 - History page that reads prior Conductor chats/messages from the macOS
   Conductor database when available.
 - Imported Conductor repositories/workspaces are visible in the app.
@@ -161,8 +161,8 @@ MVP is not complete until the normal workflow can be driven from the app.
   raw transcript/input surface rather than a polished terminal emulator with
   resize/cursor/scrollback/session management. Terminal process records are
   created and stopped, but app-crash reconciliation is still rough.
-- Spotlight support is start-time checkpoint plus manual apply/restore. It does
-  not yet watch files or continuously sync new checkpoint commits.
+- Spotlight support is manual checkpoint/apply/restore/switch/sync. It does not
+  yet watch files or automatically sync new checkpoint commits.
 - Projects/workspace creation forms are basic text fields, not polished
   Conductor flows.
 - Run/Stop and lifecycle buttons perform actions but need confirmation,
