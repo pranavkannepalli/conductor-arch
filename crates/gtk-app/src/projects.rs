@@ -82,6 +82,17 @@ pub(crate) fn build_projects_page(
     name_entry.set_placeholder_text(Some("workspace name"));
     let branch_entry = Entry::new();
     branch_entry.set_placeholder_text(Some("branch name"));
+    let base_entry = Entry::new();
+    base_entry.set_placeholder_text(Some("base ref, optional"));
+    let source_select = ComboBoxText::new();
+    source_select.append(Some("branch"), "Branch");
+    source_select.append(Some("github_issue"), "GitHub Issue");
+    source_select.append(Some("github_pr"), "GitHub PR");
+    source_select.append(Some("linear_issue"), "Linear Issue");
+    source_select.append(Some("prompt"), "Prompt");
+    source_select.set_active_id(Some("branch"));
+    let source_entry = Entry::new();
+    source_entry.set_placeholder_text(Some("issue/PR id or prompt"));
     let create_btn = Button::with_label("Create Workspace");
     let result = Label::new(None);
     result.add_css_class("card-meta");
@@ -89,6 +100,9 @@ pub(crate) fn build_projects_page(
     create_box.append(&repo_entry);
     create_box.append(&name_entry);
     create_box.append(&branch_entry);
+    create_box.append(&base_entry);
+    create_box.append(&source_select);
+    create_box.append(&source_entry);
     create_box.append(&create_btn);
     body.append(&create_box);
     body.append(&result);
@@ -353,22 +367,108 @@ pub(crate) fn build_projects_page(
     let refresh_after_settings_save = refresh.clone();
     create_btn.connect_clicked(move |_| {
         let repo = repo_entry.text().trim().to_owned();
-        let name = name_entry.text().trim().to_owned();
-        let branch = branch_entry.text().trim().to_owned();
-        if repo.is_empty() || name.is_empty() || branch.is_empty() {
-            result.set_text("Repository, workspace name, and branch are required.");
+        let typed_name = name_entry.text().trim().to_owned();
+        let typed_branch = branch_entry.text().trim().to_owned();
+        let base = optional_entry_text(&base_entry);
+        let source = source_select
+            .active_id()
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "branch".to_owned());
+        let source_value = source_entry.text().trim().to_owned();
+        if repo.is_empty() {
+            result.set_text("Repository is required.");
             return;
         }
-        match WorkspaceStore::open(db_path_create.clone()).and_then(|store| {
-            store.create(CreateWorkspace {
-                repository_name: repo,
-                name,
-                branch,
-                base_ref: None,
-            })
-        }) {
+        result.set_text("Creating workspace...");
+        let create_result =
+            WorkspaceStore::open(db_path_create.clone()).and_then(|store| match source.as_str() {
+                "github_issue" => {
+                    let issue = source_value
+                        .trim_start_matches('#')
+                        .parse::<u64>()
+                        .map_err(|_| anyhow::anyhow!("GitHub issue number is required"))?;
+                    store.create_from_issue(&repo, issue, None)
+                }
+                "github_pr" => {
+                    let pr = source_value
+                        .trim_start_matches('#')
+                        .parse::<u64>()
+                        .map_err(|_| anyhow::anyhow!("GitHub PR number is required"))?;
+                    let name = if typed_name.is_empty() {
+                        format!("pr-{pr}")
+                    } else {
+                        typed_name.clone()
+                    };
+                    let branch = if typed_branch.is_empty() {
+                        format!("pr-{pr}")
+                    } else {
+                        typed_branch.clone()
+                    };
+                    store.create(CreateWorkspace {
+                        repository_name: repo,
+                        name,
+                        branch,
+                        base_ref: base.or_else(|| Some(format!("pull/{pr}/head"))),
+                    })
+                }
+                "linear_issue" => {
+                    let slug = slugify(&source_value);
+                    let name = if typed_name.is_empty() {
+                        slug.clone()
+                    } else {
+                        typed_name.clone()
+                    };
+                    let branch = if typed_branch.is_empty() {
+                        format!("lc/{slug}")
+                    } else {
+                        typed_branch.clone()
+                    };
+                    store.create(CreateWorkspace {
+                        repository_name: repo,
+                        name,
+                        branch,
+                        base_ref: base,
+                    })
+                }
+                "prompt" => {
+                    let slug = slugify(&source_value);
+                    let name = if typed_name.is_empty() {
+                        slug.clone()
+                    } else {
+                        typed_name.clone()
+                    };
+                    let branch = if typed_branch.is_empty() {
+                        format!("lc/{slug}")
+                    } else {
+                        typed_branch.clone()
+                    };
+                    store.create(CreateWorkspace {
+                        repository_name: repo,
+                        name,
+                        branch,
+                        base_ref: base,
+                    })
+                }
+                _ => {
+                    if typed_name.is_empty() || typed_branch.is_empty() {
+                        anyhow::bail!("Workspace name and branch are required for Branch source.");
+                    }
+                    store.create(CreateWorkspace {
+                        repository_name: repo,
+                        name: typed_name.clone(),
+                        branch: typed_branch.clone(),
+                        base_ref: base,
+                    })
+                }
+            });
+        match create_result {
             Ok(workspace) => {
-                result.set_text(&format!("Created {}", workspace.path.display()));
+                result.set_text(&format!(
+                    "Created {} at {} from {}",
+                    workspace.name,
+                    workspace.path.display(),
+                    source
+                ));
                 refresh_after_create();
                 refresh_dashboard();
                 refresh_workspace();
@@ -595,4 +695,27 @@ fn parse_environment_lines(text: &str) -> Vec<(String, String)> {
             (!key.is_empty()).then(|| (key.to_owned(), value.trim().to_owned()))
         })
         .collect()
+}
+
+fn slugify(value: &str) -> String {
+    let slug = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+
+    if slug.is_empty() {
+        "workspace".to_owned()
+    } else {
+        slug
+    }
 }

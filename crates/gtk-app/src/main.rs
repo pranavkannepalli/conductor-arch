@@ -9,6 +9,7 @@ mod session_surface;
 mod sidebar;
 mod state;
 mod terminal;
+mod workspace_command_center;
 
 use adw::prelude::*;
 use adw::{Application, ApplicationWindow, HeaderBar};
@@ -69,7 +70,7 @@ fn build_ui(app: &Application, initial_workspace: Option<String>) {
     dashboard.set_vexpand(true);
 
     let (workspace_detail, refresh_workspace_detail) =
-        build_workspace_detail_page(&app_state, refresh_hub.clone());
+        workspace_command_center::build_workspace_command_center(&app_state, refresh_hub.clone());
     let (projects_page, refresh_projects) = projects::build_projects_page(
         &app_state.paths,
         refresh_dashboard.clone(),
@@ -582,7 +583,7 @@ fn workspace_processes_text(store: &WorkspaceStore, name: &str) -> String {
     out
 }
 
-fn cli_binary() -> PathBuf {
+pub(crate) fn cli_binary() -> PathBuf {
     std::env::current_exe()
         .ok()
         .and_then(|path| path.parent().map(|parent| parent.join("linux-conductor")))
@@ -590,7 +591,7 @@ fn cli_binary() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("linux-conductor"))
 }
 
-fn shell_quote(value: &str) -> String {
+pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
@@ -611,7 +612,7 @@ pub(crate) fn repo_name_from_url(url: &str) -> String {
         .to_owned()
 }
 
-fn spawn_terminal_command(cmd: &str) {
+pub(crate) fn spawn_terminal_command(cmd: &str) {
     let full_cmd = format!("{cmd}; echo; echo '--- Press Enter to close ---'; read");
 
     #[cfg(target_os = "macos")]
@@ -930,6 +931,23 @@ window {
 
 .detail-body {
     padding: 24px 28px;
+}
+
+.command-center-strip {
+    padding: 0;
+}
+
+.command-panel, .metric-card {
+    background-color: #211d1b;
+    border: 1px solid #3a3330;
+    border-radius: 8px;
+    padding: 12px;
+}
+
+.metric-value {
+    color: #f5f0ed;
+    font-size: 16px;
+    font-weight: 700;
 }
 
 .detail-row {

@@ -2,9 +2,10 @@
 
 ## Current State
 
-This project has completed the Phase 0 documentation reset and the first Phase
-1 app architecture cleanup slice for the corrected GUI-first MVP plan. The next
-implementation phase is polished GUI product surfaces.
+This project has completed the Phase 0 documentation reset, Phase 1 app
+architecture cleanup slice, Phase 2 project settings slice, and a Phase 3
+workspace command center slice for the corrected GUI-first MVP plan. The next
+implementation phase is embedded runtime and app-native sessions.
 
 The codebase is being redirected from a CLI-heavy worktree tool into a
 GUI-first Conductor-style desktop app. The CLI and core backend are useful
@@ -50,9 +51,11 @@ security/privacy posture.
 - Sidebar workspace search/grouping.
 - Dashboard columns.
 - Projects page can add local repos, clone Git URLs, list projects, and create
-  workspaces.
-- Workspace page has basic actions and rough tabs for chats, changes, checks,
-  todos, and processes.
+  workspaces from branch/base, GitHub issue, GitHub PR ref, Linear issue slug,
+  or prompt slug.
+- Workspace page has a command center layout with status header, agents panel,
+  runtime panel, changes/checks/review tabs, chat/terminal split, todos,
+  processes, and lifecycle controls.
 - History page can read old chats from the macOS Conductor database when
   available.
 
@@ -63,22 +66,21 @@ The actual GUI-first Conductor MVP is not complete.
 MVP-critical missing work:
 
 - Embedded Conductor-native Claude/Codex/Cursor chat.
-- Embedded workspace terminal.
+- PTY-backed embedded workspace terminal.
 - Big Terminal Mode direction.
 - More polished project settings/onboarding layout.
 - Monorepo directory selection and linked-directory workflows.
 - MCP status.
 - Agent controls: Plan Mode, Fast Mode, reasoning/effort, Codex personality,
   Codex goals, checkpoints, skills, and tool approvals where supported.
-- Polished repository/workspace creation flows.
-- Workspace creation from branch, PR, GitHub issue, Linear issue, and prompt.
+- Fully polished repository/workspace creation flows.
 - Real diff/review/comment surface.
 - GUI-first GitHub PR/check/review/merge flow.
 - Command palette, keyboard shortcuts, and deep links.
 - Monorepo sparse-checkout controls and linked-directory workflows.
 - Agent status model and resumable in-app session history.
 - Unified local history model for archived workspaces and chats.
-- Robust confirmations, progress, error states, refresh, and toasts.
+- Toast-backed progress/error states and deeper per-action refresh polish.
 - Visual parity with Conductor.
 - Release-ready packaging validation.
 
@@ -120,6 +122,23 @@ MVP-critical missing work:
 - Repository rows now show default branch metadata, which helps users create
   workspaces from the correct base.
 
+## Phase 3 Workspace Command Center Slice Done
+
+- Workspace detail now renders through a focused command center module instead
+  of the old inline page.
+- The workspace page shows header/status metrics, agents, runtime, workspace
+  lifecycle controls, work tabs, and a chat/terminal split.
+- Agents panel launches Shell, Codex, Claude, and Cursor sessions through the
+  existing session surface.
+- Runtime panel can run/stop configured workspace scripts, open the workspace
+  folder, and show latest process state.
+- Work tabs separate changes, checks, review comments, todos, and processes.
+- Lifecycle controls support rename, archive, restore, and discard with visible
+  progress text and confirmation gating for destructive archive/discard actions.
+- The Projects page can create workspaces from branch/base, GitHub issue,
+  GitHub PR ref, Linear issue slug, or prompt slug while reusing current core
+  workspace APIs.
+
 ## Next Step
 
 Do not continue adding backend-only commands unless they unblock the GUI-first
@@ -130,10 +149,7 @@ Recommended next work:
 1. Keep local docs aligned with the official Conductor docs before adding
    better-than-Conductor product ideas.
 2. Continue polishing project onboarding and settings validation.
-3. Turn the workspace page into the command center: confirmations, progress,
-   targeted refresh, richer runtime logs, agent controls, review/check/PR
-   surfaces, and visible blockers.
-4. Replace the session/terminal foundations with PTY-backed streaming and
+3. Replace the session/terminal foundations with PTY-backed streaming and
    bidirectional app-native chat/terminal I/O.
-5. Continue extracting the workspace detail helpers as that surface is made
-   product-grade.
+4. Add richer runtime logs, agent controls, PR/check actions, toasts, and
+   visible blockers on top of the command center.
