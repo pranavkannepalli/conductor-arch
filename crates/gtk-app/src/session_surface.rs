@@ -51,8 +51,22 @@ pub fn agent_session_panel(
     let input = Entry::new();
     input.set_placeholder_text(Some("Prompt draft or review context"));
     input.set_hexpand(true);
+    let stage_reviews = Button::with_label("Stage Reviews");
     let queue = Button::with_label("Stage");
     let buffer = transcript.buffer();
+    let review_buffer = transcript.buffer();
+    let review_db_path = database_path.clone();
+    let review_workspace = workspace_name.to_owned();
+    stage_reviews.connect_clicked(move |_| {
+        let text = match WorkspaceStore::open(review_db_path.clone())
+            .and_then(|store| store.review_comments_agent_prompt(&review_workspace))
+        {
+            Ok(prompt) => staged_review_prompt_text(&prompt),
+            Err(err) => format!("\n[review prompt error]\n{err:#}\n"),
+        };
+        let mut end = review_buffer.end_iter();
+        review_buffer.insert(&mut end, &text);
+    });
     let input_clone = input.clone();
     queue.connect_clicked(move |_| {
         let draft = input_clone.text().trim().to_owned();
@@ -64,6 +78,7 @@ pub fn agent_session_panel(
         input_clone.set_text("");
     });
     composer.append(&input);
+    composer.append(&stage_reviews);
     composer.append(&queue);
     root.append(&composer);
 
@@ -76,6 +91,10 @@ pub fn agent_session_panel(
     root.append(&hint);
 
     root
+}
+
+fn staged_review_prompt_text(prompt: &str) -> String {
+    format!("\n[staged review prompt]\n{}\n", prompt.trim())
 }
 
 fn latest_session_text(database_path: &Path, workspace_name: &str) -> String {
@@ -101,4 +120,20 @@ fn latest_session_text(database_path: &Path, workspace_name: &str) -> String {
         record.log_path.display(),
         log
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn staged_review_prompt_text_wraps_review_context() {
+        let text = staged_review_prompt_text(
+            "Address these open review comments for workspace berlin.\n- #1 src/lib.rs: fix it\n",
+        );
+
+        assert!(text.contains("[staged review prompt]"));
+        assert!(text.contains("workspace berlin"));
+        assert!(text.contains("#1 src/lib.rs"));
+    }
 }

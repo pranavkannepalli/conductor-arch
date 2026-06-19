@@ -540,7 +540,8 @@ Cursor interactive sessions, see
   redraws, a full multi-terminal tab model beyond clickable live-shell tabs, a
   polished history/scrollback browser beyond summarized session
   listing/transcript search, and live PTY process reattach after app restart are
-  still MVP work.
+  still MVP work. Open review comments can be staged as an agent prompt, but
+  they are not sent into a live bidirectional chat yet.
   Latest transcript restore is built.
   Background `session start` remains available when you want supervised process
   records and captured logs.

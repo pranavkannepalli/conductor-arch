@@ -1497,6 +1497,15 @@ impl WorkspaceStore {
         Ok(comments)
     }
 
+    pub fn review_comments_agent_prompt(&self, name: &str) -> Result<String> {
+        let comments = self
+            .list_review_comments(name)?
+            .into_iter()
+            .filter(|comment| comment.status == "open")
+            .collect::<Vec<_>>();
+        Ok(format_review_comments_agent_prompt(name, &comments))
+    }
+
     pub fn resolve_review_comment(&self, id: i64) -> Result<ReviewComment> {
         let now = timestamp();
         let changed = self.conn.execute(
@@ -2565,6 +2574,26 @@ fn untracked_file_counts(path: &Path) -> Result<(usize, usize)> {
             + usize::from(!contents.ends_with(b"\n"))
     };
     Ok((additions, contents.len()))
+}
+
+fn format_review_comments_agent_prompt(name: &str, comments: &[ReviewComment]) -> String {
+    let mut prompt = format!("Address these open review comments for workspace {name}.\n");
+    if comments.is_empty() {
+        prompt.push_str("No open review comments.\n");
+        return prompt;
+    }
+    prompt.push_str("Make the smallest safe changes, then run relevant tests.\n\n");
+    for comment in comments {
+        let line = comment
+            .line_number
+            .map(|line| format!(":{line}"))
+            .unwrap_or_default();
+        prompt.push_str(&format!(
+            "- #{} {}{}: {}\n",
+            comment.id, comment.file_path, line, comment.body
+        ));
+    }
+    prompt
 }
 
 fn parse_numstat_count(value: &str) -> Option<Option<usize>> {
@@ -5767,6 +5796,47 @@ spotlight_testing = true
                 },
             ]
         );
+    }
+
+    #[test]
+    fn review_comments_agent_prompt_includes_only_open_comments() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let open = store
+            .add_review_comment("berlin", "src/lib.rs", Some(12), "handle empty input")
+            .unwrap();
+        let resolved = store
+            .add_review_comment("berlin", "README.md", None, "clarify setup")
+            .unwrap();
+        store.resolve_review_comment(resolved.id).unwrap();
+
+        let prompt = store.review_comments_agent_prompt("berlin").unwrap();
+
+        assert!(prompt.contains("Address these open review comments for workspace berlin."));
+        assert!(prompt.contains(&format!("- #{} src/lib.rs:12: handle empty input", open.id)));
+        assert!(!prompt.contains("clarify setup"));
     }
 
     #[test]

@@ -369,6 +369,8 @@ treated as merge blockers unless the user explicitly clears or overrides them.
 - Command palette, keyboard shortcut coverage, and deep-link handling are
   missing or incomplete.
 - MCP/agent-control surfaces are incomplete.
+- Open review comments can be staged into the agent prompt surface, but there is
+  still no live selected-agent send/response loop.
 - Monorepo directory selection and linked-directory flows are missing.
 - Error handling, progress, confirmations, refresh, and toasts are incomplete;
   Runtime and lifecycle button failures now have first-slice app toasts.

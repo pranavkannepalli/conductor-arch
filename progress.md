@@ -306,6 +306,8 @@ Verified Phase 3 evidence so far:
   counts and newest-first ordering.
 - Changes tab now includes a file-level diff summary with additions/deletions
   and untracked-file counts before the raw unified diff.
+- Open review comments can now be converted into an agent-ready staged review
+  prompt from the agent panel; this is not live bidirectional agent chat yet.
 - Process rows and runtime summaries show exit codes after background processes
   exit naturally.
 - Core can start/stop a Spotlight session when `spotlight_testing = true`,

@@ -166,7 +166,8 @@ MVP is not complete until the normal workflow can be driven from the app.
   it is not yet a unified local chat model.
 - Agent sessions still launch through external terminals or supervised log
   capture. The chat composer is only a staged prompt surface, not a live
-  bidirectional agent chat.
+  bidirectional agent chat. Open review comments can be converted into a staged
+  agent prompt from the agent panel.
 - Embedded terminal support now has a PTY-backed shell, but the UI is still a
   transcript/input surface rather than a polished terminal emulator with
   cursor/session management. Terminal process records are created, stopped, and

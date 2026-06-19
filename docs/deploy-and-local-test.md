@@ -358,7 +358,8 @@ Manual GUI smoke:
 
 Known GUI MVP gaps:
 
-- No embedded Conductor-native agent chat yet.
+- No embedded Conductor-native agent chat yet. Open review comments can be
+  staged as an agent prompt, but they are not sent into a live chat.
 - No polished terminal emulator yet; the current terminal has PTY-backed shell
   I/O and process records but renders transcript text with basic ANSI-control
   stripping, carriage-return/backspace/cursor-up/cursor-left/right line redraws,

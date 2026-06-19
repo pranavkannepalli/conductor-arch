@@ -78,7 +78,8 @@ They are intentionally stricter than the current prototype smoke path.
   repository root.
 - [ ] The changes/review view shows changed files with additions/deletions,
   git status, recent commits, and a usable unified or side-by-side diff.
-- [ ] Inline review comments can be added and sent back to a selected agent.
+- [ ] Inline review comments can be added and staged as review context for a
+  selected agent.
 - [ ] GitHub review comments and local comments appear in the review/checks
   flow where possible.
 - [ ] Resolved comments can be marked resolved from the GUI.
