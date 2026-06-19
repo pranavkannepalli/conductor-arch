@@ -799,8 +799,13 @@ impl WorkspaceStore {
             fs::create_dir_all(parent)
                 .with_context(|| format!("create directory {}", parent.display()))?;
         }
-        fs::copy(&source_path, &destination_path)
-            .with_context(|| format!("copy {} to {}", source_path.display(), destination_path.display()))?;
+        fs::copy(&source_path, &destination_path).with_context(|| {
+            format!(
+                "copy {} to {}",
+                source_path.display(),
+                destination_path.display()
+            )
+        })?;
         Ok(())
     }
 
@@ -4666,11 +4671,8 @@ CUSTOM_VALUE = "from-settings"
             "from tokyo\n"
         );
 
-        let traversal_err = store.copy_conflict_file_from_workspace(
-            "berlin",
-            "tokyo",
-            "../outside.txt",
-        );
+        let traversal_err =
+            store.copy_conflict_file_from_workspace("berlin", "tokyo", "../outside.txt");
         assert!(traversal_err.is_err());
     }
 
@@ -5551,7 +5553,10 @@ spotlight_testing = true
             fs::read_to_string(repo_path.join("README.md")).unwrap(),
             "demo\n"
         );
-        assert!(store.spotlight_root_conflict_paths("berlin").unwrap().is_empty());
+        assert!(store
+            .spotlight_root_conflict_paths("berlin")
+            .unwrap()
+            .is_empty());
         assert_eq!(store.checkpoint_list("berlin").unwrap().len(), 2);
     }
 

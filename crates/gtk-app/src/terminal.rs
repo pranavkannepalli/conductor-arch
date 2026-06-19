@@ -1482,7 +1482,7 @@ fn run_terminal_log_search(
     history_browser: ListBox,
     browser_database_path: PathBuf,
     browser_workspace_name: String,
-    jump_history_pages: Rc<RefCell<HashMap<i64, usize>>,
+    jump_history_pages: Rc<RefCell<HashMap<i64, usize>>>,
 ) {
     append_text(
         &buffer,
@@ -2029,7 +2029,7 @@ fn set_terminal_search_results_browser(
     database_path: PathBuf,
     workspace_name: String,
     buffer: TextBuffer,
-    jump_history_pages: Rc<RefCell<HashMap<i64, usize>>,
+    jump_history_pages: Rc<RefCell<HashMap<i64, usize>>>,
 ) {
     while let Some(child) = history_browser.first_child() {
         history_browser.remove(&child);
