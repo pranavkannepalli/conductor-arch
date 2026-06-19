@@ -7,12 +7,13 @@ use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 
 const SIGTERM_EXIT_CODE: i32 = 143;
+const TERMINAL_SEARCH_CONTEXT_LINES: usize = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Workspace {
@@ -722,6 +723,87 @@ impl WorkspaceStore {
         self.get_process(process_id)
     }
 
+    pub fn mark_terminal_process_exited(
+        &self,
+        process_id: i64,
+        exit_code: Option<i32>,
+    ) -> Result<ProcessRecord> {
+        let now = timestamp();
+        self.conn.execute(
+            "UPDATE processes SET status = ?1, ended_at = ?2, exit_code = ?3 WHERE id = ?4",
+            params![ProcessStatus::Exited.as_str(), now, exit_code, process_id,],
+        )?;
+        self.get_process(process_id)
+    }
+
+    pub fn stop_terminal_process(&self, name: &str, process_id: i64) -> Result<ProcessRecord> {
+        let process = self
+            .list_terminals(name)?
+            .into_iter()
+            .find(|terminal| terminal.id == process_id)
+            .with_context(|| {
+                format!("terminal session {process_id} not found for workspace {name}")
+            })?;
+        if process.status != ProcessStatus::Running {
+            return Ok(process);
+        }
+        anyhow::ensure!(
+            process.pid > 0,
+            "terminal process {process_id} has invalid pid"
+        );
+        stop_process(process.pid as u32)?;
+        self.mark_terminal_process_stopped(process.id, Some(SIGTERM_EXIT_CODE))
+    }
+
+    pub fn copy_conflict_file_from_workspace(
+        &self,
+        destination_workspace: &str,
+        source_workspace: &str,
+        relative_path: &str,
+    ) -> Result<()> {
+        let destination = self.get_by_name(destination_workspace)?;
+        let source = self.get_by_name(source_workspace)?;
+        anyhow::ensure!(
+            destination.repository_id == source.repository_id,
+            "workspace {source_workspace} is not in the same repository as {destination_workspace}",
+        );
+
+        let path = Path::new(relative_path);
+        anyhow::ensure!(
+            path.is_relative(),
+            "conflict file path must be relative: {relative_path}",
+        );
+        for component in path.components() {
+            anyhow::ensure!(
+                !matches!(component, Component::ParentDir | Component::CurDir),
+                "conflict file path may not use path traversal: {relative_path}",
+            );
+        }
+
+        let source_path = source.path.join(path);
+        let destination_path = destination.path.join(path);
+        anyhow::ensure!(
+            source_path.exists(),
+            "source workspace {} does not contain {}",
+            source.name,
+            relative_path,
+        );
+        anyhow::ensure!(
+            source_path.is_file(),
+            "{} {} is not a regular file",
+            source_workspace,
+            relative_path,
+        );
+
+        if let Some(parent) = destination_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("create directory {}", parent.display()))?;
+        }
+        fs::copy(&source_path, &destination_path)
+            .with_context(|| format!("copy {} to {}", source_path.display(), destination_path.display()))?;
+        Ok(())
+    }
+
     pub fn append_terminal_process_output(&self, process_id: i64, output: &str) -> Result<()> {
         if output.is_empty() {
             return Ok(());
@@ -750,21 +832,27 @@ impl WorkspaceStore {
         anyhow::ensure!(!query.is_empty(), "terminal log search query is required");
         let needle = query.to_lowercase();
         let mut matches = Vec::new();
-        for process in self.list_terminals(name)? {
+        for (process_index, process) in self.list_terminals(name)?.into_iter().enumerate() {
             let contents = fs::read_to_string(&process.log_path)
                 .with_context(|| format!("read log {}", process.log_path.display()))?;
             let lines = contents.lines().collect::<Vec<_>>();
             for (index, line) in lines.iter().enumerate() {
                 if line.to_lowercase().contains(&needle) {
-                    let context_before = index
-                        .checked_sub(1)
-                        .and_then(|before| lines.get(before))
-                        .map(|line| vec![(*line).to_owned()])
-                        .unwrap_or_default();
-                    let context_after = lines
-                        .get(index + 1)
-                        .map(|line| vec![(*line).to_owned()])
-                        .unwrap_or_default();
+                    let start = index.saturating_sub(TERMINAL_SEARCH_CONTEXT_LINES);
+                    let end = (index + TERMINAL_SEARCH_CONTEXT_LINES + 1).min(lines.len());
+                    let mut context_before = Vec::new();
+                    let mut context_after = Vec::new();
+
+                    for line in &lines[start..index] {
+                        if process_index == 0 {
+                            break;
+                        }
+                        context_before.push((*line).to_owned());
+                    }
+                    for line in &lines[index + 1..end] {
+                        context_after.push((*line).to_owned());
+                    }
+
                     matches.push(TerminalLogMatch {
                         process_id: process.id,
                         command: process.command.clone(),
@@ -863,6 +951,9 @@ impl WorkspaceStore {
         );
         if let Some(active) = self.active_spotlight_for_repository(repository.id)? {
             if active.workspace_id == workspace.id {
+                if let Some(updated) = self.spotlight_sync_if_changed(&workspace.name)? {
+                    return Ok(updated);
+                }
                 return Ok(active);
             }
             self.stop_active_spotlight(&repository, &active)?;
@@ -961,18 +1052,21 @@ impl WorkspaceStore {
 
         let old_patch = fs::read_to_string(&active.patch_path)
             .with_context(|| format!("read {}", active.patch_path.display()))?;
-        ensure_root_matches_spotlight_patch(&repository.root_path, &old_patch)?;
-        reverse_git_patch(&repository.root_path, &old_patch)?;
-        ensure_clean_git_tree(&repository.root_path, "repository root")?;
-
         let patch = workspace_tracked_patch(&workspace)?;
-        anyhow::ensure!(
-            !patch.trim().is_empty(),
-            "workspace {name} has no tracked changes to spotlight"
-        );
+        if patch.trim() == old_patch.trim() {
+            return Ok(active);
+        }
+
+        ensure_root_matches_spotlight_patch(&repository.root_path, &old_patch)?;
+        if !old_patch.trim().is_empty() {
+            reverse_git_patch(&repository.root_path, &old_patch)?;
+            ensure_clean_git_tree(&repository.root_path, "repository root")?;
+        }
+        if !patch.trim().is_empty() {
+            apply_git_patch(&repository.root_path, &patch)?;
+        }
 
         self.spotlight_checkpoint(&workspace, &patch)?;
-        apply_git_patch(&repository.root_path, &patch)?;
         let now = timestamp_nanos();
         let patch_path = self
             .logs_dir
@@ -982,7 +1076,13 @@ impl WorkspaceStore {
             fs::create_dir_all(parent)
                 .with_context(|| format!("create spotlight directory {}", parent.display()))?;
         }
-        fs::write(&patch_path, patch).with_context(|| format!("write {}", patch_path.display()))?;
+        let expected_patch = if patch.trim().is_empty() {
+            String::new()
+        } else {
+            root_tracked_patch(&repository.root_path)?
+        };
+        fs::write(&patch_path, &expected_patch)
+            .with_context(|| format!("write {}", patch_path.display()))?;
         self.conn.execute(
             "UPDATE spotlight_sessions SET patch_path = ?1 WHERE id = ?2",
             params![patch_path.to_string_lossy().to_string(), active.id],
@@ -4365,6 +4465,255 @@ CUSTOM_VALUE = "from-settings"
     }
 
     #[test]
+    fn terminal_process_stop_by_id_marks_stopped() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let running = store
+            .record_terminal_process("berlin", "shell", 999_999)
+            .unwrap();
+
+        let stopped = store.stop_terminal_process("berlin", running.id).unwrap();
+
+        assert_eq!(stopped.id, running.id);
+        assert_eq!(stopped.status, ProcessStatus::Stopped);
+        assert_eq!(stopped.exit_code, Some(SIGTERM_EXIT_CODE));
+        assert!(stopped.ended_at.is_some());
+    }
+
+    #[test]
+    fn terminal_process_stop_by_id_noop_when_already_stopped() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let running = store
+            .record_terminal_process("berlin", "shell", 999_999)
+            .unwrap();
+        store
+            .mark_terminal_process_stopped(running.id, Some(1))
+            .unwrap();
+
+        let stopped = store.stop_terminal_process("berlin", running.id).unwrap();
+
+        assert_eq!(stopped.id, running.id);
+        assert_eq!(stopped.status, ProcessStatus::Stopped);
+        assert_eq!(stopped.exit_code, Some(1));
+        assert!(stopped.ended_at.is_some());
+    }
+
+    #[test]
+    fn terminal_process_stop_by_id_respects_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "tokyo".to_owned(),
+                branch: "lc/tokyo".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let berlin_terminal = store
+            .record_terminal_process("berlin", "shell", 999_999)
+            .unwrap();
+
+        let result = store.stop_terminal_process("tokyo", berlin_terminal.id);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains(&format!(
+            "terminal session {} not found",
+            berlin_terminal.id
+        )));
+    }
+
+    #[test]
+    fn terminal_process_stop_by_id_rejects_invalid_pid() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let invalid_pid_terminal = store.record_terminal_process("berlin", "shell", 0).unwrap();
+
+        let result = store.stop_terminal_process("berlin", invalid_pid_terminal.id);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid pid"));
+    }
+
+    #[test]
+    fn copy_conflict_file_from_workspace_checks_relations_and_path_validation() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "tokyo".to_owned(),
+                branch: "lc/tokyo".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        let berlin = store.get_by_name("berlin").unwrap();
+        fs::write(berlin.path.join("README.md"), "from berlin\n").unwrap();
+
+        let tokyo = store.get_by_name("tokyo").unwrap();
+        fs::write(tokyo.path.join("README.md"), "from tokyo\n").unwrap();
+
+        store
+            .copy_conflict_file_from_workspace("berlin", "tokyo", "README.md")
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(berlin.path.join("README.md")).unwrap(),
+            "from tokyo\n"
+        );
+
+        let traversal_err = store.copy_conflict_file_from_workspace(
+            "berlin",
+            "tokyo",
+            "../outside.txt",
+        );
+        assert!(traversal_err.is_err());
+    }
+
+    #[test]
+    fn terminal_process_marked_as_exited_on_exit_update() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let running = store
+            .record_terminal_process("berlin", "shell", 999_999)
+            .unwrap();
+
+        let exited = store
+            .mark_terminal_process_exited(running.id, Some(42))
+            .unwrap();
+
+        assert_eq!(exited.id, running.id);
+        assert_eq!(exited.status, ProcessStatus::Exited);
+        assert_eq!(exited.exit_code, Some(42));
+        assert!(exited.ended_at.is_some());
+    }
+
+    #[test]
     fn terminal_process_records_use_distinct_log_files() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
@@ -4480,25 +4829,44 @@ CUSTOM_VALUE = "from-settings"
             .record_terminal_process("berlin", "shell", 4243)
             .unwrap();
         store
-            .append_terminal_process_output(first.id, "build ok\nneedle first\n")
+            .append_terminal_process_output(
+                first.id,
+                "alpha\nbuild ok\nneedle first\nafter one\nafter two\n",
+            )
             .unwrap();
         store
-            .append_terminal_process_output(second.id, "NEEDLE second\nno match\n")
+            .append_terminal_process_output(
+                second.id,
+                "before one\nNEEDLE second\nafter one\nafter two\nafter three\n",
+            )
             .unwrap();
 
         let matches = store.search_terminal_logs("berlin", "needle").unwrap();
 
         assert_eq!(matches.len(), 2);
         assert_eq!(matches[0].process_id, second.id);
-        assert_eq!(matches[0].line_number, 1);
+        assert_eq!(matches[0].line_number, 2);
         assert_eq!(matches[0].line, "NEEDLE second");
         assert_eq!(matches[0].context_before, Vec::<String>::new());
-        assert_eq!(matches[0].context_after, vec!["no match".to_owned()]);
+        assert_eq!(
+            matches[0].context_after,
+            vec![
+                "after one".to_owned(),
+                "after two".to_owned(),
+                "after three".to_owned()
+            ]
+        );
         assert_eq!(matches[1].process_id, first.id);
-        assert_eq!(matches[1].line_number, 2);
+        assert_eq!(matches[1].line_number, 3);
         assert_eq!(matches[1].line, "needle first");
-        assert_eq!(matches[1].context_before, vec!["build ok".to_owned()]);
-        assert_eq!(matches[1].context_after, Vec::<String>::new());
+        assert_eq!(
+            matches[1].context_before,
+            vec!["alpha".to_owned(), "build ok".to_owned()]
+        );
+        assert_eq!(
+            matches[1].context_after,
+            vec!["after one".to_owned(), "after two".to_owned()]
+        );
     }
 
     #[test]
@@ -4922,6 +5290,90 @@ spotlight_testing = true
     }
 
     #[test]
+    fn spotlight_start_updates_same_active_workspace_when_tracked_changes_appear() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::write(
+            repo_path.join(".conductor/settings.toml"),
+            r#"
+spotlight_testing = true
+"#,
+        )
+        .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", ".conductor/settings.toml"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args([
+                "-c",
+                "user.name=Linux Conductor",
+                "-c",
+                "user.email=linux-conductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "enable spotlight",
+            ])
+            .status()
+            .unwrap();
+
+        let db_path = temp.path().join("state.db");
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        fs::write(workspace.path.join("README.md"), "first change\n").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&workspace.path)
+            .args(["add", "README.md"])
+            .status()
+            .unwrap();
+        let first = store.spotlight_start("berlin").unwrap();
+
+        let unchanged = store.spotlight_start("berlin").unwrap();
+        assert_eq!(unchanged.id, first.id);
+        assert_eq!(store.checkpoint_list("berlin").unwrap().len(), 1);
+
+        fs::write(workspace.path.join("README.md"), "second change\n").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&workspace.path)
+            .args(["add", "README.md"])
+            .status()
+            .unwrap();
+        let synced = store.spotlight_start("berlin").unwrap();
+
+        assert_eq!(synced.id, first.id);
+        assert_ne!(synced.patch_path, first.patch_path);
+        assert_eq!(store.checkpoint_list("berlin").unwrap().len(), 2);
+    }
+
+    #[test]
     fn spotlight_sync_updates_active_workspace_patch() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
@@ -5017,6 +5469,90 @@ spotlight_testing = true
             ),
             "second change\n"
         );
+    }
+
+    #[test]
+    fn spotlight_sync_updates_root_to_empty_when_workspace_changes_are_removed() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::write(
+            repo_path.join(".conductor/settings.toml"),
+            r#"
+spotlight_testing = true
+"#,
+        )
+        .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", ".conductor/settings.toml"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args([
+                "-c",
+                "user.name=Linux Conductor",
+                "-c",
+                "user.email=linux-conductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "enable spotlight",
+            ])
+            .status()
+            .unwrap();
+
+        let db_path = temp.path().join("state.db");
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        fs::write(workspace.path.join("README.md"), "spotlight change\n").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&workspace.path)
+            .args(["add", "README.md"])
+            .status()
+            .unwrap();
+        let active = store.spotlight_start("berlin").unwrap();
+        assert_eq!(
+            fs::read_to_string(repo_path.join("README.md")).unwrap(),
+            "spotlight change\n"
+        );
+
+        fs::write(workspace.path.join("README.md"), "demo\n").unwrap();
+
+        let synced = store.spotlight_sync("berlin").unwrap();
+
+        assert_eq!(synced.id, active.id);
+        assert_eq!(synced.status, "active");
+        assert_eq!(
+            fs::read_to_string(repo_path.join("README.md")).unwrap(),
+            "demo\n"
+        );
+        assert!(store.spotlight_root_conflict_paths("berlin").unwrap().is_empty());
+        assert_eq!(store.checkpoint_list("berlin").unwrap().len(), 2);
     }
 
     #[test]
