@@ -340,6 +340,10 @@ Manual GUI smoke:
   changes after a short polling delay.
 - Confirm active Spotlight sessions keep auto-syncing after navigating away from
   the workspace page.
+- Confirm Runtime Spotlight status shows `root clean` when the active root
+  matches the active Spotlight patch.
+- Confirm Runtime Spotlight status shows root-only affected paths after adding
+  extra root edits before clicking Spotlight Off/Sync.
 - Confirm root-only edits make Spotlight Off/Sync fail without marking the
   active session stopped and the Runtime status prioritizes root-only affected
   paths with a destructive Repair Spotlight warning.

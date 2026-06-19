@@ -207,7 +207,9 @@ Current GUI capabilities:
   edits outside the active Spotlight patch. Repair Spotlight can explicitly
   discard root-only edits and reapply the active patch, and dirty-root Spotlight
   failures prioritize root-only affected paths and warn that Repair Spotlight
-  discards root-only edits before reapplying the active patch.
+  discards root-only edits before reapplying the active patch. Runtime status
+  also shows whether the active Spotlight root is clean or has extra root edits
+  before the user clicks Stop/Sync.
 - History page that can read old macOS Conductor chats when
   `~/Library/Application Support/com.conductor.app/conductor.db` exists.
 

@@ -939,15 +939,29 @@ fn latest_runtime_line(store: &WorkspaceStore, name: &str) -> String {
 
 fn spotlight_line(store: &WorkspaceStore, name: &str) -> String {
     match store.spotlight_status(name) {
-        Ok(Some(session)) => format!(
-            "{} since {} patch={}",
-            session.status,
-            session.started_at,
-            session.patch_path.display()
-        ),
+        Ok(Some(session)) => {
+            let root_status = match store.spotlight_root_conflict_paths(name) {
+                Ok(paths) => spotlight_root_conflict_status(&paths),
+                Err(err) => format!("root check failed: {err:#}"),
+            };
+            format!(
+                "{} since {} patch={}\n{}",
+                session.status,
+                session.started_at,
+                session.patch_path.display(),
+                root_status
+            )
+        }
         Ok(None) => "Inactive".to_owned(),
         Err(err) => format!("Could not read Spotlight status: {err:#}"),
     }
+}
+
+fn spotlight_root_conflict_status(paths: &[String]) -> String {
+    if paths.is_empty() {
+        return "root clean".to_owned();
+    }
+    format!("root extra edits: {}", paths.join(", "))
 }
 
 fn latest_setup_log_line(store: &WorkspaceStore, name: &str) -> String {
@@ -1104,6 +1118,18 @@ mod tests {
         assert!(feedback.status_text.contains("- root-only.txt"));
         assert!(feedback.status_text.contains("- config/local.env"));
         assert!(feedback.status_text.contains("Repair Spotlight discards"));
+    }
+
+    #[test]
+    fn spotlight_root_conflict_status_summarizes_clean_and_dirty_roots() {
+        assert_eq!(spotlight_root_conflict_status(&[]), "root clean");
+        assert_eq!(
+            spotlight_root_conflict_status(&[
+                "root-only.txt".to_owned(),
+                "config/local.env".to_owned()
+            ]),
+            "root extra edits: root-only.txt, config/local.env"
+        );
     }
 
     #[test]

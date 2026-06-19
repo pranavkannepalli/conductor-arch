@@ -258,6 +258,10 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
   Spotlight workspace eventually auto-syncs the root patch.
 - [ ] After navigating away from the workspace page, active Spotlight sessions
   still auto-sync changed tracked patches through the app-wide poller.
+- [ ] Runtime Spotlight status shows `root clean` when the active root matches
+  the active Spotlight patch.
+- [ ] Runtime Spotlight status shows root-only affected paths after extra root
+  edits exist before clicking Spotlight Off/Sync.
 - [ ] If the repository root has extra edits outside the active Spotlight patch,
   Spotlight Off/Sync fails without marking the session stopped and the Runtime
   status prioritizes root-only affected paths and warns that Repair Spotlight
