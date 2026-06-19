@@ -2,6 +2,7 @@ use crate::settings::load_repository_settings;
 use anyhow::{Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use rusqlite::{params, Connection};
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 #[cfg(unix)]
@@ -2639,11 +2640,36 @@ fn ensure_root_matches_spotlight_patch(root_path: &Path, expected_patch: &str) -
         &["diff", "--cached", "--binary", "HEAD"],
     )?;
     let _ = fs::remove_file(&index_path);
+    let conflict_detail = spotlight_conflict_detail(&current_patch, expected_patch);
     anyhow::ensure!(
         current_patch.trim() == expected_patch.trim(),
-        "repository root has changes outside the active Spotlight patch; clean or save root changes before changing Spotlight state"
+        "repository root has changes outside the active Spotlight patch{conflict_detail}; clean or save root changes before changing Spotlight state"
     );
     Ok(())
+}
+
+fn spotlight_conflict_detail(current_patch: &str, expected_patch: &str) -> String {
+    let mut paths = patch_changed_paths(current_patch);
+    let expected_paths = patch_changed_paths(expected_patch);
+    paths.extend(expected_paths);
+
+    if paths.is_empty() {
+        return String::new();
+    }
+
+    let shown = paths.into_iter().take(6).collect::<Vec<_>>();
+    format!("; changed root paths: {}", shown.join(", "))
+}
+
+fn patch_changed_paths(patch: &str) -> BTreeSet<String> {
+    patch
+        .lines()
+        .filter_map(|line| {
+            let rest = line.strip_prefix("diff --git a/")?;
+            let (_, path) = rest.split_once(" b/")?;
+            Some(path.to_owned())
+        })
+        .collect()
 }
 
 fn apply_git_patch(cwd: &Path, patch: &str) -> Result<()> {
@@ -5060,6 +5086,7 @@ spotlight_testing = true
         assert!(err
             .to_string()
             .contains("repository root has changes outside the active Spotlight patch"));
+        assert!(err.to_string().contains("root-only.txt"));
         assert_eq!(store.spotlight_status("berlin").unwrap().unwrap(), active);
         assert_eq!(
             fs::read_to_string(repo_path.join("README.md")).unwrap(),

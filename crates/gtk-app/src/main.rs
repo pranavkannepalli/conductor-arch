@@ -227,7 +227,7 @@ impl RuntimeReconciliationReport {
 }
 
 fn reconcile_runtime_state(db_path: &Path) -> anyhow::Result<RuntimeReconciliationReport> {
-    let store = WorkspaceStore::open(db_path.to_path_buf())?;
+    let store = WorkspaceStore::open(db_path)?;
     let synced = store.spotlight_sync_active_sessions()?;
     let reconciled = store.reconcile_terminal_processes()?;
     Ok(RuntimeReconciliationReport {
@@ -252,7 +252,7 @@ fn refresh_spotlight_file_watcher(
     event_tx: &Sender<()>,
     current: &Rc<RefCell<Option<SpotlightFileWatcher>>>,
 ) -> anyhow::Result<()> {
-    let store = WorkspaceStore::open(db_path.to_path_buf())?;
+    let store = WorkspaceStore::open(db_path)?;
     let targets = store.spotlight_watch_targets()?;
     let target_keys = targets
         .iter()

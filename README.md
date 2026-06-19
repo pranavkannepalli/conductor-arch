@@ -201,7 +201,8 @@ Current GUI capabilities:
   polling interval. Stop/Sync/Switch refuse to proceed when the root has extra
   edits outside the active Spotlight patch. Repair Spotlight can explicitly
   discard root-only edits and reapply the active patch, and dirty-root Spotlight
-  failures point users to Repair Spotlight or manual clean/save.
+  failures point users to affected root paths, Repair Spotlight, or manual
+  clean/save.
 - History page that can read old macOS Conductor chats when
   `~/Library/Application Support/com.conductor.app/conductor.db` exists.
 
@@ -395,8 +396,9 @@ dependencies, and fetched secrets usually belong in `scripts.setup` instead.
   tracked workspace changes, and the selected workspace page polls for changed
   active patches; the app shell also polls active Spotlight sessions across
   pages. Repair Spotlight can explicitly discard root-only edits and reapply the
-  active patch. The GTK app also watches active Spotlight workspace trees while
-  open and uses file events to trigger sync, with polling as a fallback.
+  active patch, and dirty-root failures can name affected root paths. The GTK
+  app also watches active Spotlight workspace trees while open and uses file
+  events to trigger sync, with polling as a fallback.
 
 ### Environment variables available in scripts
 
@@ -539,9 +541,9 @@ Cursor interactive sessions, see
   the active patch manually. The selected workspace page polls for active patch
   changes and auto-syncs them; the app shell also polls active sessions across
   pages and watches active Spotlight workspace trees while the app is open. It
-  refuses to reverse the patch when root-only edits are present, and Repair
-  Spotlight can explicitly discard those root-only edits and reapply the active
-  patch.
+  refuses to reverse the patch when root-only edits are present, shows affected
+  root paths when Git can identify them, and Repair Spotlight can explicitly
+  discard those root-only edits and reapply the active patch.
 - **Project setup UI is functional but not polished.** The Projects page can
   edit shared/local repository settings and preview `.worktreeinclude`
   precedence, but monorepo directory selection, linked-directory flows, and

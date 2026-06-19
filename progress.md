@@ -278,7 +278,9 @@ Verified Phase 3 evidence so far:
   show both inline status text and app toasts.
 - Spotlight dirty-root Runtime failures now show targeted guidance that points
   to Repair Spotlight or manually cleaning/saving root changes instead of only
-  echoing the raw backend error.
+  echoing the raw backend error. Core dirty-root failures also include the
+  changed root paths when Git can identify them, and GTK shows those affected
+  paths inline.
 - Process rows and runtime summaries show exit codes after background processes
   exit naturally.
 - Core can start/stop a Spotlight session when `spotlight_testing = true`,
@@ -312,12 +314,14 @@ Still needs Phase 4 work:
   search/selected transcript loading, and live PTY process reattach after app
   restart. Latest transcript restore is built, but that is not the same as
   reattaching to the old shell process.
-- Full Spotlight parity: app-open recursive file watching now exists, but there
-  is still no app-closed/background watcher, rich conflict UI beyond targeted
-  dirty-root guidance, or Conductor-level parity around every checkpoint/watch
-  edge case. Current support is manual checkpoint/apply/restore/switch/sync plus
-  event-triggered and app-wide polling sync of tracked changes, dirty-root
-  refusal before patch reversal, and an explicit destructive root repair action.
+- Full Spotlight parity: app-open recursive file watching now exists, and
+  dirty-root conflicts now name affected paths, but there is still no
+  app-closed/background watcher, polished conflict review/merge UI, or
+  Conductor-level parity around every checkpoint/watch edge case. Current
+  support is manual checkpoint/apply/restore/switch/sync plus event-triggered
+  and app-wide polling sync of tracked changes, dirty-root refusal before patch
+  reversal, affected-path conflict details, and an explicit destructive root
+  repair action.
 - Toasts and richer error/progress state beyond Runtime and lifecycle failure
   toasts.
 

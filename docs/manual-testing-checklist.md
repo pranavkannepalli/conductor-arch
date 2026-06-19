@@ -245,7 +245,8 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
   still auto-sync changed tracked patches through the app-wide poller.
 - [ ] If the repository root has extra edits outside the active Spotlight patch,
   Spotlight Off/Sync fails without marking the session stopped and the Runtime
-  status/toast points to Repair Spotlight or manual clean/save.
+  status points to affected root paths while the status/toast points to Repair
+  Spotlight or manual clean/save.
 - [ ] Repair Spotlight explicitly discards root-only edits, reapplies the active
   Spotlight patch, and then Spotlight Off can restore the clean root.
 - [ ] Archive, Restore, and Discard buttons call the current lifecycle APIs and

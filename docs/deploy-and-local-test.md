@@ -326,7 +326,7 @@ Manual GUI smoke:
 - Confirm active Spotlight sessions keep auto-syncing after navigating away from
   the workspace page.
 - Confirm root-only edits make Spotlight Off/Sync fail without marking the
-  active session stopped.
+  active session stopped and the Runtime status names the affected root path.
 - Confirm Repair Spotlight explicitly discards root-only edits, reapplies the
   active Spotlight patch, and then Spotlight Off restores the clean root.
 - Confirm Shell, Codex, Claude Code, and Cursor actions use the current
@@ -348,7 +348,7 @@ Known GUI MVP gaps:
   history/scrollback browser.
 - Full Spotlight parity is not implemented; the current Spotlight slice is
   manual checkpoint/apply/restore/switch/sync with dirty-root refusal before
-  patch reversal, targeted dirty-root guidance, explicit destructive root
+  patch reversal, affected-path dirty-root guidance, explicit destructive root
   repair, app-wide polling sync, and app-open recursive file watching for active
   Spotlight workspace trees.
 - No command palette, shortcut coverage, deep links, polished Big Terminal

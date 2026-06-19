@@ -984,9 +984,12 @@ struct RuntimeActionFeedback {
 
 fn runtime_action_failure_feedback(action: &str, err: &anyhow::Error) -> RuntimeActionFeedback {
     if is_spotlight_dirty_root_error(err) {
+        let detail = spotlight_dirty_root_detail(err)
+            .map(|detail| format!(" Affected paths: {detail}."))
+            .unwrap_or_default();
         return RuntimeActionFeedback {
             status_text: format!(
-                "{action} blocked: repository root has extra edits outside the active Spotlight patch. Use Repair Spotlight to discard root-only edits and reapply the active patch, or clean/save root changes manually."
+                "{action} blocked: repository root has extra edits outside the active Spotlight patch.{detail} Use Repair Spotlight to discard root-only edits and reapply the active patch, or clean/save root changes manually."
             ),
             toast_text: Some(
                 "Spotlight root has extra edits. Use Repair Spotlight or clean/save root changes."
@@ -1004,6 +1007,17 @@ fn runtime_action_failure_feedback(action: &str, err: &anyhow::Error) -> Runtime
 fn is_spotlight_dirty_root_error(err: &anyhow::Error) -> bool {
     err.to_string()
         .contains("repository root has changes outside the active Spotlight patch")
+}
+
+fn spotlight_dirty_root_detail(err: &anyhow::Error) -> Option<String> {
+    let message = err.to_string();
+    let detail = message.split("changed root paths: ").nth(1)?;
+    let detail = detail
+        .split("; clean or save root changes")
+        .next()
+        .unwrap_or(detail)
+        .trim();
+    (!detail.is_empty()).then(|| detail.to_owned())
 }
 
 fn lifecycle_action_failure_feedback(action: &str, err: &anyhow::Error) -> RuntimeActionFeedback {
@@ -1045,12 +1059,13 @@ mod tests {
         let feedback = runtime_action_failure_feedback(
             "Spotlight sync",
             &anyhow::anyhow!(
-                "repository root has changes outside the active Spotlight patch; clean or save root changes before changing Spotlight state"
+                "repository root has changes outside the active Spotlight patch; changed root paths: root-only.txt"
             ),
         );
 
         assert!(feedback.status_text.contains("Spotlight sync blocked"));
         assert!(feedback.status_text.contains("Repair Spotlight"));
+        assert!(feedback.status_text.contains("root-only.txt"));
         assert_eq!(
             feedback.toast_text.as_deref(),
             Some(

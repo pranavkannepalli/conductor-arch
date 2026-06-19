@@ -122,7 +122,8 @@ MVP is not complete until the normal workflow can be driven from the app.
   clean repository root when `spotlight_testing = true`, then reverse that patch
   on stop, with a start-time checkpoint commit of the tracked workspace state
   and manual sync/switching between active Spotlight workspaces. Stop/sync/switch
-  refuse to reverse the active patch when the root has extra edits. The selected
+  refuse to reverse the active patch when the root has extra edits and dirty-root
+  failures include affected root paths when Git can identify them. The selected
   workspace page polls for active patch changes and auto-syncs them; the app
   shell also polls active Spotlight sessions across pages.
 - Interactive terminal launch for Shell, Codex, Claude Code, and Cursor.
@@ -181,8 +182,9 @@ MVP is not complete until the normal workflow can be driven from the app.
   reattach after app restart are still missing.
 - Spotlight support is manual checkpoint/apply/restore/switch/sync with
   dirty-root refusal before patch reversal, explicit destructive root repair,
-  targeted dirty-root guidance in the Runtime panel, app-wide polling sync, and
-  app-open recursive filesystem watching for active Spotlight workspace trees.
+  affected-path dirty-root guidance in the Runtime panel, app-wide polling sync,
+  and app-open recursive filesystem watching for active Spotlight workspace
+  trees.
 - Projects/workspace creation forms are basic text fields, not polished
   Conductor flows.
 - Run/Stop and lifecycle buttons perform actions, and Runtime/lifecycle button
