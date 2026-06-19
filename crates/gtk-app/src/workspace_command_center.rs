@@ -792,6 +792,61 @@ fn workspace_review_panel(
     refresh_hub: RefreshHub,
 ) -> GBox {
     let panel = GBox::new(Orientation::Vertical, 8);
+    let form = GBox::new(Orientation::Horizontal, 8);
+    let file_entry = Entry::new();
+    file_entry.set_placeholder_text(Some("file path"));
+    file_entry.set_hexpand(true);
+    let line_entry = Entry::new();
+    line_entry.set_placeholder_text(Some("line"));
+    let body_entry = Entry::new();
+    body_entry.set_placeholder_text(Some("comment"));
+    body_entry.set_hexpand(true);
+    let add_btn = Button::with_label("Add Comment");
+    let feedback = Label::new(None);
+    feedback.add_css_class("card-meta");
+    feedback.set_xalign(0.0);
+    feedback.set_wrap(true);
+    let db_for_add = db_path.to_path_buf();
+    let workspace_for_add = name.to_owned();
+    let refresh_after_add = refresh_hub.clone();
+    let file_for_add = file_entry.clone();
+    let line_for_add = line_entry.clone();
+    let body_for_add = body_entry.clone();
+    let feedback_for_add = feedback.clone();
+    add_btn.connect_clicked(move |_| {
+        let file = file_for_add.text().trim().to_owned();
+        let body = body_for_add.text().trim().to_owned();
+        if file.is_empty() || body.is_empty() {
+            feedback_for_add.set_text("File and comment are required.");
+            return;
+        }
+        let line = match parse_review_comment_line(line_for_add.text().as_ref()) {
+            Ok(line) => line,
+            Err(err) => {
+                feedback_for_add.set_text(err);
+                return;
+            }
+        };
+        match WorkspaceStore::open(db_for_add.clone())
+            .and_then(|store| store.add_review_comment(&workspace_for_add, &file, line, &body))
+        {
+            Ok(comment) => {
+                feedback_for_add.set_text(&format!("Added review comment #{}", comment.id));
+                file_for_add.set_text("");
+                line_for_add.set_text("");
+                body_for_add.set_text("");
+                refresh_after_add.refresh(RefreshScope::All);
+            }
+            Err(err) => feedback_for_add.set_text(&format!("Could not add comment: {err:#}")),
+        }
+    });
+    form.append(&file_entry);
+    form.append(&line_entry);
+    form.append(&body_entry);
+    form.append(&add_btn);
+    panel.append(&form);
+    panel.append(&feedback);
+
     match store.list_review_comments(name) {
         Ok(comments) if comments.is_empty() => panel.append(&detail_row("Review", "No comments")),
         Ok(comments) => {
@@ -839,6 +894,20 @@ fn review_comment_row_summary(comment: &ReviewComment) -> String {
 
 fn review_comment_can_resolve(comment: &ReviewComment) -> bool {
     comment.status == "open"
+}
+
+fn parse_review_comment_line(value: &str) -> Result<Option<i64>, &'static str> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let line = value
+        .parse::<i64>()
+        .map_err(|_| "line must be a positive number")?;
+    if line <= 0 {
+        return Err("line must be greater than zero");
+    }
+    Ok(Some(line))
 }
 
 fn workspace_todos_panel(store: &WorkspaceStore, name: &str) -> GBox {
@@ -1235,6 +1304,20 @@ mod tests {
 
         assert_eq!(summary, "#7 [open] src/lib.rs:42 - handle empty input");
         assert!(review_comment_can_resolve(&comment));
+    }
+
+    #[test]
+    fn review_comment_line_input_allows_blank_or_positive_numbers() {
+        assert_eq!(parse_review_comment_line(""), Ok(None));
+        assert_eq!(parse_review_comment_line(" 42 "), Ok(Some(42)));
+        assert_eq!(
+            parse_review_comment_line("zero").unwrap_err(),
+            "line must be a positive number"
+        );
+        assert_eq!(
+            parse_review_comment_line("0").unwrap_err(),
+            "line must be greater than zero"
+        );
     }
 
     #[test]

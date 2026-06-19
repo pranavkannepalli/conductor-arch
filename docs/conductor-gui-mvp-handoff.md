@@ -362,7 +362,7 @@ treated as merge blockers unless the user explicitly clears or overrides them.
   destructive root repair, and app-open recursive file watching for active
   Spotlight workspace trees, but it is not full Conductor-level Spotlight parity.
 - Changes/checks/todos/process panels are basic, not review-grade. Local review
-  comments can be marked resolved from the Review tab.
+  comments can be added and marked resolved from the Review tab.
 - GitHub integration is backend/CLI-heavy and not a real GUI workflow.
 - History reads old Conductor DB but is not a first-class app history model.
 - Project settings editor is functional but still needs Conductor-level polish,
