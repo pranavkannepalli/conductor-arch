@@ -170,8 +170,8 @@ MVP is not complete until the normal workflow can be driven from the app.
   shell PID is no longer alive. Active PTY shells are resized from the GTK
   terminal allocation. Each recorded shell gets a distinct log path, and PTY
   command/output chunks are appended to that raw transcript log. The visible
-  transcript strips common ANSI/OSC escape sequences, applies carriage-return
-  and cursor-up progress-line redraws, and caps on-screen scrollback while
+  transcript strips common ANSI/OSC escape sequences, applies carriage-return,
+  cursor-up, and clear-screen/home redraws, and caps on-screen scrollback while
   keeping persisted logs raw. It can search persisted transcript logs, list
   recorded terminal sessions/logs, load a selected past transcript into the
   terminal view, and restore the latest transcript into the terminal view after

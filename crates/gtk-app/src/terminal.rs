@@ -789,6 +789,18 @@ fn terminal_display_text(text: &str) -> String {
                             csi_first_number(&sequence, 1),
                         ));
                     }
+                    Some('H') => {
+                        cursor = Some(move_terminal_display_cursor_to_position(
+                            &rendered,
+                            csi_numbers(&sequence),
+                        ));
+                    }
+                    Some('J') => {
+                        if csi_first_number(&sequence, 0) == 2 {
+                            rendered.clear();
+                            cursor = Some(0);
+                        }
+                    }
                     Some('K') => {
                         clear_terminal_display_line(&mut rendered, cursor);
                     }
@@ -872,6 +884,29 @@ fn csi_first_number(sequence: &str, default: usize) -> usize {
         .and_then(|part| part.parse::<usize>().ok())
         .filter(|number| *number > 0)
         .unwrap_or(default)
+}
+
+fn csi_numbers(sequence: &str) -> Vec<usize> {
+    sequence
+        .split(';')
+        .filter_map(|part| part.parse::<usize>().ok())
+        .collect()
+}
+
+fn move_terminal_display_cursor_to_position(rendered: &[char], numbers: Vec<usize>) -> usize {
+    let row = numbers.first().copied().unwrap_or(1).max(1);
+    let column = numbers.get(1).copied().unwrap_or(1).max(1);
+    let mut start = 0;
+    for _ in 1..row {
+        start = match rendered[start.min(rendered.len())..]
+            .iter()
+            .position(|ch| *ch == '\n')
+        {
+            Some(offset) => start + offset + 1,
+            None => rendered.len(),
+        };
+    }
+    (start + column - 1).min(line_end_after(rendered, start))
 }
 
 fn line_start(rendered: &[char]) -> usize {
@@ -1005,6 +1040,13 @@ mod tests {
         let rendered = terminal_display_text("step 1\nstep 2\n\u{1b}[1A\u{1b}[2Kdone\n");
 
         assert_eq!(rendered, "step 1\ndone\n");
+    }
+
+    #[test]
+    fn terminal_display_text_applies_clear_screen_and_cursor_home() {
+        let rendered = terminal_display_text("old line\n\u{1b}[2J\u{1b}[Hfresh\n");
+
+        assert_eq!(rendered, "fresh\n");
     }
 
     #[test]

@@ -261,6 +261,8 @@ Verified Phase 3 evidence so far:
   the persisted terminal logs raw.
 - GTK terminal display now handles simple cursor-up plus clear-line redraws for
   common progress/status output that rewrites the previous line.
+- GTK terminal display now handles full-screen redraws that clear the visible
+  screen and move the cursor home before writing fresh output.
 - GTK terminal display caps the on-screen scrollback and shows a trim marker
   while preserving complete raw terminal transcript logs on disk.
 - GTK app shell reconciles stale terminal process records once during startup
@@ -307,7 +309,8 @@ Verified Phase 3 evidence so far:
 Still needs Phase 4 work:
 
 - Terminal emulator polish: broader cursor-state/session emulation beyond common
-  escape stripping and carriage-return/cursor-up line redraws, a full
+  escape stripping, carriage-return/cursor-up line redraws, and clear-screen
+  redraws; a full
   multi-terminal tab model beyond clickable live-shell tabs, a polished terminal
   history/scrollback browser beyond basic session listing/transcript
   search/selected transcript loading, and live PTY process reattach after app
