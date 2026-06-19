@@ -4,7 +4,9 @@ use gtk::{
     Box as GBox, Button, CheckButton, ComboBoxText, Entry, Label, Orientation, Paned, PolicyType,
     ScrolledWindow, Stack, StackSwitcher, TextView,
 };
-use linux_conductor_core::workspace::{DiffFileSummary, ReviewComment, Workspace, WorkspaceStore};
+use linux_conductor_core::workspace::{
+    DiffFileSummary, PullRequest, ReviewComment, Workspace, WorkspaceStore,
+};
 use std::path::Path;
 
 use crate::refresh::{RefreshHub, RefreshScope};
@@ -803,6 +805,9 @@ fn workspace_checks_panel(
     body_entry.set_hexpand(true);
     let draft = CheckButton::with_label("Draft");
     let create_btn = Button::with_label("Create PR");
+    let inspect_row = GBox::new(Orientation::Horizontal, 8);
+    let refresh_pr_btn = Button::with_label("Refresh PR State");
+    let view_checks_btn = Button::with_label("View Checks");
     let merge_row = GBox::new(Orientation::Horizontal, 8);
     let merge_method = ComboBoxText::new();
     merge_method.append(Some("squash"), "Squash");
@@ -814,6 +819,11 @@ fn workspace_checks_panel(
     feedback.add_css_class("card-meta");
     feedback.set_xalign(0.0);
     feedback.set_wrap(true);
+    let checks_output = Label::new(None);
+    checks_output.add_css_class("checks-view");
+    checks_output.set_xalign(0.0);
+    checks_output.set_wrap(true);
+    checks_output.set_selectable(true);
 
     let db_for_create = db_path.to_path_buf();
     let workspace_for_create = name.to_owned();
@@ -837,6 +847,29 @@ fn workspace_checks_panel(
         refresh_after_create.refresh(RefreshScope::All);
     });
 
+    let db_for_refresh = db_path.to_path_buf();
+    let workspace_for_refresh = name.to_owned();
+    let refresh_after_pr_refresh = refresh_hub.clone();
+    let feedback_for_refresh = feedback.clone();
+    refresh_pr_btn.connect_clicked(move |_| {
+        let result = WorkspaceStore::open(db_for_refresh.clone())
+            .and_then(|store| store.refresh_pull_request_state(&workspace_for_refresh));
+        feedback_for_refresh.set_text(&pull_request_refresh_feedback(result));
+        refresh_after_pr_refresh.refresh(RefreshScope::All);
+    });
+
+    let db_for_checks = db_path.to_path_buf();
+    let workspace_for_checks = name.to_owned();
+    let checks_output_for_checks = checks_output.clone();
+    let feedback_for_checks = feedback.clone();
+    view_checks_btn.connect_clicked(move |_| {
+        let result = WorkspaceStore::open(db_for_checks.clone())
+            .and_then(|store| store.pull_request_checks(&workspace_for_checks));
+        let text = pull_request_checks_feedback(result);
+        feedback_for_checks.set_text("Checks output updated.");
+        checks_output_for_checks.set_text(&text);
+    });
+
     let db_for_merge = db_path.to_path_buf();
     let workspace_for_merge = name.to_owned();
     let refresh_after_merge = refresh_hub;
@@ -858,10 +891,14 @@ fn workspace_checks_panel(
     pr_form.append(&draft);
     pr_form.append(&create_btn);
     panel.append(&pr_form);
+    inspect_row.append(&refresh_pr_btn);
+    inspect_row.append(&view_checks_btn);
+    panel.append(&inspect_row);
     merge_row.append(&merge_method);
     merge_row.append(&merge_btn);
     panel.append(&merge_row);
     panel.append(&feedback);
+    panel.append(&checks_output);
     panel
 }
 
@@ -892,6 +929,28 @@ fn pull_request_merge_feedback(result: anyhow::Result<String>) -> String {
             .map(|line| format!("Merged PR: {line}"))
             .unwrap_or_else(|| "Merged PR.".to_owned()),
         Err(err) => format!("Merge PR failed: {err:#}"),
+    }
+}
+
+fn pull_request_refresh_feedback(result: anyhow::Result<Option<PullRequest>>) -> String {
+    match result {
+        Ok(Some(pr)) => format!("PR #{} state: {}", pr.number, pr.state),
+        Ok(None) => "No PR recorded for this workspace.".to_owned(),
+        Err(err) => format!("Refresh PR failed: {err:#}"),
+    }
+}
+
+fn pull_request_checks_feedback(result: anyhow::Result<String>) -> String {
+    match result {
+        Ok(output) => {
+            let output = output.trim();
+            if output.is_empty() {
+                "PR checks returned no output.".to_owned()
+            } else {
+                format!("PR checks:\n{output}")
+            }
+        }
+        Err(err) => format!("View checks failed: {err:#}"),
     }
 }
 
@@ -1463,6 +1522,45 @@ mod tests {
             failure,
             "Merge PR failed: 2 open todo(s) remain in workspace berlin"
         );
+    }
+
+    #[test]
+    fn pull_request_refresh_feedback_summarizes_state() {
+        let success =
+            pull_request_refresh_feedback(Ok(Some(linux_conductor_core::workspace::PullRequest {
+                id: 1,
+                workspace_id: 2,
+                provider: "github".to_owned(),
+                number: 42,
+                url: "https://github.com/example/demo/pull/42".to_owned(),
+                state: "MERGED".to_owned(),
+                created_at: "now".to_owned(),
+                updated_at: "now".to_owned(),
+            })));
+        assert_eq!(success, "PR #42 state: MERGED");
+
+        let missing = pull_request_refresh_feedback(Ok(None));
+        assert_eq!(missing, "No PR recorded for this workspace.");
+
+        let failure = pull_request_refresh_feedback(Err(anyhow::anyhow!("gh auth required")));
+        assert_eq!(failure, "Refresh PR failed: gh auth required");
+    }
+
+    #[test]
+    fn pull_request_checks_feedback_keeps_raw_check_output() {
+        let success = pull_request_checks_feedback(Ok(
+            "build\tpass\t1m\thttps://github.com/example/demo/actions/runs/1\n".to_owned(),
+        ));
+        assert_eq!(
+            success,
+            "PR checks:\nbuild\tpass\t1m\thttps://github.com/example/demo/actions/runs/1"
+        );
+
+        let empty = pull_request_checks_feedback(Ok(String::new()));
+        assert_eq!(empty, "PR checks returned no output.");
+
+        let failure = pull_request_checks_feedback(Err(anyhow::anyhow!("no pull requests found")));
+        assert_eq!(failure, "View checks failed: no pull requests found");
     }
 
     #[test]

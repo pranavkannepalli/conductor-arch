@@ -363,8 +363,9 @@ treated as merge blockers unless the user explicitly clears or overrides them.
   Spotlight workspace trees, but it is not full Conductor-level Spotlight parity.
 - Changes/checks/todos/process panels are basic, not review-grade. Local review
   comments can be added and marked resolved from the Review tab.
-- GitHub integration is still backend/CLI-heavy; GTK can create and merge a PR
-  through the Checks tab, but review/check/archive workflow is not complete.
+- GitHub integration is still backend/CLI-heavy; GTK can create, refresh,
+  inspect raw checks, and merge a PR through the Checks tab, but review,
+  aggregated checks, and archive workflow are not complete.
 - History reads old Conductor DB but is not a first-class app history model.
 - Project settings editor is functional but still needs Conductor-level polish,
   validation, and full managed/user layer visibility.
@@ -521,8 +522,7 @@ Correct interpretation:
 
 ### Phase 7: GitHub Workflow
 
-- GUI PR create/merge first slice.
-- GUI PR view/checks.
+- GUI PR create/view/raw-checks/merge first slice.
 - Show CI failures.
 - Show PR comments/review state.
 - Let user ask agents to fix failing checks or review comments.

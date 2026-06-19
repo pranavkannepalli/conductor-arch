@@ -189,8 +189,8 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
 - [ ] Workspace page opens when selecting a workspace.
 - [ ] Workspace page shows metadata and rough tabs for Chats, Changes, Checks,
   Todos, and Processes.
-- [ ] Checks tab exposes first-slice PR controls: create with title/body/draft
-  and merge with squash/merge/rebase methods.
+- [ ] Checks tab exposes first-slice PR controls: create with title/body/draft,
+  refresh PR state, view raw checks, and merge with squash/merge/rebase methods.
 - [ ] Workspace page buttons can launch Shell, Codex, Claude Code, and Cursor
   through the current external-process path.
 - [ ] Setup, Run, and Stop buttons call the current runtime process APIs, show

@@ -215,7 +215,7 @@ MVP is not complete until the normal workflow can be driven from the app.
 - Live GitHub/Linear workspace creation verification with real credentials.
 - Diff viewer with inline comments that can be sent back to an agent.
 - Full checks tab with CI/deployment/comment/todo aggregation.
-- PR review/check workflow in the GUI beyond first-slice create/merge controls.
+- PR review/check workflow in the GUI beyond first-slice PR controls.
 - Polished PTY-backed embedded terminal panes.
 - Project/repository settings editor.
 - Agent status model comparable to Conductor's live session state.
