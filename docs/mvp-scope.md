@@ -146,6 +146,8 @@ MVP is not complete until the normal workflow can be driven from the app.
 - Workspace detail page with metadata and actions for Shell, Codex, Claude Code,
   Cursor, Setup, Run, Stop, Open Folder, Archive, Restore, and Discard.
 - Workspace tabs for Chats, Changes, Terminal, Checks, Todos, and Processes.
+- Changes tab shows recent commits, git status, a file-level additions/deletions
+  summary including untracked files, and the raw unified diff.
 - Basic embedded terminal with PTY-backed shell controls plus presets for
   Conductor env, git status, diff, and file list.
 - Processes tab lists embedded terminal shells alongside setup, run, and agent

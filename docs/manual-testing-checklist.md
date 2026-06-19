@@ -76,8 +76,8 @@ They are intentionally stricter than the current prototype smoke path.
   honored.
 - [ ] Spotlight testing is configurable for projects that must run from the
   repository root.
-- [ ] The changes/review view shows changed files, git status, recent commits,
-  and a usable unified or side-by-side diff.
+- [ ] The changes/review view shows changed files with additions/deletions,
+  git status, recent commits, and a usable unified or side-by-side diff.
 - [ ] Inline review comments can be added and sent back to a selected agent.
 - [ ] GitHub review comments and local comments appear in the review/checks
   flow where possible.

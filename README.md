@@ -195,6 +195,8 @@ Current GUI capabilities:
   saved-cursor restore plus erase-line and clear-screen/home redraws. The
   on-screen scrollback is capped while raw transcript logs stay complete, but
   this is not a polished terminal emulator yet.
+- Changes tab includes recent commits, git status, a file-level diff summary
+  with additions/deletions including untracked files, and the raw unified diff.
 - First-slice Spotlight testing can apply tracked workspace changes to a clean
   repository root when `spotlight_testing = true`, then reverse that patch on
   stop. Starting Spotlight creates a checkpoint commit for the tracked workspace
@@ -222,7 +224,8 @@ Still missing from the real MVP:
 - Command palette, shortcuts, and deep links.
 - Agent controls, MCP status, checkpoints, and resumable session history.
 - Monorepo directory selection and linked-directory workflows.
-- Rich diff/review/comment UI.
+- Rich diff/review/comment UI beyond the current file summary plus raw unified
+  diff.
 - GUI-first GitHub PR/check/merge workflow.
 - Polished Conductor visual parity.
 

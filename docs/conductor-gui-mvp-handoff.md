@@ -218,7 +218,7 @@ and commands still run on the user's machine with the user's permissions.
 
 ### 6. Git And Review
 
-- Show changed files.
+- Show changed files with file-level additions/deletions summaries.
 - Show git status.
 - Show recent commits.
 - Show unified diff.

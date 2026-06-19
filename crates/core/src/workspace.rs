@@ -153,6 +153,13 @@ pub struct TerminalSessionSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffFileSummary {
+    pub path: String,
+    pub additions: Option<usize>,
+    pub deletions: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpotlightSession {
     pub id: i64,
     pub repository_id: i64,
@@ -1088,6 +1095,33 @@ impl WorkspaceStore {
             return git_output_dynamic(&workspace.path, &["diff", "--", path_value.as_str()]);
         }
         git_output(&workspace.path, ["diff", "--"])
+    }
+
+    pub fn diff_file_summaries(&self, name: &str) -> Result<Vec<DiffFileSummary>> {
+        let workspace = self.get_by_name(name)?;
+        let output = git_output(&workspace.path, ["diff", "--numstat", "--"])?;
+        let mut summaries = parse_diff_numstat(&output);
+        let known_paths = summaries
+            .iter()
+            .map(|summary| summary.path.clone())
+            .collect::<BTreeSet<_>>();
+        let status = git_output(
+            &workspace.path,
+            ["status", "--porcelain", "--untracked-files=all"],
+        )?;
+        for path in parse_untracked_status_paths(&status) {
+            if known_paths.contains(&path) || is_conductor_context_path(&path) {
+                continue;
+            }
+            let counts = untracked_file_counts(&workspace.path.join(&path))?;
+            summaries.push(DiffFileSummary {
+                path,
+                additions: Some(counts.0),
+                deletions: Some(0),
+            });
+        }
+        summaries.sort_by(|left, right| left.path.cmp(&right.path));
+        Ok(summaries)
     }
 
     pub fn push_branch(&self, name: &str) -> Result<String> {
@@ -2489,6 +2523,55 @@ fn terminal_log_preview(contents: &str) -> String {
             (!trimmed.is_empty()).then(|| trimmed.to_owned())
         })
         .unwrap_or_else(|| "(empty transcript)".to_owned())
+}
+
+fn parse_diff_numstat(output: &str) -> Vec<DiffFileSummary> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.splitn(3, '\t');
+            let additions = parse_numstat_count(parts.next()?)?;
+            let deletions = parse_numstat_count(parts.next()?)?;
+            let path = parts.next()?.to_owned();
+            Some(DiffFileSummary {
+                path,
+                additions,
+                deletions,
+            })
+        })
+        .collect()
+}
+
+fn parse_untracked_status_paths(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter_map(|line| line.strip_prefix("?? "))
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn is_conductor_context_path(path: &str) -> bool {
+    path == ".context" || path.starts_with(".context/")
+}
+
+fn untracked_file_counts(path: &Path) -> Result<(usize, usize)> {
+    let contents = fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    let additions = if contents.is_empty() {
+        0
+    } else {
+        contents.iter().filter(|byte| **byte == b'\n').count()
+            + usize::from(!contents.ends_with(b"\n"))
+    };
+    Ok((additions, contents.len()))
+}
+
+fn parse_numstat_count(value: &str) -> Option<Option<usize>> {
+    if value == "-" {
+        return Some(None);
+    }
+    value.parse::<usize>().ok().map(Some)
 }
 
 fn slugify(text: &str) -> String {
@@ -5636,6 +5719,54 @@ spotlight_testing = true
         assert!(changed.contains(&"notes.txt".to_owned()));
         assert!(diff.contains("diff --git a/README.md b/README.md"));
         assert!(diff.contains("+changed"));
+    }
+
+    #[test]
+    fn diff_file_summaries_include_additions_and_deletions() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        fs::write(workspace.path.join("README.md"), "demo\nchanged\n").unwrap();
+        fs::write(workspace.path.join("notes.txt"), "new\n").unwrap();
+
+        let summaries = store.diff_file_summaries("berlin").unwrap();
+
+        assert_eq!(
+            summaries,
+            vec![
+                DiffFileSummary {
+                    path: "README.md".to_owned(),
+                    additions: Some(1),
+                    deletions: Some(0),
+                },
+                DiffFileSummary {
+                    path: "notes.txt".to_owned(),
+                    additions: Some(1),
+                    deletions: Some(0),
+                },
+            ]
+        );
     }
 
     #[test]

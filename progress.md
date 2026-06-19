@@ -304,6 +304,8 @@ Verified Phase 3 evidence so far:
 - Terminal history now uses core-provided session summaries so Show History
   includes line counts, byte counts, and last-output previews alongside status
   counts and newest-first ordering.
+- Changes tab now includes a file-level diff summary with additions/deletions
+  and untracked-file counts before the raw unified diff.
 - Process rows and runtime summaries show exit codes after background processes
   exit naturally.
 - Core can start/stop a Spotlight session when `spotlight_testing = true`,

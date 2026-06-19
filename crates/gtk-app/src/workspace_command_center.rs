@@ -4,7 +4,7 @@ use gtk::{
     Box as GBox, Button, CheckButton, Entry, Label, Orientation, Paned, PolicyType, ScrolledWindow,
     Stack, StackSwitcher, TextView,
 };
-use linux_conductor_core::workspace::{Workspace, WorkspaceStore};
+use linux_conductor_core::workspace::{DiffFileSummary, Workspace, WorkspaceStore};
 use std::path::Path;
 
 use crate::refresh::{RefreshHub, RefreshScope};
@@ -699,12 +699,35 @@ fn workspace_changes_text(store: &WorkspaceStore, name: &str) -> String {
             .git_status_short(name)
             .unwrap_or_else(|err| format!("Could not read status: {err:#}\n")),
     );
+    out.push_str("\n\n");
+    match store.diff_file_summaries(name) {
+        Ok(summaries) => out.push_str(&format_diff_file_summary(&summaries)),
+        Err(err) => out.push_str(&format!(
+            "Files changed\nCould not read diff summary: {err:#}\n"
+        )),
+    }
     out.push_str("\n\nDiff\n");
     out.push_str(
         &store
             .unified_diff(name, None)
             .unwrap_or_else(|err| format!("Could not read diff: {err:#}\n")),
     );
+    out
+}
+
+fn format_diff_file_summary(summaries: &[DiffFileSummary]) -> String {
+    let mut out = "Files changed\n".to_owned();
+    if summaries.is_empty() {
+        out.push_str("No unstaged file changes.\n");
+        return out;
+    }
+    for summary in summaries {
+        let counts = match (summary.additions, summary.deletions) {
+            (Some(additions), Some(deletions)) => format!("+{additions} -{deletions}"),
+            _ => "binary".to_owned(),
+        };
+        out.push_str(&format!("{} {}\n", summary.path, counts));
+    }
     out
 }
 
@@ -1130,6 +1153,28 @@ mod tests {
             ]),
             "root extra edits: root-only.txt, config/local.env"
         );
+    }
+
+    #[test]
+    fn diff_file_summary_renders_review_scan_rows() {
+        let summaries = vec![
+            linux_conductor_core::workspace::DiffFileSummary {
+                path: "README.md".to_owned(),
+                additions: Some(2),
+                deletions: Some(1),
+            },
+            linux_conductor_core::workspace::DiffFileSummary {
+                path: "assets/logo.png".to_owned(),
+                additions: None,
+                deletions: None,
+            },
+        ];
+
+        let rendered = format_diff_file_summary(&summaries);
+
+        assert!(rendered.contains("Files changed"));
+        assert!(rendered.contains("README.md +2 -1"));
+        assert!(rendered.contains("assets/logo.png binary"));
     }
 
     #[test]
