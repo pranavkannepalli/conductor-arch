@@ -184,9 +184,10 @@ Current GUI capabilities:
   gets its own log path, and PTY command/output chunks are appended to that raw
   transcript log. The terminal panel can search persisted terminal transcript
   logs and append matching process/line results, list recorded terminal
-  sessions/logs with status counts newest first, load a selected past transcript
-  into the terminal view, and restore the latest transcript into the terminal
-  view after app restart.
+  sessions/logs with status counts newest first, keep the transcript selector in
+  the same newest-first order, load a selected past transcript into the terminal
+  view, and restore the latest transcript into the terminal view after app
+  restart.
   Active PTY shells are resized from the GTK terminal allocation.
   The visible transcript strips common ANSI control sequences and applies
   carriage-return, cursor-up, and clear-screen/home redraws. The on-screen

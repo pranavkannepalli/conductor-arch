@@ -257,6 +257,8 @@ Verified Phase 3 evidence so far:
   terminal sessions, status, pid, exit code, log file, start time, and command.
 - GTK terminal history now shows session counts by status and sorts listed
   sessions newest first.
+- GTK terminal history selector now uses the same newest-first ordering as the
+  displayed history list, so Load Transcript defaults to the newest session.
 - GTK terminal history now fills a session selector and can load the selected
   persisted transcript into the terminal view.
 - Core can read the latest terminal transcript, and GTK terminal panels restore

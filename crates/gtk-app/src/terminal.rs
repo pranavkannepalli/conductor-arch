@@ -499,18 +499,19 @@ fn run_terminal_history(
 
     glib::timeout_add_local(Duration::from_millis(100), move || match rx.try_recv() {
         Ok(Ok(records)) => {
+            let display_records = terminal_history_records_for_display(&records);
             history_combo.remove_all();
-            for record in &records {
+            for record in &display_records {
                 history_combo.append(
                     Some(&record.id.to_string()),
                     &terminal_history_option_label(record),
                 );
             }
-            if !records.is_empty() {
+            if !display_records.is_empty() {
                 history_combo.set_active(Some(0));
             }
-            *history_records.borrow_mut() = records.clone();
-            append_text(&buffer, &format_terminal_history(&records));
+            *history_records.borrow_mut() = display_records.clone();
+            append_text(&buffer, &format_terminal_history(&display_records));
             glib::ControlFlow::Break
         }
         Ok(Err(err)) => {
@@ -609,8 +610,7 @@ fn format_terminal_history(records: &[ProcessRecord]) -> String {
         exited
     ));
 
-    let mut sorted_records = records.to_vec();
-    sorted_records.sort_by(|left, right| right.started_at.cmp(&left.started_at));
+    let sorted_records = terminal_history_records_for_display(records);
 
     for record in &sorted_records {
         let file_name = record
@@ -630,6 +630,12 @@ fn format_terminal_history(records: &[ProcessRecord]) -> String {
         ));
     }
     text
+}
+
+fn terminal_history_records_for_display(records: &[ProcessRecord]) -> Vec<ProcessRecord> {
+    let mut sorted_records = records.to_vec();
+    sorted_records.sort_by(|left, right| right.started_at.cmp(&left.started_at));
+    sorted_records
 }
 
 fn terminal_history_option_label(record: &ProcessRecord) -> String {
@@ -1185,6 +1191,43 @@ mod tests {
         let bash = rendered.find("#7 exited").unwrap();
         assert!(zsh < fish);
         assert!(fish < bash);
+    }
+
+    #[test]
+    fn terminal_history_records_for_display_are_newest_first() {
+        let records = vec![
+            ProcessRecord {
+                id: 7,
+                workspace_id: 1,
+                kind: ProcessKind::Terminal,
+                command: "/bin/bash".to_owned(),
+                pid: 4242,
+                log_path: PathBuf::from("/tmp/logs/terminal-4242.log"),
+                status: ProcessStatus::Exited,
+                started_at: "2026-06-18T02:00:00Z".to_owned(),
+                exit_code: Some(0),
+                ended_at: Some("2026-06-18T02:05:00Z".to_owned()),
+            },
+            ProcessRecord {
+                id: 9,
+                workspace_id: 1,
+                kind: ProcessKind::Terminal,
+                command: "/bin/zsh".to_owned(),
+                pid: 5252,
+                log_path: PathBuf::from("/tmp/logs/terminal-5252.log"),
+                status: ProcessStatus::Running,
+                started_at: "2026-06-18T03:00:00Z".to_owned(),
+                exit_code: None,
+                ended_at: None,
+            },
+        ];
+
+        let sorted = terminal_history_records_for_display(&records);
+
+        assert_eq!(
+            sorted.iter().map(|record| record.id).collect::<Vec<_>>(),
+            vec![9, 7]
+        );
     }
 
     #[test]

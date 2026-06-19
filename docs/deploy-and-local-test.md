@@ -295,6 +295,8 @@ Manual GUI smoke:
   pid, exit code, log file, start time, and command.
 - Confirm Terminal Show History displays running/stopped/exited counts and
   orders terminal sessions newest first.
+- Confirm the Load Transcript selector uses the same newest-first ordering as
+  the rendered history list.
 - Confirm selecting a recorded terminal session and clicking Load Transcript
   replaces the terminal view with that session's persisted transcript.
 - Restart the GTK app after terminal output exists and confirm the terminal view
