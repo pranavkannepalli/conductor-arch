@@ -190,7 +190,7 @@ Current GUI capabilities:
   restart.
   Active PTY shells are resized from the GTK terminal allocation.
   The visible transcript strips common ANSI control sequences and applies
-  carriage-return, cursor-up, cursor-left/right overwrite, and
+  carriage-return, backspace, cursor-up, cursor-left/right overwrite, and
   saved-cursor restore plus erase-line and clear-screen/home redraws. The
   on-screen scrollback is capped while raw transcript logs stay complete, but
   this is not a polished terminal emulator yet.

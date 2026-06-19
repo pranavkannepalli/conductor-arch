@@ -226,6 +226,8 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
   text in the GTK transcript instead of raw escape codes.
 - [ ] Terminal commands that redraw progress with carriage returns show the
   latest progress line instead of raw `\r` artifacts.
+- [ ] Terminal commands that redraw a spinner with backspaces show the latest
+  spinner character instead of raw backspace artifacts.
 - [ ] Terminal commands that redraw one line using cursor-up plus clear-line
   sequences show the latest line instead of stale duplicate lines.
 - [ ] Terminal commands that save and restore the cursor position overwrite at
@@ -273,9 +275,9 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
 - [ ] Embedded Conductor-native agent chat is not implemented.
 - [ ] Polished PTY terminal emulation is not implemented. The current terminal
   has a PTY-backed shell but still renders as transcript text with basic
-  ANSI-control stripping, carriage-return/cursor-up/cursor-left/right line
-  redraws, saved-cursor restore, erase-line redraws, clear-screen/home redraws,
-  and resize propagation; stale process rows reconcile at startup and while the
+  ANSI-control stripping, carriage-return/backspace/cursor-up/cursor-left/right
+  line redraws, saved-cursor restore, erase-line redraws, clear-screen/home
+  redraws, and resize propagation; stale process rows reconcile at startup and while the
   app is open, and shell records get distinct searchable raw transcript logs with
   capped on-screen scrollback, latest-transcript restore, and clickable
   live-shell tabs, but this is not a full emulator/live PTY reattach model, full

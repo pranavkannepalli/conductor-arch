@@ -172,7 +172,7 @@ MVP is not complete until the normal workflow can be driven from the app.
   terminal allocation. Each recorded shell gets a distinct log path, and PTY
   command/output chunks are appended to that raw transcript log. The visible
   transcript strips common ANSI/OSC escape sequences, applies carriage-return,
-  cursor-up, cursor-left/right overwrite, saved-cursor restore, and
+  backspace, cursor-up, cursor-left/right overwrite, saved-cursor restore, and
   erase-line plus clear-screen/home redraws, and caps on-screen scrollback while
   keeping persisted logs raw. It can search persisted transcript logs, list
   recorded terminal sessions/logs with status counts newest first, keep the

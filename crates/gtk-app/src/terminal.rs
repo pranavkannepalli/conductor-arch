@@ -804,6 +804,14 @@ fn terminal_display_text(text: &str) -> String {
             cursor = Some(line_start(&rendered));
             continue;
         }
+        if ch == '\u{8}' {
+            cursor = Some(move_terminal_display_cursor_left(
+                &rendered,
+                cursor.unwrap_or(rendered.len()),
+                1,
+            ));
+            continue;
+        }
         if ch == '\n' {
             if let Some(position) = cursor {
                 if rendered.get(position) == Some(&'\n') {
@@ -1174,6 +1182,13 @@ mod tests {
         let rendered = terminal_display_text("abcd\u{1b}[2DXY\u{1b}[1CZ\n");
 
         assert_eq!(rendered, "abXYZ\n");
+    }
+
+    #[test]
+    fn terminal_display_text_applies_backspace_overwrites() {
+        let rendered = terminal_display_text("spinner -\u{8}\\\u{8}|\n");
+
+        assert_eq!(rendered, "spinner |\n");
     }
 
     #[test]

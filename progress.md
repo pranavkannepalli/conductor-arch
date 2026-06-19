@@ -266,6 +266,8 @@ Verified Phase 3 evidence so far:
 - GTK terminal display now strips common ANSI/OSC escape sequences and applies
   carriage-return progress-line updates in the visible transcript while keeping
   the persisted terminal logs raw.
+- GTK terminal display now handles backspace redraws for spinner-style terminal
+  output that rewrites the previous character.
 - GTK terminal display now handles simple cursor-up plus clear-line redraws for
   common progress/status output that rewrites the previous line.
 - GTK terminal display now handles cursor-left/right inline overwrites for
@@ -323,9 +325,9 @@ Verified Phase 3 evidence so far:
 Still needs Phase 4 work:
 
 - Terminal emulator polish: broader cursor-state/session emulation beyond the
-  current escape stripping, carriage-return/cursor-up/cursor-left/right line
-  redraws, saved-cursor restore, erase-line redraws, and clear-screen redraws; a
-  full
+  current escape stripping, carriage-return/backspace/cursor-up/cursor-left/right
+  line redraws, saved-cursor restore, erase-line redraws, and clear-screen
+  redraws; a full
   multi-terminal tab model beyond clickable live-shell tabs, a polished terminal
   history/scrollback browser beyond basic session listing/transcript
   search/selected transcript loading, and live PTY process reattach after app

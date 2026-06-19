@@ -305,6 +305,8 @@ Manual GUI smoke:
   text in the GTK transcript instead of raw escape codes.
 - Confirm a command that redraws progress with carriage returns shows the latest
   progress line instead of raw `\r` artifacts.
+- Confirm a command that redraws a spinner with backspaces shows the latest
+  spinner character instead of raw backspace artifacts.
 - Confirm a command that redraws one line using cursor-up plus clear-line
   sequences shows the latest line instead of stale duplicate lines.
 - Confirm a command that saves and restores the cursor position overwrites at
@@ -353,7 +355,7 @@ Known GUI MVP gaps:
 - No embedded Conductor-native agent chat yet.
 - No polished terminal emulator yet; the current terminal has PTY-backed shell
   I/O and process records but renders transcript text with basic ANSI-control
-  stripping, carriage-return/cursor-up/cursor-left/right line redraws,
+  stripping, carriage-return/backspace/cursor-up/cursor-left/right line redraws,
   saved-cursor restore, erase-line redraws, clear-screen/home redraws, and
   resize propagation.
   Stale process rows reconcile at startup and while the app is open, and shell
