@@ -172,18 +172,18 @@ MVP is not complete until the normal workflow can be driven from the app.
   terminal allocation. Each recorded shell gets a distinct log path, and PTY
   command/output chunks are appended to that raw transcript log. The visible
   transcript strips common ANSI/OSC escape sequences, applies carriage-return,
-  cursor-up, cursor-left/right overwrite, and clear-screen/home redraws, and
-  caps on-screen scrollback while keeping persisted logs raw. It can search
-  persisted transcript logs, list recorded terminal sessions/logs with status
-  counts newest first, keep the transcript selector in the same newest-first
-  order, load a selected past transcript into the terminal view, and restore the
-  latest transcript into the terminal view after app restart. The terminal
-  panel has clickable live-shell tabs so multiple live PTY shells can run, Stop
-  Shell targets the selected tab, and stopping one tab automatically selects
-  another running tab when available. Broader cursor/session emulation, a full
-  multi-terminal tab model beyond clickable live-shell tabs, a more polished
-  terminal history/scrollback browser, and live PTY process reattach after app
-  restart are still missing.
+  cursor-up, cursor-left/right overwrite, saved-cursor restore, and
+  clear-screen/home redraws, and caps on-screen scrollback while keeping
+  persisted logs raw. It can search persisted transcript logs, list recorded
+  terminal sessions/logs with status counts newest first, keep the transcript
+  selector in the same newest-first order, load a selected past transcript into
+  the terminal view, and restore the latest transcript into the terminal view
+  after app restart. The terminal panel has clickable live-shell tabs so
+  multiple live PTY shells can run, Stop Shell targets the selected tab, and
+  stopping one tab automatically selects another running tab when available.
+  Broader cursor/session emulation, a full multi-terminal tab model beyond
+  clickable live-shell tabs, a more polished terminal history/scrollback
+  browser, and live PTY process reattach after app restart are still missing.
 - Spotlight support is manual checkpoint/apply/restore/switch/sync with
   dirty-root refusal before patch reversal, explicit destructive root repair,
   review-style affected-path dirty-root guidance in the Runtime panel,

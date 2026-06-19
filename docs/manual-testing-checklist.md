@@ -228,6 +228,8 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
   latest progress line instead of raw `\r` artifacts.
 - [ ] Terminal commands that redraw one line using cursor-up plus clear-line
   sequences show the latest line instead of stale duplicate lines.
+- [ ] Terminal commands that save and restore the cursor position overwrite at
+  the restored location instead of appending at the end.
 - [ ] Terminal commands that clear the screen and move the cursor home show only
   the fresh screen contents instead of stale previous output.
 - [ ] Resizing the GTK terminal area updates the active PTY shell size; `stty
@@ -269,13 +271,13 @@ foundation is healthy; it does not mean the GUI-first MVP is complete.
 - [ ] Embedded Conductor-native agent chat is not implemented.
 - [ ] Polished PTY terminal emulation is not implemented. The current terminal
   has a PTY-backed shell but still renders as transcript text with basic
-  ANSI-control stripping, carriage-return/cursor-up line redraws,
-  clear-screen/home redraws, and resize propagation; stale process rows
-  reconcile at startup and while the app is open, and shell records get distinct
-  searchable raw transcript logs with capped on-screen scrollback,
-  latest-transcript restore, and clickable live-shell tabs, but this is not a
-  full emulator/live PTY reattach model, full terminal tab model, or polished
-  terminal history/scrollback browser.
+  ANSI-control stripping, carriage-return/cursor-up/cursor-left/right line
+  redraws, saved-cursor restore, clear-screen/home redraws, and resize
+  propagation; stale process rows reconcile at startup and while the app is
+  open, and shell records get distinct searchable raw transcript logs with
+  capped on-screen scrollback, latest-transcript restore, and clickable
+  live-shell tabs, but this is not a full emulator/live PTY reattach model, full
+  terminal tab model, or polished terminal history/scrollback browser.
 - [ ] Full Spotlight parity is not implemented. The current slice manually
   checkpoints/applies/restores/switches/syncs tracked changes plus app-wide
   polling sync, app-open recursive file watching for active Spotlight workspace

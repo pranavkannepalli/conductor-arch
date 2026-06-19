@@ -797,6 +797,7 @@ fn trim_terminal_scrollback(text: &str, max_lines: usize) -> String {
 fn terminal_display_text(text: &str) -> String {
     let mut rendered = Vec::new();
     let mut cursor = None;
+    let mut saved_cursor = None;
     let mut chars = text.chars().peekable();
     while let Some(ch) = chars.next() {
         if ch == '\r' {
@@ -874,6 +875,12 @@ fn terminal_display_text(text: &str) -> String {
                     }
                     Some('K') => {
                         clear_terminal_display_line(&mut rendered, cursor);
+                    }
+                    Some('s') => {
+                        saved_cursor = Some(cursor.unwrap_or(rendered.len()));
+                    }
+                    Some('u') => {
+                        cursor = Some(saved_cursor.unwrap_or(rendered.len()));
                     }
                     _ => {}
                 }
@@ -1135,6 +1142,13 @@ mod tests {
         let rendered = terminal_display_text("abcd\u{1b}[2DXY\u{1b}[1CZ\n");
 
         assert_eq!(rendered, "abXYZ\n");
+    }
+
+    #[test]
+    fn terminal_display_text_applies_saved_cursor_restore() {
+        let rendered = terminal_display_text("hello\u{1b}[2D\u{1b}[sXY\u{1b}[uZ\n");
+
+        assert_eq!(rendered, "helZY\n");
     }
 
     #[test]

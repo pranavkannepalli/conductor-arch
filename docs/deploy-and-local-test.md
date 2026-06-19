@@ -307,6 +307,8 @@ Manual GUI smoke:
   progress line instead of raw `\r` artifacts.
 - Confirm a command that redraws one line using cursor-up plus clear-line
   sequences shows the latest line instead of stale duplicate lines.
+- Confirm a command that saves and restores the cursor position overwrites at
+  the restored location instead of appending at the end.
 - Confirm a command that clears the screen and moves the cursor home shows only
   the fresh screen contents instead of stale previous output.
 - Confirm resizing the GTK terminal area updates the active PTY shell size;
@@ -349,8 +351,8 @@ Known GUI MVP gaps:
 - No embedded Conductor-native agent chat yet.
 - No polished terminal emulator yet; the current terminal has PTY-backed shell
   I/O and process records but renders transcript text with basic ANSI-control
-  stripping, carriage-return/cursor-up line redraws, clear-screen/home redraws,
-  and resize propagation.
+  stripping, carriage-return/cursor-up/cursor-left/right line redraws,
+  saved-cursor restore, clear-screen/home redraws, and resize propagation.
   Stale process rows reconcile at startup and while the app is open, and shell
   records get distinct searchable raw transcript logs with capped on-screen
   scrollback, latest-transcript restore, and clickable live-shell tabs, but this
