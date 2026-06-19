@@ -308,6 +308,8 @@ Verified Phase 3 evidence so far:
   and untracked-file counts before the raw unified diff.
 - Open review comments can now be converted into an agent-ready staged review
   prompt from the agent panel; this is not live bidirectional agent chat yet.
+- Local review comments now render as actionable rows in the GTK Review tab,
+  and open comments can be marked resolved from the GUI.
 - Process rows and runtime summaries show exit codes after background processes
   exit naturally.
 - Core can start/stop a Spotlight session when `spotlight_testing = true`,

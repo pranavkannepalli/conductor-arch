@@ -224,8 +224,8 @@ Still missing from the real MVP:
 - Command palette, shortcuts, and deep links.
 - Agent controls, MCP status, checkpoints, and resumable session history.
 - Monorepo directory selection and linked-directory workflows.
-- Rich diff/review/comment UI beyond the current file summary plus raw unified
-  diff.
+- Rich diff/review/comment UI beyond the current file summary, raw unified diff,
+  staged review prompts, and local comment resolution.
 - GUI-first GitHub PR/check/merge workflow.
 - Polished Conductor visual parity.
 

@@ -4,7 +4,7 @@ use gtk::{
     Box as GBox, Button, CheckButton, Entry, Label, Orientation, Paned, PolicyType, ScrolledWindow,
     Stack, StackSwitcher, TextView,
 };
-use linux_conductor_core::workspace::{DiffFileSummary, Workspace, WorkspaceStore};
+use linux_conductor_core::workspace::{DiffFileSummary, ReviewComment, Workspace, WorkspaceStore};
 use std::path::Path;
 
 use crate::refresh::{RefreshHub, RefreshScope};
@@ -553,7 +553,7 @@ fn work_tabs(
     panel.append(&switcher);
 
     tabs.add_titled(
-        &changes_checks_review_tabs(store, &ws.name),
+        &changes_checks_review_tabs(db_path, store, &ws.name, refresh_hub.clone()),
         Some("work"),
         "Changes",
     );
@@ -599,7 +599,12 @@ fn work_tabs(
     panel
 }
 
-fn changes_checks_review_tabs(store: &WorkspaceStore, name: &str) -> GBox {
+fn changes_checks_review_tabs(
+    db_path: &Path,
+    store: &WorkspaceStore,
+    name: &str,
+    refresh_hub: RefreshHub,
+) -> GBox {
     let panel = GBox::new(Orientation::Vertical, 8);
     let tabs = Stack::new();
     tabs.set_vexpand(true);
@@ -618,7 +623,7 @@ fn changes_checks_review_tabs(store: &WorkspaceStore, name: &str) -> GBox {
         "Checks",
     );
     tabs.add_titled(
-        &text_panel(&workspace_review_text(store, name)),
+        &workspace_review_panel(db_path, store, name, refresh_hub),
         Some("review"),
         "Review",
     );
@@ -780,25 +785,60 @@ fn workspace_checks_text(store: &WorkspaceStore, name: &str) -> String {
     }
 }
 
-fn workspace_review_text(store: &WorkspaceStore, name: &str) -> String {
+fn workspace_review_panel(
+    db_path: &Path,
+    store: &WorkspaceStore,
+    name: &str,
+    refresh_hub: RefreshHub,
+) -> GBox {
+    let panel = GBox::new(Orientation::Vertical, 8);
     match store.list_review_comments(name) {
-        Ok(comments) if comments.is_empty() => "No review comments.".to_owned(),
-        Ok(comments) => comments
-            .into_iter()
-            .map(|comment| {
-                let line = comment
-                    .line_number
-                    .map(|line| format!(":{line}"))
-                    .unwrap_or_default();
-                format!(
-                    "#{} [{}] {}{} - {}",
-                    comment.id, comment.status, comment.file_path, line, comment.body
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
-        Err(err) => format!("Could not read review comments: {err:#}"),
+        Ok(comments) if comments.is_empty() => panel.append(&detail_row("Review", "No comments")),
+        Ok(comments) => {
+            for comment in comments {
+                let row = GBox::new(Orientation::Horizontal, 8);
+                let summary = Label::new(Some(&review_comment_row_summary(&comment)));
+                summary.set_xalign(0.0);
+                summary.set_wrap(true);
+                summary.set_hexpand(true);
+                row.append(&summary);
+                if review_comment_can_resolve(&comment) {
+                    let button = Button::with_label("Resolve");
+                    let db_for_resolve = db_path.to_path_buf();
+                    let refresh_after_resolve = refresh_hub.clone();
+                    let comment_id = comment.id;
+                    button.connect_clicked(move |_| {
+                        if let Ok(store) = WorkspaceStore::open(db_for_resolve.clone()) {
+                            let _ = store.resolve_review_comment(comment_id);
+                            refresh_after_resolve.refresh(RefreshScope::All);
+                        }
+                    });
+                    row.append(&button);
+                }
+                panel.append(&row);
+            }
+        }
+        Err(err) => panel.append(&detail_row(
+            "Review",
+            &format!("Could not read review comments: {err:#}"),
+        )),
     }
+    panel
+}
+
+fn review_comment_row_summary(comment: &ReviewComment) -> String {
+    let line = comment
+        .line_number
+        .map(|line| format!(":{line}"))
+        .unwrap_or_default();
+    format!(
+        "#{} [{}] {}{} - {}",
+        comment.id, comment.status, comment.file_path, line, comment.body
+    )
+}
+
+fn review_comment_can_resolve(comment: &ReviewComment) -> bool {
+    comment.status == "open"
 }
 
 fn workspace_todos_panel(store: &WorkspaceStore, name: &str) -> GBox {
@@ -1175,6 +1215,26 @@ mod tests {
         assert!(rendered.contains("Files changed"));
         assert!(rendered.contains("README.md +2 -1"));
         assert!(rendered.contains("assets/logo.png binary"));
+    }
+
+    #[test]
+    fn review_comment_summary_marks_open_comments_resolvable() {
+        let comment = linux_conductor_core::workspace::ReviewComment {
+            id: 7,
+            workspace_id: 1,
+            file_path: "src/lib.rs".to_owned(),
+            line_number: Some(42),
+            body: "handle empty input".to_owned(),
+            status: "open".to_owned(),
+            github_thread_id: None,
+            created_at: "2026-06-19T00:00:00Z".to_owned(),
+            updated_at: "2026-06-19T00:00:00Z".to_owned(),
+        };
+
+        let summary = review_comment_row_summary(&comment);
+
+        assert_eq!(summary, "#7 [open] src/lib.rs:42 - handle empty input");
+        assert!(review_comment_can_resolve(&comment));
     }
 
     #[test]

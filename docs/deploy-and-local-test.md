@@ -274,6 +274,8 @@ Manual GUI smoke:
 - Confirm the Projects page lists repositories and can create a workspace.
 - Confirm the Workspace page opens from the sidebar and shows rough Chats,
   Terminal, Changes, Checks, Todos, and Processes tabs.
+- Confirm the Review tab lists local review comments and the Resolve button
+  marks an open comment resolved.
 - Confirm the Terminal tab runs a short command, shows stdout/stderr, and
   reports the exit code.
 - Confirm Start Shell opens a PTY-backed workspace shell, accepts a typed

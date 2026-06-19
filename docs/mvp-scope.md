@@ -201,7 +201,8 @@ MVP is not complete until the normal workflow can be driven from the app.
   failures have first-slice error toasts, but richer progress and automatic
   targeted refresh still need polish.
 - Changes/Checks/Todos/Processes are basic panels, not full Conductor review
-  surfaces.
+  surfaces. Local review comments can be resolved in the Review tab, but inline
+  diff commenting and GitHub review-thread sync are still missing.
 - Settings, provider, MCP, command palette, keyboard shortcut, deep-link,
   Spotlight, monorepo, linked-directory, and rich History surfaces are missing
   or incomplete.
