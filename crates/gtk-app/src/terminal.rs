@@ -466,7 +466,12 @@ pub fn embedded_terminal_panel(
         let preserved_process_id = active_pty_combo_for_close
             .active_id()
             .and_then(|id| id.as_str().parse::<usize>().ok())
-            .and_then(|index| terminal_tab_states_for_close.borrow().get(index).map(|state| state.process_id));
+            .and_then(|index| {
+                terminal_tab_states_for_close
+                    .borrow()
+                    .get(index)
+                    .map(|state| state.process_id)
+            });
 
         let Some(active_id) = active_pty_combo_for_close.active_id() else {
             append_text(&buffer_for_close, "\n[no pty shell selected]\n");
@@ -575,7 +580,12 @@ pub fn embedded_terminal_panel(
             .collect();
         let removed_process_ids: Vec<i64> = removed_indices
             .iter()
-            .filter_map(|index| terminal_tab_states_for_prune.borrow().get(*index).map(|state| state.process_id))
+            .filter_map(|index| {
+                terminal_tab_states_for_prune
+                    .borrow()
+                    .get(*index)
+                    .map(|state| state.process_id)
+            })
             .collect();
         if removed_indices.is_empty() {
             append_text(
@@ -811,11 +821,17 @@ pub fn embedded_terminal_panel(
             return;
         };
         if let Err(err) = session.write("\u{3}") {
-            append_text(&buffer_for_interrupt, &format!("\n[pty interrupt error]\n{err:#}\n"));
+            append_text(
+                &buffer_for_interrupt,
+                &format!("\n[pty interrupt error]\n{err:#}\n"),
+            );
             return;
         }
         if let Err(err) = session.append_output("\n^C\n") {
-            append_text(&buffer_for_interrupt, &format!("\n[pty log error]\n{err:#}\n"));
+            append_text(
+                &buffer_for_interrupt,
+                &format!("\n[pty log error]\n{err:#}\n"),
+            );
             return;
         }
         append_text(&buffer_for_interrupt, "\n[pty interrupt sent]\n");
@@ -1064,13 +1080,13 @@ pub fn embedded_terminal_panel(
                 );
                 return;
             };
-            let Ok(process_id) = active_id.as_str().parse::<i64>() else {
-                append_text(
-                    &jump_history_buffer,
+        let Ok(process_id) = active_id.as_str().parse::<i64>() else {
+            append_text(
+                &jump_history_buffer,
                 "\n[terminal history]\nSelected terminal session is invalid.\n",
-                );
-                return;
-            };
+            );
+            return;
+        };
             let existing_line = jump_history_pages.borrow().get(&process_id).copied();
             let line_text = jump_history_entry.text().trim().to_owned();
             let mut line_number = if line_text.is_empty() {
@@ -1209,8 +1225,11 @@ pub fn embedded_terminal_panel(
         let filter = terminal_history_filter_status(&history_filter_for_change);
         let all_records = history_records_all_for_filter.borrow().clone();
         let query = history_session_filter_for_filter.text().to_string();
-        let filtered_records =
-            terminal_history_summaries_for_filter_with_query(&all_records, filter, Some(query.as_str()));
+        let filtered_records = terminal_history_summaries_for_filter_with_query(
+            &all_records,
+            filter,
+            Some(query.as_str()),
+        );
         let preserved_selection = history_combo_for_filter
             .active_id()
             .and_then(|id| id.as_str().parse::<i64>().ok());
@@ -1498,10 +1517,13 @@ fn run_terminal_log_search(
 
     let buffer_for_ui = buffer.clone();
     glib::timeout_add_local(Duration::from_millis(100), move || match rx.try_recv() {
-        Ok(result) => {
-            match result {
-                Ok(matches) => {
-                    append_text(&buffer_for_ui, &format_terminal_search_results(&query, &matches));
+                Ok(result) => {
+                    match result {
+                        Ok(matches) => {
+                    append_text(
+                        &buffer_for_ui,
+                        &format_terminal_search_results(&query, &matches),
+                    );
                     set_terminal_search_results_browser(
                         &history_browser,
                         &matches,
@@ -1558,7 +1580,11 @@ fn run_terminal_match_transcript(
                 let transcript = store.read_terminal_log(&workspace_name, process_id)?;
                 let excerpt =
                     terminal_log_excerpt(&transcript, line_number, TERMINAL_SEARCH_CONTEXT_LINES);
-                Ok(format_terminal_match_transcript(&record, line_number, &excerpt))
+                Ok(format_terminal_match_transcript(
+                    &record,
+                    line_number,
+                    &excerpt,
+                ))
             })
             .unwrap_or_else(|err| format!("[terminal match error]\n{err:#}\n"));
         let _ = tx.send(message);
@@ -1587,7 +1613,10 @@ fn run_terminal_line_transcript(
 ) {
     append_text(
         &buffer,
-        &format!("\n[terminal session #{}] loading around line {}\n", process_id, line_number),
+        &format!(
+            "\n[terminal session #{}] loading around line {}\n",
+            process_id, line_number
+        ),
     );
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -1604,12 +1633,15 @@ fn run_terminal_line_transcript(
                     })?;
                 let transcript = store.read_terminal_log(&workspace_name, process_id)?;
                 let excerpt = terminal_log_excerpt(&transcript, line_number, context_lines);
-                Ok(format_terminal_line_transcript(&record, line_number, context_lines, &excerpt))
+                Ok(format_terminal_line_transcript(
+                    &record,
+                    line_number,
+                    context_lines,
+                    &excerpt,
+                ))
             })
             .unwrap_or_else(|err| {
-                format!(
-                    "[terminal line jump error for session #{process_id}]\n{err:#}\n"
-                )
+                format!("[terminal line jump error for session #{process_id}]\n{err:#}\n")
             });
         let _ = tx.send(message);
     });
@@ -1983,7 +2015,10 @@ fn run_terminal_transcript_load(
 }
 
 fn format_terminal_search_results(query: &str, matches: &[TerminalLogMatch]) -> String {
-    let mut text = format!("\n[terminal search] {query}\n{n} match(es)\n", n = matches.len());
+    let mut text = format!(
+        "\n[terminal search] {query}\n{n} match(es)\n",
+        n = matches.len()
+    );
     if matches.is_empty() {
         text.push_str("No terminal transcript matches.\n");
         return text;
@@ -2136,11 +2171,7 @@ fn set_terminal_search_results_browser(
             let snippet = terminal_search_match_snippet(item);
             let label = format!(
                 "#{} {}:{} [{}]\n{}\n{}",
-                item.process_id,
-                item.command,
-                file_name,
-                context,
-                snippet
+                item.process_id, item.command, file_name, context, snippet
             );
             let row = GBox::new(Orientation::Horizontal, 8);
             let match_row = Button::with_label(&label);
@@ -2233,7 +2264,10 @@ fn terminal_search_match_snippet(match_record: &TerminalLogMatch) -> String {
             snippet.push_str(&format!("{line_number:>6}  {line}\n"));
         }
     }
-    snippet.push_str(&format!("{:>6}> {}\n", match_record.line_number, match_record.line));
+    snippet.push_str(&format!(
+        "{:>6}> {}\n",
+        match_record.line_number, match_record.line
+    ));
     if !match_record.context_after.is_empty() {
         let after_start = match_record.line_number.saturating_add(1);
         for (offset, line) in match_record.context_after.iter().enumerate() {
@@ -2340,7 +2374,7 @@ fn terminal_history_browser_row_label(summary: &TerminalSessionSummary) -> Strin
 }
 
 fn truncate_text_for_display(text: &str, max_chars: usize) -> String {
-            let mut output = text.chars().take(max_chars).collect::<String>();
+    let mut output = text.chars().take(max_chars).collect::<String>();
     if text.chars().count() > max_chars {
         output.push('…');
     }
@@ -2367,10 +2401,7 @@ fn set_terminal_history_browser(
         return;
     }
 
-    let total_label = Label::new(Some(&format!(
-        "Terminal sessions: {}",
-        summaries.len()
-    )));
+    let total_label = Label::new(Some(&format!("Terminal sessions: {}", summaries.len())));
     total_label.set_xalign(0.0);
     total_label.set_hexpand(true);
     let total_row = GBox::new(Orientation::Horizontal, 8);
@@ -2414,7 +2445,11 @@ fn set_terminal_history_browser(
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or("terminal.log");
-            let meta = format!("{} · {}", terminal_history_browser_row_label(summary), file_name);
+            let meta = format!(
+                "{} · {}",
+                terminal_history_browser_row_label(summary),
+                file_name
+            );
             let command = truncate_text_for_display(
                 summary.process.command.trim().replace('\n', " ").as_str(),
                 120,
@@ -2542,7 +2577,8 @@ fn set_terminal_history_browser(
                 );
             });
 
-            let jump_prev_btn = Button::with_label(&format!("Prev {TERMINAL_LINE_JUMP_PAGE_SIZE} lines"));
+            let jump_prev_btn =
+                Button::with_label(&format!("Prev {TERMINAL_LINE_JUMP_PAGE_SIZE} lines"));
             jump_prev_btn.set_tooltip_text(Some("Jump back through transcript pages"));
             let jump_prev_btn_db = row_db.clone();
             let jump_prev_btn_workspace = row_workspace.clone();
@@ -2575,7 +2611,8 @@ fn set_terminal_history_browser(
                 );
             });
 
-            let jump_next_btn = Button::with_label(&format!("Next {TERMINAL_LINE_JUMP_PAGE_SIZE} lines"));
+            let jump_next_btn =
+                Button::with_label(&format!("Next {TERMINAL_LINE_JUMP_PAGE_SIZE} lines"));
             jump_next_btn.set_tooltip_text(Some("Jump forward through transcript pages"));
             let jump_next_btn_db = row_db.clone();
             let jump_next_btn_workspace = row_workspace.clone();
@@ -2591,10 +2628,8 @@ fn set_terminal_history_browser(
                     .get(&jump_next_btn_record.id)
                     .copied()
                     .unwrap_or(jump_next_line);
-                let line_number = terminal_line_jump_target(
-                    existing_line,
-                    TERMINAL_LINE_JUMP_PAGE_SIZE as isize,
-                );
+                let line_number =
+                    terminal_line_jump_target(existing_line, TERMINAL_LINE_JUMP_PAGE_SIZE as isize);
                 jump_next_pages
                     .borrow_mut()
                     .insert(jump_next_btn_record.id, line_number);
@@ -2990,7 +3025,7 @@ fn terminal_display_text(text: &str) -> String {
             continue;
         }
 
-            match chars.peek().copied() {
+        match chars.peek().copied() {
             Some('[') => {
                 chars.next();
                 let mut sequence = String::new();
@@ -3155,15 +3190,15 @@ fn terminal_display_text(text: &str) -> String {
                     Some('u') => {
                         cursor = Some(saved_cursor.unwrap_or(rendered.len()));
                     }
-            Some('7') => {
-                saved_cursor = Some(cursor.unwrap_or(rendered.len()));
-            }
-            Some('8') => {
-                cursor = Some(saved_cursor.unwrap_or(rendered.len()));
-            }
-            Some('n') => {}
-            _ => {}
-        }
+                    Some('7') => {
+                        saved_cursor = Some(cursor.unwrap_or(rendered.len()));
+                    }
+                    Some('8') => {
+                        cursor = Some(saved_cursor.unwrap_or(rendered.len()));
+                    }
+                    Some('n') => {}
+                    _ => {}
+                }
             }
             Some(']') => {
                 chars.next();
@@ -3306,7 +3341,11 @@ fn delete_terminal_display_lines(rendered: &mut Vec<char>, cursor: usize, count:
     cursor.min(rendered.len())
 }
 
-fn scroll_terminal_display_lines_up(rendered: &mut Vec<char>, cursor: usize, count: usize) -> usize {
+fn scroll_terminal_display_lines_up(
+    rendered: &mut Vec<char>,
+    cursor: usize,
+    count: usize,
+) -> usize {
     if count == 0 || rendered.is_empty() {
         return cursor.min(rendered.len());
     }
@@ -4340,11 +4379,7 @@ mod tests {
             ),
         ];
 
-        let filtered = terminal_history_summaries_for_filter_with_query(
-            &summaries,
-            None,
-            Some("shell"),
-        );
+        let filtered = terminal_history_summaries_for_filter_with_query(&summaries, None, Some("shell"));
         let filtered_ids = filtered
             .iter()
             .map(|summary| summary.process.id)

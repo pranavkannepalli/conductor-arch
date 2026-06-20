@@ -391,11 +391,13 @@ fn runtime_panel(
             .and_then(|store| store.spotlight_repair_root(&spotlight_repair_workspace))
         {
             Ok(session) => {
-                let message = format!(
-                    "Spotlight root repaired for {}",
-                    session.workspace_name
+                let message = format!("Spotlight root repaired for {}", session.workspace_name);
+                apply_action_feedback(
+                    &status_spotlight_repair,
+                    &toast_spotlight_repair,
+                    &message,
+                    true,
                 );
-                apply_action_feedback(&status_spotlight_repair, &toast_spotlight_repair, &message, true);
             }
             Err(err) => apply_runtime_action_feedback(
                 &status_spotlight_repair,
@@ -670,12 +672,17 @@ fn workspace_checkpoint_panel(
     let feedback_for_create = feedback.clone();
     let toast_for_create = toast_overlay.clone();
     let message_for_create = message.clone();
-    create_btn.connect_clicked(move |_| {
-        let message = message_for_create.text().trim().to_owned();
-        if message.is_empty() {
-            apply_action_feedback(&feedback_for_create, &toast_for_create, "Checkpoint message required.", true);
-            return;
-        }
+        create_btn.connect_clicked(move |_| {
+            let message = message_for_create.text().trim().to_owned();
+            if message.is_empty() {
+                apply_action_feedback(
+                    &feedback_for_create,
+                    &toast_for_create,
+                    "Checkpoint message required.",
+                    true,
+                );
+                return;
+            }
         match WorkspaceStore::open(db_for_create.clone())
             .and_then(|store| store.checkpoint_create(&workspace_for_create, &message, None))
         {
@@ -704,7 +711,8 @@ fn workspace_checkpoint_panel(
 
     let mut checkpoints_loaded = Vec::new();
     let mut list_error = None;
-    match WorkspaceStore::open(db_path.to_path_buf()).and_then(|store| store.checkpoint_list(name)) {
+    match WorkspaceStore::open(db_path.to_path_buf()).and_then(|store| store.checkpoint_list(name))
+    {
         Ok(checkpoints) => {
             checkpoints_loaded = checkpoints;
         }
@@ -810,13 +818,7 @@ fn changes_checks_review_tabs(
         "Checks",
     );
     tabs.add_titled(
-        &workspace_review_panel(
-            db_path,
-            store,
-            name,
-            refresh_hub,
-            toast_overlay,
-        ),
+        &workspace_review_panel(db_path, store, name, refresh_hub, toast_overlay),
         Some("review"),
         "Review",
     );
@@ -1073,12 +1075,7 @@ fn workspace_checks_panel(
         let result = WorkspaceStore::open(db_for_checks.clone())
             .and_then(|store| store.pull_request_checks(&workspace_for_checks));
         let text = pull_request_checks_feedback(result);
-        apply_action_feedback(
-            &feedback_for_checks,
-            &toast_for_checks,
-            &text,
-            true,
-        );
+        apply_action_feedback(&feedback_for_checks, &toast_for_checks, &text, true);
         checks_output_for_checks.set_text(&text);
     });
 
@@ -1182,7 +1179,9 @@ fn workspace_conflict_resolution_panel(
     diff_preview.set_monospace(true);
     diff_preview.set_hexpand(true);
     diff_preview.set_vexpand(true);
-    diff_preview.buffer().set_text("Select a conflict file to preview its diff.");
+    diff_preview
+        .buffer()
+        .set_text("Select a conflict file to preview its diff.");
     let conflict_feedback = Label::new(None);
     conflict_feedback.add_css_class("card-meta");
     conflict_feedback.set_xalign(0.0);
@@ -1227,16 +1226,24 @@ fn workspace_conflict_resolution_panel(
         let db_for_diff_all = db_path.to_path_buf();
         diff_all_btn.connect_clicked(move |_| {
             let mut sections = Vec::new();
-            for file in &files_for_diff_all {
-                let file_path = Path::new(file).to_path_buf();
+                for file in &files_for_diff_all {
+                    let file_path = Path::new(file).to_path_buf();
                 match WorkspaceStore::open(db_for_diff_all.clone())
-                    .and_then(|store| store.unified_diff(&source_workspace_for_diff_all, Some(file_path.as_path())))
+                    .and_then(|store| {
+                        store.unified_diff(&source_workspace_for_diff_all, Some(file_path.as_path()))
+                    })
                 {
                     Ok(output) => {
-                        sections.push(format!("# {}:{}\n{}\n", source_workspace_for_diff_all, file_path.display(), output));
+                        sections.push(format!(
+                            "# {}:{}\n{}\n",
+                            source_workspace_for_diff_all,
+                            file_path.display(),
+                            output
+                        ));
                     }
                     Err(err) => {
-                        feedback_for_diff_all.set_text(&format!("Could not read diff for {file}: {err:#}"));
+                        feedback_for_diff_all
+                            .set_text(&format!("Could not read diff for {file}: {err:#}"));
                         return;
                     }
                 }
@@ -1317,13 +1324,18 @@ fn workspace_conflict_resolution_panel(
             let diff_buffer = diff_preview.buffer();
             diff_btn.connect_clicked(move |_| {
                 let output = WorkspaceStore::open(db_for_diff.clone())
-                    .and_then(|store| {
-                        store.unified_diff(
-                            &source_workspace_for_diff,
-                            Some(file_for_diff.as_path()),
-                        )
-                    })
-                    .unwrap_or_else(|err| format!("Could not read diff for {}: {err:#}", file_for_diff.display()));
+                .and_then(|store| {
+                    store.unified_diff(
+                        &source_workspace_for_diff,
+                        Some(file_for_diff.as_path()),
+                    )
+                })
+                .unwrap_or_else(|err| {
+                    format!(
+                        "Could not read diff for {}: {err:#}",
+                        file_for_diff.display()
+                    )
+                });
                 let formatted = format!(
                     "# {}:{}\n{}",
                     source_workspace_for_diff,
@@ -1464,7 +1476,12 @@ fn workspace_review_panel(
         let file = file_for_add.text().trim().to_owned();
         let body = body_for_add.text().trim().to_owned();
         if file.is_empty() || body.is_empty() {
-            apply_action_feedback(&feedback_for_add, &toast_for_add, "File and comment are required.", true);
+            apply_action_feedback(
+                &feedback_for_add,
+                &toast_for_add,
+                "File and comment are required.",
+                true,
+            );
             return;
         }
         let line = match parse_review_comment_line(line_for_add.text().as_ref()) {
@@ -1528,7 +1545,12 @@ fn workspace_review_panel(
                             Ok(comment) => format!("Resolved review comment #{}", comment.id),
                             Err(err) => format!("Could not resolve comment: {err:#}"),
                         };
-                        apply_action_feedback(&feedback_for_resolve, &toast_for_resolve, &message, true);
+                        apply_action_feedback(
+                            &feedback_for_resolve,
+                            &toast_for_resolve,
+                            &message,
+                            true,
+                        );
                         if result.is_ok() {
                             refresh_after_resolve.refresh(RefreshScope::All);
                         }
@@ -1867,7 +1889,12 @@ fn apply_runtime_action_feedback(
     }
 }
 
-fn apply_action_feedback(status: &Label, toast_overlay: &ToastOverlay, text: &str, show_toast: bool) {
+fn apply_action_feedback(
+    status: &Label,
+    toast_overlay: &ToastOverlay,
+    text: &str,
+    show_toast: bool,
+) {
     status.set_text(text);
     if show_toast {
         toast_overlay.add_toast(Toast::new(text));

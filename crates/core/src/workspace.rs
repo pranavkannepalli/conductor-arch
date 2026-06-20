@@ -447,6 +447,10 @@ impl WorkspaceStore {
                 workspace.id
             ],
         )?;
+        self.conn.execute(
+            "UPDATE spotlight_sessions SET workspace_name = ?1 WHERE workspace_id = ?2",
+            params![new_name, workspace.id],
+        )?;
         anyhow::ensure!(changed > 0, "workspace {name} not found");
         self.get_by_name(new_name)
     }
@@ -1103,19 +1107,34 @@ impl WorkspaceStore {
         let Some(active) = active else {
             return Ok(None);
         };
+        self.spotlight_sync_if_changed_session(active.id)
+    }
+
+    fn spotlight_sync_if_changed_session(&self, session_id: i64) -> Result<Option<SpotlightSession>> {
+        let active = self.get_spotlight_session(session_id)?;
+        if active.status != "active" {
+            return Ok(None);
+        }
+        let workspace = self.get_by_id(active.workspace_id)?;
+        let active = self
+            .active_spotlight_for_repository(workspace.repository_id)?
+            .filter(|session| session.id == session_id);
+        let Some(active) = active else {
+            return Ok(None);
+        };
         let active_patch = fs::read_to_string(&active.patch_path)
             .with_context(|| format!("read {}", active.patch_path.display()))?;
         let current_patch = workspace_tracked_patch(&workspace)?;
         if active_patch.trim() == current_patch.trim() {
             return Ok(None);
         }
-        self.spotlight_sync(name).map(Some)
+        self.spotlight_sync(&workspace.name).map(Some)
     }
 
     pub fn spotlight_sync_active_sessions(&self) -> Result<Vec<SpotlightSession>> {
         let mut synced = Vec::new();
         for session in self.active_spotlight_sessions()? {
-            if let Some(updated) = self.spotlight_sync_if_changed(&session.workspace_name)? {
+            if let Some(updated) = self.spotlight_sync_if_changed_session(session.id)? {
                 synced.push(updated);
             }
         }
@@ -1123,17 +1142,24 @@ impl WorkspaceStore {
     }
 
     pub fn spotlight_watch_targets(&self) -> Result<Vec<SpotlightWatchTarget>> {
-        self.active_spotlight_sessions()?
-            .into_iter()
-            .map(|session| {
-                let workspace = self.get_by_name(&session.workspace_name)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT ss.id, w.name, w.path
+             FROM spotlight_sessions ss
+             JOIN workspaces w ON w.id = ss.workspace_id
+             WHERE ss.status = 'active'
+             ORDER BY ss.id",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
                 Ok(SpotlightWatchTarget {
-                    session_id: session.id,
-                    workspace_name: session.workspace_name,
-                    workspace_path: workspace.path,
+                    session_id: row.get(0)?,
+                    workspace_name: row.get(1)?,
+                    workspace_path: PathBuf::from(row.get::<_, String>(2)?),
                 })
-            })
-            .collect()
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("load spotlight watch targets")?;
+        Ok(rows)
     }
 
     pub fn spotlight_status(&self, name: &str) -> Result<Option<SpotlightSession>> {
@@ -2146,6 +2172,17 @@ impl WorkspaceStore {
                 row_to_workspace,
             )
             .with_context(|| format!("load workspace {name}"))
+    }
+
+    fn get_by_id(&self, id: i64) -> Result<Workspace> {
+        self.conn
+            .query_row(
+                "SELECT id, repository_id, name, path, branch, base_ref, port_base, status, archived_at, created_at, updated_at
+                 FROM workspaces WHERE id = ?1",
+                [id],
+                row_to_workspace,
+            )
+            .with_context(|| format!("load workspace {id}"))
     }
 
     fn load_repository_by_id(&self, id: i64) -> Result<RepositoryRecord> {
@@ -6552,6 +6589,102 @@ spotlight_testing = true
         let list = store.list().unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].name, "oslo");
+    }
+
+    #[test]
+    fn spotlight_rename_updates_watch_and_sync_works_with_stale_session_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::write(
+            repo_path.join(".conductor/settings.toml"),
+            r#"
+spotlight_testing = true
+"#,
+        )
+        .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", ".conductor/settings.toml"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args([
+                "-c",
+                "user.name=Linux Conductor",
+                "-c",
+                "user.email=linux-conductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "enable spotlight",
+            ])
+            .status()
+            .unwrap();
+
+        let db_path = temp.path().join("state.db");
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        fs::write(workspace.path.join("README.md"), "first change\n").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&workspace.path)
+            .args(["add", "README.md"])
+            .status()
+            .unwrap();
+
+        let active = store.spotlight_start("berlin").unwrap();
+        let renamed = store.rename("berlin", "oslo").unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE spotlight_sessions SET workspace_name = 'berlin' WHERE id = ?1",
+                [active.id],
+            )
+            .unwrap();
+
+        fs::write(renamed.path.join("README.md"), "second change\n").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&renamed.path)
+            .args(["add", "README.md"])
+            .status()
+            .unwrap();
+
+        let synced = store.spotlight_sync_active_sessions().unwrap();
+        let targets = store.spotlight_watch_targets().unwrap();
+
+        assert_eq!(synced.len(), 1);
+        assert_eq!(synced[0].workspace_name, "oslo");
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].workspace_name, "oslo");
+        assert_eq!(targets[0].workspace_path, renamed.path);
+        assert_eq!(
+            fs::read_to_string(repo_path.join("README.md")).unwrap(),
+            "second change\n"
+        );
     }
 
     #[test]
