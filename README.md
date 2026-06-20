@@ -166,11 +166,12 @@ Current GUI capabilities:
   variables, provider executable/provider hints, durable action prompts, and
   basic Git behavior flags. Saves validate run mode and environment variable
   names.
-- Workspace page with basic Shell/Codex/Claude/Cursor launch actions,
-  setup/run/stop, Spotlight On/Off, open-folder, archive/restore/discard, and
-  rough tabs for chats, terminal, changes, checks, todos, and processes.
-  Runtime and lifecycle action failures now show both inline status text and app
-  toasts.
+- Workspace page with PTY-backed Shell/Codex/Claude/Cursor session launch,
+  readable app-native transcripts, send/stop/checkpoint controls, Plan/Fast
+  mode and Codex harness controls, provider/auth/MCP status text, setup/run/stop,
+  Spotlight On/Off, open-folder, archive/restore/discard, and tabs for chats,
+  terminal, changes, checks, review, todos, checkpoints, and processes. Runtime
+  and lifecycle action failures now show both inline status text and app toasts.
 - Basic embedded terminal scoped to the workspace. It can run one-shot commands
   with `CONDUCTOR_*` environment variables and can start PTY-backed workspace
   shells that accept input after launch and stream output. The terminal panel
@@ -195,8 +196,18 @@ Current GUI capabilities:
   saved-cursor restore plus erase-line and clear-screen/home redraws. The
   on-screen scrollback is capped while raw transcript logs stay complete, but
   this is not a polished terminal emulator yet.
-- Changes tab includes recent commits, git status, a file-level diff summary
-  with additions/deletions including untracked files, and the raw unified diff.
+- Changes tab includes recent commits, git status, branch push state, a
+  selectable changed-file tree, a file-level diff summary with
+  additions/deletions including untracked files, per-file unified diff preview,
+  full-diff fallback, file-scoped inline comments, and safe tracked-file revert
+  back to `HEAD`.
+- Review tab can add local file/line/body comments, resolve open local comments,
+  stage open comments as an agent-ready prompt, and send the staged prompt into
+  the selected live agent session when one is attached.
+- Checks tab can create and refresh PR state, view raw `gh pr checks` output
+  and raw PR comments/reviews, stage failing checks or PR comments/reviews into
+  the selected agent session, show merge blockers, merge the PR, and archive
+  after merge when repository Git settings enable it.
 - First-slice Spotlight testing can apply tracked workspace changes to a clean
   repository root when `spotlight_testing = true`, then reverse that patch on
   stop. Starting Spotlight creates a checkpoint commit for the tracked workspace
@@ -217,16 +228,21 @@ Current GUI capabilities:
   `~/Library/Application Support/com.conductor.app/conductor.db` exists.
 
 Still missing from the real MVP:
-- Embedded Conductor-native agent chat.
+- Polished Conductor-native agent chat. A PTY-backed app-native session surface
+  exists, but it is still transcript-oriented rather than a rich structured
+  chat surface.
 - Polished PTY terminal emulator behavior.
 - More polished project onboarding and settings layout.
 - Full Spotlight testing parity beyond app-open file watching/checkpoint sync.
 - Command palette, shortcuts, and deep links.
-- Agent controls, MCP status, checkpoints, and resumable session history.
+- Richer resumable structured session history beyond saved transcripts and
+  best-effort PTY reattach.
 - Monorepo directory selection and linked-directory workflows.
-- Rich diff/review/comment UI beyond the current file summary, raw unified diff,
-  local review comments, staged review prompts, and local comment resolution.
-- GUI-first GitHub review/check workflow beyond first-slice PR controls.
+- Rich diff/review/comment UI beyond the current file tree, unified diff,
+  local inline comments, staged review prompts, local comment resolution, and
+  safe tracked-file revert.
+- Structured GitHub review-thread sync and richer checks/deployment aggregation
+  beyond the first-slice PR controls.
 - Polished Conductor visual parity.
 
 Launch the GUI pre-selecting a workspace:
@@ -534,19 +550,19 @@ Cursor interactive sessions, see
 
 ## Known limits
 
-- **No native agent chat or polished terminal emulator yet.** The GUI has a
-  PTY-backed workspace shell and one-shot command runner, but Claude/Codex/Cursor
-  chat, broader cursor/session polish beyond basic ANSI stripping and common
-  redraws, richer multi-terminal session management than basic live-tab switching,
-  and a polished history/scrollback browser beyond summarized session listing/transcript
-  search are still MVP work. Open review comments can be staged as an agent
-  prompt, but they are not sent into a live bidirectional chat yet.
-  Latest transcript restore is built.
+- **Agent chat and terminal polish are still limited.** The GUI has PTY-backed
+  Shell/Codex/Claude/Cursor sessions with app-native transcripts, send/stop,
+  checkpoints, harness controls, provider/auth/MCP status, staged review prompt
+  sending, a PTY-backed workspace shell, and a one-shot command runner. It is
+  still transcript-oriented rather than a rich structured chat UI, and broader
+  cursor/session polish plus a polished history/scrollback browser beyond
+  summarized session listing/transcript search are still MVP work. Latest
+  transcript restore is built.
   Background `session start` remains available when you want supervised process
   records and captured logs.
 - **Conductor app controls are incomplete.** Command palette, shortcut coverage,
-  deep links, Big Terminal Mode, agent controls, MCP status, checkpoint UI, and
-  resumable chat history are still MVP work.
+  deep links, richer Big Terminal Mode, richer checkpoint/history browsing, and
+  resumable structured chat history are still MVP work.
 - **Spotlight is partial.** It can manually apply and restore tracked workspace
   changes against a clean repository root and creates a checkpoint when
   Spotlight starts. Starting Spotlight for a different workspace switches the

@@ -1367,8 +1367,13 @@ fn workspace_checks_text(store: &WorkspaceStore, name: &str) -> String {
                     .collect::<Vec<_>>()
                     .join("\n")
             };
+            let blockers = merge_blockers_text(
+                summary.open_todos,
+                summary.open_review_comments,
+                summary.conflicting_workspaces.len(),
+            );
             format!(
-                "Changed files: {}\nRun: {}\nSessions: {}\nPR: {}\nTodos: {} open / {} total\nReview comments: {} open\nBranch: {}\nConflicts:\n{}",
+                "Changed files: {}\nRun: {}\nSessions: {}\nPR: {}\n{}\nTodos: {} open / {} total\nReview comments: {} open\nBranch: {}\nConflicts:\n{}",
                 summary.changed_files,
                 summary
                     .run_status
@@ -1376,6 +1381,7 @@ fn workspace_checks_text(store: &WorkspaceStore, name: &str) -> String {
                     .unwrap_or_else(|| "none".to_owned()),
                 summary.active_sessions,
                 pr,
+                blockers,
                 summary.open_todos,
                 summary.total_todos,
                 summary.open_review_comments,
@@ -1410,6 +1416,9 @@ fn workspace_checks_panel(
     let inspect_row = GBox::new(Orientation::Horizontal, 8);
     let refresh_pr_btn = Button::with_label("Refresh PR State");
     let view_checks_btn = Button::with_label("View Checks");
+    let stage_checks_btn = Button::with_label("Stage Failing Checks");
+    let view_reviews_btn = Button::with_label("View PR Comments");
+    let stage_reviews_btn = Button::with_label("Stage PR Comments");
     let merge_row = GBox::new(Orientation::Horizontal, 8);
     let merge_method = ComboBoxText::new();
     merge_method.append(Some("squash"), "Squash");
@@ -1486,6 +1495,81 @@ fn workspace_checks_panel(
         checks_output_for_checks.set_text(&text);
     });
 
+    let db_for_stage_checks = db_path.to_path_buf();
+    let workspace_for_stage_checks = name.to_owned();
+    let feedback_for_stage_checks = feedback.clone();
+    let toast_for_stage_checks = toast_overlay.clone();
+    let app_state_for_stage_checks = app_state.clone();
+    stage_checks_btn.connect_clicked(move |_| {
+        match WorkspaceStore::open(db_for_stage_checks.clone()).and_then(|store| {
+            let prompt = store.pull_request_checks_agent_prompt(&workspace_for_stage_checks)?;
+            if prompt.contains("No failing PR checks.") {
+                anyhow::bail!("No failing PR checks to stage");
+            }
+            Ok(prompt)
+        }) {
+            Ok(prompt) => {
+                app_state_for_stage_checks.set_staged_review_prompt(Some(prompt));
+                apply_action_feedback(
+                    &feedback_for_stage_checks,
+                    &toast_for_stage_checks,
+                    "Staged failing PR checks for the selected agent session.",
+                    true,
+                );
+            }
+            Err(err) => apply_action_feedback(
+                &feedback_for_stage_checks,
+                &toast_for_stage_checks,
+                &format!("Could not stage failing checks: {err:#}"),
+                true,
+            ),
+        }
+    });
+
+    let db_for_reviews = db_path.to_path_buf();
+    let workspace_for_reviews = name.to_owned();
+    let checks_output_for_reviews = checks_output.clone();
+    let feedback_for_reviews = feedback.clone();
+    let toast_for_reviews = toast_overlay.clone();
+    view_reviews_btn.connect_clicked(move |_| {
+        let result = WorkspaceStore::open(db_for_reviews.clone())
+            .and_then(|store| store.pull_request_review_state(&workspace_for_reviews));
+        let text = pull_request_review_feedback(result);
+        apply_action_feedback(&feedback_for_reviews, &toast_for_reviews, &text, true);
+        checks_output_for_reviews.set_text(&text);
+    });
+
+    let db_for_stage_reviews = db_path.to_path_buf();
+    let workspace_for_stage_reviews = name.to_owned();
+    let feedback_for_stage_reviews = feedback.clone();
+    let toast_for_stage_reviews = toast_overlay.clone();
+    let app_state_for_stage_reviews = app_state.clone();
+    stage_reviews_btn.connect_clicked(move |_| {
+        match WorkspaceStore::open(db_for_stage_reviews.clone()).and_then(|store| {
+            let prompt = store.pull_request_review_agent_prompt(&workspace_for_stage_reviews)?;
+            if prompt.contains("No GitHub PR review/comment output.") {
+                anyhow::bail!("No GitHub PR comments or reviews to stage");
+            }
+            Ok(prompt)
+        }) {
+            Ok(prompt) => {
+                app_state_for_stage_reviews.set_staged_review_prompt(Some(prompt));
+                apply_action_feedback(
+                    &feedback_for_stage_reviews,
+                    &toast_for_stage_reviews,
+                    "Staged GitHub PR comments/reviews for the selected agent session.",
+                    true,
+                );
+            }
+            Err(err) => apply_action_feedback(
+                &feedback_for_stage_reviews,
+                &toast_for_stage_reviews,
+                &format!("Could not stage PR comments/reviews: {err:#}"),
+                true,
+            ),
+        }
+    });
+
     let db_for_merge = db_path.to_path_buf();
     let workspace_for_merge = name.to_owned();
     let refresh_after_merge = refresh_hub.clone();
@@ -1497,12 +1581,13 @@ fn workspace_checks_panel(
             .active_id()
             .map(|method| method.to_string())
             .unwrap_or_else(|| "squash".to_owned());
-        let result = WorkspaceStore::open(db_for_merge.clone())
-            .and_then(|store| store.merge_pull_request(&workspace_for_merge, &method));
+        let result = WorkspaceStore::open(db_for_merge.clone()).and_then(|store| {
+            store.merge_and_maybe_archive_pull_request(&workspace_for_merge, &method)
+        });
         apply_action_feedback(
             &feedback_for_merge,
             &toast_for_merge,
-            &pull_request_merge_feedback(result),
+            &pull_request_merge_and_archive_feedback(result),
             true,
         );
         refresh_after_merge.refresh(RefreshScope::All);
@@ -1532,6 +1617,9 @@ fn workspace_checks_panel(
     panel.append(&pr_form);
     inspect_row.append(&refresh_pr_btn);
     inspect_row.append(&view_checks_btn);
+    inspect_row.append(&stage_checks_btn);
+    inspect_row.append(&view_reviews_btn);
+    inspect_row.append(&stage_reviews_btn);
     panel.append(&inspect_row);
     merge_row.append(&merge_method);
     merge_row.append(&merge_btn);
@@ -1817,6 +1905,21 @@ fn pull_request_merge_feedback(result: anyhow::Result<String>) -> String {
     }
 }
 
+fn pull_request_merge_and_archive_feedback(
+    result: anyhow::Result<linux_conductor_core::workspace::MergePullRequestResult>,
+) -> String {
+    match result {
+        Ok(result) => {
+            let mut text = pull_request_merge_feedback(Ok(result.merge_output));
+            if let Some(workspace) = result.archived_workspace {
+                text.push_str(&format!("; archived workspace {}.", workspace.name));
+            }
+            text
+        }
+        Err(err) => format!("Merge PR failed: {err:#}"),
+    }
+}
+
 fn pull_request_refresh_feedback(result: anyhow::Result<Option<PullRequest>>) -> String {
     match result {
         Ok(Some(pr)) => format!("PR #{} state: {}", pr.number, pr.state),
@@ -1839,10 +1942,54 @@ fn pull_request_checks_feedback(result: anyhow::Result<String>) -> String {
     }
 }
 
+fn pull_request_review_feedback(result: anyhow::Result<String>) -> String {
+    match result {
+        Ok(output) => {
+            let output = output.trim();
+            if output.is_empty() {
+                "PR comments/reviews returned no output.".to_owned()
+            } else {
+                format!("PR comments/reviews:\n{output}")
+            }
+        }
+        Err(err) => format!("View PR comments/reviews failed: {err:#}"),
+    }
+}
+
 fn pull_request_archive_feedback(result: anyhow::Result<Workspace>) -> String {
     match result {
         Ok(workspace) => format!("Archived workspace {}.", workspace.name),
         Err(err) => format!("Archive failed: {err:#}"),
+    }
+}
+
+fn merge_blockers_text(
+    open_todos: usize,
+    open_review_comments: usize,
+    conflicting_workspaces: usize,
+) -> String {
+    let mut blockers = Vec::new();
+    if open_todos > 0 {
+        blockers.push(pluralize(open_todos, "open todo"));
+    }
+    if open_review_comments > 0 {
+        blockers.push(pluralize(open_review_comments, "open review comment"));
+    }
+    if conflicting_workspaces > 0 {
+        blockers.push(pluralize(conflicting_workspaces, "conflicting workspace"));
+    }
+    if blockers.is_empty() {
+        "Merge blockers: none".to_owned()
+    } else {
+        format!("Merge blockers: {}", blockers.join(", "))
+    }
+}
+
+fn pluralize(count: usize, noun: &str) -> String {
+    if count == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{count} {noun}s")
     }
 }
 
@@ -2560,6 +2707,51 @@ mod tests {
     }
 
     #[test]
+    fn pull_request_merge_and_archive_feedback_reports_archive_state() {
+        let success = pull_request_merge_and_archive_feedback(Ok(
+            linux_conductor_core::workspace::MergePullRequestResult {
+                merge_output: "Merged pull request #42\n".to_owned(),
+                archived_workspace: Some(Workspace {
+                    id: 1,
+                    repository_id: 2,
+                    name: "berlin".to_owned(),
+                    path: std::path::PathBuf::from("/tmp/berlin"),
+                    branch: "lc/berlin".to_owned(),
+                    base_ref: "main".to_owned(),
+                    port_base: 4200,
+                    status: "archived".to_owned(),
+                    archived_at: Some("now".to_owned()),
+                    created_at: "then".to_owned(),
+                    updated_at: "now".to_owned(),
+                }),
+            },
+        ));
+        assert_eq!(
+            success,
+            "Merged PR: Merged pull request #42; archived workspace berlin."
+        );
+
+        let no_archive = pull_request_merge_and_archive_feedback(Ok(
+            linux_conductor_core::workspace::MergePullRequestResult {
+                merge_output: "Merged pull request #42\n".to_owned(),
+                archived_workspace: None,
+            },
+        ));
+        assert_eq!(no_archive, "Merged PR: Merged pull request #42");
+    }
+
+    #[test]
+    fn merge_blockers_text_lists_blocking_review_state() {
+        let text = merge_blockers_text(2, 1, 1);
+
+        assert_eq!(
+            text,
+            "Merge blockers: 2 open todos, 1 open review comment, 1 conflicting workspace"
+        );
+        assert_eq!(merge_blockers_text(0, 0, 0), "Merge blockers: none");
+    }
+
+    #[test]
     fn pull_request_refresh_feedback_summarizes_state() {
         let success =
             pull_request_refresh_feedback(Ok(Some(linux_conductor_core::workspace::PullRequest {
@@ -2596,6 +2788,23 @@ mod tests {
 
         let failure = pull_request_checks_feedback(Err(anyhow::anyhow!("no pull requests found")));
         assert_eq!(failure, "View checks failed: no pull requests found");
+    }
+
+    #[test]
+    fn pull_request_review_feedback_keeps_raw_review_output() {
+        let success = pull_request_review_feedback(Ok(
+            "Reviewers: changes requested\nalice: add a test\n".to_owned(),
+        ));
+        assert_eq!(
+            success,
+            "PR comments/reviews:\nReviewers: changes requested\nalice: add a test"
+        );
+
+        let empty = pull_request_review_feedback(Ok(String::new()));
+        assert_eq!(empty, "PR comments/reviews returned no output.");
+
+        let failure = pull_request_review_feedback(Err(anyhow::anyhow!("gh auth required")));
+        assert_eq!(failure, "View PR comments/reviews failed: gh auth required");
     }
 
     #[test]

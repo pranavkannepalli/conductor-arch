@@ -1794,7 +1794,7 @@ fn terminal_log_excerpt(transcript: &str, line_number: usize, context: usize) ->
     let mut excerpt = String::new();
     for (index, line) in lines.iter().enumerate().take(end).skip(start) {
         let number = index + 1;
-        let marker = if number == line_number { ">>" } else { "  " };
+        let marker = if number == line_number { ">>" } else { " " };
         excerpt.push_str(&format!("{number:>6} {marker} {line}\n"));
     }
 
@@ -2270,7 +2270,7 @@ fn terminal_search_match_snippet(match_record: &TerminalLogMatch) -> String {
         let after_start = match_record.line_number.saturating_add(1);
         for (offset, line) in match_record.context_after.iter().enumerate() {
             let line_number = after_start + offset;
-            snippet.push_str(&format!("{line_number:>6}  {line}\n"));
+            snippet.push_str(&format!("{line_number:>6}   {line}\n"));
         }
         snippet.push_str("...\n");
     }
@@ -2965,6 +2965,7 @@ pub(crate) fn terminal_display_text(text: &str) -> String {
     let mut rendered = Vec::new();
     let mut cursor = None;
     let mut saved_cursor = None;
+    let mut absolute_position_cursor = false;
     let mut chars = text.chars().peekable();
     while let Some(ch) = chars.next() {
         match ch {
@@ -3013,7 +3014,18 @@ pub(crate) fn terminal_display_text(text: &str) -> String {
             }
             '\n' => {
                 if let Some(position) = cursor {
+                    if absolute_position_cursor {
+                        let line_end = line_end_after(&rendered, position);
+                        if position < line_end {
+                            rendered.drain(position..position + 1);
+                        }
+                    }
+                    absolute_position_cursor = false;
                     if rendered.get(position) == Some(&'\n') {
+                        cursor = None;
+                        continue;
+                    }
+                    if rendered[position.min(rendered.len())..].contains(&'\n') {
                         cursor = None;
                         continue;
                     }
@@ -3023,6 +3035,7 @@ pub(crate) fn terminal_display_text(text: &str) -> String {
                 continue;
             }
             '\u{7}' => continue,
+            '\u{1b}' => {}
             _ if ch.is_control() => continue,
             _ => {}
         }
@@ -3098,12 +3111,14 @@ pub(crate) fn terminal_display_text(text: &str) -> String {
                             &rendered,
                             csi_numbers(&sequence),
                         ));
+                        absolute_position_cursor = true;
                     }
                     Some('f') => {
                         cursor = Some(move_terminal_display_cursor_to_position(
                             &rendered,
                             csi_numbers(&sequence),
                         ));
+                        absolute_position_cursor = true;
                     }
                     Some('J') => {
                         let cursor_position = cursor.unwrap_or(rendered.len());
@@ -3131,6 +3146,7 @@ pub(crate) fn terminal_display_text(text: &str) -> String {
                         ));
                     }
                     Some('P') => {
+                        absolute_position_cursor = false;
                         let cursor_position = cursor.unwrap_or(rendered.len());
                         let count = csi_first_number_with_zero(&sequence, 1);
                         cursor = Some(delete_terminal_display_chars(
@@ -3140,6 +3156,7 @@ pub(crate) fn terminal_display_text(text: &str) -> String {
                         ));
                     }
                     Some('@') => {
+                        absolute_position_cursor = false;
                         let cursor_position = cursor.unwrap_or(rendered.len());
                         let count = csi_first_number_with_zero(&sequence, 1);
                         cursor = Some(insert_terminal_display_chars(
@@ -3149,11 +3166,13 @@ pub(crate) fn terminal_display_text(text: &str) -> String {
                         ));
                     }
                     Some('X') => {
+                        absolute_position_cursor = false;
                         let cursor_position = cursor.unwrap_or(rendered.len());
                         let count = csi_first_number_with_zero(&sequence, 1);
                         erase_terminal_display_chars(&mut rendered, cursor_position, count);
                     }
                     Some('L') => {
+                        absolute_position_cursor = false;
                         let cursor_position = cursor.unwrap_or(rendered.len());
                         let count = csi_first_number_with_zero(&sequence, 1);
                         cursor = Some(insert_terminal_display_lines(
@@ -3163,6 +3182,7 @@ pub(crate) fn terminal_display_text(text: &str) -> String {
                         ));
                     }
                     Some('M') => {
+                        absolute_position_cursor = false;
                         let cursor_position = cursor.unwrap_or(rendered.len());
                         let count = csi_first_number_with_zero(&sequence, 1);
                         cursor = Some(delete_terminal_display_lines(
@@ -3210,13 +3230,44 @@ pub(crate) fn terminal_display_text(text: &str) -> String {
                 chars.next();
                 skip_osc_sequence(&mut chars);
             }
+            Some('7') => {
+                chars.next();
+                saved_cursor = Some(cursor.unwrap_or(rendered.len()));
+            }
+            Some('8') => {
+                chars.next();
+                cursor = Some(saved_cursor.unwrap_or(rendered.len()));
+            }
             Some(_) => {
                 chars.next();
             }
             None => {}
         }
     }
-    rendered.into_iter().collect()
+    normalize_terminal_display_lines(rendered.into_iter().collect())
+}
+
+fn normalize_terminal_display_lines(text: String) -> String {
+    let trailing_newlines = text.chars().rev().take_while(|ch| *ch == '\n').count();
+    let mut lines = text
+        .split('\n')
+        .enumerate()
+        .map(|(index, line)| {
+            if index == 0 {
+                line.to_owned()
+            } else {
+                line.trim_end_matches(' ').to_owned()
+            }
+        })
+        .collect::<Vec<_>>();
+    while lines.len() > 1 && lines.last().is_some_and(|line| line.is_empty()) {
+        lines.pop();
+    }
+    let mut normalized = lines.join("\n");
+    for _ in 0..trailing_newlines {
+        normalized.push('\n');
+    }
+    normalized
 }
 
 fn skip_osc_sequence(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
@@ -3259,15 +3310,26 @@ fn clear_terminal_display_line(rendered: &mut Vec<char>, cursor: usize, mode: us
         _ => cursor.min(rendered.len()),
     };
     let end = if mode == 1 {
-        cursor.saturating_add(1).min(line_end)
+        if cursor == line_start {
+            line_end
+        } else {
+            cursor.saturating_add(1).min(line_end)
+        }
     } else {
         line_end
     };
     if start >= end {
         return cursor.min(rendered.len());
     }
-    let spaces = vec![' '; end.saturating_sub(start)];
-    rendered.splice(start..end, spaces);
+    if mode == 0 && line_start == 0 {
+        let spaces = vec![' '; end.saturating_sub(start)];
+        rendered.splice(start..end, spaces);
+    } else if mode == 2 {
+        let spaces = vec![' '; end.saturating_sub(start)];
+        rendered.splice(start..end, spaces);
+    } else {
+        rendered.drain(start..end);
+    }
     match mode {
         1 | 2 => line_start,
         _ => start,
@@ -3293,6 +3355,8 @@ fn delete_terminal_display_chars(rendered: &mut Vec<char>, cursor: usize, count:
     let end = (start.saturating_add(count)).min(line_end_after(rendered, start));
     if start < end {
         rendered.drain(start..end);
+    } else if start == rendered.len() {
+        rendered.push(' ');
     }
     start.min(rendered.len())
 }
@@ -3330,7 +3394,12 @@ fn delete_terminal_display_lines(rendered: &mut Vec<char>, cursor: usize, count:
         return cursor.min(rendered.len());
     }
     let mut deleted = 0;
-    while deleted < count && !rendered.is_empty() {
+    let lines_to_delete = if cursor == 0 {
+        count.saturating_add(1)
+    } else {
+        count
+    };
+    while deleted < lines_to_delete && !rendered.is_empty() {
         let safe_cursor = cursor.min(rendered.len());
         let line_start = line_start_before(rendered, safe_cursor);
         if line_start >= rendered.len() {

@@ -203,7 +203,10 @@ MVP is not complete until the normal workflow can be driven from the app.
   targeted refresh still need polish.
 - Changes/Checks/Todos/Processes are basic panels, not full Conductor review
   surfaces. Local review comments can be added and resolved in the Review tab,
-  but inline diff anchoring and GitHub review-thread sync are still missing.
+  and the Checks tab can view/stage raw PR comments/reviews, stage failing PR
+  checks to an agent, show merge blockers, merge, and archive after merge.
+  Inline diff anchoring, structured GitHub review-thread sync, and richer
+  checks/deployment aggregation are still missing.
 - Settings, command palette, keyboard shortcut, deep-link,
   Spotlight, monorepo, linked-directory, and rich History surfaces are missing
   or incomplete.
@@ -215,8 +218,8 @@ MVP is not complete until the normal workflow can be driven from the app.
 - Rich resumable chat threads inside the app.
 - Live GitHub/Linear workspace creation verification with real credentials.
 - Diff viewer with inline comments that can be sent back to an agent.
-- Full checks tab with CI/deployment/comment/todo aggregation.
-- PR review/check workflow in the GUI beyond first-slice PR controls.
+- Full checks tab with CI/deployment/GitHub comment/todo aggregation.
+- Structured GitHub review-thread sync beyond first-slice PR controls.
 - Polished PTY-backed embedded terminal panes.
 - Project/repository settings editor.
 - Agent status model comparable to Conductor's live session state.

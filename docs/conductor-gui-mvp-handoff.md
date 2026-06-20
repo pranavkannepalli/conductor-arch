@@ -363,8 +363,10 @@ treated as merge blockers unless the user explicitly clears or overrides them.
 - Changes/checks/todos/process panels are basic, not review-grade. Local review
   comments can be added and marked resolved from the Review tab.
 - GitHub integration is still backend/CLI-heavy; GTK can create, refresh,
-  inspect raw checks, and merge a PR through the Checks tab, but review,
-  aggregated checks, and archive workflow are not complete.
+  inspect raw checks and PR comments/reviews, stage failing checks or PR
+  comments/reviews to an agent, show merge blockers, merge a PR, and archive
+  after merge through the Checks tab, but structured GitHub review-thread sync
+  and richer checks/deployment aggregation are not complete.
 - History reads old Conductor DB but is not a first-class app history model.
 - Project settings editor is functional but still needs Conductor-level polish,
   validation, and full managed/user layer visibility.

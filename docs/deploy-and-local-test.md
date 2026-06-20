@@ -392,8 +392,10 @@ Known GUI MVP gaps:
   validation, monorepo directory selection, and linked-directory workflows are
   still pending.
 - No rich diff/review/comment GUI yet.
-- No full GUI-first GitHub PR/check/archive workflow yet; the Checks tab only
-  has first-slice PR create/view/raw-checks/merge controls.
+- No full GUI-first GitHub review/check workflow yet; the Checks tab has
+  first-slice PR create/view/raw-checks/raw-comments/stage-failing-checks/
+  stage-comments/merge/archive controls, but structured GitHub review-thread
+  sync and richer deployment/check aggregation are still pending.
 
 ## 12. Build Release Artifacts
 

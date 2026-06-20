@@ -5,8 +5,8 @@
 This project has completed the Phase 0 documentation reset, Phase 1 app
 architecture cleanup slice, Phase 2 project settings slice, and a usable Phase
 3 Workspace Command Center slice. Phase 4 Embedded Runtime, Phase 5 Agent
-Sessions, and the current Phase 6 Git/Diff/Review slice are now in place for
-the GUI-first MVP path. Phase 3 still lacks live connector proof for
+Sessions, Phase 6 Git/Diff/Review, and a first Phase 7 GitHub Workflow slice
+are now in place for the GUI-first MVP path. Phase 3 still lacks live connector proof for
 GitHub/Linear credentials, but the source creation code path is no longer
 placeholder-only.
 
@@ -25,6 +25,9 @@ Conductor's documented workflow first: repository setup, isolated workspaces,
 agent sessions, runtime, diff review, checks, todos, PR flow, archive/history,
 settings, command palette, shortcuts, deep links, provider settings, MCP, and
 security/privacy posture.
+
+Latest verification on 2026-06-20: `cargo test` passes across the CLI, core,
+GTK, and doctest suites.
 
 ## What Exists
 
@@ -73,6 +76,9 @@ security/privacy posture.
 - Git status/diff/log helpers.
 - Todo, review comment, checkpoint, conflict, and checks-summary commands.
 - GitHub PR create/view/checks/merge through local `gh` auth.
+- PR merge now blocks open todos and open local review comments, and can archive
+  the workspace after merge when repository Git settings enable it.
+- PR checks output can be parsed into failing-check prompts for agents.
 - Packaging scaffolding for AppImage, deb, rpm, AUR, and Flatpak.
 
 ### GTK Prototype
@@ -99,6 +105,19 @@ security/privacy posture.
   setup/run log tails.
 - Runtime panel can start/sync/stop the first Spotlight testing slice and show
   the active Spotlight patch/status.
+- Agent panel can start PTY-backed Shell, Codex, Claude, and Cursor sessions,
+  persist transcripts, send input, stop selected sessions, create checkpoints,
+  show harness metadata, surface provider/auth/MCP status, and stage open
+  review comments into the selected live session.
+- Changes tab now has a selectable changed-file tree, per-file unified diff
+  preview, full-diff fallback, file-scoped inline comments, recent commits,
+  branch push state, git status, and safe tracked-file revert.
+- Review tab can add local file/line comments, resolve open comments, and stage
+  open comments for the selected agent session.
+- Checks tab can create/refresh PR state, inspect raw PR checks and PR
+  comments/reviews, stage failing checks or PR comments/reviews for the
+  selected agent session, show merge blockers, merge a PR, and archive after
+  merge through the existing repository setting.
 - History page can read old chats from the macOS Conductor database when
   available.
 
@@ -108,7 +127,9 @@ The actual GUI-first Conductor MVP is not complete.
 
 MVP-critical missing work:
 
-- Embedded Conductor-native Claude/Codex/Cursor chat.
+- Polished Conductor-native Claude/Codex/Cursor chat. A PTY-backed app-native
+  session surface exists, but it is still transcript-oriented rather than a
+  rich structured chat surface.
 - Polished PTY terminal UX. A real PTY-backed workspace shell now exists, but
   it is still largely transcript-oriented, not a full terminal emulator with
   richer cursor-state/session emulation and polished history/scrollback browsing.
@@ -117,8 +138,10 @@ MVP-critical missing work:
 - More polished project settings/onboarding layout.
 - Monorepo directory selection and linked-directory workflows.
 - Fully polished repository/workspace creation flows.
-- Real diff/review/comment surface.
-- GUI-first GitHub PR/check/review/merge flow.
+- Rich diff/review/comment surface beyond the current file tree, unified diff,
+  local inline comments, comment staging, and safe tracked-file revert.
+- Structured GitHub review-thread sync and richer PR/check/deployment
+  aggregation.
 - Command palette, keyboard shortcuts, and deep links.
 - Monorepo sparse-checkout controls and linked-directory workflows.
 - Rich message rendering with attachments and stronger in-app session history.
@@ -380,6 +403,10 @@ Still needs Phase 4 work:
 - Running sessions from a previous app run can now be reattached when their
   PTY device is still available; otherwise they remain visible as detached
   saved transcripts.
+- Verification: `cargo test` passes. This covers core session launch/process
+  behavior, PTY input/output, GTK staged-review/session status helpers, and the
+  broader GTK build. Manual live auth/provider smoke for Claude, Codex, and
+  Cursor still depends on those tools being installed and authenticated locally.
 
 ## Phase 6 Git Diff Review Done
 
@@ -396,6 +423,11 @@ Still needs Phase 4 work:
   session from the app-native session surface.
 - Sibling workspace conflict detection and copy/diff actions remain available
   in the Checks tab for overlapping files.
+- Verification: `cargo test` passes. This covers changed files, unified diffs,
+  file summaries, review comment prompts, safe tracked-file revert, conflict
+  detection, GTK diff-tree/comment rendering helpers, and terminal transcript
+  rendering used by the review/runtime surfaces. Live GitHub review comment
+  aggregation remains Phase 7 work.
 
 ## Next Step
 

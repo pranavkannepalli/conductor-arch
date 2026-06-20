@@ -316,6 +316,28 @@ pub struct PullRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequestCheckRun {
+    pub name: String,
+    pub status: String,
+    pub detail: Option<String>,
+}
+
+impl PullRequestCheckRun {
+    pub fn is_failure(&self) -> bool {
+        matches!(
+            self.status.to_ascii_lowercase().as_str(),
+            "fail" | "failed" | "failure" | "error" | "cancelled" | "timed_out"
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergePullRequestResult {
+    pub merge_output: String,
+    pub archived_workspace: Option<Workspace>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Todo {
     pub id: i64,
     pub workspace_id: i64,
@@ -1333,8 +1355,12 @@ impl WorkspaceStore {
         fs::write(&patch_path, &expected_patch)
             .with_context(|| format!("write {}", patch_path.display()))?;
         self.conn.execute(
-            "UPDATE spotlight_sessions SET patch_path = ?1 WHERE id = ?2",
-            params![patch_path.to_string_lossy().to_string(), active.id],
+            "UPDATE spotlight_sessions SET workspace_name = ?1, patch_path = ?2 WHERE id = ?3",
+            params![
+                workspace.name,
+                patch_path.to_string_lossy().to_string(),
+                active.id
+            ],
         )?;
         self.get_spotlight_session(active.id)
     }
@@ -1758,6 +1784,26 @@ impl WorkspaceStore {
     pub fn pull_request_checks(&self, name: &str) -> Result<String> {
         let workspace = self.get_by_name(name)?;
         command_output(&workspace.path, "gh", &["pr", "checks"])
+    }
+
+    pub fn pull_request_check_runs(&self, name: &str) -> Result<Vec<PullRequestCheckRun>> {
+        self.pull_request_checks(name)
+            .map(|output| parse_pull_request_check_runs(&output))
+    }
+
+    pub fn pull_request_checks_agent_prompt(&self, name: &str) -> Result<String> {
+        let checks = self.pull_request_check_runs(name)?;
+        Ok(format_pull_request_checks_agent_prompt(name, &checks))
+    }
+
+    pub fn pull_request_review_state(&self, name: &str) -> Result<String> {
+        let workspace = self.get_by_name(name)?;
+        command_output(&workspace.path, "gh", &["pr", "view", "--comments"])
+    }
+
+    pub fn pull_request_review_agent_prompt(&self, name: &str) -> Result<String> {
+        let review_state = self.pull_request_review_state(name)?;
+        Ok(format_pull_request_review_agent_prompt(name, &review_state))
     }
 
     pub fn pull_request(&self, name: &str) -> Result<Option<PullRequest>> {
@@ -2286,6 +2332,13 @@ impl WorkspaceStore {
                 "{open_todos} open todo(s) remain in workspace {name}; complete them before merging"
             );
         }
+        let comments = self.list_review_comments(name)?;
+        let open_comments = comments.iter().filter(|c| c.status == "open").count();
+        if open_comments > 0 {
+            anyhow::bail!(
+                "{open_comments} open review comment(s) remain in workspace {name}; resolve them before merging"
+            );
+        }
 
         let output = command_output(
             &workspace.path,
@@ -2305,6 +2358,26 @@ impl WorkspaceStore {
         )?;
 
         Ok(output)
+    }
+
+    pub fn merge_and_maybe_archive_pull_request(
+        &self,
+        name: &str,
+        method: &str,
+    ) -> Result<MergePullRequestResult> {
+        let merge_output = self.merge_pull_request(name, method)?;
+        let workspace = self.get_by_name(name)?;
+        let repository = self.load_repository_by_id(workspace.repository_id)?;
+        let settings = load_repository_settings(&repository.root_path)?;
+        let archived_workspace = if settings.git.archive_on_merge.unwrap_or(false) {
+            Some(self.archive(name, false)?)
+        } else {
+            None
+        };
+        Ok(MergePullRequestResult {
+            merge_output,
+            archived_workspace,
+        })
     }
 
     pub fn editor_launch(&self, name: &str, editor: &str) -> Result<SessionLaunch> {
@@ -2972,6 +3045,49 @@ fn parse_pull_request_number(url: &str) -> Option<i64> {
         .and_then(|segment| segment.parse::<i64>().ok())
 }
 
+fn parse_pull_request_check_runs(output: &str) -> Vec<PullRequestCheckRun> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() {
+                return None;
+            }
+            let parts = line.split('\t').map(str::trim).collect::<Vec<_>>();
+            if parts.len() >= 2 {
+                return Some(PullRequestCheckRun {
+                    name: parts[0].to_owned(),
+                    status: parts[1].to_owned(),
+                    detail: parts
+                        .iter()
+                        .skip(2)
+                        .rev()
+                        .find(|part| !part.is_empty())
+                        .map(|part| (*part).to_owned()),
+                });
+            }
+            let lower = line.to_ascii_lowercase();
+            let status = [
+                "fail",
+                "failed",
+                "failure",
+                "error",
+                "cancelled",
+                "timed_out",
+                "pass",
+                "pending",
+            ]
+            .iter()
+            .find(|status| lower.contains(**status))?;
+            Some(PullRequestCheckRun {
+                name: line.to_owned(),
+                status: (*status).to_owned(),
+                detail: None,
+            })
+        })
+        .collect()
+}
+
 fn extract_json_string_field(json: &str, field: &str) -> Option<String> {
     let needle = format!("\"{field}\"");
     let field_start = json.find(&needle)? + needle.len();
@@ -3052,6 +3168,42 @@ fn format_review_comments_agent_prompt(name: &str, comments: &[ReviewComment]) -
             comment.id, comment.file_path, line, comment.body
         ));
     }
+    prompt
+}
+
+fn format_pull_request_checks_agent_prompt(name: &str, checks: &[PullRequestCheckRun]) -> String {
+    let failures = checks
+        .iter()
+        .filter(|check| check.is_failure())
+        .collect::<Vec<_>>();
+    let mut prompt = format!("Fix these failing PR checks for workspace {name}.\n");
+    if failures.is_empty() {
+        prompt.push_str("No failing PR checks.\n");
+        return prompt;
+    }
+    prompt.push_str("Make the smallest safe changes, then run relevant tests.\n\n");
+    for check in failures {
+        match check.detail.as_deref() {
+            Some(detail) => prompt.push_str(&format!(
+                "- {}: {} - {}\n",
+                check.name, check.status, detail
+            )),
+            None => prompt.push_str(&format!("- {}: {}\n", check.name, check.status)),
+        }
+    }
+    prompt
+}
+
+fn format_pull_request_review_agent_prompt(name: &str, review_state: &str) -> String {
+    let mut prompt = format!("Address this GitHub PR review/comment state for workspace {name}.\n");
+    let review_state = review_state.trim();
+    if review_state.is_empty() {
+        prompt.push_str("No GitHub PR review/comment output.\n");
+        return prompt;
+    }
+    prompt.push_str("Make the smallest safe changes, then run relevant tests.\n\n");
+    prompt.push_str(review_state);
+    prompt.push('\n');
     prompt
 }
 
@@ -6858,6 +7010,134 @@ spotlight_testing = true
         assert!(prompt.contains("Address these open review comments for workspace berlin."));
         assert!(prompt.contains(&format!("- #{} src/lib.rs:12: handle empty input", open.id)));
         assert!(!prompt.contains("clarify setup"));
+    }
+
+    #[test]
+    fn pull_request_checks_agent_prompt_includes_failing_checks() {
+        let output = "\
+build\tpass\t1m\thttps://github.com/example/demo/actions/1
+lint\tfail\t30s\thttps://github.com/example/demo/actions/2
+deploy\tpending\t10s\thttps://github.com/example/demo/actions/3
+";
+
+        let checks = parse_pull_request_check_runs(output);
+        let prompt = format_pull_request_checks_agent_prompt("berlin", &checks);
+
+        assert_eq!(checks.len(), 3);
+        assert_eq!(checks.iter().filter(|check| check.is_failure()).count(), 1);
+        assert!(prompt.contains("Fix these failing PR checks for workspace berlin."));
+        assert!(prompt.contains("- lint: fail - https://github.com/example/demo/actions/2"));
+        assert!(!prompt.contains("build"));
+        assert!(!prompt.contains("deploy"));
+    }
+
+    #[test]
+    fn pull_request_review_agent_prompt_wraps_github_comment_state() {
+        let raw = "Reviewers: changes requested\nalice: please add a test\n";
+
+        let prompt = format_pull_request_review_agent_prompt("berlin", raw);
+
+        assert!(
+            prompt.contains("Address this GitHub PR review/comment state for workspace berlin.")
+        );
+        assert!(prompt.contains("Reviewers: changes requested"));
+        assert!(prompt.contains("alice: please add a test"));
+    }
+
+    #[test]
+    fn merge_pull_request_blocks_open_review_comments() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        store
+            .record_pull_request(workspace.id, "https://github.com/example/demo/pull/42")
+            .unwrap();
+        store
+            .add_review_comment("berlin", "src/lib.rs", Some(12), "fix edge case")
+            .unwrap();
+
+        let err = store.merge_pull_request("berlin", "squash").unwrap_err();
+
+        assert!(err.to_string().contains("open review comment(s) remain"));
+    }
+
+    #[test]
+    fn merge_and_maybe_archive_archives_when_repository_setting_is_enabled() {
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::write(
+            repo_path.join(".conductor/settings.toml"),
+            "[git]\narchive_on_merge = true\n",
+        )
+        .unwrap();
+        let old_path = install_fake_gh(
+            temp.path(),
+            r#"#!/bin/sh
+if [ "$1" = "pr" ] && [ "$2" = "merge" ]; then
+  printf 'merged pull request\n'
+  exit 0
+fi
+echo "unexpected gh args: $*" >&2
+exit 1
+"#,
+        );
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        store
+            .record_pull_request(workspace.id, "https://github.com/example/demo/pull/42")
+            .unwrap();
+
+        let result = store
+            .merge_and_maybe_archive_pull_request("berlin", "squash")
+            .unwrap();
+
+        restore_path(old_path);
+        assert_eq!(result.merge_output.trim(), "merged pull request");
+        assert_eq!(result.archived_workspace.unwrap().status, "archived");
+        assert_eq!(store.get_by_name("berlin").unwrap().status, "archived");
     }
 
     #[test]

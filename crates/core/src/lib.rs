@@ -9,18 +9,24 @@ pub mod workspace;
 
 #[cfg(test)]
 mod pty_tests {
+    use std::ffi::OsString;
     use std::time::Duration;
 
     #[test]
     fn pty_session_accepts_input_and_streams_output() {
         let temp = tempfile::tempdir().unwrap();
-        let mut session = crate::pty::PtySession::spawn_shell(temp.path(), Vec::new()).unwrap();
+        let marker = "linux-conductor-pty-ready";
+        let mut session = crate::pty::PtySession::spawn_shell(
+            temp.path(),
+            vec![("LC_PTY_TEST_MARKER".to_owned(), OsString::from(marker))],
+        )
+        .unwrap();
 
-        session.write("printf 'ready:%s\\n' \"$PWD\"\n").unwrap();
-        let ready = session
-            .read_until("ready:", Duration::from_secs(2))
+        session
+            .write("printf 'ready:%s\\n%s\\n' \"$PWD\" \"$LC_PTY_TEST_MARKER\"\n")
             .unwrap();
-        assert!(ready.contains(temp.path().to_str().unwrap()));
+        let ready = session.read_until(marker, Duration::from_secs(2)).unwrap();
+        assert!(ready.contains(temp.path().canonicalize().unwrap().to_str().unwrap()));
 
         session
             .write("read line; printf 'echo:%s\\n' \"$line\"; exit\n")
