@@ -3934,12 +3934,26 @@ mod tests {
     use crate::repository::{AddRepository, RepositoryStore};
     use std::fs;
     use std::path::Path;
-    use std::process::Command;
+    use std::process::{Command, Stdio};
     use std::sync::{Mutex, OnceLock};
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn exited_child_pid() -> u32 {
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("exit 0")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        assert!(!process_alive(pid));
+        pid
     }
 
     #[test]
@@ -6870,7 +6884,7 @@ spotlight_testing = true
 
         let launch = store.session_launch("berlin", SessionKind::Shell).unwrap();
         let process = store
-            .record_session_process("berlin", &launch, u32::MAX)
+            .record_session_process("berlin", &launch, exited_child_pid())
             .expect("seed dead session record");
 
         let reconciled = store
