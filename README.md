@@ -31,16 +31,17 @@ The current app supports the core Conductor-style loop, with some rough edges:
   session.
 - Create, refresh, merge, and archive GitHub PRs from the workspace view through
   local `gh` auth.
-- Restore archived workspaces and read older macOS Conductor chat history when
-  that database is available.
+- Restore archived workspaces, inspect saved Linux session history, and read
+  older macOS Conductor chat history when that database is available.
 - Customize repository behavior with editable prompts, scripts, environment,
-  provider paths, Git behavior, and file-copy rules.
+  provider paths, Git behavior, file-copy rules, monorepo working directories,
+  and file-editable workflow defaults for naming, automation, agents, merge
+  rules, workspaces, and views.
 
 The GUI is usable, but not fully polished. Agent sessions run local PTY-backed
 harnesses and render structured app-native transcript events. Terminal
-rendering, shortcut coverage, deep links, monorepo directory selection,
-linked-directory workflows, theme/view configuration, and full Conductor visual
-parity are still in progress.
+rendering, exhaustive per-command shortcuts, full visual theme/layout
+application, and full Conductor visual parity are still in progress.
 
 ## The Workflow
 
@@ -156,9 +157,48 @@ API_BASE_URL = "http://localhost:3000"
 general = "Prefer small, reviewable changes and run focused tests."
 code_review = "Focus on correctness, behavior changes, and missing tests."
 create_pr = "Write concise PR descriptions with test evidence."
+test_fixing = "Reproduce failing tests first, then make the smallest fix."
+refactor_style = "Keep behavior-preserving refactors separate from feature work."
 
 [git]
 archive_on_merge = true
+
+[customization.naming]
+branch_template = "{prefix}/{type}-{slug}"
+workspace_name_style = "city"
+commit_style = "conventional"
+pr_body_sections = ["Summary", "Tests", "Risk"]
+default_merge_method = "squash"
+
+[customization.automation]
+auto_setup = true
+auto_start_agent = "codex"
+required_local_files = [".env"]
+test_command = "cargo test --workspace"
+lint_command = "cargo clippy --workspace"
+build_command = "cargo build --workspace"
+
+[customization.merge_rules]
+block_on_open_todos = true
+block_on_open_comments = true
+block_on_failed_checks = true
+block_on_pending_checks = false
+definition_of_done = "Tests run, reviewer comments resolved, PR explains risk."
+
+[customization.workspace_defaults]
+base_branch = "main"
+branch_prefix = "lc"
+working_directory = "apps/web"
+port_block_size = 10
+default_visible_tab = "changes"
+
+[customization.view]
+theme = "system"
+accent_color = "green"
+density = "compact"
+keybindings = "vim"
+diff_preference = "unified"
+transcript_display = "structured"
 ```
 
 Local machine overrides live at `.conductor/settings.local.toml`. Do not commit
@@ -177,16 +217,34 @@ belong in `scripts.setup`.
 
 ### Script Environment
 
-Setup, run, archive, terminal, and agent processes receive Conductor context:
+Setup, run, archive, terminal, and agent processes receive Conductor context.
+When `customization.workspace_defaults.working_directory` is set, processes run
+from that relative subdirectory inside the worktree.
 
 | Variable | Value |
 | --- | --- |
 | `CONDUCTOR_WORKSPACE_NAME` | Workspace name |
 | `CONDUCTOR_WORKSPACE_PATH` | Absolute path to the worktree |
+| `CONDUCTOR_WORKING_DIRECTORY` | Absolute path to the selected working directory |
 | `CONDUCTOR_ROOT_PATH` | Absolute path to the main repository |
 | `CONDUCTOR_DEFAULT_BRANCH` | Repository default branch |
 | `CONDUCTOR_PORT` | Base port for this workspace |
 | `CONDUCTOR_IS_LOCAL` | `1` |
+| `CONDUCTOR_LINKED_DIRECTORIES` | Newline-separated `workspace=/path` entries for linked workspaces |
+| `CONDUCTOR_LINKED_DIRECTORY_<NAME>` | Absolute path for one linked workspace |
+
+### Linked Directories
+
+Use linked directories when one workspace needs to read or edit another related
+workspace, such as a frontend and backend checked out from separate projects.
+Links are stored in the app database and materialized as symlinks under
+`.context/linked-directories/<target-workspace>`.
+
+```bash
+linux-conductor workspace link-dir frontend backend
+linux-conductor workspace linked-dirs frontend
+linux-conductor workspace unlink-dir frontend backend
+```
 
 `scripts.run_mode = "concurrent"` lets multiple workspaces run at once.
 `"nonconcurrent"` allows only one active run script per repository.
@@ -292,6 +350,7 @@ Workspace creation should be fast and predictable:
 
 - Default base branch.
 - Workspace parent directory.
+- Monorepo working directory relative to the workspace root.
 - Branch prefix and slug style.
 - Default port block size.
 - Files to copy policy.
@@ -327,10 +386,26 @@ Power users should be able to tune attention and speed:
 - Repository-specific terminal presets.
 - Import/export for settings bundles and prompt packs.
 
-The current implemented settings format is TOML. Future theme/view
-customization can use the same settings model or a dedicated file format, but
-the public docs should not require every advanced knob to have a custom GUI
-control.
+The current implemented settings format is TOML. The Projects settings page
+edits common repository fields directly and includes an advanced TOML block for
+the `[customization]` sections. Workspace creation already honors
+`customization.workspace_defaults.base_branch`, `branch_prefix`, and
+`port_block_size`. Runtime setup/run/archive scripts, terminal commands, and
+agent sessions honor `working_directory`. PR merge honors
+`customization.naming.default_merge_method` plus merge blockers for open todos,
+open local review comments, failed checks, and pending checks. GTK workspace
+startup and sidebar selection honor `default_visible_tab` unless an explicit
+launch tab is provided, and apply the configured `theme`, `accent_color`, and
+`density` as stylesheet classes. GTK also honors `keybindings` for global
+refresh, sidebar, and command-palette shortcuts, including `vim` and custom
+`action=shortcut` mappings, and applies `terminal_font` plus
+`terminal_scrollback` to workspace terminal surfaces. `command_palette_presets`
+feeds workspace terminal preset buttons; entries can be known aliases such as
+`test`, `lint`, `build`, `typecheck`, `ci`, `status`, `diff`, `env`, and
+`files`, or custom `Label=command` / `Label: command` entries. The CLI can
+export or import shared and local repository settings bundles. The other
+customization fields are saved, merged, and preserved for workflow surfaces
+that consume them.
 
 ## Platform Stance
 
@@ -356,6 +431,8 @@ linux-conductor doctor
 linux-conductor repo add <path> [--name <name>]
 linux-conductor repo list
 linux-conductor repo doctor [<name>]
+linux-conductor repo settings <name> export [--local] [--output <path>]
+linux-conductor repo settings <name> import <path> [--local]
 
 linux-conductor workspace create <repo> --name <name> --branch <branch> [--base <ref>]
 linux-conductor workspace create <repo> --from-issue <number>
@@ -394,6 +471,10 @@ linux-conductor pr view <workspace>
 linux-conductor pr checks <workspace>
 linux-conductor pr merge <workspace> [--method squash|merge|rebase]
 
+linux-conductor workspace link-dir <workspace> <target-workspace>
+linux-conductor workspace linked-dirs <workspace>
+linux-conductor workspace unlink-dir <workspace> <target-workspace>
+
 linux-conductor checkpoint create <workspace> [--session <id>] <message...>
 linux-conductor checkpoint list <workspace>
 linux-conductor checkpoint restore <workspace> <id>
@@ -424,8 +505,8 @@ linux-conductor checkpoint restore <workspace> <id>
   terminal emulator.
 - GitHub PR workflows use the local `gh` CLI and require `gh auth login`.
 - Linear workspace creation requires `LINEAR_API_KEY`.
-- Broad shortcuts, deep links, monorepo directory selection, linked directories,
-  theme/view configuration, and unified local history are not finished.
+- Exhaustive per-command shortcut customization and deeper layout/theme
+  coverage are not finished.
 - `checkpoint restore` is destructive: it resets the workspace and removes
   untracked files.
 - Flatpak is experimental because arbitrary repository access needs broad

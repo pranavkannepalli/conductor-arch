@@ -4,10 +4,14 @@ use linux_conductor_core::doctor;
 use linux_conductor_core::import::{default_conductor_app_database, import_conductor_app_database};
 use linux_conductor_core::paths::AppPaths;
 use linux_conductor_core::repository::{AddRepository, RepositoryStore};
-use linux_conductor_core::workspace::{
-    CreateWorkspace, SessionHarnessOptions, SessionKind, SessionLaunch, WorkspaceStatusLine,
-    WorkspaceStore,
+use linux_conductor_core::settings::{
+    repository_settings_from_toml, save_repository_settings, SettingsLayer,
 };
+use linux_conductor_core::workspace::{
+    CreateWorkspace, LinkedDirectory, LocalChatHistoryMessage, LocalChatHistorySummary,
+    SessionHarnessOptions, SessionKind, SessionLaunch, WorkspaceStatusLine, WorkspaceStore,
+};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 
@@ -101,6 +105,10 @@ enum Command {
         #[command(subcommand)]
         command: ImportCommand,
     },
+    History {
+        #[command(subcommand)]
+        command: HistoryCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -108,6 +116,17 @@ enum ImportCommand {
     Conductor {
         #[arg(long)]
         source: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum HistoryCommand {
+    List {
+        #[arg(long)]
+        workspace: Option<String>,
+    },
+    Show {
+        process_id: i64,
     },
 }
 
@@ -153,6 +172,26 @@ enum RepoCommand {
     Update {
         name: String,
     },
+    Settings {
+        name: String,
+        #[command(subcommand)]
+        command: RepoSettingsCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum RepoSettingsCommand {
+    Export {
+        #[arg(long)]
+        local: bool,
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    Import {
+        input: PathBuf,
+        #[arg(long)]
+        local: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -194,6 +233,17 @@ enum WorkspaceCommand {
     Rename {
         name: String,
         new_name: String,
+    },
+    LinkDir {
+        workspace: String,
+        target: String,
+    },
+    UnlinkDir {
+        workspace: String,
+        target: String,
+    },
+    LinkedDirs {
+        workspace: String,
     },
     SourcePreflight,
 }
@@ -288,8 +338,8 @@ enum PrCommand {
     },
     Merge {
         workspace: String,
-        #[arg(long, default_value = "squash")]
-        method: String,
+        #[arg(long)]
+        method: Option<String>,
     },
 }
 
@@ -365,6 +415,23 @@ fn main() -> Result<()> {
                 }
             }
         },
+        Command::History { command } => {
+            let store = WorkspaceStore::open_with_logs(paths.database_path, paths.logs_dir)?;
+            match command {
+                HistoryCommand::List { workspace } => {
+                    let workspace_path = workspace
+                        .as_deref()
+                        .map(|name| store.workspace_path(name))
+                        .transpose()?;
+                    let sessions = store.list_local_chat_history(workspace_path.as_deref())?;
+                    print!("{}", render_history_list(&sessions));
+                }
+                HistoryCommand::Show { process_id } => {
+                    let messages = store.local_chat_history_messages(process_id)?;
+                    print!("{}", render_history_messages(&messages));
+                }
+            }
+        }
         Command::Repo { command } => {
             let store = RepositoryStore::open(paths.database_path)?;
             match command {
@@ -412,6 +479,42 @@ fn main() -> Result<()> {
                         "Updated {} (default branch: {})",
                         repo.name, repo.default_branch
                     );
+                }
+                RepoCommand::Settings { name, command } => {
+                    let repo = store.get_by_name(&name)?;
+                    match command {
+                        RepoSettingsCommand::Export { local, output } => {
+                            let layer = repo_settings_layer(local);
+                            let path = repo_settings_path(&repo.root_path, layer);
+                            let contents = fs::read_to_string(&path)
+                                .with_context(|| format!("read {}", path.display()))?;
+                            if let Some(output) = output {
+                                fs::write(&output, contents)
+                                    .with_context(|| format!("write {}", output.display()))?;
+                                println!(
+                                    "Exported {} settings for {} to {}",
+                                    repo_settings_layer_label(layer),
+                                    repo.name,
+                                    output.display()
+                                );
+                            } else {
+                                print!("{contents}");
+                            }
+                        }
+                        RepoSettingsCommand::Import { input, local } => {
+                            let contents = fs::read_to_string(&input)
+                                .with_context(|| format!("read {}", input.display()))?;
+                            let settings = repository_settings_from_toml(&contents)?;
+                            let layer = repo_settings_layer(local);
+                            save_repository_settings(&repo.root_path, layer, &settings)?;
+                            println!(
+                                "Imported {} settings for {} from {}",
+                                repo_settings_layer_label(layer),
+                                repo.name,
+                                input.display()
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -539,6 +642,28 @@ fn main() -> Result<()> {
                         name,
                         workspace.name,
                         workspace.path.display()
+                    );
+                }
+                WorkspaceCommand::LinkDir { workspace, target } => {
+                    let link = store.link_workspace_directory(&workspace, &target)?;
+                    println!(
+                        "Linked {} into {} at {}",
+                        link.target_workspace_name,
+                        link.workspace_name,
+                        link.link_path.display()
+                    );
+                }
+                WorkspaceCommand::UnlinkDir { workspace, target } => {
+                    let link = store.unlink_workspace_directory(&workspace, &target)?;
+                    println!(
+                        "Unlinked {} from {}",
+                        link.target_workspace_name, link.workspace_name
+                    );
+                }
+                WorkspaceCommand::LinkedDirs { workspace } => {
+                    print!(
+                        "{}",
+                        render_linked_directories(&store.list_linked_directories(&workspace)?)
                     );
                 }
                 WorkspaceCommand::SourcePreflight => {
@@ -675,7 +800,10 @@ fn main() -> Result<()> {
                     }
                 }
                 PrCommand::Merge { workspace, method } => {
-                    print!("{}", store.merge_pull_request(&workspace, &method)?);
+                    print!(
+                        "{}",
+                        store.merge_pull_request(&workspace, method.as_deref())?
+                    );
                     println!("Merged pull request for {workspace}");
                 }
             }
@@ -980,6 +1108,90 @@ fn print_source_preflight(preflight: linux_conductor_core::workspace::WorkspaceS
     println!("Workspace source preflight");
     println!("GitHub: {}", preflight.github_status());
     println!("Linear: {}", preflight.linear_status());
+}
+
+fn render_linked_directories(links: &[LinkedDirectory]) -> String {
+    if links.is_empty() {
+        return "No linked directories.\n".to_owned();
+    }
+    let mut out = String::new();
+    for link in links {
+        out.push_str(&format!(
+            "{}\t{}\t{}\n",
+            link.target_workspace_name,
+            link.target_workspace_path.display(),
+            link.link_path.display()
+        ));
+    }
+    out
+}
+
+fn render_history_list(sessions: &[LocalChatHistorySummary]) -> String {
+    if sessions.is_empty() {
+        return "No local chat history found.\n".to_owned();
+    }
+    let mut out = String::new();
+    for session in sessions {
+        out.push_str(&format!(
+            "#{}\t{}\t{}\t{}\t{}\t{} message(s)\t{}\n",
+            session.process_id,
+            session.status,
+            session.updated_at,
+            session.repository_name,
+            session.workspace_name,
+            session.message_count,
+            session.preview.replace('\n', " ")
+        ));
+    }
+    out
+}
+
+fn render_history_messages(messages: &[LocalChatHistoryMessage]) -> String {
+    if messages.is_empty() {
+        return "No messages in this chat.\n".to_owned();
+    }
+    let mut out = String::new();
+    for message in messages {
+        out.push_str(history_role_label(&message.role));
+        out.push('\n');
+        out.push_str(&message.content);
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+    out
+}
+
+fn history_role_label(role: &str) -> &'static str {
+    match role {
+        "user" => "You",
+        "review" => "Review Prompt",
+        "system" => "System",
+        _ => "Agent",
+    }
+}
+
+fn repo_settings_layer(local: bool) -> SettingsLayer {
+    if local {
+        SettingsLayer::LocalOverride
+    } else {
+        SettingsLayer::RepositoryShared
+    }
+}
+
+fn repo_settings_layer_label(layer: SettingsLayer) -> &'static str {
+    match layer {
+        SettingsLayer::RepositoryShared => "shared",
+        SettingsLayer::LocalOverride => "local",
+    }
+}
+
+fn repo_settings_path(repo_path: &Path, layer: SettingsLayer) -> PathBuf {
+    match layer {
+        SettingsLayer::RepositoryShared => repo_path.join(".conductor/settings.toml"),
+        SettingsLayer::LocalOverride => repo_path.join(".conductor/settings.local.toml"),
+    }
 }
 
 fn print_mcp_status(status: linux_conductor_core::mcp::McpStatus) {
@@ -1354,5 +1566,62 @@ mod tests {
         assert!(command.contains("CONDUCTOR_PORT=3000"));
         assert!(command.contains("CONDUCTOR_PORT=3000 exec codex"));
         assert!(command.ends_with("exec codex"));
+    }
+
+    #[test]
+    fn history_list_render_shows_local_session_rows() {
+        let text = render_history_list(&[LocalChatHistorySummary {
+            process_id: 9,
+            repository_name: "demo".to_owned(),
+            workspace_name: "berlin".to_owned(),
+            workspace_path: PathBuf::from("/tmp/berlin"),
+            agent_type: "Codex".to_owned(),
+            status: "exited".to_owned(),
+            started_at: "2026-06-21T01:00:00Z".to_owned(),
+            updated_at: "2026-06-21T01:05:00Z".to_owned(),
+            message_count: 3,
+            preview: "fixed tests\nwith detail".to_owned(),
+            harness: Some("plan=true".to_owned()),
+        }]);
+
+        assert!(text.contains("#9\texited\t2026-06-21T01:05:00Z\tdemo\tberlin\t3 message(s)"));
+        assert!(text.contains("fixed tests with detail"));
+    }
+
+    #[test]
+    fn history_message_render_labels_transcript_roles() {
+        let text = render_history_messages(&[
+            LocalChatHistoryMessage {
+                role: "user".to_owned(),
+                content: "run tests".to_owned(),
+            },
+            LocalChatHistoryMessage {
+                role: "agent".to_owned(),
+                content: "tests passed".to_owned(),
+            },
+        ]);
+
+        assert!(text.contains("You\nrun tests\n\n"));
+        assert!(text.contains("Agent\ntests passed\n\n"));
+    }
+
+    #[test]
+    fn linked_directory_render_lists_target_and_context_link() {
+        let text = render_linked_directories(&[LinkedDirectory {
+            id: 1,
+            workspace_id: 10,
+            workspace_name: "frontend".to_owned(),
+            workspace_path: PathBuf::from("/tmp/frontend"),
+            target_workspace_id: 11,
+            target_workspace_name: "backend".to_owned(),
+            target_workspace_path: PathBuf::from("/tmp/backend"),
+            link_path: PathBuf::from("/tmp/frontend/.context/linked-directories/backend"),
+            created_at: "2026-06-21T12:00:00Z".to_owned(),
+        }]);
+
+        assert_eq!(
+            text,
+            "backend\t/tmp/backend\t/tmp/frontend/.context/linked-directories/backend\n"
+        );
     }
 }

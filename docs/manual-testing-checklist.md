@@ -24,17 +24,23 @@ you want to test. Run `gh auth login` before GitHub checks. Set
   workspace parent.
 - [ ] Edit shared `.conductor/settings.toml` from Projects.
 - [ ] Edit local `.conductor/settings.local.toml` from Projects.
+- [ ] Export shared settings with
+  `linux-conductor repo settings <name> export --output <file>`.
+- [ ] Import that file back into shared and local settings with
+  `linux-conductor repo settings <name> import <file>` and `--local`.
 - [ ] Configure setup, run, archive, run mode, Spotlight testing, Files to copy,
   environment variables, provider executable fields, prompts, and Git behavior.
 - [ ] Confirm all repository action prompts are editable from the GUI: general,
   code review, create PR, fix errors, resolve conflicts, rename branch, commit
   generation, test fixing, and refactor style.
-- [ ] Confirm prompt profiles or prompt packs can be represented in settings
-  even if the first UI only edits the active values.
+- [ ] Confirm prompt profiles or prompt packs can be represented in the
+  advanced customization TOML block even if the first UI only edits the active
+  values.
 - [ ] Confirm final assembled agent prompts can be previewed or exported before
   launch, or mark prompt preview as a known gap.
 - [ ] Configure branch naming, workspace naming, commit style, PR title/body
-  template, default merge strategy, and archive-after-merge defaults.
+  template, default merge strategy, and archive-after-merge defaults through
+  settings or the advanced customization TOML block.
 - [ ] Confirm repository setup can be fully automated with setup/run/archive
   scripts and no manual terminal-only step for a normal workspace.
 - [ ] Confirm repository automation can represent required local file checks,
@@ -43,9 +49,12 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] Configure default agent, agent profile, approval mode, reasoning/effort,
   Codex personality/goals, and MCP visibility.
 - [ ] Configure merge blockers and a repository-specific definition of done.
+- [ ] Confirm PR merge honors configured default merge method, open todo/comment
+  blockers, failed-check blockers, and pending-check blockers.
 - [ ] Configure workspace defaults: base branch, workspace parent, branch
-  prefix, port block size, auto-open, checkpoint timing, and default visible
-  tab/panel.
+  prefix, working directory, port block size, auto-open, checkpoint timing, and
+  default visible tab/panel. Confirm new workspace creation honors configured
+  base branch, branch prefix, and port block size.
 - [ ] Confirm `.worktreeinclude` wins over Files to copy settings and is shown
   as a read-only preview when present.
 - [ ] Confirm shared settings do not encourage committing secrets.
@@ -92,6 +101,11 @@ you want to test. Run `gh auth login` before GitHub checks. Set
   page.
 - [ ] Confirm sessions run from the workspace directory with `CONDUCTOR_*`
   environment variables.
+- [ ] In a monorepo, set `customization.workspace_defaults.working_directory`
+  to a tracked subdirectory and confirm setup/run scripts, terminal commands,
+  and agent sessions run from that directory while `CONDUCTOR_WORKSPACE_PATH`
+  still points at the worktree root and `CONDUCTOR_WORKING_DIRECTORY` points at
+  the subdirectory.
 - [ ] Start multiple sessions in one workspace.
 - [ ] Start sessions in two workspaces for the same repository.
 - [ ] Select a saved or running agent session and confirm the session surface
@@ -103,6 +117,13 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] Stop the selected session and confirm the process row updates.
 - [ ] Confirm Plan/Fast mode and Codex harness controls affect new sessions.
 - [ ] Confirm provider/auth/MCP status text appears where applicable.
+- [ ] Link one workspace to another from the workspace page and confirm
+  `.context/linked-directories/<target>` points at the target workspace.
+- [ ] Run `linux-conductor workspace linked-dirs <workspace>` and confirm the
+  same target and symlink path are listed.
+- [ ] Start a session in the source workspace and confirm
+  `CONDUCTOR_LINKED_DIRECTORIES` and `CONDUCTOR_LINKED_DIRECTORY_<NAME>` are
+  available to the agent process.
 - [ ] Run a one-shot terminal command and confirm stdout, stderr, and exit code.
 - [ ] Start multiple PTY shells, select one, send input to it, and stop only
   that shell.
@@ -189,6 +210,12 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] Sidebar search finds repositories and workspaces.
 - [ ] Dashboard groups active and archived workspaces.
 - [ ] History shows archived workspaces.
+- [ ] Start a local Shell/Codex/Claude/Cursor session, send at least one
+  composer message, refresh History, and confirm the saved Linux session appears.
+- [ ] Run `linux-conductor history list --workspace <name>` and confirm the
+  saved session row appears with message count and preview.
+- [ ] Run `linux-conductor history show <process-id>` and confirm the saved
+  transcript is labeled as You, Agent, System, or Review Prompt.
 - [ ] History reads old macOS Conductor chats when
   `~/Library/Application Support/com.conductor.app/conductor.db` exists.
 - [ ] `Ctrl+K` opens the command palette.
@@ -201,16 +228,35 @@ you want to test. Run `gh auth login` before GitHub checks. Set
   Processes, and Checkpoints.
 - [ ] Confirm command palette workspace-tab commands are hidden until a
   workspace is selected.
+- [ ] Launch `linux-conductor-gtk --workspace <name> --tab checks` and confirm
+  the workspace opens on Checks.
+- [ ] Launch `linux-conductor-gtk 'linux-conductor://workspace/<name>?tab=review'`
+  and confirm the workspace opens on Review.
+- [ ] Launch `linux-conductor-gtk 'linux-conductor://history'` and confirm
+  History opens directly.
+- [ ] Set `customization.workspace_defaults.default_visible_tab = "checks"` and
+  confirm opening/selecting that workspace lands on Checks when no explicit tab
+  is passed.
+- [ ] Set `customization.view.theme = "light"`, `accent_color = "green"`, and
+  `density = "compact"` and confirm selecting the workspace changes the GTK
+  stylesheet.
+- [ ] Set `customization.view.keybindings = "vim"` and confirm Ctrl+P opens the
+  command palette while the palette shows configured Refresh/Sidebar shortcuts.
+- [ ] Set `customization.view.terminal_font` and
+  `customization.view.terminal_scrollback`, then confirm workspace terminal
+  surfaces show the font/scrollback summary and trim output at the configured
+  line budget.
+- [ ] Set `customization.view.command_palette_presets = ["test",
+  "Preview=pnpm dev"]` and confirm the terminal preset row shows Test and
+  Preview buttons with the expected commands in their tooltips.
 
 ## Known Gaps To Keep Visible
 
 - [ ] Terminal rendering is not a full terminal emulator.
-- [ ] Customizable shortcuts and deep links are not complete.
-- [ ] Theme/view customization is not complete.
-- [ ] Full naming-template, hook, notification, shortcut, and prompt-pack
-  customization is not complete.
-- [ ] Monorepo directory selection and linked-directory workflows are not
-  complete.
+- [ ] Exhaustive per-command shortcut customization is not complete.
+- [ ] Deeper layout/theme coverage is not complete.
+- [ ] Full naming-template, hook, notification, shortcut, prompt-pack, and
+  non-terminal preset customization is not complete.
 - [ ] GitHub review-thread resolution has CLI and GTK GraphQL controls with a
   live-proven CLI mutation path; check/deployment aggregation has live-proven
   CLI coverage for success/failure/pending/error commit statuses,
@@ -218,7 +264,6 @@ you want to test. Run `gh auth login` before GitHub checks. Set
   coverage, and rollup/head-status de-duplication. Cancelled/skipped remain
   dependent on real provider rollups rather than synthetic commit status API
   proof.
-- [ ] Unified local history for all chats is not complete.
 - [ ] Visual parity with Conductor is not complete.
 
 ## Packaging Smoke

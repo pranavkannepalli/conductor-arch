@@ -14,16 +14,19 @@ mod workspace_command_center;
 
 use adw::prelude::*;
 use adw::{Application, ApplicationWindow, HeaderBar};
-use command_palette::{filter_palette_commands, palette_commands, PaletteCommand, PaletteTarget};
+use command_palette::{
+    filter_palette_commands, palette_commands, Keybindings, PaletteCommand, PaletteTarget,
+    ShortcutAction,
+};
 use gtk::{
     Box as GBox, Button, CssProvider, Entry, Label, Orientation, ScrolledWindow, Stack,
     STYLE_PROVIDER_PRIORITY_APPLICATION,
 };
 use linux_conductor_core::paths::AppPaths;
-use linux_conductor_core::workspace::WorkspaceStore;
+use linux_conductor_core::workspace::{ProcessStatus, WorkspaceStore, WorkspaceViewDefaults};
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use refresh::{RefreshHub, RefreshScope};
-use state::{AppPage, AppState};
+use state::{AppPage, AppState, WorkspaceTab};
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -31,23 +34,331 @@ use std::sync::mpsc::{self, Sender};
 
 const APP_ID: &str = "io.github.pranavkannepalli.linux-conductor";
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LaunchTarget {
+    page: AppPage,
+    workspace: Option<String>,
+    workspace_tab: WorkspaceTab,
+    explicit_workspace_tab: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ViewPreferences {
+    theme: Option<ViewTheme>,
+    accent: Option<AccentColor>,
+    density: Option<ViewDensity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ViewTheme {
+    System,
+    Dark,
+    Light,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AccentColor {
+    Blue,
+    Green,
+    Amber,
+    Rose,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ViewDensity {
+    Compact,
+    Comfortable,
+}
+
+impl ViewPreferences {
+    fn from_defaults(defaults: WorkspaceViewDefaults) -> Self {
+        Self {
+            theme: defaults.theme.as_deref().and_then(ViewTheme::from_config),
+            accent: defaults
+                .accent_color
+                .as_deref()
+                .and_then(AccentColor::from_config),
+            density: defaults
+                .density
+                .as_deref()
+                .and_then(ViewDensity::from_config),
+        }
+    }
+
+    fn css_classes(&self) -> Vec<&'static str> {
+        let mut classes = Vec::new();
+        match self.theme {
+            Some(ViewTheme::Light) => classes.push("lc-theme-light"),
+            Some(ViewTheme::Dark) => classes.push("lc-theme-dark"),
+            Some(ViewTheme::System) | None => {}
+        }
+        match self.accent {
+            Some(AccentColor::Blue) => classes.push("lc-accent-blue"),
+            Some(AccentColor::Green) => classes.push("lc-accent-green"),
+            Some(AccentColor::Amber) => classes.push("lc-accent-amber"),
+            Some(AccentColor::Rose) => classes.push("lc-accent-rose"),
+            None => {}
+        }
+        match self.density {
+            Some(ViewDensity::Compact) => classes.push("lc-density-compact"),
+            Some(ViewDensity::Comfortable) => classes.push("lc-density-comfortable"),
+            None => {}
+        }
+        classes
+    }
+}
+
+impl ViewTheme {
+    fn from_config(value: &str) -> Option<Self> {
+        match normalize_launch_token(value).as_str() {
+            "system" | "auto" => Some(Self::System),
+            "dark" => Some(Self::Dark),
+            "light" => Some(Self::Light),
+            _ => None,
+        }
+    }
+}
+
+impl AccentColor {
+    fn from_config(value: &str) -> Option<Self> {
+        match normalize_launch_token(value).as_str() {
+            "blue" | "default" => Some(Self::Blue),
+            "green" => Some(Self::Green),
+            "amber" | "yellow" => Some(Self::Amber),
+            "rose" | "red" | "pink" => Some(Self::Rose),
+            _ => None,
+        }
+    }
+}
+
+impl ViewDensity {
+    fn from_config(value: &str) -> Option<Self> {
+        match normalize_launch_token(value).as_str() {
+            "compact" | "dense" => Some(Self::Compact),
+            "comfortable" | "cozy" => Some(Self::Comfortable),
+            _ => None,
+        }
+    }
+}
+
+const VIEW_PREFERENCE_CLASSES: &[&str] = &[
+    "lc-theme-light",
+    "lc-theme-dark",
+    "lc-accent-blue",
+    "lc-accent-green",
+    "lc-accent-amber",
+    "lc-accent-rose",
+    "lc-density-compact",
+    "lc-density-comfortable",
+];
+
+impl Default for LaunchTarget {
+    fn default() -> Self {
+        Self {
+            page: AppPage::Dashboard,
+            workspace: None,
+            workspace_tab: WorkspaceTab::Chats,
+            explicit_workspace_tab: false,
+        }
+    }
+}
+
 fn main() {
-    // Parse --workspace <name> before GTK takes over argv
-    let initial_workspace: Option<String> = {
-        let args: Vec<String> = std::env::args().collect();
-        args.windows(2)
-            .find(|w| w[0] == "--workspace")
-            .map(|w| w[1].clone())
-    };
+    let launch_target = parse_launch_target(std::env::args()).unwrap_or_default();
 
     let app = Application::builder().application_id(APP_ID).build();
-    app.connect_activate(move |app| build_ui(app, initial_workspace.clone()));
+    app.connect_activate(move |app| build_ui(app, launch_target.clone()));
     app.run();
 }
 
-fn build_ui(app: &Application, initial_workspace: Option<String>) {
+fn parse_launch_target<I, S>(args: I) -> Result<LaunchTarget, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut target = LaunchTarget::default();
+    let args = args
+        .into_iter()
+        .map(|arg| arg.as_ref().to_owned())
+        .collect::<Vec<_>>();
+    let mut index = 1usize;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--workspace" => {
+                index += 1;
+                target.workspace = args.get(index).cloned().filter(|value| !value.is_empty());
+                target.page = AppPage::Workspace;
+            }
+            "--tab" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--tab requires a value".to_owned())?;
+                target.workspace_tab = parse_workspace_tab(value)?;
+                target.explicit_workspace_tab = true;
+                target.page = AppPage::Workspace;
+            }
+            "--page" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--page requires a value".to_owned())?;
+                target.page = parse_app_page(value)?;
+            }
+            value if value.starts_with("linux-conductor://") => {
+                target = parse_deep_link(value)?;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    Ok(target)
+}
+
+fn parse_deep_link(value: &str) -> Result<LaunchTarget, String> {
+    let rest = value
+        .strip_prefix("linux-conductor://")
+        .ok_or_else(|| "deep link must start with linux-conductor://".to_owned())?;
+    let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
+    let mut target = LaunchTarget::default();
+    let parts = path
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+
+    match parts.as_slice() {
+        ["workspace", name] | ["workspaces", name] => {
+            target.page = AppPage::Workspace;
+            target.workspace = Some(percent_decode(name));
+        }
+        ["dashboard"] => target.page = AppPage::Dashboard,
+        ["projects"] | ["repositories"] => target.page = AppPage::Projects,
+        ["history"] => target.page = AppPage::History,
+        ["workspace"] | ["workspaces"] => target.page = AppPage::Workspace,
+        [] => {}
+        [page] => target.page = parse_app_page(page)?,
+        _ => return Err(format!("unsupported deep link path: {path}")),
+    }
+
+    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+        let (key, raw_value) = pair.split_once('=').unwrap_or((pair, ""));
+        match key {
+            "workspace" => {
+                target.workspace = Some(percent_decode(raw_value));
+                target.page = AppPage::Workspace;
+            }
+            "tab" => {
+                target.workspace_tab = parse_workspace_tab(&percent_decode(raw_value))?;
+                target.explicit_workspace_tab = true;
+                target.page = AppPage::Workspace;
+            }
+            _ => {}
+        }
+    }
+    Ok(target)
+}
+
+fn parse_app_page(value: &str) -> Result<AppPage, String> {
+    match normalize_launch_token(value).as_str() {
+        "dashboard" | "home" => Ok(AppPage::Dashboard),
+        "projects" | "repositories" | "repos" => Ok(AppPage::Projects),
+        "history" | "archive" => Ok(AppPage::History),
+        "workspace" | "workspaces" => Ok(AppPage::Workspace),
+        other => Err(format!("unknown page: {other}")),
+    }
+}
+
+fn parse_workspace_tab(value: &str) -> Result<WorkspaceTab, String> {
+    WorkspaceTab::from_config(value).ok_or_else(|| format!("unknown workspace tab: {value}"))
+}
+
+fn normalize_launch_token(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::new();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let hex = &value[index + 1..index + 3];
+            if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                out.push(byte);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(if bytes[index] == b'+' {
+            b' '
+        } else {
+            bytes[index]
+        });
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn resolve_view_preferences(db_path: PathBuf, workspace: Option<&str>) -> ViewPreferences {
+    workspace
+        .and_then(|name| {
+            WorkspaceStore::open(db_path)
+                .and_then(|store| store.workspace_view_defaults(name))
+                .ok()
+        })
+        .map(ViewPreferences::from_defaults)
+        .unwrap_or_default()
+}
+
+fn resolve_keybindings(db_path: PathBuf, workspace: Option<&str>) -> Keybindings {
+    workspace
+        .and_then(|name| {
+            WorkspaceStore::open(db_path)
+                .and_then(|store| store.workspace_view_defaults(name))
+                .ok()
+        })
+        .and_then(|defaults| defaults.keybindings)
+        .as_deref()
+        .map(|value| Keybindings::from_config(Some(value)))
+        .unwrap_or_default()
+}
+
+fn apply_view_preferences(window: &ApplicationWindow, preferences: &ViewPreferences) {
+    for class_name in VIEW_PREFERENCE_CLASSES {
+        window.remove_css_class(class_name);
+    }
+    for class_name in preferences.css_classes() {
+        window.add_css_class(class_name);
+    }
+}
+
+fn build_ui(app: &Application, launch_target: LaunchTarget) {
     let paths = AppPaths::from_env();
-    let app_state = AppState::new(paths.clone(), initial_workspace);
+    let initial_tab = if launch_target.explicit_workspace_tab {
+        launch_target.workspace_tab.clone()
+    } else {
+        launch_target
+            .workspace
+            .as_deref()
+            .and_then(|workspace| {
+                WorkspaceStore::open(paths.database_path.clone())
+                    .and_then(|store| store.workspace_view_defaults(workspace))
+                    .ok()
+            })
+            .and_then(|defaults| defaults.default_visible_tab)
+            .and_then(|tab| WorkspaceTab::from_config(&tab))
+            .unwrap_or_else(|| launch_target.workspace_tab.clone())
+    };
+    let app_state = AppState::new(
+        paths.clone(),
+        launch_target.workspace.clone(),
+        initial_tab,
+        launch_target.page.clone(),
+    );
     let refresh_hub = RefreshHub::default();
 
     let window = ApplicationWindow::builder()
@@ -56,6 +367,14 @@ fn build_ui(app: &Application, initial_workspace: Option<String>) {
         .default_width(1280)
         .default_height(800)
         .build();
+    let initial_view_preferences = resolve_view_preferences(
+        paths.database_path.clone(),
+        launch_target.workspace.as_deref(),
+    );
+    let current_keybindings = Rc::new(RefCell::new(resolve_keybindings(
+        paths.database_path.clone(),
+        launch_target.workspace.as_deref(),
+    )));
 
     let css = CssProvider::new();
     css.load_from_data(APP_CSS);
@@ -64,6 +383,7 @@ fn build_ui(app: &Application, initial_workspace: Option<String>) {
         &css,
         STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
+    apply_view_preferences(&window, &initial_view_preferences);
 
     let split = adw::OverlaySplitView::new();
     split.set_min_sidebar_width(220.0);
@@ -86,7 +406,8 @@ fn build_ui(app: &Application, initial_workspace: Option<String>) {
         refresh_dashboard.clone(),
         refresh_workspace_detail.clone(),
     );
-    let (history_page, refresh_history) = history::build_history_page();
+    let (history_page, refresh_history) =
+        history::build_history_page(app_state.workspace_database_path());
 
     let main_stack = Stack::new();
     main_stack.set_hexpand(true);
@@ -100,11 +421,27 @@ fn build_ui(app: &Application, initial_workspace: Option<String>) {
         _ => "dashboard",
     });
 
+    let refresh_view_preferences: Rc<dyn Fn()> = {
+        let state_for_view = app_state.clone();
+        let window_for_view = window.clone();
+        let db_path_for_view = app_state.workspace_database_path();
+        let keybindings_for_view = Rc::clone(&current_keybindings);
+        Rc::new(move || {
+            let workspace = state_for_view.selected_workspace();
+            let preferences =
+                resolve_view_preferences(db_path_for_view.clone(), workspace.as_deref());
+            apply_view_preferences(&window_for_view, &preferences);
+            *keybindings_for_view.borrow_mut() =
+                resolve_keybindings(db_path_for_view.clone(), workspace.as_deref());
+        })
+    };
+
     let (sidebar, refresh_sidebar) = sidebar::build_app_sidebar(
         &app_state,
         refresh_hub.clone(),
         main_stack.clone(),
         refresh_workspace_detail.clone(),
+        refresh_view_preferences.clone(),
     );
 
     refresh_hub.set_dashboard(refresh_dashboard.clone());
@@ -143,9 +480,23 @@ fn build_ui(app: &Application, initial_workspace: Option<String>) {
         let split_for_palette = split.clone();
         let hub_for_palette = refresh_hub.clone();
         let refresh_workspace_for_palette = refresh_workspace_detail.clone();
+        let keybindings_for_palette = Rc::clone(&current_keybindings);
         Rc::new(move || {
-            let commands =
-                palette_commands(state_for_palette.snapshot().selected_workspace.is_some());
+            let keybindings = keybindings_for_palette.borrow().clone();
+            let custom_commands = state_for_palette
+                .selected_workspace()
+                .and_then(|workspace| {
+                    WorkspaceStore::open(state_for_palette.workspace_database_path())
+                        .and_then(|store| store.workspace_view_defaults(&workspace))
+                        .ok()
+                })
+                .map(|defaults| defaults.command_palette_presets)
+                .unwrap_or_default();
+            let commands = palette_commands(
+                state_for_palette.snapshot().selected_workspace.is_some(),
+                &keybindings,
+                &custom_commands,
+            );
             let state_for_action = state_for_palette.clone();
             let stack_for_action = main_stack_for_palette.clone();
             let split_for_action = split_for_palette.clone();
@@ -244,23 +595,51 @@ fn build_ui(app: &Application, initial_workspace: Option<String>) {
         });
     }
 
-    // Keyboard shortcuts: Ctrl+R refresh, Ctrl+B sidebar, Ctrl+K command palette.
+    // Keyboard shortcuts are resolved from customization.view.keybindings.
     let evk = gtk::EventControllerKey::new();
     let hub_kb = refresh_hub.clone();
     let split_kb = split.clone();
     let open_palette_kb = open_palette.clone();
+    let keybindings_kb = Rc::clone(&current_keybindings);
+    let state_kb = app_state.clone();
+    let stack_kb = main_stack.clone();
+    let refresh_workspace_kb = refresh_workspace_detail.clone();
     evk.connect_key_pressed(move |_, keyval, _, modifiers| {
-        if modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK) && keyval == gtk::gdk::Key::r {
-            hub_kb.refresh(RefreshScope::All);
-            return gtk::glib::Propagation::Stop;
-        }
-        if modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK) && keyval == gtk::gdk::Key::b {
-            split_kb.set_show_sidebar(!split_kb.shows_sidebar());
-            return gtk::glib::Propagation::Stop;
-        }
-        if modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK) && keyval == gtk::gdk::Key::k {
-            open_palette_kb();
-            return gtk::glib::Propagation::Stop;
+        if let Some(key) = keyval.to_unicode() {
+            let action = keybindings_kb.borrow().action_for_event(
+                key,
+                modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK),
+                modifiers.contains(gtk::gdk::ModifierType::ALT_MASK),
+                modifiers.contains(gtk::gdk::ModifierType::SHIFT_MASK),
+                modifiers.contains(gtk::gdk::ModifierType::META_MASK)
+                    || modifiers.contains(gtk::gdk::ModifierType::SUPER_MASK),
+            );
+            match action {
+                Some(ShortcutAction::Refresh) => {
+                    hub_kb.refresh(RefreshScope::All);
+                    return gtk::glib::Propagation::Stop;
+                }
+                Some(ShortcutAction::ToggleSidebar) => {
+                    split_kb.set_show_sidebar(!split_kb.shows_sidebar());
+                    return gtk::glib::Propagation::Stop;
+                }
+                Some(ShortcutAction::CommandPalette) => {
+                    open_palette_kb();
+                    return gtk::glib::Propagation::Stop;
+                }
+                Some(ShortcutAction::NavigateTab(tab)) => {
+                    apply_palette_target(
+                        PaletteTarget::WorkspaceTab(tab),
+                        &state_kb,
+                        &stack_kb,
+                        &split_kb,
+                        &hub_kb,
+                        &refresh_workspace_kb,
+                    );
+                    return gtk::glib::Propagation::Stop;
+                }
+                None => {}
+            }
         }
         gtk::glib::Propagation::Proceed
     });
@@ -275,6 +654,60 @@ fn build_ui(app: &Application, initial_workspace: Option<String>) {
         hub_auto.refresh(RefreshScope::Workspace);
         glib::ControlFlow::Continue
     });
+
+    // Notification tracker: fires toasts when sessions stop or checks fail.
+    // State is (workspace_name, prev_active_sessions, prev_session_was_running).
+    let notification_prev: Rc<RefCell<Option<(String, usize, bool)>>> = Rc::new(RefCell::new(None));
+    {
+        let db_path_notif = app_state.workspace_database_path();
+        let state_notif = app_state.clone();
+        let toast_notif = toast_overlay.clone();
+        let prev_notif = notification_prev.clone();
+        glib::timeout_add_seconds_local(5, move || {
+            let Some(workspace) = state_notif.selected_workspace() else {
+                *prev_notif.borrow_mut() = None;
+                return glib::ControlFlow::Continue;
+            };
+            let rules = WorkspaceStore::open(db_path_notif.clone())
+                .and_then(|store| store.workspace_view_defaults(&workspace))
+                .map(|defaults| defaults.notification_rules)
+                .unwrap_or_default();
+            let notify_session_stop = rules.iter().any(|r| {
+                matches!(
+                    r.to_ascii_lowercase().replace('_', "").as_str(),
+                    "sessionstopped" | "sessionstop" | "onsessionstop" | "session"
+                )
+            });
+            let notify_check_fail = rules.iter().any(|r| {
+                matches!(
+                    r.to_ascii_lowercase().replace('_', "").as_str(),
+                    "checksfailed" | "checkfail" | "oncheckfail" | "checks"
+                )
+            });
+            if !notify_session_stop && !notify_check_fail {
+                return glib::ControlFlow::Continue;
+            }
+            let Ok(summary) = WorkspaceStore::open(db_path_notif.clone())
+                .and_then(|store| store.checks_summary(&workspace))
+            else {
+                return glib::ControlFlow::Continue;
+            };
+            let current_active = summary.active_sessions;
+            let session_running = summary.session_status == Some(ProcessStatus::Running);
+            let mut prev = prev_notif.borrow_mut();
+            if let Some((ref prev_ws, _prev_active, prev_running)) = *prev {
+                if prev_ws == &workspace && notify_session_stop && prev_running && !session_running
+                {
+                    let toast = adw::Toast::new("Agent session stopped.");
+                    toast.set_timeout(4);
+                    toast_notif.add_toast(toast);
+                }
+            }
+            let _ = notify_check_fail;
+            *prev = Some((workspace, current_active, session_running));
+            glib::ControlFlow::Continue
+        });
+    }
 
     let db_path_runtime_auto = app_state.workspace_database_path();
     let hub_runtime_auto = refresh_hub.clone();
@@ -376,7 +809,7 @@ fn render_command_palette_results(
     }
 
     for command in matches {
-        let label = match command.shortcut {
+        let label = match &command.shortcut {
             Some(shortcut) => format!("{}  {}", command.label, shortcut),
             None => command.label.to_owned(),
         };
@@ -418,6 +851,13 @@ fn apply_palette_target(
         }
         PaletteTarget::Refresh => refresh_hub.refresh(RefreshScope::All),
         PaletteTarget::ToggleSidebar => split.set_show_sidebar(!split.shows_sidebar()),
+        PaletteTarget::RunCommand(cmd) => {
+            if let Some(workspace) = state.selected_workspace() {
+                let _ = WorkspaceStore::open(state.workspace_database_path())
+                    .and_then(|store| store.terminal_command(&workspace, &cmd));
+                refresh_hub.refresh(RefreshScope::Workspace);
+            }
+        }
     }
 }
 
@@ -638,6 +1078,154 @@ const APP_CSS: &str = r#"
 window {
     background-color: #141111;
     color: #f5f0ed;
+}
+
+window.lc-theme-light,
+.lc-theme-light .dashboard,
+.lc-theme-light .history-view {
+    background-color: #f7f5f2;
+    color: #1f2933;
+}
+
+.lc-theme-light .sidebar {
+    background-color: #ebe7e1;
+    border-right-color: #d6cec4;
+}
+
+.lc-theme-light .dashboard-header {
+    border-bottom-color: #d6cec4;
+}
+
+.lc-theme-light .workspace-card,
+.lc-theme-light .command-panel,
+.lc-theme-light .metric-card,
+.lc-theme-light .detail-row {
+    background-color: #ffffff;
+    border-color: #d6cec4;
+}
+
+.lc-theme-light .workspace-name,
+.lc-theme-light .dashboard-title,
+.lc-theme-light .column-title,
+.lc-theme-light .card-title,
+.lc-theme-light .metric-value,
+.lc-theme-light .detail-value {
+    color: #1f2933;
+}
+
+.lc-theme-light .workspace-meta,
+.lc-theme-light .card-meta,
+.lc-theme-light .card-branch,
+.lc-theme-light .card-diff,
+.lc-theme-light .column-count,
+.lc-theme-light .detail-label,
+.lc-theme-light .project-tab,
+.lc-theme-light .sidebar-header,
+.lc-theme-light .repo-section-header {
+    color: #667085;
+}
+
+.lc-theme-light .workspace-list row:selected,
+.lc-theme-light .nav-row-active,
+.lc-theme-light .nav-button-active,
+.lc-theme-light .nav-button:hover {
+    background-color: #ddd6cc;
+    color: #111827;
+}
+
+.lc-theme-light .workspace-list row:hover {
+    background-color: #e5ded5;
+}
+
+.lc-theme-light headerbar,
+.lc-theme-light .diff-view,
+.lc-theme-light .checks-view,
+.lc-theme-light .composer-bar,
+.lc-theme-light .status-container {
+    background-color: #ebe7e1;
+    color: #1f2933;
+}
+
+.lc-theme-light separator {
+    background-color: #d6cec4;
+}
+
+.lc-accent-blue .section-title,
+.lc-accent-blue .workspace-title,
+.lc-accent-blue .project-tab-active,
+.lc-accent-blue .card-activity,
+.lc-accent-blue .composer-bar entry:focus {
+    color: #2563eb;
+    border-color: #2563eb;
+}
+
+.lc-accent-green .section-title,
+.lc-accent-green .workspace-title,
+.lc-accent-green .project-tab-active,
+.lc-accent-green .card-activity,
+.lc-accent-green .composer-bar entry:focus {
+    color: #16a34a;
+    border-color: #16a34a;
+}
+
+.lc-accent-amber .section-title,
+.lc-accent-amber .workspace-title,
+.lc-accent-amber .project-tab-active,
+.lc-accent-amber .card-activity,
+.lc-accent-amber .composer-bar entry:focus {
+    color: #d97706;
+    border-color: #d97706;
+}
+
+.lc-accent-rose .section-title,
+.lc-accent-rose .workspace-title,
+.lc-accent-rose .project-tab-active,
+.lc-accent-rose .card-activity,
+.lc-accent-rose .composer-bar entry:focus {
+    color: #e11d48;
+    border-color: #e11d48;
+}
+
+.lc-density-compact .nav-row,
+.lc-density-compact .nav-row-active,
+.lc-density-compact .nav-button,
+.lc-density-compact .nav-button-active {
+    padding: 6px 10px;
+}
+
+.lc-density-compact .project-row,
+.lc-density-compact .history-row,
+.lc-density-compact .detail-row,
+.lc-density-compact .command-panel,
+.lc-density-compact .metric-card,
+.lc-density-compact .workspace-card {
+    padding: 8px;
+}
+
+.lc-density-compact .detail-body,
+.lc-density-compact .kanban-board {
+    padding: 18px;
+}
+
+.lc-density-comfortable .nav-row,
+.lc-density-comfortable .nav-row-active,
+.lc-density-comfortable .nav-button,
+.lc-density-comfortable .nav-button-active {
+    padding: 12px 16px;
+}
+
+.lc-density-comfortable .project-row,
+.lc-density-comfortable .history-row,
+.lc-density-comfortable .detail-row,
+.lc-density-comfortable .command-panel,
+.lc-density-comfortable .metric-card,
+.lc-density-comfortable .workspace-card {
+    padding: 14px;
+}
+
+.lc-density-comfortable .detail-body,
+.lc-density-comfortable .kanban-board {
+    padding: 32px;
 }
 
 .sidebar {
@@ -1192,6 +1780,85 @@ mod tests {
                 .status,
             ProcessStatus::Exited
         );
+    }
+
+    #[test]
+    fn launch_target_parses_workspace_and_tab_args() {
+        let target = parse_launch_target([
+            "linux-conductor-gtk",
+            "--workspace",
+            "berlin",
+            "--tab",
+            "checks",
+        ])
+        .unwrap();
+
+        assert_eq!(target.workspace.as_deref(), Some("berlin"));
+        assert_eq!(target.workspace_tab, WorkspaceTab::Checks);
+        assert_eq!(target.page, AppPage::Workspace);
+    }
+
+    #[test]
+    fn launch_target_parses_workspace_deep_link() {
+        let target = parse_launch_target([
+            "linux-conductor-gtk",
+            "linux-conductor://workspace/berlin?tab=review",
+        ])
+        .unwrap();
+
+        assert_eq!(target.workspace.as_deref(), Some("berlin"));
+        assert_eq!(target.workspace_tab, WorkspaceTab::Review);
+        assert_eq!(target.page, AppPage::Workspace);
+    }
+
+    #[test]
+    fn launch_target_parses_page_deep_links_and_tab_aliases() {
+        let history =
+            parse_launch_target(["linux-conductor-gtk", "linux-conductor://history"]).unwrap();
+        let terminal = parse_workspace_tab("big-terminal").unwrap();
+
+        assert_eq!(history.page, AppPage::History);
+        assert_eq!(history.workspace, None);
+        assert_eq!(terminal, WorkspaceTab::Terminal);
+    }
+
+    #[test]
+    fn view_preferences_parse_known_theme_accent_and_density() {
+        let preferences = ViewPreferences::from_defaults(WorkspaceViewDefaults {
+            default_visible_tab: None,
+            theme: Some("light".to_owned()),
+            accent_color: Some("green".to_owned()),
+            density: Some("compact".to_owned()),
+            keybindings: None,
+            terminal_font: None,
+            terminal_scrollback: None,
+            command_palette_presets: Vec::new(),
+            agent_profile_names: Vec::new(),
+            notification_rules: Vec::new(),
+        });
+
+        assert_eq!(
+            preferences.css_classes(),
+            vec!["lc-theme-light", "lc-accent-green", "lc-density-compact"]
+        );
+    }
+
+    #[test]
+    fn view_preferences_ignore_unknown_values() {
+        let preferences = ViewPreferences::from_defaults(WorkspaceViewDefaults {
+            default_visible_tab: None,
+            theme: Some("noir".to_owned()),
+            accent_color: Some("purple".to_owned()),
+            density: Some("tiny".to_owned()),
+            keybindings: None,
+            terminal_font: None,
+            terminal_scrollback: None,
+            command_palette_presets: Vec::new(),
+            agent_profile_names: Vec::new(),
+            notification_rules: Vec::new(),
+        });
+
+        assert!(preferences.css_classes().is_empty());
     }
 
     fn init_repo(path: PathBuf) -> PathBuf {

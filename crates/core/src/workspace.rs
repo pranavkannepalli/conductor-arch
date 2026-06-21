@@ -221,6 +221,28 @@ fn sanitize_empty_text(value: Option<&str>) -> Option<String> {
     }
 }
 
+fn env_key_fragment(value: &str) -> String {
+    let fragment = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .split('_')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("_");
+    if fragment.is_empty() {
+        "WORKSPACE".to_owned()
+    } else {
+        fragment
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessKind {
     Setup,
@@ -279,6 +301,54 @@ pub struct ProcessRecord {
     pub exit_code: Option<i32>,
     pub ended_at: Option<String>,
     pub session_harness_metadata: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalChatHistorySummary {
+    pub process_id: i64,
+    pub repository_name: String,
+    pub workspace_name: String,
+    pub workspace_path: PathBuf,
+    pub agent_type: String,
+    pub status: String,
+    pub started_at: String,
+    pub updated_at: String,
+    pub message_count: usize,
+    pub preview: String,
+    pub harness: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalChatHistoryMessage {
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkedDirectory {
+    pub id: i64,
+    pub workspace_id: i64,
+    pub workspace_name: String,
+    pub workspace_path: PathBuf,
+    pub target_workspace_id: i64,
+    pub target_workspace_name: String,
+    pub target_workspace_path: PathBuf,
+    pub link_path: PathBuf,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct WorkspaceViewDefaults {
+    pub default_visible_tab: Option<String>,
+    pub theme: Option<String>,
+    pub accent_color: Option<String>,
+    pub density: Option<String>,
+    pub keybindings: Option<String>,
+    pub terminal_font: Option<String>,
+    pub terminal_scrollback: Option<u32>,
+    pub command_palette_presets: Vec<String>,
+    pub agent_profile_names: Vec<String>,
+    pub notification_rules: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -545,6 +615,13 @@ struct RepositoryRecord {
     workspace_parent_path: PathBuf,
 }
 
+struct LocalChatHistoryRow {
+    process: ProcessRecord,
+    repository_name: String,
+    workspace_name: String,
+    workspace_path: PathBuf,
+}
+
 pub struct WorkspaceStore {
     conn: Connection,
     db_path: PathBuf,
@@ -582,8 +659,16 @@ impl WorkspaceStore {
     pub fn create(&self, input: CreateWorkspace) -> Result<Workspace> {
         validate_workspace_name(&input.name)?;
         let repository = self.load_repository(&input.repository_name)?;
+        let settings = load_repository_settings(&repository.root_path)?;
         let base_ref = input.base_ref.unwrap_or_else(|| {
-            if remote_exists(&repository.root_path, &repository.remote_name) {
+            if let Some(base_branch) = settings
+                .customization
+                .workspace_defaults
+                .base_branch
+                .as_deref()
+            {
+                base_branch.to_owned()
+            } else if remote_exists(&repository.root_path, &repository.remote_name) {
                 format!("{}/{}", repository.remote_name, repository.default_branch)
             } else {
                 repository.default_branch.clone()
@@ -615,11 +700,15 @@ impl WorkspaceStore {
         )?;
         std::fs::create_dir_all(path.join(".context"))
             .with_context(|| format!("create workspace context directory {}", path.display()))?;
-        let settings = load_repository_settings(&repository.root_path)?;
         initialize_context_files(&path, &settings)?;
         copy_included_ignored_files(&repository.root_path, &path)?;
 
-        let port_base = self.next_port_base()?;
+        let port_block_size = settings
+            .customization
+            .workspace_defaults
+            .port_block_size
+            .unwrap_or(10);
+        let port_base = self.next_port_base(port_block_size)?;
         run_setup_script(&settings, &repository, &path, &input.name, port_base)?;
         let now = timestamp();
         self.conn.execute(
@@ -773,7 +862,13 @@ impl WorkspaceStore {
 
         if let Some(archive_script) = &settings.scripts.archive {
             if workspace.path.exists() {
-                run_shell_script(archive_script, &settings, &repository, &workspace)?;
+                run_shell_script(
+                    archive_script,
+                    &settings,
+                    &repository,
+                    &workspace,
+                    &self.linked_directory_env(&workspace)?,
+                )?;
             }
         }
 
@@ -1323,20 +1418,23 @@ impl WorkspaceStore {
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
         let settings = load_repository_settings(&repository.root_path)?;
+        let cwd = workspace_working_directory(&settings, &workspace)?;
         let started_at = timestamp();
+        let mut env = conductor_environment(&settings, &repository, &workspace);
+        env.extend(self.linked_directory_env(&workspace)?);
         let output = Command::new("sh")
             .arg("-c")
             .arg(command)
-            .current_dir(&workspace.path)
-            .envs(conductor_environment(&settings, &repository, &workspace))
+            .current_dir(&cwd)
+            .envs(env)
             .stdin(Stdio::null())
             .output()
-            .with_context(|| format!("run terminal command in {}", workspace.path.display()))?;
+            .with_context(|| format!("run terminal command in {}", cwd.display()))?;
         let ended_at = timestamp();
 
         Ok(TerminalCommandResult {
             command: command.to_owned(),
-            cwd: workspace.path,
+            cwd,
             exit_code: output.status.code(),
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
@@ -1743,10 +1841,17 @@ impl WorkspaceStore {
         )?;
         let title = extract_json_string_field(&output, "title")
             .unwrap_or_else(|| format!("issue-{issue_number}"));
+        let settings = load_repository_settings(&repository.root_path)?;
 
         // Slugify title for branch name
         let slug = slugify(&title);
-        let prefix = branch_prefix.unwrap_or("lc");
+        let configured_prefix = settings
+            .customization
+            .workspace_defaults
+            .branch_prefix
+            .as_deref()
+            .unwrap_or("lc");
+        let prefix = branch_prefix.unwrap_or(configured_prefix);
         let branch = format!("{prefix}/{issue_number}/{slug}");
         let workspace_name = format!("issue-{issue_number}");
 
@@ -1796,6 +1901,13 @@ impl WorkspaceStore {
         let url = extract_json_string_field(&output, "url");
         let state =
             extract_json_string_field(&output, "state").unwrap_or_else(|| "open".to_owned());
+        let settings = load_repository_settings(&repository.root_path)?;
+        let prefix = settings
+            .customization
+            .workspace_defaults
+            .branch_prefix
+            .as_deref()
+            .unwrap_or("lc");
         let slug = slugify(&title);
         let remote_ref = format!("refs/linux-conductor/pull-requests/{pr_number}");
         let fetch_refspec = format!("pull/{pr_number}/head:{remote_ref}");
@@ -1815,7 +1927,7 @@ impl WorkspaceStore {
                 .unwrap_or_else(|| format!("pr-{pr_number}")),
             branch: branch_name
                 .map(str::to_owned)
-                .unwrap_or_else(|| format!("lc/pr-{pr_number}-{slug}")),
+                .unwrap_or_else(|| format!("{prefix}/pr-{pr_number}-{slug}")),
             base_ref: Some(remote_ref),
         })?;
 
@@ -1853,6 +1965,14 @@ impl WorkspaceStore {
     ) -> Result<Workspace> {
         let prompt = prompt.trim();
         anyhow::ensure!(!prompt.is_empty(), "prompt is required");
+        let repository = self.load_repository(repository_name)?;
+        let settings = load_repository_settings(&repository.root_path)?;
+        let prefix = settings
+            .customization
+            .workspace_defaults
+            .branch_prefix
+            .as_deref()
+            .unwrap_or("lc");
         let slug = slugify(prompt);
         let workspace = self.create(CreateWorkspace {
             repository_name: repository_name.to_owned(),
@@ -1861,7 +1981,7 @@ impl WorkspaceStore {
                 .unwrap_or_else(|| slug.clone()),
             branch: branch_name
                 .map(str::to_owned)
-                .unwrap_or_else(|| format!("lc/{slug}")),
+                .unwrap_or_else(|| format!("{prefix}/{slug}")),
             base_ref: base_ref.map(str::to_owned),
         })?;
         write_context_brief(
@@ -1888,6 +2008,14 @@ impl WorkspaceStore {
         let issue_id = issue_id.trim();
         anyhow::ensure!(!issue_id.is_empty(), "Linear issue id is required");
         let issue = fetch_linear_issue(issue_id)?;
+        let repository = self.load_repository(repository_name)?;
+        let settings = load_repository_settings(&repository.root_path)?;
+        let prefix = settings
+            .customization
+            .workspace_defaults
+            .branch_prefix
+            .as_deref()
+            .unwrap_or("lc");
         let slug = slugify(&issue.title);
         let workspace = self.create(CreateWorkspace {
             repository_name: repository_name.to_owned(),
@@ -1897,7 +2025,9 @@ impl WorkspaceStore {
             branch: branch_name
                 .map(str::to_owned)
                 .or(issue.branch_name)
-                .unwrap_or_else(|| format!("lc/{}-{slug}", issue.identifier.to_ascii_lowercase())),
+                .unwrap_or_else(|| {
+                    format!("{prefix}/{}-{slug}", issue.identifier.to_ascii_lowercase())
+                }),
             base_ref: base_ref.map(str::to_owned),
         })?;
         write_context_brief(
@@ -2690,36 +2820,81 @@ mutation($threadId: ID!) {{
         }
     }
 
-    pub fn merge_pull_request(&self, name: &str, method: &str) -> Result<String> {
+    pub fn merge_pull_request(&self, name: &str, method: Option<&str>) -> Result<String> {
         let workspace = self.get_by_name(name)?;
+        let repository = self.load_repository_by_id(workspace.repository_id)?;
+        let settings = load_repository_settings(&repository.root_path)?;
         let pr = self
             .pull_request_by_workspace_id(workspace.id)?
             .with_context(|| format!("no pull request recorded for workspace {name}"))?;
+        let method = merge_method(&settings, method)?;
+        let merge_rules = &settings.customization.merge_rules;
 
-        let todos = self.list_todos(name)?;
-        let open_todos = todos.iter().filter(|t| t.status == "open").count();
-        if open_todos > 0 {
-            anyhow::bail!(
-                "{open_todos} open todo(s) remain in workspace {name}; complete them before merging"
-            );
+        if merge_rules.block_on_open_todos.unwrap_or(true) {
+            let todos = self.list_todos(name)?;
+            let open_todos = todos.iter().filter(|t| t.status == "open").count();
+            if open_todos > 0 {
+                anyhow::bail!(
+                    "{open_todos} open todo(s) remain in workspace {name}; complete them before merging"
+                );
+            }
         }
-        let comments = self.list_review_comments(name)?;
-        let open_comments = comments.iter().filter(|c| c.status == "open").count();
-        if open_comments > 0 {
-            anyhow::bail!(
-                "{open_comments} open review comment(s) remain in workspace {name}; resolve them before merging"
-            );
+        if merge_rules.block_on_open_comments.unwrap_or(true) {
+            let comments = self.list_review_comments(name)?;
+            let open_comments = comments.iter().filter(|c| c.status == "open").count();
+            if open_comments > 0 {
+                anyhow::bail!(
+                    "{open_comments} open review comment(s) remain in workspace {name}; resolve them before merging"
+                );
+            }
+        }
+        if merge_rules.block_on_failed_checks.unwrap_or(false)
+            || merge_rules.block_on_pending_checks.unwrap_or(false)
+        {
+            let readiness = self.pull_request_readiness(name)?;
+            if merge_rules.block_on_failed_checks.unwrap_or(false) {
+                let failing = readiness
+                    .checks
+                    .iter()
+                    .filter(|check| check.is_failure())
+                    .collect::<Vec<_>>();
+                if !failing.is_empty() {
+                    let names = failing
+                        .iter()
+                        .map(|check| check.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    anyhow::bail!(
+                        "{} failing check(s) remain in workspace {name}: {names}",
+                        failing.len()
+                    );
+                }
+            }
+            if merge_rules.block_on_pending_checks.unwrap_or(false) {
+                let pending = readiness
+                    .checks
+                    .iter()
+                    .filter(|check| check.is_pending())
+                    .collect::<Vec<_>>();
+                if !pending.is_empty() {
+                    let names = pending
+                        .iter()
+                        .map(|check| check.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    anyhow::bail!(
+                        "{} pending check(s) remain in workspace {name}: {names}",
+                        pending.len()
+                    );
+                }
+            }
         }
 
+        let method_flag = format!("--{method}");
         let output = command_output(
             &workspace.path,
             "gh",
-            &[
-                "pr",
-                "merge",
-                pr.number.to_string().as_str(),
-                &format!("--{method}"),
-            ],
+            &["pr", "merge", pr.number.to_string().as_str(), &method_flag],
         )?;
 
         let now = timestamp();
@@ -2734,7 +2909,7 @@ mutation($threadId: ID!) {{
     pub fn merge_and_maybe_archive_pull_request(
         &self,
         name: &str,
-        method: &str,
+        method: Option<&str>,
     ) -> Result<MergePullRequestResult> {
         let merge_output = self.merge_pull_request(name, method)?;
         let workspace = self.get_by_name(name)?;
@@ -2755,12 +2930,15 @@ mutation($threadId: ID!) {{
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
         let settings = load_repository_settings(&repository.root_path)?;
+        let cwd = workspace_working_directory(&settings, &workspace)?;
+        let mut env = conductor_environment(&settings, &repository, &workspace);
+        env.extend(self.linked_directory_env(&workspace)?);
         Ok(SessionLaunch {
             kind: SessionKind::Shell,
             program: PathBuf::from(editor),
-            args: vec![workspace.path.to_string_lossy().to_string()],
-            cwd: workspace.path.clone(),
-            env: conductor_environment(&settings, &repository, &workspace),
+            args: vec![cwd.to_string_lossy().to_string()],
+            cwd,
+            env,
             harness_metadata: None,
         })
     }
@@ -2778,7 +2956,9 @@ mutation($threadId: ID!) {{
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
         let settings = load_repository_settings(&repository.root_path)?;
+        let cwd = workspace_working_directory(&settings, &workspace)?;
         let mut env = conductor_environment(&settings, &repository, &workspace);
+        env.extend(self.linked_directory_env(&workspace)?);
         harness.apply_to_env(&mut env);
         let (program, args) = match kind {
             SessionKind::Shell => (
@@ -2808,7 +2988,7 @@ mutation($threadId: ID!) {{
             ),
             SessionKind::Cursor => (
                 PathBuf::from("cursor"),
-                vec![workspace.path.to_string_lossy().to_string()],
+                vec![cwd.to_string_lossy().to_string()],
             ),
         };
 
@@ -2816,7 +2996,7 @@ mutation($threadId: ID!) {{
             kind,
             program,
             args,
-            cwd: workspace.path.clone(),
+            cwd,
             env,
             harness_metadata: harness.metadata(),
         })
@@ -2824,6 +3004,219 @@ mutation($threadId: ID!) {{
 
     pub fn list_sessions(&self, name: &str) -> Result<Vec<ProcessRecord>> {
         self.list_processes(name, ProcessKind::Session)
+    }
+
+    pub fn list_local_chat_history(
+        &self,
+        workspace_path: Option<&Path>,
+    ) -> Result<Vec<LocalChatHistorySummary>> {
+        let rows = self.local_chat_history_rows(workspace_path)?;
+        rows.into_iter()
+            .map(|row| {
+                let transcript = fs::read_to_string(&row.process.log_path).unwrap_or_default();
+                let messages = parse_local_chat_transcript(&transcript);
+                let preview = messages
+                    .iter()
+                    .rev()
+                    .find_map(|message| {
+                        let trimmed = message.content.trim();
+                        (!trimmed.is_empty()).then(|| truncate_chars(trimmed, 160))
+                    })
+                    .unwrap_or_else(|| terminal_log_preview(&transcript));
+                Ok(LocalChatHistorySummary {
+                    process_id: row.process.id,
+                    repository_name: row.repository_name,
+                    workspace_name: row.workspace_name,
+                    workspace_path: row.workspace_path,
+                    agent_type: local_chat_agent_type(&row.process.command),
+                    status: row.process.status.as_str().to_owned(),
+                    started_at: row.process.started_at.clone(),
+                    updated_at: row
+                        .process
+                        .ended_at
+                        .clone()
+                        .unwrap_or_else(|| row.process.started_at.clone()),
+                    message_count: messages.len(),
+                    preview,
+                    harness: row.process.session_harness_metadata.clone(),
+                })
+            })
+            .collect()
+    }
+
+    pub fn local_chat_history_messages(
+        &self,
+        process_id: i64,
+    ) -> Result<Vec<LocalChatHistoryMessage>> {
+        let process = self.get_process(process_id)?;
+        anyhow::ensure!(
+            process.kind == ProcessKind::Session,
+            "process {process_id} is not a session process"
+        );
+        let transcript = fs::read_to_string(&process.log_path)
+            .with_context(|| format!("read log {}", process.log_path.display()))?;
+        Ok(parse_local_chat_transcript(&transcript))
+    }
+
+    pub fn link_workspace_directory(
+        &self,
+        name: &str,
+        target_name: &str,
+    ) -> Result<LinkedDirectory> {
+        let workspace = self.get_by_name(name)?;
+        let target = self.get_by_name(target_name)?;
+        anyhow::ensure!(
+            workspace.id != target.id,
+            "workspace {name} cannot link to itself"
+        );
+        anyhow::ensure!(
+            workspace.status == "active",
+            "workspace {name} must be active to link directories"
+        );
+        anyhow::ensure!(
+            target.status == "active",
+            "target workspace {target_name} must be active to link directories"
+        );
+        let now = timestamp();
+        self.conn.execute(
+            "INSERT INTO linked_directories (
+                workspace_id, target_workspace_id, created_at
+             ) VALUES (?1, ?2, ?3)
+             ON CONFLICT(workspace_id, target_workspace_id) DO UPDATE SET
+                created_at = linked_directories.created_at",
+            params![workspace.id, target.id, now],
+        )?;
+        let link = self.linked_directory_by_workspaces(workspace.id, target.id)?;
+        materialize_linked_directory(&link)?;
+        Ok(link)
+    }
+
+    pub fn unlink_workspace_directory(
+        &self,
+        name: &str,
+        target_name: &str,
+    ) -> Result<LinkedDirectory> {
+        let workspace = self.get_by_name(name)?;
+        let target = self.get_by_name(target_name)?;
+        let link = self.linked_directory_by_workspaces(workspace.id, target.id)?;
+        self.conn.execute(
+            "DELETE FROM linked_directories WHERE workspace_id = ?1 AND target_workspace_id = ?2",
+            params![workspace.id, target.id],
+        )?;
+        remove_linked_directory_path(&link)?;
+        Ok(link)
+    }
+
+    pub fn list_linked_directories(&self, name: &str) -> Result<Vec<LinkedDirectory>> {
+        let workspace = self.get_by_name(name)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT ld.id,
+                    source.id, source.name, source.path,
+                    target.id, target.name, target.path,
+                    ld.created_at
+             FROM linked_directories ld
+             JOIN workspaces source ON source.id = ld.workspace_id
+             JOIN workspaces target ON target.id = ld.target_workspace_id
+             WHERE source.id = ?1
+             ORDER BY target.name",
+        )?;
+        let links = stmt
+            .query_map([workspace.id], row_to_linked_directory)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+        for link in &links {
+            materialize_linked_directory(link)?;
+        }
+        Ok(links)
+    }
+
+    fn linked_directory_by_workspaces(
+        &self,
+        workspace_id: i64,
+        target_workspace_id: i64,
+    ) -> Result<LinkedDirectory> {
+        self.conn
+            .query_row(
+                "SELECT ld.id,
+                        source.id, source.name, source.path,
+                        target.id, target.name, target.path,
+                        ld.created_at
+                 FROM linked_directories ld
+                 JOIN workspaces source ON source.id = ld.workspace_id
+                 JOIN workspaces target ON target.id = ld.target_workspace_id
+                 WHERE source.id = ?1 AND target.id = ?2",
+                params![workspace_id, target_workspace_id],
+                row_to_linked_directory,
+            )
+            .with_context(|| format!("load linked directory {workspace_id}->{target_workspace_id}"))
+    }
+
+    fn linked_directory_env(&self, workspace: &Workspace) -> Result<Vec<(String, OsString)>> {
+        let links = self.list_linked_directories(&workspace.name)?;
+        if links.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut env = Vec::new();
+        let manifest = links
+            .iter()
+            .map(|link| {
+                format!(
+                    "{}={}",
+                    link.target_workspace_name,
+                    link.target_workspace_path.display()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        env.push((
+            "CONDUCTOR_LINKED_DIRECTORIES".to_owned(),
+            OsString::from(manifest),
+        ));
+        for link in links {
+            env.push((
+                format!(
+                    "CONDUCTOR_LINKED_DIRECTORY_{}",
+                    env_key_fragment(&link.target_workspace_name)
+                ),
+                link.target_workspace_path.as_os_str().to_owned(),
+            ));
+        }
+        Ok(env)
+    }
+
+    fn local_chat_history_rows(
+        &self,
+        workspace_path: Option<&Path>,
+    ) -> Result<Vec<LocalChatHistoryRow>> {
+        let mut sql = String::from(
+            "SELECT p.id, p.workspace_id, p.kind, p.command, p.pid, p.log_path, p.status,
+                    p.started_at, p.exit_code, p.ended_at, p.session_harness_metadata,
+                    r.name, w.name, w.path
+             FROM processes p
+             JOIN workspaces w ON w.id = p.workspace_id
+             JOIN repositories r ON r.id = w.repository_id
+             WHERE p.kind = ?1",
+        );
+        if workspace_path.is_some() {
+            sql.push_str(" AND w.path = ?2");
+        }
+        sql.push_str(" ORDER BY p.id DESC LIMIT 200");
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = if let Some(path) = workspace_path {
+            stmt.query_map(
+                params![ProcessKind::Session.as_str(), path.to_string_lossy()],
+                row_to_local_chat_history_row,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        } else {
+            stmt.query_map(
+                [ProcessKind::Session.as_str()],
+                row_to_local_chat_history_row,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        Ok(rows)
     }
 
     pub fn list_terminals(&self, name: &str) -> Result<Vec<ProcessRecord>> {
@@ -2910,6 +3303,42 @@ mutation($threadId: ID!) {{
         Ok(self.get_by_name(name)?.path)
     }
 
+    pub fn workspace_view_defaults(&self, name: &str) -> Result<WorkspaceViewDefaults> {
+        let workspace = self.get_by_name(name)?;
+        let repository = self.load_repository_by_id(workspace.repository_id)?;
+        let settings = load_repository_settings(&repository.root_path)?;
+        Ok(WorkspaceViewDefaults {
+            default_visible_tab: settings
+                .customization
+                .workspace_defaults
+                .default_visible_tab
+                .clone(),
+            theme: settings.customization.view.theme.clone(),
+            accent_color: settings.customization.view.accent_color.clone(),
+            density: settings.customization.view.density.clone(),
+            keybindings: settings.customization.view.keybindings.clone(),
+            terminal_font: settings.customization.view.terminal_font.clone(),
+            terminal_scrollback: settings.customization.view.terminal_scrollback,
+            command_palette_presets: settings.customization.view.command_palette_presets.clone(),
+            agent_profile_names: settings
+                .customization
+                .agent_profiles
+                .keys()
+                .cloned()
+                .collect(),
+            notification_rules: settings.customization.view.notification_rules.clone(),
+        })
+    }
+
+    pub fn workspace_repo_settings(
+        &self,
+        workspace_name: &str,
+    ) -> Result<crate::settings::RepositorySettings> {
+        let workspace = self.get_by_name(workspace_name)?;
+        let repository = self.load_repository_by_id(workspace.repository_id)?;
+        load_repository_settings(&repository.root_path)
+    }
+
     fn get_by_name(&self, name: &str) -> Result<Workspace> {
         self.conn
             .query_row(
@@ -2970,13 +3399,17 @@ mutation($threadId: ID!) {{
             .with_context(|| format!("load repository {name}"))
     }
 
-    fn next_port_base(&self) -> Result<u16> {
+    fn next_port_base(&self, port_block_size: u16) -> Result<u16> {
+        anyhow::ensure!(
+            port_block_size > 0,
+            "workspace port block size must be greater than 0"
+        );
         let next = self
             .conn
             .query_row("SELECT MAX(port_base) FROM workspaces", [], |row| {
                 row.get::<_, Option<i64>>(0)
             })?
-            .map(|port| port + 10)
+            .map(|port| port + i64::from(port_block_size))
             .unwrap_or(3000);
         u16::try_from(next).context("workspace port base exceeded u16 range")
     }
@@ -3007,13 +3440,16 @@ mutation($threadId: ID!) {{
         let stderr = log_file
             .try_clone()
             .with_context(|| format!("clone log {}", log_path.display()))?;
+        let cwd = workspace_working_directory(settings, workspace)?;
+        let mut env = conductor_environment(settings, repository, workspace);
+        env.extend(self.linked_directory_env(workspace)?);
 
         let mut command = Command::new("sh");
         command
             .arg("-c")
             .arg(script)
-            .current_dir(&workspace.path)
-            .envs(conductor_environment(settings, repository, workspace))
+            .current_dir(&cwd)
+            .envs(env)
             .stdin(Stdio::null())
             .stdout(Stdio::from(log_file))
             .stderr(Stdio::from(stderr));
@@ -3023,7 +3459,7 @@ mutation($threadId: ID!) {{
         }
         let child = command
             .spawn()
-            .with_context(|| format!("start script in {}", workspace.path.display()))?;
+            .with_context(|| format!("start script in {}", cwd.display()))?;
 
         self.conn.execute(
             "INSERT INTO processes (
@@ -3215,6 +3651,14 @@ mutation($threadId: ID!) {{
               started_at TEXT NOT NULL,
               ended_at TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS linked_directories (
+              id INTEGER PRIMARY KEY,
+              workspace_id INTEGER NOT NULL REFERENCES workspaces(id),
+              target_workspace_id INTEGER NOT NULL REFERENCES workspaces(id),
+              created_at TEXT NOT NULL,
+              UNIQUE(workspace_id, target_workspace_id)
+            );
             ",
         )?;
         ensure_column(
@@ -3321,6 +3765,32 @@ fn row_to_process(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProcessRecord> {
         exit_code: row.get(8)?,
         ended_at: row.get(9)?,
         session_harness_metadata,
+    })
+}
+
+fn row_to_local_chat_history_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LocalChatHistoryRow> {
+    Ok(LocalChatHistoryRow {
+        process: row_to_process(row)?,
+        repository_name: row.get(11)?,
+        workspace_name: row.get(12)?,
+        workspace_path: PathBuf::from(row.get::<_, String>(13)?),
+    })
+}
+
+fn row_to_linked_directory(row: &rusqlite::Row<'_>) -> rusqlite::Result<LinkedDirectory> {
+    let workspace_name: String = row.get(2)?;
+    let workspace_path = PathBuf::from(row.get::<_, String>(3)?);
+    let target_workspace_name: String = row.get(5)?;
+    Ok(LinkedDirectory {
+        id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        workspace_name,
+        workspace_path: workspace_path.clone(),
+        target_workspace_id: row.get(4)?,
+        target_workspace_name: target_workspace_name.clone(),
+        target_workspace_path: PathBuf::from(row.get::<_, String>(6)?),
+        link_path: linked_directory_path(&workspace_path, &target_workspace_name),
+        created_at: row.get(7)?,
     })
 }
 
@@ -3786,6 +4256,185 @@ fn terminal_log_preview(contents: &str) -> String {
             (!trimmed.is_empty()).then(|| trimmed.to_owned())
         })
         .unwrap_or_else(|| "(empty transcript)".to_owned())
+}
+
+fn linked_directory_root(workspace_path: &Path) -> PathBuf {
+    workspace_path.join(".context/linked-directories")
+}
+
+fn linked_directory_path(workspace_path: &Path, target_workspace_name: &str) -> PathBuf {
+    linked_directory_root(workspace_path).join(target_workspace_name)
+}
+
+fn materialize_linked_directory(link: &LinkedDirectory) -> Result<()> {
+    anyhow::ensure!(
+        link.target_workspace_path.is_dir(),
+        "target workspace {} does not exist at {}",
+        link.target_workspace_name,
+        link.target_workspace_path.display()
+    );
+    if let Some(parent) = link.link_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create linked directory root {}", parent.display()))?;
+    }
+    if let Ok(existing) = fs::read_link(&link.link_path) {
+        if existing == link.target_workspace_path {
+            return Ok(());
+        }
+        fs::remove_file(&link.link_path)
+            .with_context(|| format!("replace linked directory {}", link.link_path.display()))?;
+    } else if link.link_path.exists() {
+        anyhow::bail!(
+            "linked directory path {} already exists and is not a symlink",
+            link.link_path.display()
+        );
+    }
+    create_directory_symlink(&link.target_workspace_path, &link.link_path).with_context(|| {
+        format!(
+            "link {} to {}",
+            link.link_path.display(),
+            link.target_workspace_path.display()
+        )
+    })
+}
+
+fn remove_linked_directory_path(link: &LinkedDirectory) -> Result<()> {
+    match fs::read_link(&link.link_path) {
+        Ok(_) => fs::remove_file(&link.link_path)
+            .with_context(|| format!("remove linked directory {}", link.link_path.display())),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) if !link.link_path.exists() => Ok(()),
+        Err(_) => anyhow::bail!(
+            "linked directory path {} exists and is not a symlink",
+            link.link_path.display()
+        ),
+    }
+}
+
+#[cfg(unix)]
+fn create_directory_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+fn create_directory_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_dir(target, link)
+}
+
+fn parse_local_chat_transcript(transcript: &str) -> Vec<LocalChatHistoryMessage> {
+    let lines = transcript.lines().collect::<Vec<_>>();
+    let mut messages = Vec::new();
+    let mut index = 0usize;
+
+    while index < lines.len() {
+        let line = lines[index].trim_end();
+        if line.trim().is_empty() {
+            index += 1;
+            continue;
+        }
+
+        if is_local_user_marker(line) {
+            let (content, next) = collect_until_local_marker(&lines, index + 1);
+            push_local_chat_message(&mut messages, "user", content);
+            index = next;
+            continue;
+        }
+
+        if line == "[staged review prompt]" {
+            let (content, next) = collect_staged_review_prompt(&lines, index + 1);
+            push_local_chat_message(&mut messages, "review", content);
+            index = next;
+            continue;
+        }
+
+        if is_local_system_marker(line) {
+            push_local_chat_message(&mut messages, "system", line.to_owned());
+            index += 1;
+            continue;
+        }
+
+        let (content, next) = collect_until_local_marker(&lines, index);
+        push_local_chat_message(&mut messages, "agent", content);
+        index = next;
+    }
+
+    messages
+}
+
+fn push_local_chat_message(
+    messages: &mut Vec<LocalChatHistoryMessage>,
+    role: &str,
+    content: String,
+) {
+    let content = content.trim().to_owned();
+    if !content.is_empty() {
+        messages.push(LocalChatHistoryMessage {
+            role: role.to_owned(),
+            content,
+        });
+    }
+}
+
+fn collect_until_local_marker(lines: &[&str], mut index: usize) -> (String, usize) {
+    let mut content = Vec::new();
+    while index < lines.len() {
+        let line = lines[index].trim_end();
+        if !content.is_empty() && is_local_chat_marker(line) {
+            break;
+        }
+        content.push(lines[index]);
+        index += 1;
+    }
+    (content.join("\n"), index)
+}
+
+fn collect_staged_review_prompt(lines: &[&str], mut index: usize) -> (String, usize) {
+    let mut content = Vec::new();
+    while index < lines.len() {
+        let line = lines[index].trim_end();
+        if line == "[/staged review prompt]" {
+            return (content.join("\n"), index + 1);
+        }
+        content.push(lines[index]);
+        index += 1;
+    }
+    (content.join("\n"), index)
+}
+
+fn is_local_chat_marker(line: &str) -> bool {
+    is_local_user_marker(line) || line == "[staged review prompt]" || is_local_system_marker(line)
+}
+
+fn is_local_user_marker(line: &str) -> bool {
+    line.starts_with("[user input ") && line.ends_with(']')
+}
+
+fn is_local_system_marker(line: &str) -> bool {
+    line.starts_with("[session ")
+        || line.starts_with("[provider ")
+        || line.starts_with("[mcp ")
+        || line.starts_with("[harness ")
+}
+
+fn local_chat_agent_type(command: &str) -> String {
+    let lower = command.to_ascii_lowercase();
+    if lower.contains("codex") {
+        "Codex".to_owned()
+    } else if lower.contains("claude") {
+        "Claude".to_owned()
+    } else if lower.contains("cursor") {
+        "Cursor".to_owned()
+    } else {
+        "Shell".to_owned()
+    }
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    let mut truncated = value.chars().take(max_chars).collect::<String>();
+    if value.chars().count() > max_chars {
+        truncated.push_str("...");
+    }
+    truncated
 }
 
 fn parse_diff_numstat(output: &str) -> Vec<DiffFileSummary> {
@@ -4859,7 +5508,7 @@ fn run_setup_script(
         created_at: String::new(),
         updated_at: String::new(),
     };
-    run_shell_script(setup, settings, repository, &workspace)
+    run_shell_script(setup, settings, repository, &workspace, &[])
 }
 
 fn run_shell_script(
@@ -4867,21 +5516,21 @@ fn run_shell_script(
     settings: &crate::settings::RepositorySettings,
     repository: &RepositoryRecord,
     workspace: &Workspace,
+    extra_env: &[(String, OsString)],
 ) -> Result<()> {
+    let cwd = workspace_working_directory(settings, workspace)?;
+    let mut env = conductor_environment(settings, repository, workspace);
+    env.extend(extra_env.iter().cloned());
     let mut command = Command::new("sh");
-    command
-        .arg("-c")
-        .arg(script)
-        .current_dir(&workspace.path)
-        .envs(conductor_environment(settings, repository, workspace));
+    command.arg("-c").arg(script).current_dir(&cwd).envs(env);
 
     let output = command
         .output()
-        .with_context(|| format!("run script in {}", workspace.path.display()))?;
+        .with_context(|| format!("run script in {}", cwd.display()))?;
     anyhow::ensure!(
         output.status.success(),
         "script failed in {}: {}\n{}",
-        workspace.path.display(),
+        cwd.display(),
         String::from_utf8_lossy(&output.stderr),
         String::from_utf8_lossy(&output.stdout)
     );
@@ -4894,6 +5543,8 @@ fn conductor_environment(
     repository: &RepositoryRecord,
     workspace: &Workspace,
 ) -> Vec<(String, OsString)> {
+    let working_directory =
+        workspace_working_directory(settings, workspace).unwrap_or_else(|_| workspace.path.clone());
     let mut env = vec![
         (
             "CONDUCTOR_WORKSPACE_NAME".to_owned(),
@@ -4902,6 +5553,10 @@ fn conductor_environment(
         (
             "CONDUCTOR_WORKSPACE_PATH".to_owned(),
             workspace.path.as_os_str().to_owned(),
+        ),
+        (
+            "CONDUCTOR_WORKING_DIRECTORY".to_owned(),
+            working_directory.as_os_str().to_owned(),
         ),
         (
             "CONDUCTOR_ROOT_PATH".to_owned(),
@@ -4924,6 +5579,65 @@ fn conductor_environment(
             .map(|(key, value)| (key.clone(), OsString::from(value))),
     );
     env
+}
+
+fn workspace_working_directory(
+    settings: &crate::settings::RepositorySettings,
+    workspace: &Workspace,
+) -> Result<PathBuf> {
+    let Some(relative) = settings
+        .customization
+        .workspace_defaults
+        .working_directory
+        .as_deref()
+    else {
+        return Ok(workspace.path.clone());
+    };
+    validate_relative_workspace_path(relative)?;
+    let cwd = workspace.path.join(relative);
+    anyhow::ensure!(
+        cwd.is_dir(),
+        "workspace working_directory {} does not exist in {}",
+        relative,
+        workspace.path.display()
+    );
+    Ok(cwd)
+}
+
+fn merge_method(
+    settings: &crate::settings::RepositorySettings,
+    method: Option<&str>,
+) -> Result<String> {
+    let method = method
+        .filter(|method| !method.trim().is_empty())
+        .map(str::trim)
+        .or(settings
+            .customization
+            .naming
+            .default_merge_method
+            .as_deref())
+        .unwrap_or("squash");
+    anyhow::ensure!(
+        matches!(method, "squash" | "merge" | "rebase"),
+        "merge method must be squash, merge, or rebase"
+    );
+    Ok(method.to_owned())
+}
+
+fn validate_relative_workspace_path(path: &str) -> Result<()> {
+    let path = Path::new(path);
+    anyhow::ensure!(
+        !path.as_os_str().is_empty()
+            && !path.as_os_str().as_encoded_bytes().contains(&0)
+            && path.is_relative(),
+        "workspace working_directory must be a relative path"
+    );
+    anyhow::ensure!(
+        path.components()
+            .all(|component| matches!(component, std::path::Component::Normal(_))),
+        "workspace working_directory cannot contain parent/current/root components"
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -5033,6 +5747,52 @@ mod tests {
     }
 
     #[test]
+    fn create_from_prompt_uses_configured_branch_prefix() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::write(
+            repo_path.join(".conductor/settings.toml"),
+            r#"
+[customization.workspace_defaults]
+branch_prefix = "team"
+"#,
+        )
+        .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", ".conductor/settings.toml"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["commit", "-m", "add conductor settings"])
+            .status()
+            .unwrap();
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create_from_prompt("demo", "Build source defaults", None, None, None)
+            .unwrap();
+
+        assert_eq!(workspace.branch, "team/build-source-defaults");
+    }
+
+    #[test]
     fn create_from_issue_uses_gh_title_and_writes_context_brief() {
         let _guard = env_lock().lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
@@ -5070,6 +5830,63 @@ exit 1
         let brief = fs::read_to_string(workspace.path.join(".context/brief.md")).unwrap();
         assert!(brief.contains("GitHub issue #123: Fix honest connector validation"));
         assert!(brief.contains("GitHub Issue"));
+    }
+
+    #[test]
+    fn create_from_issue_uses_configured_branch_prefix_when_not_explicit() {
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::write(
+            repo_path.join(".conductor/settings.toml"),
+            r#"
+[customization.workspace_defaults]
+branch_prefix = "team"
+"#,
+        )
+        .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", ".conductor/settings.toml"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["commit", "-m", "add conductor settings"])
+            .status()
+            .unwrap();
+        let old_path = install_fake_gh(
+            temp.path(),
+            r#"#!/bin/sh
+if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
+  printf '{"title":"Fix configured branch prefixes","number":123}\n'
+  exit 0
+fi
+echo "unexpected gh args: $*" >&2
+exit 1
+"#,
+        );
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store.create_from_issue("demo", 123, None).unwrap();
+
+        restore_path(old_path);
+        assert_eq!(workspace.branch, "team/123/fix-configured-branch-prefixes");
     }
 
     #[test]
@@ -5364,6 +6181,123 @@ claude_code_executable_path = "/opt/bin/claude-custom"
 
         assert_eq!(first.port_base, 3000);
         assert_eq!(second.port_base, 3010);
+    }
+
+    #[test]
+    fn create_workspace_uses_configured_workspace_base_branch_default() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["checkout", "-b", "develop"])
+            .status()
+            .unwrap();
+        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::write(
+            repo_path.join(".conductor/settings.toml"),
+            r#"
+[customization.workspace_defaults]
+base_branch = "develop"
+"#,
+        )
+        .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", ".conductor/settings.toml"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["commit", "-m", "add conductor settings"])
+            .status()
+            .unwrap();
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: None,
+            })
+            .unwrap();
+
+        assert_eq!(workspace.base_ref, "develop");
+    }
+
+    #[test]
+    fn create_workspace_uses_configured_port_block_size() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::write(
+            repo_path.join(".conductor/settings.toml"),
+            r#"
+[customization.workspace_defaults]
+port_block_size = 25
+"#,
+        )
+        .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", ".conductor/settings.toml"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["commit", "-m", "add conductor settings"])
+            .status()
+            .unwrap();
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let first = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let second = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "tokyo".to_owned(),
+                branch: "lc/tokyo".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        assert_eq!(first.port_base, 3000);
+        assert_eq!(second.port_base, 3025);
     }
 
     #[test]
@@ -5930,6 +6864,84 @@ CUSTOM_VALUE = "from-settings"
         assert_eq!(result.stderr, "warn\n");
         assert!(!result.started_at.is_empty());
         assert!(!result.ended_at.is_empty());
+    }
+
+    #[test]
+    fn terminal_command_uses_configured_monorepo_working_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir_all(repo_path.join("apps/web")).unwrap();
+        fs::write(repo_path.join("apps/web/package.json"), "{}\n").unwrap();
+        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::write(
+            repo_path.join(".conductor/settings.toml"),
+            r#"
+[customization.workspace_defaults]
+working_directory = "apps/web"
+"#,
+        )
+        .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", "."])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args([
+                "-c",
+                "user.name=Linux Conductor",
+                "-c",
+                "user.email=linux-conductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "add monorepo app",
+            ])
+            .status()
+            .unwrap();
+
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        let result = store
+            .terminal_command(
+                "berlin",
+                "pwd; printf 'root=%s\\nwork=%s\\n' \"$CONDUCTOR_WORKSPACE_PATH\" \"$CONDUCTOR_WORKING_DIRECTORY\"",
+            )
+            .unwrap();
+
+        assert_eq!(result.cwd, workspace.path.join("apps/web"));
+        assert!(result.stdout.contains(result.cwd.to_str().unwrap()));
+        assert!(result
+            .stdout
+            .contains(&format!("root={}", workspace.path.to_string_lossy())));
+        assert!(result.stdout.contains(&format!(
+            "work={}",
+            workspace.path.join("apps/web").to_string_lossy()
+        )));
     }
 
     #[test]
@@ -6572,6 +7584,337 @@ CUSTOM_VALUE = "from-settings"
     }
 
     #[test]
+    fn local_chat_history_summaries_include_saved_agent_sessions_newest_first() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "zurich".to_owned(),
+                branch: "lc/zurich".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let berlin = store
+            .record_session_process(
+                "berlin",
+                &SessionLaunch {
+                    kind: SessionKind::Codex,
+                    program: PathBuf::from("codex"),
+                    args: Vec::new(),
+                    cwd: temp.path().join("workspaces/demo/berlin"),
+                    env: Vec::new(),
+                    harness_metadata: Some("plan=true".to_owned()),
+                },
+                exited_child_pid(),
+            )
+            .unwrap();
+        let zurich = store
+            .record_session_process(
+                "zurich",
+                &SessionLaunch {
+                    kind: SessionKind::Claude,
+                    program: PathBuf::from("claude"),
+                    args: Vec::new(),
+                    cwd: temp.path().join("workspaces/demo/zurich"),
+                    env: Vec::new(),
+                    harness_metadata: None,
+                },
+                exited_child_pid(),
+            )
+            .unwrap();
+        store
+            .append_session_process_output(berlin.id, "older response\n")
+            .unwrap();
+        store
+            .append_session_process_output(zurich.id, "newer response\n")
+            .unwrap();
+
+        let all = store.list_local_chat_history(None).unwrap();
+        let berlin_only = store
+            .list_local_chat_history(Some(temp.path().join("workspaces/demo/berlin").as_path()))
+            .unwrap();
+
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].workspace_name, "zurich");
+        assert_eq!(all[0].agent_type, "Claude");
+        assert_eq!(all[0].message_count, 1);
+        assert_eq!(all[0].preview, "newer response");
+        assert_eq!(all[1].workspace_name, "berlin");
+        assert_eq!(all[1].agent_type, "Codex");
+        assert_eq!(all[1].harness, Some("plan=true".to_owned()));
+        assert_eq!(berlin_only.len(), 1);
+        assert_eq!(berlin_only[0].process_id, berlin.id);
+    }
+
+    #[test]
+    fn local_chat_history_messages_render_saved_transcript_events() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let session = store
+            .record_session_process(
+                "berlin",
+                &SessionLaunch {
+                    kind: SessionKind::Cursor,
+                    program: PathBuf::from("cursor"),
+                    args: vec![temp
+                        .path()
+                        .join("workspaces/demo/berlin")
+                        .display()
+                        .to_string()],
+                    cwd: temp.path().join("workspaces/demo/berlin"),
+                    env: Vec::new(),
+                    harness_metadata: Some("fast=true".to_owned()),
+                },
+                exited_child_pid(),
+            )
+            .unwrap();
+        store
+            .append_session_process_output(
+                session.id,
+                "[session started] #1 kind=Cursor pid=123\nagent preface\n[user input berlin#1]\nrun tests\n[session finished] #1\nagent reply\n",
+            )
+            .unwrap();
+
+        let messages = store.local_chat_history_messages(session.id).unwrap();
+
+        assert_eq!(messages.len(), 5);
+        assert_eq!(messages[0].role, "system");
+        assert!(messages[0].content.contains("kind=Cursor"));
+        assert_eq!(messages[1].role, "agent");
+        assert_eq!(messages[1].content, "agent preface");
+        assert_eq!(messages[2].role, "user");
+        assert_eq!(messages[2].content, "run tests");
+        assert_eq!(messages[3].role, "system");
+        assert_eq!(messages[4].role, "agent");
+        assert_eq!(messages[4].content, "agent reply");
+    }
+
+    #[test]
+    fn linked_directory_links_workspace_context_to_target_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        let frontend = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "frontend".to_owned(),
+                branch: "lc/frontend".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let backend = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "backend".to_owned(),
+                branch: "lc/backend".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        let link = store
+            .link_workspace_directory("frontend", "backend")
+            .unwrap();
+        let links = store.list_linked_directories("frontend").unwrap();
+
+        assert_eq!(links, vec![link.clone()]);
+        assert_eq!(link.workspace_name, "frontend");
+        assert_eq!(link.target_workspace_name, "backend");
+        assert_eq!(link.target_workspace_path, backend.path);
+        assert_eq!(
+            link.link_path,
+            frontend.path.join(".context/linked-directories/backend")
+        );
+        assert!(link.link_path.exists());
+        assert_eq!(
+            fs::read_link(&link.link_path).unwrap(),
+            link.target_workspace_path
+        );
+    }
+
+    #[test]
+    fn session_launch_exposes_linked_directory_environment() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "frontend".to_owned(),
+                branch: "lc/frontend".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let backend = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "backend".to_owned(),
+                branch: "lc/backend".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        store
+            .link_workspace_directory("frontend", "backend")
+            .unwrap();
+
+        let launch = store
+            .session_launch("frontend", SessionKind::Codex)
+            .unwrap();
+
+        assert_eq!(
+            launch.env_value("CONDUCTOR_LINKED_DIRECTORIES"),
+            Some(format!("backend={}", backend.path.display()).as_str())
+        );
+        assert_eq!(
+            launch.env_value("CONDUCTOR_LINKED_DIRECTORY_BACKEND"),
+            Some(backend.path.to_str().unwrap())
+        );
+    }
+
+    #[test]
+    fn workspace_view_defaults_read_repository_customization() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::write(
+            repo_path.join(".conductor/settings.toml"),
+            r#"
+[customization.workspace_defaults]
+default_visible_tab = "checks"
+
+[customization.view]
+theme = "dark"
+accent_color = "green"
+density = "compact"
+keybindings = "vim"
+terminal_font = "JetBrains Mono 13"
+terminal_scrollback = 5000
+command_palette_presets = ["test", "Preview=pnpm dev"]
+"#,
+        )
+        .unwrap();
+        git(&repo_path, ["add", ".conductor/settings.toml"]).unwrap();
+        git(
+            &repo_path,
+            [
+                "-c",
+                "user.name=Linux Conductor",
+                "-c",
+                "user.email=linux-conductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "add settings",
+            ],
+        )
+        .unwrap();
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        let defaults = store.workspace_view_defaults("berlin").unwrap();
+
+        assert_eq!(defaults.default_visible_tab.as_deref(), Some("checks"));
+        assert_eq!(defaults.theme.as_deref(), Some("dark"));
+        assert_eq!(defaults.accent_color.as_deref(), Some("green"));
+        assert_eq!(defaults.density.as_deref(), Some("compact"));
+        assert_eq!(defaults.keybindings.as_deref(), Some("vim"));
+        assert_eq!(defaults.terminal_font.as_deref(), Some("JetBrains Mono 13"));
+        assert_eq!(defaults.terminal_scrollback, Some(5000));
+        assert_eq!(
+            defaults.command_palette_presets,
+            vec!["test".to_owned(), "Preview=pnpm dev".to_owned()]
+        );
+        assert!(defaults.agent_profile_names.is_empty());
+        assert!(defaults.notification_rules.is_empty());
+    }
+
+    #[test]
     fn setup_workspace_executes_setup_script_and_captures_logs() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
@@ -6638,6 +7981,79 @@ setup = "printf 'setup:%s:%s\n' \"$CONDUCTOR_WORKSPACE_NAME\" \"$CONDUCTOR_PORT\
             .read_latest_setup_log("berlin")
             .unwrap()
             .contains("setup:berlin:3000"));
+    }
+
+    #[test]
+    fn setup_workspace_uses_configured_monorepo_working_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir_all(repo_path.join("apps/api")).unwrap();
+        fs::write(repo_path.join("apps/api/Cargo.toml"), "[package]\n").unwrap();
+        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::write(
+            repo_path.join(".conductor/settings.toml"),
+            r#"
+[scripts]
+setup = "pwd; printf 'work=%s\n' \"$CONDUCTOR_WORKING_DIRECTORY\""
+
+[customization.workspace_defaults]
+working_directory = "apps/api"
+"#,
+        )
+        .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", "."])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args([
+                "-c",
+                "user.name=Linux Conductor",
+                "-c",
+                "user.email=linux-conductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "add monorepo setup",
+            ])
+            .status()
+            .unwrap();
+
+        let db_path = temp.path().join("state.db");
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let setup = store.setup_workspace("berlin").unwrap();
+        wait_for_log(&setup.log_path, "work=");
+        let log = store.read_latest_setup_log("berlin").unwrap();
+
+        assert!(log.contains(workspace.path.join("apps/api").to_str().unwrap()));
+        assert!(log.contains(&format!(
+            "work={}",
+            workspace.path.join("apps/api").to_string_lossy()
+        )));
     }
 
     #[test]
@@ -7687,6 +9103,79 @@ spotlight_testing = true
         assert_eq!(
             launch.env_value("CONDUCTOR_ROOT_PATH"),
             repo_path.canonicalize().unwrap().to_str()
+        );
+    }
+
+    #[test]
+    fn session_launch_uses_configured_monorepo_working_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir_all(repo_path.join("apps/worker")).unwrap();
+        fs::write(repo_path.join("apps/worker/main.rs"), "fn main() {}\n").unwrap();
+        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::write(
+            repo_path.join(".conductor/settings.toml"),
+            r#"
+[customization.workspace_defaults]
+working_directory = "apps/worker"
+"#,
+        )
+        .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", "."])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args([
+                "-c",
+                "user.name=Linux Conductor",
+                "-c",
+                "user.email=linux-conductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "add worker",
+            ])
+            .status()
+            .unwrap();
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        let launch = store.session_launch("berlin", SessionKind::Shell).unwrap();
+
+        assert_eq!(launch.cwd, workspace.path.join("apps/worker"));
+        assert_eq!(
+            launch.env_value("CONDUCTOR_WORKSPACE_PATH"),
+            workspace.path.to_str()
+        );
+        assert_eq!(
+            launch.env_value("CONDUCTOR_WORKING_DIRECTORY"),
+            workspace.path.join("apps/worker").to_str()
         );
     }
 
@@ -8945,9 +10434,258 @@ exit 1
             .add_review_comment("berlin", "src/lib.rs", Some(12), "fix edge case")
             .unwrap();
 
-        let err = store.merge_pull_request("berlin", "squash").unwrap_err();
+        let err = store
+            .merge_pull_request("berlin", Some("squash"))
+            .unwrap_err();
 
         assert!(err.to_string().contains("open review comment(s) remain"));
+    }
+
+    #[test]
+    fn merge_pull_request_honors_disabled_todo_and_comment_blockers() {
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::write(
+            repo_path.join(".conductor/settings.toml"),
+            r#"
+[customization.merge_rules]
+block_on_open_todos = false
+block_on_open_comments = false
+"#,
+        )
+        .unwrap();
+        let old_path = install_fake_gh(
+            temp.path(),
+            r#"#!/bin/sh
+if [ "$1" = "pr" ] && [ "$2" = "merge" ]; then
+  printf 'merged despite local review state\n'
+  exit 0
+fi
+echo "unexpected gh args: $*" >&2
+exit 1
+"#,
+        );
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        store
+            .record_pull_request(workspace.id, "https://github.com/example/demo/pull/42")
+            .unwrap();
+        store.add_todo("berlin", "ship anyway").unwrap();
+        store
+            .add_review_comment("berlin", "src/lib.rs", Some(12), "known follow-up")
+            .unwrap();
+
+        let output = store.merge_pull_request("berlin", Some("squash")).unwrap();
+
+        restore_path(old_path);
+        assert_eq!(output.trim(), "merged despite local review state");
+    }
+
+    #[test]
+    fn merge_pull_request_blocks_failed_checks_when_configured() {
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::write(
+            repo_path.join(".conductor/settings.toml"),
+            r#"
+[customization.merge_rules]
+block_on_failed_checks = true
+"#,
+        )
+        .unwrap();
+        let old_path = install_fake_gh(
+            temp.path(),
+            r#"#!/bin/sh
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  printf '{"reviewDecision":"APPROVED","latestReviews":[],"comments":[],"statusCheckRollup":[{"name":"unit","conclusion":"FAILURE","detailsUrl":"https://example.test/unit"}]}\n'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "merge" ]; then
+  printf 'merge should not run\n' >&2
+  exit 1
+fi
+echo "unexpected gh args: $*" >&2
+exit 1
+"#,
+        );
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        store
+            .record_pull_request(workspace.id, "https://github.com/example/demo/pull/42")
+            .unwrap();
+
+        let err = store
+            .merge_pull_request("berlin", Some("squash"))
+            .unwrap_err();
+
+        restore_path(old_path);
+        assert!(err.to_string().contains("1 failing check(s) remain"));
+        assert!(err.to_string().contains("unit"));
+    }
+
+    #[test]
+    fn merge_pull_request_blocks_pending_checks_when_configured() {
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::write(
+            repo_path.join(".conductor/settings.toml"),
+            r#"
+[customization.merge_rules]
+block_on_pending_checks = true
+"#,
+        )
+        .unwrap();
+        let old_path = install_fake_gh(
+            temp.path(),
+            r#"#!/bin/sh
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  printf '{"reviewDecision":"APPROVED","latestReviews":[],"comments":[],"statusCheckRollup":[{"name":"e2e","status":"IN_PROGRESS","detailsUrl":"https://example.test/e2e"}]}\n'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "merge" ]; then
+  printf 'merge should not run\n' >&2
+  exit 1
+fi
+echo "unexpected gh args: $*" >&2
+exit 1
+"#,
+        );
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        store
+            .record_pull_request(workspace.id, "https://github.com/example/demo/pull/42")
+            .unwrap();
+
+        let err = store
+            .merge_pull_request("berlin", Some("squash"))
+            .unwrap_err();
+
+        restore_path(old_path);
+        assert!(err.to_string().contains("1 pending check(s) remain"));
+        assert!(err.to_string().contains("e2e"));
+    }
+
+    #[test]
+    fn merge_pull_request_uses_configured_default_merge_method() {
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::write(
+            repo_path.join(".conductor/settings.toml"),
+            r#"
+[customization.naming]
+default_merge_method = "rebase"
+"#,
+        )
+        .unwrap();
+        let old_path = install_fake_gh(
+            temp.path(),
+            r#"#!/bin/sh
+if [ "$1" = "pr" ] && [ "$2" = "merge" ] && [ "$4" = "--rebase" ]; then
+  printf 'merged with rebase\n'
+  exit 0
+fi
+echo "unexpected gh args: $*" >&2
+exit 1
+"#,
+        );
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        store
+            .record_pull_request(workspace.id, "https://github.com/example/demo/pull/42")
+            .unwrap();
+
+        let output = store.merge_pull_request("berlin", None).unwrap();
+
+        restore_path(old_path);
+        assert_eq!(output.trim(), "merged with rebase");
     }
 
     #[test]
@@ -8999,7 +10737,7 @@ exit 1
             .unwrap();
 
         let result = store
-            .merge_and_maybe_archive_pull_request("berlin", "squash")
+            .merge_and_maybe_archive_pull_request("berlin", Some("squash"))
             .unwrap();
 
         restore_path(old_path);

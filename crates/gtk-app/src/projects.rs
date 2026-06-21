@@ -6,9 +6,9 @@ use gtk::{
 use linux_conductor_core::paths::AppPaths;
 use linux_conductor_core::repository::{AddRepository, RepositoryStore};
 use linux_conductor_core::settings::{
-    inspect_repository_settings, load_repository_settings, save_repository_settings,
-    FilePatternSource, GitSettings, PromptSettings, ProviderSettings, RepositorySettings,
-    ScriptSettings, SettingsLayer,
+    customization_settings_from_toml, customization_settings_to_toml, inspect_repository_settings,
+    load_repository_settings, save_repository_settings, FilePatternSource, GitSettings,
+    PromptSettings, ProviderSettings, RepositorySettings, ScriptSettings, SettingsLayer,
 };
 use linux_conductor_core::workspace::{CreateWorkspace, WorkspaceSourcePreflight, WorkspaceStore};
 use std::path::PathBuf;
@@ -145,6 +145,12 @@ pub(crate) fn build_projects_page(
     settings_result.set_wrap(true);
     settings_grid.append(&settings_result);
 
+    let scripts_section = Label::new(Some("Scripts"));
+    scripts_section.add_css_class("section-title");
+    scripts_section.set_xalign(0.0);
+    scripts_section.set_margin_top(6);
+    settings_grid.append(&scripts_section);
+
     let scripts_row = GBox::new(Orientation::Horizontal, 8);
     let setup_entry = Entry::new();
     setup_entry.set_placeholder_text(Some("setup script"));
@@ -217,25 +223,84 @@ pub(crate) fn build_projects_page(
     let env_view = settings_text_view(72);
     settings_grid.append(&env_view.0);
 
-    let prompts_label = Label::new(Some(
-        "Prompts: general, code review, create PR, fix errors, resolve conflicts, rename branch",
-    ));
-    prompts_label.add_css_class("detail-label");
-    prompts_label.set_xalign(0.0);
-    prompts_label.set_wrap(true);
-    settings_grid.append(&prompts_label);
+    let prompts_section = Label::new(Some("Prompts"));
+    prompts_section.add_css_class("section-title");
+    prompts_section.set_xalign(0.0);
+    prompts_section.set_margin_top(6);
+    settings_grid.append(&prompts_section);
+
+    let general_label = Label::new(Some("General agent instructions"));
+    general_label.add_css_class("detail-label");
+    general_label.set_xalign(0.0);
+    settings_grid.append(&general_label);
     let general_prompt_view = settings_text_view(84);
-    let review_prompt_view = settings_text_view(84);
-    let create_pr_prompt_view = settings_text_view(84);
-    let fix_errors_prompt_view = settings_text_view(84);
-    let conflicts_prompt_view = settings_text_view(84);
-    let rename_branch_prompt_view = settings_text_view(84);
     settings_grid.append(&general_prompt_view.0);
+
+    let review_label = Label::new(Some("Code review"));
+    review_label.add_css_class("detail-label");
+    review_label.set_xalign(0.0);
+    settings_grid.append(&review_label);
+    let review_prompt_view = settings_text_view(84);
     settings_grid.append(&review_prompt_view.0);
+
+    let create_pr_label = Label::new(Some("Create PR"));
+    create_pr_label.add_css_class("detail-label");
+    create_pr_label.set_xalign(0.0);
+    settings_grid.append(&create_pr_label);
+    let create_pr_prompt_view = settings_text_view(84);
     settings_grid.append(&create_pr_prompt_view.0);
+
+    let fix_errors_label = Label::new(Some("Fix errors / failing checks"));
+    fix_errors_label.add_css_class("detail-label");
+    fix_errors_label.set_xalign(0.0);
+    settings_grid.append(&fix_errors_label);
+    let fix_errors_prompt_view = settings_text_view(84);
     settings_grid.append(&fix_errors_prompt_view.0);
+
+    let conflicts_label = Label::new(Some("Resolve merge conflicts"));
+    conflicts_label.add_css_class("detail-label");
+    conflicts_label.set_xalign(0.0);
+    settings_grid.append(&conflicts_label);
+    let conflicts_prompt_view = settings_text_view(84);
     settings_grid.append(&conflicts_prompt_view.0);
+
+    let rename_branch_label = Label::new(Some("Rename branch"));
+    rename_branch_label.add_css_class("detail-label");
+    rename_branch_label.set_xalign(0.0);
+    settings_grid.append(&rename_branch_label);
+    let rename_branch_prompt_view = settings_text_view(84);
     settings_grid.append(&rename_branch_prompt_view.0);
+
+    let commit_label = Label::new(Some("Commit message generation"));
+    commit_label.add_css_class("detail-label");
+    commit_label.set_xalign(0.0);
+    settings_grid.append(&commit_label);
+    let commit_prompt_view = settings_text_view(84);
+    settings_grid.append(&commit_prompt_view.0);
+
+    let test_fixing_label = Label::new(Some("Test fixing"));
+    test_fixing_label.add_css_class("detail-label");
+    test_fixing_label.set_xalign(0.0);
+    settings_grid.append(&test_fixing_label);
+    let test_fixing_prompt_view = settings_text_view(84);
+    settings_grid.append(&test_fixing_prompt_view.0);
+
+    let refactor_label = Label::new(Some("Refactor style"));
+    refactor_label.add_css_class("detail-label");
+    refactor_label.set_xalign(0.0);
+    settings_grid.append(&refactor_label);
+    let refactor_prompt_view = settings_text_view(84);
+    settings_grid.append(&refactor_prompt_view.0);
+
+    let advanced_label = Label::new(Some(
+        "Advanced customization TOML: naming, automation, agent profiles, merge rules, workspace defaults, and view settings",
+    ));
+    advanced_label.add_css_class("detail-label");
+    advanced_label.set_xalign(0.0);
+    advanced_label.set_wrap(true);
+    settings_grid.append(&advanced_label);
+    let customization_view = settings_text_view(180);
+    settings_grid.append(&customization_view.0);
 
     let db_path = paths.database_path.clone();
     let refresh = {
@@ -444,6 +509,10 @@ pub(crate) fn build_projects_page(
     let fix_errors_prompt_buffer_load = fix_errors_prompt_view.1.clone();
     let conflicts_prompt_buffer_load = conflicts_prompt_view.1.clone();
     let rename_branch_prompt_buffer_load = rename_branch_prompt_view.1.clone();
+    let commit_prompt_buffer_load = commit_prompt_view.1.clone();
+    let test_fixing_prompt_buffer_load = test_fixing_prompt_view.1.clone();
+    let refactor_prompt_buffer_load = refactor_prompt_view.1.clone();
+    let customization_buffer_load = customization_view.1.clone();
     load_settings_btn.connect_clicked(move |_| {
         let repo_name = settings_repo_entry_load.text().trim().to_owned();
         if repo_name.is_empty() {
@@ -488,6 +557,12 @@ pub(crate) fn build_projects_page(
                 fix_errors_prompt_buffer_load.set_text(prompts.fix_errors.as_deref().unwrap_or(""));
                 conflicts_prompt_buffer_load.set_text(prompts.resolve_merge_conflicts.as_deref().unwrap_or(""));
                 rename_branch_prompt_buffer_load.set_text(prompts.rename_branch.as_deref().unwrap_or(""));
+                commit_prompt_buffer_load.set_text(prompts.commit_generation.as_deref().unwrap_or(""));
+                test_fixing_prompt_buffer_load.set_text(prompts.test_fixing.as_deref().unwrap_or(""));
+                refactor_prompt_buffer_load.set_text(prompts.refactor_style.as_deref().unwrap_or(""));
+                customization_buffer_load.set_text(
+                    &customization_settings_to_toml(&settings.customization).unwrap_or_default(),
+                );
                 let source = match inspection.active_file_patterns_source {
                     FilePatternSource::Worktreeinclude => ".worktreeinclude wins; Files to copy is read-only preview for new workspace copying.",
                     FilePatternSource::RepositorySettings => "repository settings provide Files to copy patterns.",
@@ -528,6 +603,15 @@ pub(crate) fn build_projects_page(
         let current_file_globs = load_repository_settings(&repo_path)
             .map(|settings| settings.file_include_globs)
             .unwrap_or_default();
+        let customization =
+            match customization_settings_from_toml(&text_buffer_text(&customization_view.1)) {
+                Ok(customization) => customization,
+                Err(err) => {
+                    settings_result
+                        .set_text(&format!("Save failed: customization TOML invalid: {err:#}"));
+                    return;
+                }
+            };
         let settings = RepositorySettings {
             file_include_globs: if file_globs_view.2.is_editable() {
                 text_buffer_text(&file_globs_view.1)
@@ -556,6 +640,9 @@ pub(crate) fn build_projects_page(
                 fix_errors: optional_buffer_text(&fix_errors_prompt_view.1),
                 resolve_merge_conflicts: optional_buffer_text(&conflicts_prompt_view.1),
                 rename_branch: optional_buffer_text(&rename_branch_prompt_view.1),
+                commit_generation: optional_buffer_text(&commit_prompt_view.1),
+                test_fixing: optional_buffer_text(&test_fixing_prompt_view.1),
+                refactor_style: optional_buffer_text(&refactor_prompt_view.1),
             }),
             providers: ProviderSettings {
                 claude_code_executable_path: optional_entry_text(&claude_path_entry),
@@ -573,6 +660,7 @@ pub(crate) fn build_projects_page(
                 branch_prefix_type: optional_entry_text(&branch_prefix_type_entry),
                 branch_prefix: optional_entry_text(&branch_prefix_entry),
             },
+            customization,
         };
         match save_repository_settings(&repo_path, layer, &settings) {
             Ok(()) => {

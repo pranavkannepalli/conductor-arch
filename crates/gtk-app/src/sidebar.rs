@@ -8,13 +8,14 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::refresh::{RefreshHub, RefreshScope};
-use crate::state::{AppPage, AppState};
+use crate::state::{AppPage, AppState, WorkspaceTab};
 
 pub(crate) fn build_app_sidebar(
     app_state: &AppState,
     refresh_hub: RefreshHub,
     stack: Stack,
     refresh_workspace: impl Fn() + Clone + 'static,
+    refresh_view_preferences: Rc<dyn Fn()>,
 ) -> (GBox, impl Fn() + Clone + 'static) {
     let sidebar_box = GBox::new(Orientation::Vertical, 0);
     sidebar_box.add_css_class("sidebar");
@@ -80,12 +81,14 @@ pub(crate) fn build_app_sidebar(
     let names: Rc<RefCell<std::collections::HashMap<i32, String>>> =
         Rc::new(RefCell::new(std::collections::HashMap::new()));
     let db_path = app_state.workspace_database_path();
+    let db_path_populate = db_path.clone();
 
     let populate = {
         let list = list.clone();
         let names = Rc::clone(&names);
         let state = app_state.clone();
         let search_entry = search_entry.clone();
+        let db_path_populate = db_path_populate.clone();
         move || {
             while let Some(child) = list.first_child() {
                 list.remove(&child);
@@ -95,7 +98,7 @@ pub(crate) fn build_app_sidebar(
             let prev_selected = state.selected_workspace();
             let mut row_idx = 0;
 
-            if let Ok(store) = WorkspaceStore::open(db_path.clone()) {
+            if let Ok(store) = WorkspaceStore::open(db_path_populate.clone()) {
                 if let Ok(statuses) = store.list_status() {
                     let mut current_repo = String::new();
                     for line in statuses {
@@ -172,11 +175,19 @@ pub(crate) fn build_app_sidebar(
     let state_select = app_state.clone();
     let stack_select = stack.clone();
     let refresh_select = refresh_hub.clone();
+    let db_path_select = db_path.clone();
+    let refresh_view_preferences_select = refresh_view_preferences.clone();
     list.connect_row_selected(move |_, row| {
         let Some(name) = row.and_then(|r| names_select.borrow().get(&r.index()).cloned()) else {
             return;
         };
-        state_select.set_selected_workspace(Some(name));
+        let default_tab = WorkspaceStore::open(db_path_select.clone())
+            .and_then(|store| store.workspace_view_defaults(&name))
+            .ok()
+            .and_then(|defaults| defaults.default_visible_tab)
+            .and_then(|tab| WorkspaceTab::from_config(&tab));
+        state_select.set_selected_workspace_with_default_tab(Some(name), default_tab);
+        refresh_view_preferences_select();
         refresh_workspace();
         refresh_select.refresh(RefreshScope::Dashboard);
         stack_select.set_visible_child_name("workspace");
