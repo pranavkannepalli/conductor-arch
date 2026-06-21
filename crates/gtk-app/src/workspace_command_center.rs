@@ -184,7 +184,7 @@ fn agents_panel(
     profile_label.add_css_class("detail-label");
     let profile_select = ComboBoxText::new();
     profile_select.append(Some("default"), "Default");
-    let profile_names = WorkspaceStore::open(db_path.to_path_buf())
+    let profile_names = WorkspaceStore::open(db_path)
         .and_then(|store| store.workspace_view_defaults(&ws.name))
         .map(|defaults| defaults.agent_profile_names)
         .unwrap_or_default();
