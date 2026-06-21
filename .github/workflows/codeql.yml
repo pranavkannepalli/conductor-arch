@@ -12,7 +12,6 @@ on:
 permissions:
   contents: read
   actions: read
-  security-events: write
 
 concurrency:
   group: codeql-${{ github.workflow }}-${{ github.ref }}
@@ -37,6 +36,32 @@ jobs:
           build-mode: none
 
       - name: Perform CodeQL analysis
+        id: analyze
         uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
         with:
           category: /language:rust
+          output: codeql-results
+          upload: never
+
+      - name: Fail on high-severity CodeQL results
+        run: |
+          jq -e '
+            [ .runs[]?.results[]?
+              | select((.properties."security-severity"? // "0" | tonumber) >= 7)
+            ] as $alerts
+            | if ($alerts | length) == 0 then
+                true
+              else
+                $alerts[]
+                | "\(.ruleId): \(.message.text)"
+                | halt_error(1)
+              end
+          ' codeql-results/rust.sarif
+
+      - name: Upload CodeQL SARIF artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: codeql-rust-sarif
+          path: codeql-results/rust.sarif
+          if-no-files-found: error
