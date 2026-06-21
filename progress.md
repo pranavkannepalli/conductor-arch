@@ -43,14 +43,15 @@ pending GitHub Actions check. Phase 7 CLI matrix proof created temporary PR #20
 and exercised success, failure, pending, and error commit statuses plus success,
 failure, pending, and inactive deployments; cleanup closed the PR and deleted
 the temporary branch/deployments. A follow-up temporary PR #21 proved the
-rollup/head-status de-duplication path and was also cleaned up. GitHub commit
-statuses can be synthesized as success/failure/error/pending through the CLI;
-cancelled/skipped remain covered by parser/classifier tests and by real
-provider rollups when GitHub returns them. GTK launched and stayed running on
-the available display, but source-creation click-through is not yet automated,
-though the GTK source form now has focused request-mapping and lifecycle
-feedback coverage. Linear live proof is still blocked until `LINEAR_API_KEY` is
-set. Broader CLI/GTK suites should be run before release artifacts.
+rollup/head-status de-duplication path and was also cleaned up. Temporary PR
+#28 proved real provider rollup handling for cancelled and skipped check runs
+through `linux-conductor pr summary issue19-proof`; cancelled checks were
+promoted to attention and the skipped check stayed visible in the raw check
+list. GTK launched and stayed running on the available display, but
+source-creation click-through is not yet automated, though the GTK source form
+now has focused request-mapping and lifecycle feedback coverage. Linear live
+proof is still blocked until `LINEAR_API_KEY` is set. Broader CLI/GTK suites
+should be run before release artifacts.
 
 Phase 8 was completed on 2026-06-21 for the current PTY-backed harness model:
 selected Shell/Codex/Claude/Cursor sessions render a structured session header
@@ -339,10 +340,9 @@ labeled section header instead of a single combined label. Full suite:
   mutation paths that were live-proven against temporary PR #12 with a real
   review thread. Check/deployment aggregation now has live-proven CLI coverage
   for success/failure/pending/error commit statuses, success/failure/pending/
-  inactive deployment statuses, PR-head deployment API aggregation, and
-  rollup/head-status de-duplication. Cancelled/skipped remain limited to
-  parser/classifier coverage or real provider rollups because GitHub's commit
-  status API does not synthesize those states.
+  inactive deployment statuses, PR-head deployment API aggregation,
+  rollup/head-status de-duplication, and real provider cancelled/skipped check
+  rollups from temporary PR #28.
 - Project onboarding/settings need more polish and fuller user/managed settings
   visibility.
 - Deeper layout/theme coverage is not complete. Not every advanced visual or

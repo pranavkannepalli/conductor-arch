@@ -189,7 +189,7 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] Confirm cancelled check/deployment states are treated as attention items
   when GitHub returns them in provider rollups.
 - [ ] Confirm skipped check states are visible in the raw detail list when
-  GitHub returns them, and decide whether skipped should stay neutral or be
+  GitHub returns them; skipped is currently treated as neutral rather than
   promoted to attention.
 - [ ] For a PR with review threads, confirm the structured PR summary includes
   GitHub review thread node IDs.
@@ -261,9 +261,8 @@ you want to test. Run `gh auth login` before GitHub checks. Set
   live-proven CLI mutation path; check/deployment aggregation has live-proven
   CLI coverage for success/failure/pending/error commit statuses,
   success/failure/pending/inactive deployments, PR-head deployment API
-  coverage, and rollup/head-status de-duplication. Cancelled/skipped remain
-  dependent on real provider rollups rather than synthetic commit status API
-  proof.
+  coverage, rollup/head-status de-duplication, and real provider
+  cancelled/skipped check rollups.
 - [ ] Visual parity with Conductor is not complete.
 
 ## Packaging Smoke
