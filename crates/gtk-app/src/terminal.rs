@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use gtk::prelude::*;
 use gtk::{
-    Box as GBox, Button, ComboBoxText, Entry, Label, ListBox, Orientation, PolicyType,
-    ScrolledWindow, TextBuffer, TextView,
+    Box as GBox, Button, ComboBoxText, CssProvider, Entry, Label, ListBox, Orientation, PolicyType,
+    ScrolledWindow, TextBuffer, TextView, STYLE_PROVIDER_PRIORITY_APPLICATION,
 };
 use linux_conductor_core::pty::PtySession;
 use linux_conductor_core::workspace::{
@@ -20,6 +20,8 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
 use crate::refresh::{RefreshHub, RefreshScope};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 const TERMINAL_SCROLLBACK_LINES: usize = 2_000;
 const TERMINAL_SCROLLBACK_TRIM_MARKER: &str = "[terminal scrollback trimmed]\n";
@@ -30,6 +32,58 @@ const TERMINAL_TAIL_PREVIEW_LINES: usize = 160;
 const TERMINAL_HEAD_PREVIEW_LINES: usize = 160;
 const TERMINAL_LINE_JUMP_CONTEXT: usize = 20;
 const TERMINAL_LINE_JUMP_PAGE_SIZE: usize = 160;
+const TERMINAL_MIN_SCROLLBACK_LINES: usize = 100;
+const TERMINAL_MAX_SCROLLBACK_LINES: usize = 20_000;
+
+thread_local! {
+    static TERMINAL_BUFFER_SCROLLBACK: RefCell<HashMap<usize, usize>> = RefCell::new(HashMap::new());
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TerminalPreferences {
+    pub font: Option<String>,
+    pub scrollback_lines: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TerminalCommandPreset {
+    pub label: String,
+    pub command: String,
+}
+
+impl Default for TerminalPreferences {
+    fn default() -> Self {
+        Self {
+            font: None,
+            scrollback_lines: TERMINAL_SCROLLBACK_LINES,
+        }
+    }
+}
+
+impl TerminalPreferences {
+    pub(crate) fn from_config(font: Option<&str>, scrollback_lines: Option<u32>) -> Self {
+        let font = font
+            .map(str::trim)
+            .filter(|font| !font.is_empty())
+            .map(ToOwned::to_owned);
+        let scrollback_lines = scrollback_lines
+            .and_then(|lines| {
+                let lines = lines as usize;
+                (lines >= TERMINAL_MIN_SCROLLBACK_LINES).then_some(lines)
+            })
+            .unwrap_or(TERMINAL_SCROLLBACK_LINES)
+            .min(TERMINAL_MAX_SCROLLBACK_LINES);
+        Self {
+            font,
+            scrollback_lines,
+        }
+    }
+
+    fn summary(&self) -> String {
+        let font = self.font.as_deref().unwrap_or("system monospace");
+        format!("font: {font}\nscrollback: {} lines", self.scrollback_lines)
+    }
+}
 
 #[derive(Clone)]
 struct TerminalTabState {
@@ -50,27 +104,33 @@ pub fn embedded_terminal_panel(
     workspace_path: &Path,
     full_mode: bool,
     refresh_hub: RefreshHub,
+    preferences: TerminalPreferences,
+    command_presets: Vec<TerminalCommandPreset>,
 ) -> GBox {
     let root = GBox::new(Orientation::Vertical, 8);
     root.add_css_class("terminal-panel");
+    if full_mode {
+        root.set_vexpand(true);
+    }
 
-    let heading = Label::new(Some(if full_mode {
-        "Big Terminal"
-    } else {
-        "Workspace Terminal"
-    }));
-    heading.add_css_class("section-title");
-    heading.set_xalign(0.0);
-    root.append(&heading);
+    if !full_mode {
+        let heading = Label::new(Some("Workspace Terminal"));
+        heading.add_css_class("section-title");
+        heading.set_xalign(0.0);
+        root.append(&heading);
+    }
 
     let transcript = TextView::new();
     transcript.set_editable(false);
     transcript.set_monospace(true);
     transcript.add_css_class("history-view");
+    apply_terminal_preferences(&transcript, &preferences);
+    set_terminal_buffer_scrollback(&transcript.buffer(), preferences.scrollback_lines);
     transcript.buffer().set_text(&initial_terminal_text(
         &database_path,
         workspace_name,
         workspace_path,
+        &preferences,
     ));
 
     let active_ptys: Rc<RefCell<Vec<Option<TerminalSession>>>> = Rc::new(RefCell::new(Vec::new()));
@@ -235,6 +295,9 @@ pub fn embedded_terminal_panel(
     let transcript_scroll = ScrolledWindow::new();
     transcript_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
     transcript_scroll.set_vexpand(true);
+    if full_mode {
+        transcript_scroll.set_min_content_height(420);
+    }
     transcript_scroll.set_child(Some(&transcript));
     root.append(&transcript_scroll);
 
@@ -733,28 +796,21 @@ pub fn embedded_terminal_panel(
     root.append(&pty_controls);
 
     let presets = GBox::new(Orientation::Horizontal, 8);
-    for (label, command) in [
-        ("Env", "env | sort | grep '^CONDUCTOR_'"),
-        ("Git Status", "git status --short --branch"),
-        ("Git Diff", "git diff --stat && git diff -- ."),
-        (
-            "Files",
-            "find . -maxdepth 2 -type f | sort | sed 's#^./##' | head -80",
-        ),
-    ] {
-        let button = Button::with_label(label);
-        button.set_tooltip_text(Some(command));
+    for preset in command_presets {
+        let button = Button::with_label(&preset.label);
+        button.set_tooltip_text(Some(&preset.command));
         let db = database_path.clone();
         let workspace = workspace_name.to_owned();
         let buffer = transcript.buffer();
         let ptys = active_ptys.clone();
         let active_pty_combo_for_command = active_pty_combo.clone();
         let terminal_tab_states_for_command = terminal_tab_states.clone();
+        let command = preset.command.clone();
         button.connect_clicked(move |_| {
             send_or_run_terminal_command(
                 db.clone(),
                 workspace.clone(),
-                command.to_owned(),
+                command.clone(),
                 buffer.clone(),
                 ptys.clone(),
                 active_pty_combo_for_command.clone(),
@@ -2899,23 +2955,31 @@ fn initial_terminal_text(
     database_path: &Path,
     workspace_name: &str,
     workspace_path: &Path,
+    preferences: &TerminalPreferences,
 ) -> String {
     let restored = WorkspaceStore::open(database_path)
         .and_then(|store| store.read_latest_terminal_log(workspace_name))
         .ok()
         .filter(|log| !log.trim().is_empty());
-    format_initial_terminal_text(workspace_name, workspace_path, restored.as_deref())
+    format_initial_terminal_text(
+        workspace_name,
+        workspace_path,
+        restored.as_deref(),
+        preferences,
+    )
 }
 
 fn format_initial_terminal_text(
     workspace_name: &str,
     workspace_path: &Path,
     restored_transcript: Option<&str>,
+    preferences: &TerminalPreferences,
 ) -> String {
     let mut text = format!(
-        "Workspace terminal\nworkspace: {}\npath: {}\n\nCommands run here execute inside the workspace with CONDUCTOR_* environment variables.",
+        "Workspace terminal\nworkspace: {}\npath: {}\n{}\n\nCommands run here execute inside the workspace with CONDUCTOR_* environment variables.",
         workspace_name,
-        workspace_path.display()
+        workspace_path.display(),
+        preferences.summary()
     );
     if let Some(transcript) = restored_transcript {
         text.push_str("\n\n[restored latest terminal transcript]\n");
@@ -2927,7 +2991,36 @@ fn format_initial_terminal_text(
 fn append_text(buffer: &TextBuffer, text: &str) {
     let mut end = buffer.end_iter();
     buffer.insert(&mut end, &terminal_display_text(text));
-    trim_terminal_buffer(buffer, TERMINAL_SCROLLBACK_LINES);
+    trim_terminal_buffer(buffer, terminal_buffer_scrollback(buffer));
+}
+
+fn append_terminal_text(existing: &str, incoming: &str, max_lines: usize) -> String {
+    trim_terminal_scrollback(
+        &format!("{existing}{}", terminal_display_text(incoming)),
+        max_lines,
+    )
+}
+
+fn set_terminal_buffer_scrollback(buffer: &TextBuffer, max_lines: usize) {
+    TERMINAL_BUFFER_SCROLLBACK.with(|limits| {
+        limits
+            .borrow_mut()
+            .insert(terminal_buffer_key(buffer), max_lines);
+    });
+}
+
+fn terminal_buffer_scrollback(buffer: &TextBuffer) -> usize {
+    TERMINAL_BUFFER_SCROLLBACK.with(|limits| {
+        limits
+            .borrow()
+            .get(&terminal_buffer_key(buffer))
+            .copied()
+            .unwrap_or(TERMINAL_SCROLLBACK_LINES)
+    })
+}
+
+fn terminal_buffer_key(buffer: &TextBuffer) -> usize {
+    buffer.as_ptr() as usize
 }
 
 fn trim_terminal_buffer(buffer: &TextBuffer, max_lines: usize) {
@@ -2957,6 +3050,54 @@ fn trim_terminal_scrollback(text: &str, max_lines: usize) -> String {
         trimmed.push('\n');
     }
     trimmed
+}
+
+fn apply_terminal_preferences(transcript: &TextView, preferences: &TerminalPreferences) {
+    transcript.set_tooltip_text(Some(&preferences.summary()));
+    let Some(font) = preferences.font.as_deref() else {
+        return;
+    };
+    let class_name = terminal_font_class(font);
+    transcript.add_css_class(&class_name);
+    let css = format!(
+        "textview.{class_name} {{ {} }}",
+        terminal_font_css_declarations(font)
+    );
+    let provider = CssProvider::new();
+    provider.load_from_data(&css);
+    if let Some(display) = gtk::gdk::Display::default() {
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
+}
+
+fn terminal_font_class(font: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    font.hash(&mut hasher);
+    format!("terminal-font-{:x}", hasher.finish())
+}
+
+fn terminal_font_css_declarations(font: &str) -> String {
+    let trimmed = font.trim();
+    let mut parts = trimmed.rsplitn(2, ' ');
+    let last = parts.next().unwrap_or(trimmed);
+    let maybe_family = parts.next();
+    if let (Some(family), Ok(size)) = (maybe_family, last.parse::<u16>()) {
+        if !family.trim().is_empty() {
+            return format!(
+                "font-family: \"{}\"; font-size: {size}pt;",
+                css_string_escape(family.trim())
+            );
+        }
+    }
+    format!("font-family: \"{}\";", css_string_escape(trimmed))
+}
+
+fn css_string_escape(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 pub(crate) fn terminal_display_text(text: &str) -> String {
@@ -3666,6 +3807,108 @@ fn line_start_before(rendered: &[char], cursor: usize) -> usize {
         .unwrap_or(0)
 }
 
+pub(crate) fn terminal_command_presets(configured: &[String]) -> Vec<TerminalCommandPreset> {
+    let presets = if configured.is_empty() {
+        default_terminal_command_presets()
+    } else {
+        configured
+            .iter()
+            .filter_map(|entry| terminal_command_preset_from_config(entry))
+            .collect()
+    };
+    if presets.is_empty() {
+        default_terminal_command_presets()
+    } else {
+        presets
+    }
+}
+
+fn default_terminal_command_presets() -> Vec<TerminalCommandPreset> {
+    [
+        ("Env", "env | sort | grep '^CONDUCTOR_'"),
+        ("Git Status", "git status --short --branch"),
+        ("Git Diff", "git diff --stat && git diff -- ."),
+        (
+            "Files",
+            "find . -maxdepth 2 -type f | sort | sed 's#^./##' | head -80",
+        ),
+    ]
+    .into_iter()
+    .map(|(label, command)| terminal_command_preset(label, command))
+    .collect()
+}
+
+fn terminal_command_preset_from_config(entry: &str) -> Option<TerminalCommandPreset> {
+    let trimmed = entry.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match normalize_terminal_preset_alias(trimmed).as_str() {
+        "test" => return Some(terminal_command_preset("Test", "pnpm test")),
+        "lint" => return Some(terminal_command_preset("Lint", "pnpm lint")),
+        "build" => return Some(terminal_command_preset("Build", "pnpm build")),
+        "typecheck" | "type" => {
+            return Some(terminal_command_preset("Typecheck", "pnpm typecheck"));
+        }
+        "ci" => {
+            return Some(terminal_command_preset(
+                "CI",
+                "pnpm test && pnpm lint && pnpm build",
+            ));
+        }
+        "status" | "gitstatus" => {
+            return Some(terminal_command_preset(
+                "Git Status",
+                "git status --short --branch",
+            ));
+        }
+        "diff" | "gitdiff" => {
+            return Some(terminal_command_preset(
+                "Git Diff",
+                "git diff --stat && git diff -- .",
+            ));
+        }
+        "env" => {
+            return Some(terminal_command_preset(
+                "Env",
+                "env | sort | grep '^CONDUCTOR_'",
+            ))
+        }
+        "files" => {
+            return Some(terminal_command_preset(
+                "Files",
+                "find . -maxdepth 2 -type f | sort | sed 's#^./##' | head -80",
+            ));
+        }
+        _ => {}
+    }
+
+    let (label, command) = trimmed
+        .split_once('=')
+        .or_else(|| trimmed.split_once(':'))?;
+    let label = label.trim();
+    let command = command.trim();
+    if label.is_empty() || command.is_empty() {
+        return None;
+    }
+    Some(terminal_command_preset(label, command))
+}
+
+fn terminal_command_preset(label: &str, command: &str) -> TerminalCommandPreset {
+    TerminalCommandPreset {
+        label: label.to_owned(),
+        command: command.to_owned(),
+    }
+}
+
+fn normalize_terminal_preset_alias(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
 struct TerminalSession {
     source: TerminalSessionSource,
     database_path: PathBuf,
@@ -3998,13 +4241,16 @@ mod tests {
 
     #[test]
     fn restored_terminal_transcript_is_included_in_initial_text() {
+        let preferences = TerminalPreferences::default();
         let text = format_initial_terminal_text(
             "berlin",
             Path::new("/tmp/workspaces/berlin"),
             Some("last shell output\n"),
+            &preferences,
         );
 
         assert!(text.contains("workspace: berlin"));
+        assert!(text.contains("font: system monospace"));
         assert!(text.contains("[restored latest terminal transcript]"));
         assert!(text.contains("last shell output"));
     }
@@ -4293,6 +4539,77 @@ mod tests {
         let rendered = trim_terminal_scrollback("one\ntwo\nthree\nfour\n", 2);
 
         assert_eq!(rendered, "[terminal scrollback trimmed]\nthree\nfour\n");
+    }
+
+    #[test]
+    fn terminal_preferences_normalize_font_and_scrollback() {
+        let preferences =
+            TerminalPreferences::from_config(Some("  JetBrains Mono 13  "), Some(25_000));
+
+        assert_eq!(preferences.font.as_deref(), Some("JetBrains Mono 13"));
+        assert_eq!(preferences.scrollback_lines, 20_000);
+    }
+
+    #[test]
+    fn terminal_preferences_ignore_blank_font_and_keep_default_scrollback() {
+        let preferences = TerminalPreferences::from_config(Some("  "), Some(4));
+
+        assert_eq!(preferences.font, None);
+        assert_eq!(preferences.scrollback_lines, TERMINAL_SCROLLBACK_LINES);
+    }
+
+    #[test]
+    fn initial_terminal_text_includes_active_terminal_preferences() {
+        let preferences = TerminalPreferences::from_config(Some("Iosevka Term 12"), Some(5000));
+        let text = format_initial_terminal_text(
+            "berlin",
+            Path::new("/tmp/berlin"),
+            Some("restored\n"),
+            &preferences,
+        );
+
+        assert!(text.contains("font: Iosevka Term 12"));
+        assert!(text.contains("scrollback: 5000 lines"));
+        assert!(text.contains("[restored latest terminal transcript]"));
+    }
+
+    #[test]
+    fn append_terminal_text_uses_configured_scrollback_limit() {
+        let rendered = append_terminal_text("one\ntwo\n", "three\nfour\n", 3);
+
+        assert_eq!(
+            rendered,
+            "[terminal scrollback trimmed]\ntwo\nthree\nfour\n"
+        );
+    }
+
+    #[test]
+    fn terminal_command_presets_use_builtins_when_config_is_empty() {
+        let presets = terminal_command_presets(&[]);
+
+        assert!(presets.iter().any(|preset| preset.label == "Git Status"));
+        assert!(presets.iter().any(|preset| preset.label == "Git Diff"));
+    }
+
+    #[test]
+    fn terminal_command_presets_parse_aliases_and_label_commands() {
+        let presets = terminal_command_presets(&[
+            "test".to_owned(),
+            "Preview=pnpm dev".to_owned(),
+            "Ship: pnpm build && pnpm test".to_owned(),
+            "bad entry".to_owned(),
+        ]);
+
+        assert!(presets
+            .iter()
+            .any(|preset| preset.label == "Test" && preset.command == "pnpm test"));
+        assert!(presets
+            .iter()
+            .any(|preset| preset.label == "Preview" && preset.command == "pnpm dev"));
+        assert!(presets
+            .iter()
+            .any(|preset| preset.label == "Ship" && preset.command == "pnpm build && pnpm test"));
+        assert!(!presets.iter().any(|preset| preset.label == "bad entry"));
     }
 
     #[test]

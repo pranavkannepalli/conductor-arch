@@ -18,11 +18,36 @@ pub enum AppPage {
 pub enum WorkspaceTab {
     Chats,
     Changes,
+    Review,
     Checkpoints,
     Checks,
     Todos,
     Processes,
     Terminal,
+}
+
+impl WorkspaceTab {
+    pub fn from_config(value: &str) -> Option<Self> {
+        match normalize_tab_token(value).as_str() {
+            "chat" | "chats" | "chatterminal" | "session" | "sessions" => Some(Self::Chats),
+            "changes" | "change" | "diff" | "files" => Some(Self::Changes),
+            "review" | "comments" => Some(Self::Review),
+            "checks" | "ci" | "pr" | "pullrequest" => Some(Self::Checks),
+            "todos" | "todo" | "tasks" => Some(Self::Todos),
+            "processes" | "runs" | "process" => Some(Self::Processes),
+            "terminal" | "term" | "shell" | "bigterminal" => Some(Self::Terminal),
+            "checkpoints" | "checkpoint" | "restore" => Some(Self::Checkpoints),
+            _ => None,
+        }
+    }
+}
+
+fn normalize_tab_token(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -62,18 +87,23 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(paths: AppPaths, initial_workspace: Option<String>) -> Self {
+    pub fn new(
+        paths: AppPaths,
+        initial_workspace: Option<String>,
+        initial_tab: WorkspaceTab,
+        initial_page: AppPage,
+    ) -> Self {
         let active_page = if initial_workspace.is_some() {
             AppPage::Workspace
         } else {
-            AppPage::Dashboard
+            initial_page
         };
         Self {
             inner: Rc::new(RefCell::new(AppStateSnapshot {
                 selected_workspace: initial_workspace,
                 selected_project: None,
                 active_page,
-                active_workspace_tab: WorkspaceTab::Chats,
+                active_workspace_tab: initial_tab,
                 selected_agent_session: None,
                 staged_review_prompt: None,
                 running_processes: Vec::new(),
@@ -93,6 +123,23 @@ impl AppState {
         if state.selected_workspace != workspace {
             state.selected_agent_session = None;
             state.staged_review_prompt = None;
+        }
+        state.selected_workspace = workspace;
+        state.active_page = AppPage::Workspace;
+    }
+
+    pub fn set_selected_workspace_with_default_tab(
+        &self,
+        workspace: Option<String>,
+        default_tab: Option<WorkspaceTab>,
+    ) {
+        let mut state = self.inner.borrow_mut();
+        if state.selected_workspace != workspace {
+            state.selected_agent_session = None;
+            state.staged_review_prompt = None;
+            if let Some(tab) = default_tab {
+                state.active_workspace_tab = tab;
+            }
         }
         state.selected_workspace = workspace;
         state.active_page = AppPage::Workspace;
@@ -128,5 +175,52 @@ impl AppState {
 
     pub fn snapshot(&self) -> AppStateSnapshot {
         self.inner.borrow().clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workspace_tab_from_config_accepts_view_default_aliases() {
+        assert_eq!(
+            WorkspaceTab::from_config("checks"),
+            Some(WorkspaceTab::Checks)
+        );
+        assert_eq!(
+            WorkspaceTab::from_config("big-terminal"),
+            Some(WorkspaceTab::Terminal)
+        );
+        assert_eq!(
+            WorkspaceTab::from_config("review"),
+            Some(WorkspaceTab::Review)
+        );
+        assert_eq!(WorkspaceTab::from_config("missing"), None);
+    }
+
+    #[test]
+    fn selected_workspace_default_tab_only_applies_when_workspace_changes() {
+        let state = AppState::new(
+            AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            WorkspaceTab::Terminal,
+            AppPage::Workspace,
+        );
+
+        state.set_selected_workspace_with_default_tab(
+            Some("berlin".to_owned()),
+            Some(WorkspaceTab::Checks),
+        );
+        assert_eq!(
+            state.snapshot().active_workspace_tab,
+            WorkspaceTab::Terminal
+        );
+
+        state.set_selected_workspace_with_default_tab(
+            Some("tokyo".to_owned()),
+            Some(WorkspaceTab::Checks),
+        );
+        assert_eq!(state.snapshot().active_workspace_tab, WorkspaceTab::Checks);
     }
 }

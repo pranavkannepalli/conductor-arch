@@ -155,7 +155,7 @@ impl RepositoryStore {
         self.get_by_name(name)
     }
 
-    fn get_by_name(&self, name: &str) -> Result<Repository> {
+    pub fn get_by_name(&self, name: &str) -> Result<Repository> {
         self.conn
             .query_row(
                 "SELECT id, name, root_path, default_branch, remote_name, workspace_parent_path, created_at, updated_at

@@ -80,6 +80,9 @@ Or preselect a workspace:
 
 ```bash
 linux-conductor-gtk --workspace berlin
+linux-conductor-gtk --workspace berlin --tab checks
+linux-conductor-gtk 'linux-conductor://workspace/berlin?tab=review'
+linux-conductor-gtk 'linux-conductor://history'
 ```
 
 Validate the app path with
@@ -120,6 +123,9 @@ create_pr = "Write concise PR descriptions with test evidence."
 fix_errors = "Fix failing checks with the smallest safe change."
 resolve_merge_conflicts = "Preserve both sides when possible and explain tradeoffs."
 rename_branch = "Use short kebab-case branch names."
+commit_generation = "Use conventional commits and include tests run."
+test_fixing = "Reproduce the failing test before changing production code."
+refactor_style = "Keep behavior-preserving refactors separate."
 ```
 
 Other customization areas should be representable in settings even when the GUI
@@ -156,18 +162,45 @@ reasoning_mode = "medium"
 block_on_open_todos = true
 block_on_open_comments = true
 block_on_failed_checks = true
+block_on_pending_checks = false
 definition_of_done = "Tests run, reviewer comments resolved, PR explains risk."
+
+[customization.workspace_defaults]
+base_branch = "main"
+branch_prefix = "lc"
+working_directory = "apps/web"
+port_block_size = 10
+default_visible_tab = "changes"
 
 [customization.view]
 theme = "system"
+accent_color = "green"
 density = "compact"
-default_workspace_tab = "changes"
-diff_view = "unified"
+keybindings = "vim"
+terminal_font = "JetBrains Mono 13"
+terminal_scrollback = 5000
+command_palette_presets = ["test", "lint", "Preview=pnpm dev"]
+diff_preference = "unified"
 ```
 
 The exact advanced schema may evolve. The product direction is stable: prompts
 and common workflow controls belong in the UI; deep theme/view/layout,
 keybinding, notification, hook, and command-preset options can be file-editable.
+The GTK Projects settings page includes an advanced customization TOML block for
+these `[customization]` sections. Workspace creation currently consumes
+`customization.workspace_defaults.base_branch`, `branch_prefix`, and
+`port_block_size`. Runtime setup/run/archive scripts, terminal commands, and
+agent sessions consume `working_directory` as a relative path inside the
+worktree. PR merge consumes `customization.naming.default_merge_method` and
+merge blockers for open todos, open local review comments, failed checks, and
+pending checks. GTK workspace startup and sidebar selection consume
+`default_visible_tab` unless an explicit launch tab is provided, and apply the
+configured `theme`, `accent_color`, and `density` as stylesheet classes. GTK
+also consumes `keybindings` for global refresh, sidebar, and command-palette
+shortcuts, applies `terminal_font` plus `terminal_scrollback` to terminal
+surfaces, and expands `command_palette_presets` into terminal preset buttons
+from known aliases or `Label=command` entries; the other fields are merged,
+saved, and preserved for workflow surfaces that use them.
 
 ## 6. CLI Smoke Path
 
@@ -177,6 +210,9 @@ Register a repository:
 linux-conductor doctor
 linux-conductor repo add /path/to/repo --name demo
 linux-conductor repo list
+linux-conductor repo settings demo export --output /tmp/demo-settings.toml
+linux-conductor repo settings demo import /tmp/demo-settings.toml
+linux-conductor repo settings demo import /tmp/demo-settings.toml --local
 ```
 
 Create two workspaces:
@@ -185,6 +221,8 @@ Create two workspaces:
 linux-conductor workspace create demo --name berlin --branch lc/berlin-demo
 linux-conductor workspace create demo --name tokyo --branch lc/tokyo-demo
 linux-conductor workspace list
+linux-conductor workspace link-dir berlin tokyo
+linux-conductor workspace linked-dirs berlin
 ```
 
 Open sessions:
@@ -195,6 +233,8 @@ linux-conductor session open tokyo --kind claude
 linux-conductor session start berlin --kind shell
 linux-conductor session list berlin
 linux-conductor session stop berlin
+linux-conductor history list --workspace berlin
+linux-conductor history show <process-id>
 ```
 
 Run scripts and inspect work:

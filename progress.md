@@ -64,6 +64,132 @@ single labeled transcript events. Focused verification:
 `cargo test -p linux-conductor-gtk session_surface::tests -- --nocapture`;
 workspace verification: `cargo test --workspace`.
 
+Phase 9 has a substantial customization/settings slice in progress:
+repository settings now load, merge, save, and round-trip first-class TOML
+sections for additional prompts, naming/git style, repository automation, agent
+profiles, merge rules, workspace defaults, and view preferences. The GTK
+Projects settings page edits all active prompt fields and exposes an advanced
+customization TOML block so saving settings from the app preserves these
+sections instead of dropping them. Workspace creation now consumes
+`customization.workspace_defaults.base_branch`, `branch_prefix`, and
+`port_block_size` when the create request does not provide explicit base or
+branch values. Focused verification:
+`cargo test -p linux-conductor-core settings::tests -- --nocapture`,
+`cargo test -p linux-conductor-core workspace::tests::create_workspace_uses_configured -- --nocapture`,
+`cargo test -p linux-conductor-core workspace::tests::create_from_ -- --nocapture`,
+and `cargo test -p linux-conductor-gtk projects::tests -- --nocapture`.
+
+Phase 9 also has the first monorepo working-directory slice: repository
+settings accept `customization.workspace_defaults.working_directory` as a safe
+relative path inside the worktree. Runtime setup/run/archive scripts, one-shot
+terminal commands, editor/session launches, and Shell/Codex/Claude/Cursor
+session cwd selection use that subdirectory when configured. The environment
+keeps `CONDUCTOR_WORKSPACE_PATH` as the worktree root and adds
+`CONDUCTOR_WORKING_DIRECTORY` for the selected process cwd. Focused
+verification: `cargo test -p linux-conductor-core monorepo -- --nocapture` and
+`cargo test -p linux-conductor-core settings::tests::rejects_unsafe_workspace_working_directory_settings -- --nocapture`.
+
+Phase 9 now consumes merge customization instead of only preserving it: PR merge
+uses `customization.naming.default_merge_method` when no explicit method is
+provided, preserves the existing open-todo/open-local-comment blockers by
+default, lets repositories disable those local blockers, and can block merges
+on failed or pending PR checks through `customization.merge_rules`. Focused
+verification: `cargo test -p linux-conductor-core merge_pull_request -- --nocapture`
+and `cargo test -p linux-conductor-core settings::tests -- --nocapture`.
+
+Phase 9 now has unified local chat history for new Linux sessions: saved
+PTY-backed Shell/Codex/Claude/Cursor session process logs are exposed through a
+core history API, the GTK History page merges those local sessions with
+imported macOS Conductor chats, workspace chat panels show local saved
+sessions for the selected worktree, and the CLI has `linux-conductor history
+list [--workspace <name>]` plus `linux-conductor history show <process-id>`.
+Focused verification: `cargo test -p linux-conductor-core local_chat_history -- --nocapture`,
+`cargo test -p linux-conductor-gtk history -- --nocapture`, and
+`cargo test -p linux-conductor history -- --nocapture`.
+
+Phase 9 now has linked-directory workflows for multi-repository or
+multi-workspace agent tasks: a source workspace can link another active
+workspace, the link is persisted in SQLite, materialized as
+`.context/linked-directories/<target-workspace>`, and exposed to scripts,
+terminal commands, editor launches, and Shell/Codex/Claude/Cursor sessions via
+`CONDUCTOR_LINKED_DIRECTORIES` and `CONDUCTOR_LINKED_DIRECTORY_<NAME>`.
+The CLI has `workspace link-dir`, `workspace linked-dirs`, and
+`workspace unlink-dir`; the GTK workspace chat column has a Linked Directories
+panel for the same workflow. Focused verification:
+`cargo test -p linux-conductor-core linked_directory -- --nocapture`,
+`cargo test -p linux-conductor linked -- --nocapture`, and
+`cargo test -p linux-conductor-gtk workspace_command_center::tests -- --nocapture`.
+
+Phase 9 now has first-class GTK launch targets and deep links: startup accepts
+`--workspace <name> --tab <tab>`, workspace deep links like
+`linux-conductor://workspace/berlin?tab=checks`, and page deep links like
+`linux-conductor://history`. Review is now a distinct workspace tab target, so
+command palette navigation and deep links can land on Changes, Checks, or
+Review instead of collapsing all three to the outer work stack. Focused
+verification: `cargo test -p linux-conductor-gtk launch_target -- --nocapture`,
+`cargo test -p linux-conductor-gtk command_palette::tests -- --nocapture`, and
+`cargo test -p linux-conductor-gtk workspace_command_center::tests::workspace_tab_stack_name_maps_palette_targets_to_tabs -- --nocapture`.
+
+Phase 9 now consumes the configured default workspace tab: repository
+customization exposes view defaults through the workspace store, validates
+`customization.workspace_defaults.default_visible_tab`, and GTK startup/sidebar
+selection use that tab when opening a workspace unless the launch target passes
+an explicit tab. Supported values include Changes, Checks, Review,
+Chat/Terminal, Big Terminal, Todos, Processes, and Checkpoints plus common
+aliases. Focused verification:
+`cargo test -p linux-conductor-core default_visible_tab -- --nocapture`,
+`cargo test -p linux-conductor-core workspace_view_defaults -- --nocapture`,
+and `cargo test -p linux-conductor-gtk state::tests -- --nocapture`.
+
+Phase 9 now consumes the first GTK visual view preferences too: workspace view
+defaults normalize `customization.view.theme`, `accent_color`, and `density`
+into stable window CSS classes, startup applies the selected workspace's
+preferences, and sidebar workspace selection refreshes those classes. The CSS
+currently covers common light/dark surfaces, blue/green/amber/rose accents,
+and compact/comfortable spacing; this is not full visual parity or a bespoke
+settings UI. Focused verification:
+`cargo test -p linux-conductor-gtk view_preferences -- --nocapture`.
+
+Phase 9 now has configurable global GTK keybindings for the shortcuts that were
+previously hard-coded: refresh, sidebar toggle, and command palette. Repository
+view defaults expose `customization.view.keybindings`; GTK resolves that setting
+on startup and workspace selection, supports the default/native preset, a `vim`
+preset, and custom mappings such as
+`palette=ctrl+p,refresh=ctrl+shift+r,sidebar=ctrl+alt+b`. The command palette
+shows the active refresh/sidebar shortcuts and filters by those labels. Focused
+verification: `cargo test -p linux-conductor-gtk command_palette -- --nocapture`
+and `cargo test -p linux-conductor-core workspace_view_defaults -- --nocapture`.
+
+Phase 9 now has CLI settings bundle import/export for registered repositories:
+`linux-conductor repo settings <name> export [--local] [--output <path>]`
+exports the exact shared or local TOML file, and
+`linux-conductor repo settings <name> import <path> [--local]` parses,
+validates, and writes shared or local repository settings. Focused
+verification:
+`cargo test -p linux-conductor-core settings::tests::repository_toml_helpers_parse_validate_and_serialize_settings -- --nocapture`
+and `cargo test -p linux-conductor -- --nocapture`.
+
+Phase 9 GTK polish pass completed on 2026-06-21: seven rough/missing
+features were finished. (1) Big Terminal tab removes header chrome in
+full-mode and expands scroll area height. (2) Tab navigation keybindings
+added `changes`, `checks`, `review`, `chat`, `terminal`, `todos`,
+`processes`, and `checkpoints` as eight new optional slots in
+`customization.view.keybindings`; shortcuts shown in command palette.
+(3) Prompt preview dialog: agents panel checks `prompts.general` before
+launching a session and shows a modal with the assembled prompt text and
+Cancel/Launch buttons. (4) Prompt profiles: agents panel exposes a
+`ComboBoxText` profile selector populated from `customization.agent_profiles`
+keys; selected profile passed as `--profile <name>` to session launch.
+(5) Custom palette commands: `customization.view.command_palette_presets`
+entries surface as `RunCommand` palette entries via known aliases
+(`test`, `lint`, `build`, `ci`, etc.) or `Label=command` syntax.
+(6) Session-stop notifications: a background 5-second timer fires an
+`adw::Toast` when a session transitions from Running to stopped, gated on
+`notification_rules` containing any `on_session_stop` variant.
+(7) Projects settings polish: prompt text views now each have an individual
+labeled section header instead of a single combined label. Full suite:
+`cargo test --workspace` — 251 tests pass.
+
 ## Implemented
 
 ### Core And CLI
@@ -83,11 +209,19 @@ workspace verification: `cargo test --workspace`.
 - Setup/run/archive script plumbing from `.conductor/settings.toml`.
 - Shared/local repository settings load/save, including scripts, run mode,
   Spotlight testing, Files to copy, environment variables, durable prompts,
-  provider executable/provider fields, and Git behavior flags.
+  provider executable/provider fields, Git behavior flags, and advanced
+  customization sections for naming, automation, agent profiles, merge rules,
+  workspace defaults, and view preferences.
 - Repository action prompts are part of the editable settings model; the app
   should keep them first-class because prompt iteration is core to agent work.
 - `.worktreeinclude` precedence over `file_include_globs`.
-- Stable per-workspace port allocation.
+- Stable per-workspace port allocation with repository-configurable port block
+  size.
+- Monorepo working-directory defaults for scripts, terminal commands, editor
+  launches, and agent sessions, with unsafe relative path validation.
+- Linked-directory records and `.context/linked-directories` symlinks so one
+  workspace can expose related active workspace checkouts to agents and
+  commands.
 - Background setup/run/session process rows, logs, exit codes, stop handling,
   and stale-process reconciliation.
 - Workspace-scoped one-shot terminal commands.
@@ -103,6 +237,8 @@ workspace verification: `cargo test --workspace`.
 - GitHub PR create/view/checks/comments/readiness-summary/merge through local
   `gh` auth.
 - PR merge blocks open todos and open local review comments.
+- PR merge honors repository merge customization for default merge method,
+  local todo/comment blockers, and failed/pending check blockers.
 - PR merge can archive the workspace when `git.archive_on_merge = true`.
 - PR checks, comments, review decisions, review threads, status rollups, and
   deployment rollups can be converted into agent prompts.
@@ -135,13 +271,21 @@ workspace verification: `cargo test --workspace`.
 - Sidebar workspace search/grouping.
 - Command palette is available from the header or `Ctrl+K`, with commands for
   Dashboard, Projects, History, Workspace, Changes, Chat/Terminal, Big
-  Terminal, Todos, Processes, Checkpoints, refresh, and sidebar toggle. The
+  Terminal, Todos, Processes, Checkpoints, refresh, sidebar toggle, and any
+  custom `command_palette_presets` entries from repository settings. The
   palette filters by command label, shortcut, and workflow aliases such as
   `ci`, `diff`, `chat`, and `terminal`.
-- `Ctrl+R` refreshes the app and `Ctrl+B` toggles the sidebar.
+- `Ctrl+R` refreshes the app and `Ctrl+B` toggles the sidebar. Tab navigation
+  supports eight optional keybindings (`changes`, `checks`, `review`, `chat`,
+  `terminal`, `todos`, `processes`, `checkpoints`) via
+  `customization.view.keybindings`; active shortcuts shown in palette.
 - Projects page can add local repos, clone Git URLs, list projects, edit
   shared/local settings, and create workspaces from branch/base, GitHub issue,
   GitHub PR, Linear issue, or prompt.
+- Projects settings can edit all active repository prompts (each with its own
+  labeled section: General, Code review, Create PR, Fix errors, Resolve merge
+  conflicts, Rename branch, Commit message, Test fixing, Refactor style) plus
+  an advanced customization TOML block for file-editable workflow defaults.
 - Projects source creation uses a test-covered form mapping before dispatching
   to branch, GitHub issue, GitHub PR, Linear, or prompt workspace creation.
 - Projects source creation reports test-covered success/failure feedback for
@@ -158,7 +302,18 @@ workspace verification: `cargo test --workspace`.
 - Terminal panels support one-shot commands, PTY shells, multiple shell tabs,
   transcript persistence/search/history/reload, basic ANSI/control redraw
   handling, alternate-screen restore for TUI transcripts, CSI cursor-position
-  variants, and resize propagation.
+  variants, resize propagation, configured terminal fonts, and configured
+  scrollback limits. Repository command presets expand into terminal preset
+  buttons from known aliases or `Label=command` entries. Full-mode Big Terminal
+  removes header chrome and expands scroll height.
+- Agents panel exposes a profile selector (`ComboBoxText`) from
+  `customization.agent_profiles` keys; non-default profile passed as
+  `--profile <name>` to session launch. Before launching, if `prompts.general`
+  is set, a modal prompt-preview dialog shows the assembled text with Cancel
+  and Launch buttons.
+- In-app session-stop notifications: a background timer fires an `adw::Toast`
+  when a session transitions from Running to stopped, gated on
+  `notification_rules` containing an `on_session_stop` variant.
 - Runtime panel runs setup/run scripts, stops run scripts, shows log tails, and
   controls the current Spotlight slice.
 - Changes tab has changed-file tree, per-file unified diff preview, full-diff
@@ -173,16 +328,13 @@ workspace verification: `cargo test --workspace`.
   blockers, merge PRs, and archive after merge through repository settings.
 - Conflict panel detects sibling workspaces that changed the same files and can
   preview or copy sibling file changes.
-- History page can read old chats from the macOS Conductor database when
-  available.
+- History page can read saved Linux session history and old chats from the
+  macOS Conductor database when available.
 
 ## Known Gaps
 
 - Terminal rendering handles common ANSI/control redraws but is not a full
   terminal emulator.
-- Broad customizable keyboard shortcuts, deep links, and polished Big Terminal
-  Mode are not complete.
-- Monorepo directory selection and linked-directory workflows are not complete.
 - GitHub review-thread sync now has structured read plus CLI resolve/reopen
   mutation paths that were live-proven against temporary PR #12 with a real
   review thread. Check/deployment aggregation now has live-proven CLI coverage
@@ -191,15 +343,13 @@ workspace verification: `cargo test --workspace`.
   rollup/head-status de-duplication. Cancelled/skipped remain limited to
   parser/classifier coverage or real provider rollups because GitHub's commit
   status API does not synthesize those states.
-- Unified local history for all new chats is not complete.
 - Project onboarding/settings need more polish and fuller user/managed settings
   visibility.
-- Theme/view customization needs a documented config-file model. Not every
-  advanced visual or layout option needs a bespoke GUI control.
+- Deeper layout/theme coverage is not complete. Not every advanced visual or
+  layout option needs a bespoke GUI control.
 - Broader customization should cover prompt packs, naming templates, commit/PR
-  style, setup automation, hooks, agent profiles, merge blockers, workspace
-  defaults, notification rules, keybindings, command presets, and settings
-  import/export.
+  style, setup automation, hooks, deeper prompt-pack import/export, and richer
+  notification options beyond the single session-stop toast.
 - Platform direction is Linux-first. Keep the core portable where it does not
   compromise Linux quality; consider WSL before native Windows, and treat macOS
   as lower priority while the original Conductor app covers that platform.

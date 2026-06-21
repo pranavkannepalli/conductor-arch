@@ -3,11 +3,13 @@ use gtk::{
     Box as GBox, Label, ListBox, Orientation, PolicyType, ScrolledWindow, Separator, TextView,
 };
 use linux_conductor_core::import::default_conductor_app_database;
+use linux_conductor_core::workspace::WorkspaceStore;
 use rusqlite::Connection;
 use std::cell::RefCell;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-pub(crate) fn build_history_page() -> (GBox, impl Fn() + Clone + 'static) {
+pub(crate) fn build_history_page(database_path: PathBuf) -> (GBox, impl Fn() + Clone + 'static) {
     let root = GBox::new(Orientation::Vertical, 0);
     root.add_css_class("dashboard");
     let header = GBox::new(Orientation::Vertical, 8);
@@ -15,7 +17,9 @@ pub(crate) fn build_history_page() -> (GBox, impl Fn() + Clone + 'static) {
     let title = Label::new(Some("History"));
     title.add_css_class("dashboard-title");
     title.set_xalign(0.0);
-    let subtitle = Label::new(Some("Old Conductor chats from the macOS app database."));
+    let subtitle = Label::new(Some(
+        "Local Linux agent sessions plus imported Conductor chats when available.",
+    ));
     subtitle.add_css_class("card-meta");
     subtitle.set_xalign(0.0);
     header.append(&title);
@@ -47,12 +51,16 @@ pub(crate) fn build_history_page() -> (GBox, impl Fn() + Clone + 'static) {
     let refresh = {
         let list = list.clone();
         let session_ids = Rc::clone(&session_ids);
+        let database_path = database_path.clone();
         move || {
             while let Some(child) = list.first_child() {
                 list.remove(&child);
             }
             session_ids.borrow_mut().clear();
-            for (idx, session) in conductor_recent_sessions().into_iter().enumerate() {
+            for (idx, session) in history_recent_sessions(&database_path)
+                .into_iter()
+                .enumerate()
+            {
                 list.append(&session_summary_row(&session));
                 session_ids
                     .borrow_mut()
@@ -62,6 +70,7 @@ pub(crate) fn build_history_page() -> (GBox, impl Fn() + Clone + 'static) {
     };
 
     let session_ids_select = Rc::clone(&session_ids);
+    let database_path_select = database_path.clone();
     list.connect_row_selected(move |_, row| {
         let Some(session_id) =
             row.and_then(|r| session_ids_select.borrow().get(&r.index()).cloned())
@@ -69,7 +78,10 @@ pub(crate) fn build_history_page() -> (GBox, impl Fn() + Clone + 'static) {
             return;
         };
         let buffer = message_view.buffer();
-        buffer.set_text(&conductor_session_messages(&session_id));
+        buffer.set_text(&history_session_messages(
+            &database_path_select,
+            &session_id,
+        ));
     });
 
     refresh();
@@ -80,6 +92,7 @@ pub(crate) fn build_history_page() -> (GBox, impl Fn() + Clone + 'static) {
 
 pub(crate) struct ChatSummary {
     id: String,
+    source: String,
     title: String,
     agent_type: String,
     status: String,
@@ -98,8 +111,12 @@ pub(crate) fn session_summary_row(session: &ChatSummary) -> GBox {
     title.set_xalign(0.0);
     title.set_ellipsize(gtk::pango::EllipsizeMode::End);
     let meta = Label::new(Some(&format!(
-        "{} · {} · {} · {} messages",
-        session.repository_name, session.workspace_name, session.agent_type, session.message_count
+        "{} · {} · {} · {} · {} messages",
+        session.source,
+        session.repository_name,
+        session.workspace_name,
+        session.agent_type,
+        session.message_count
     )));
     meta.add_css_class("workspace-meta");
     meta.set_xalign(0.0);
@@ -117,12 +134,50 @@ pub(crate) fn session_summary_row(session: &ChatSummary) -> GBox {
     row
 }
 
+fn history_recent_sessions(database_path: &Path) -> Vec<ChatSummary> {
+    let mut sessions = local_recent_sessions(database_path);
+    sessions.extend(conductor_recent_sessions());
+    sessions.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    sessions.truncate(200);
+    sessions
+}
+
+fn local_recent_sessions(database_path: &Path) -> Vec<ChatSummary> {
+    query_local_sessions(database_path, None).unwrap_or_default()
+}
+
 fn conductor_recent_sessions() -> Vec<ChatSummary> {
     query_conductor_sessions(None).unwrap_or_default()
 }
 
-pub(crate) fn conductor_sessions_for_workspace_path(path: &std::path::Path) -> Vec<ChatSummary> {
-    query_conductor_sessions(Some(path)).unwrap_or_default()
+pub(crate) fn sessions_for_workspace_path(database_path: &Path, path: &Path) -> Vec<ChatSummary> {
+    let mut sessions = query_local_sessions(database_path, Some(path)).unwrap_or_default();
+    sessions.extend(query_conductor_sessions(Some(path)).unwrap_or_default());
+    sessions.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    sessions
+}
+
+fn query_local_sessions(
+    database_path: &Path,
+    path: Option<&Path>,
+) -> anyhow::Result<Vec<ChatSummary>> {
+    let store = WorkspaceStore::open(database_path)?;
+    let sessions = store.list_local_chat_history(path)?;
+    Ok(sessions
+        .into_iter()
+        .map(|session| ChatSummary {
+            id: format!("local:{}", session.process_id),
+            source: "Linux".to_owned(),
+            title: format!("{} session #{}", session.agent_type, session.process_id),
+            agent_type: session.agent_type,
+            status: session.status,
+            repository_name: session.repository_name,
+            workspace_name: session.workspace_name,
+            workspace_path: session.workspace_path.to_string_lossy().to_string(),
+            updated_at: session.updated_at,
+            message_count: i64::try_from(session.message_count).unwrap_or(i64::MAX),
+        })
+        .collect())
 }
 
 fn query_conductor_sessions(path: Option<&std::path::Path>) -> rusqlite::Result<Vec<ChatSummary>> {
@@ -162,6 +217,7 @@ fn query_conductor_sessions(path: Option<&std::path::Path>) -> rusqlite::Result<
 fn row_to_chat_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatSummary> {
     Ok(ChatSummary {
         id: row.get(0)?,
+        source: "Imported".to_owned(),
         title: row.get(1)?,
         agent_type: row.get(2)?,
         status: row.get(3)?,
@@ -171,6 +227,49 @@ fn row_to_chat_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatSummary>
         updated_at: row.get(7)?,
         message_count: row.get(8)?,
     })
+}
+
+fn history_session_messages(database_path: &Path, session_id: &str) -> String {
+    if let Some(id) = session_id
+        .strip_prefix("local:")
+        .and_then(|value| value.parse::<i64>().ok())
+    {
+        return local_session_messages(database_path, id);
+    }
+    let imported_id = session_id.strip_prefix("imported:").unwrap_or(session_id);
+    conductor_session_messages(imported_id)
+}
+
+fn local_session_messages(database_path: &Path, process_id: i64) -> String {
+    let Ok(store) = WorkspaceStore::open(database_path) else {
+        return "Could not open Linux Conductor history database.".to_owned();
+    };
+    let Ok(messages) = store.local_chat_history_messages(process_id) else {
+        return "Could not read local chat transcript.".to_owned();
+    };
+    if messages.is_empty() {
+        return "No messages in this chat.".to_owned();
+    }
+    messages
+        .into_iter()
+        .map(|message| {
+            format!(
+                "{}\n{}\n",
+                local_role_label(&message.role),
+                truncate_message(&message.content, 2200)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn local_role_label(role: &str) -> &'static str {
+    match role {
+        "user" => "You",
+        "review" => "Review Prompt",
+        "system" => "System",
+        _ => "Agent",
+    }
 }
 
 fn conductor_session_messages(session_id: &str) -> String {

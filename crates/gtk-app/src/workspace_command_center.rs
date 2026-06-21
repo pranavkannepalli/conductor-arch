@@ -1,8 +1,8 @@
 use adw::{Toast, ToastOverlay};
 use gtk::prelude::*;
 use gtk::{
-    Box as GBox, Button, CheckButton, ComboBoxText, Entry, Label, Orientation, Paned, PolicyType,
-    ScrolledWindow, Stack, StackSwitcher, TextView,
+    Align, Box as GBox, Button, CheckButton, ComboBoxText, Entry, Label, Orientation, Paned,
+    PolicyType, ScrolledWindow, Stack, StackSwitcher, TextView, WrapMode,
 };
 use linux_conductor_core::workspace::{
     DiffFileSummary, PullRequest, PullRequestReviewThread, ReviewComment, Workspace, WorkspaceStore,
@@ -178,6 +178,27 @@ fn agents_panel(
     panel.set_hexpand(true);
     panel.append(&section_title("Agents"));
 
+    // Profile selector: populated from configured agent profiles
+    let profile_row = GBox::new(Orientation::Horizontal, 8);
+    let profile_label = Label::new(Some("Profile:"));
+    profile_label.add_css_class("detail-label");
+    let profile_select = ComboBoxText::new();
+    profile_select.append(Some("default"), "Default");
+    let profile_names = WorkspaceStore::open(db_path.to_path_buf())
+        .and_then(|store| store.workspace_view_defaults(&ws.name))
+        .map(|defaults| defaults.agent_profile_names)
+        .unwrap_or_default();
+    for name in &profile_names {
+        profile_select.append(Some(name.as_str()), name.as_str());
+    }
+    profile_select.set_active_id(Some("default"));
+    if profile_names.is_empty() {
+        profile_row.set_visible(false);
+    }
+    profile_row.append(&profile_label);
+    profile_row.append(&profile_select);
+    panel.append(&profile_row);
+
     let actions = GBox::new(Orientation::Horizontal, 8);
     for (label, kind) in [
         ("Shell", "shell"),
@@ -187,13 +208,24 @@ fn agents_panel(
     ] {
         let button = Button::with_label(label);
         let workspace = ws.name.clone();
+        let db_for_launch = db_path.to_path_buf();
+        let profile_select_for_launch = profile_select.clone();
         button.connect_clicked(move |_| {
-            spawn_terminal_command(&format!(
-                "{} session open {} --kind {}",
-                cli_binary().display(),
-                shell_quote(&workspace),
-                kind
-            ));
+            let profile = profile_select_for_launch
+                .active_id()
+                .filter(|id| id != "default")
+                .map(|id| id.to_string());
+            let general_prompt = WorkspaceStore::open(db_for_launch.clone())
+                .and_then(|store| store.workspace_repo_settings(&workspace))
+                .ok()
+                .and_then(|settings| settings.prompts.and_then(|p| p.general))
+                .filter(|p| !p.is_empty());
+            let launch_cmd = build_session_open_command(&workspace, kind, profile.as_deref());
+            if let Some(prompt) = general_prompt {
+                show_prompt_preview(&prompt, &launch_cmd);
+            } else {
+                spawn_terminal_command(&launch_cmd);
+            }
         });
         actions.append(&button);
     }
@@ -211,6 +243,75 @@ fn agents_panel(
     ));
     panel.append(&session_box);
     panel
+}
+
+fn build_session_open_command(workspace: &str, kind: &str, profile: Option<&str>) -> String {
+    let mut cmd = format!(
+        "{} session open {} --kind {}",
+        cli_binary().display(),
+        shell_quote(workspace),
+        kind
+    );
+    if let Some(profile) = profile {
+        cmd.push_str(&format!(" --profile {}", shell_quote(profile)));
+    }
+    cmd
+}
+
+fn show_prompt_preview(prompt: &str, launch_cmd: &str) {
+    let dialog = gtk::Window::builder()
+        .title("Prompt Preview")
+        .modal(true)
+        .default_width(520)
+        .default_height(320)
+        .build();
+    let body = GBox::new(Orientation::Vertical, 10);
+    body.set_margin_top(14);
+    body.set_margin_bottom(14);
+    body.set_margin_start(14);
+    body.set_margin_end(14);
+    let title = Label::new(Some("General agent prompt"));
+    title.add_css_class("section-title");
+    title.set_xalign(0.0);
+    body.append(&title);
+    let hint = Label::new(Some(
+        "This prompt will be injected when the session starts.",
+    ));
+    hint.add_css_class("card-meta");
+    hint.set_xalign(0.0);
+    hint.set_wrap(true);
+    body.append(&hint);
+    let text_view = TextView::new();
+    text_view.set_editable(false);
+    text_view.set_monospace(true);
+    text_view.set_wrap_mode(WrapMode::WordChar);
+    text_view.buffer().set_text(prompt);
+    let scroll = ScrolledWindow::new();
+    scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
+    scroll.set_vexpand(true);
+    scroll.set_min_content_height(140);
+    scroll.set_child(Some(&text_view));
+    body.append(&scroll);
+    let buttons = GBox::new(Orientation::Horizontal, 8);
+    buttons.set_halign(Align::End);
+    let cancel_btn = Button::with_label("Cancel");
+    let launch_btn = Button::with_label("Launch");
+    launch_btn.add_css_class("suggested-action");
+    let dialog_for_cancel = dialog.clone();
+    cancel_btn.connect_clicked(move |_| {
+        dialog_for_cancel.close();
+    });
+    let dialog_for_launch = dialog.clone();
+    let cmd = launch_cmd.to_owned();
+    launch_btn.connect_clicked(move |_| {
+        spawn_terminal_command(&cmd);
+        dialog_for_launch.close();
+    });
+    buttons.append(&cancel_btn);
+    buttons.append(&launch_btn);
+    body.append(&buttons);
+    dialog.set_child(Some(&body));
+    dialog.present();
 }
 
 fn runtime_panel(
@@ -586,6 +687,19 @@ fn work_tabs(
     switcher.set_stack(Some(&tabs));
     switcher.add_css_class("panel-switcher");
     panel.append(&switcher);
+    let terminal_preferences = store
+        .workspace_view_defaults(&ws.name)
+        .map(|defaults| {
+            terminal::TerminalPreferences::from_config(
+                defaults.terminal_font.as_deref(),
+                defaults.terminal_scrollback,
+            )
+        })
+        .unwrap_or_default();
+    let terminal_command_presets = store
+        .workspace_view_defaults(&ws.name)
+        .map(|defaults| terminal::terminal_command_presets(&defaults.command_palette_presets))
+        .unwrap_or_else(|_| terminal::terminal_command_presets(&[]));
 
     tabs.add_titled(
         &changes_checks_review_tabs(
@@ -600,7 +714,14 @@ fn work_tabs(
         "Changes",
     );
     tabs.add_titled(
-        &chat_terminal_split(db_path, ws, state.clone(), refresh_hub.clone()),
+        &chat_terminal_split(
+            db_path,
+            ws,
+            state.clone(),
+            refresh_hub.clone(),
+            terminal_preferences.clone(),
+            terminal_command_presets.clone(),
+        ),
         Some("chat-terminal"),
         "Chat / Terminal",
     );
@@ -611,6 +732,8 @@ fn work_tabs(
             &ws.path,
             true,
             refresh_hub.clone(),
+            terminal_preferences,
+            terminal_command_presets,
         ),
         Some("terminal"),
         "Terminal",
@@ -642,7 +765,14 @@ fn work_tabs(
     let state_tabs = state.clone();
     tabs.connect_visible_child_name_notify(move |stack| {
         match stack.visible_child_name().as_deref() {
-            Some("work") => state_tabs.set_active_workspace_tab(WorkspaceTab::Changes),
+            Some("work") => {
+                if !matches!(
+                    state_tabs.snapshot().active_workspace_tab,
+                    WorkspaceTab::Checks | WorkspaceTab::Review
+                ) {
+                    state_tabs.set_active_workspace_tab(WorkspaceTab::Changes);
+                }
+            }
             Some("todos") => state_tabs.set_active_workspace_tab(WorkspaceTab::Todos),
             Some("processes") => state_tabs.set_active_workspace_tab(WorkspaceTab::Processes),
             Some("terminal") => state_tabs.set_active_workspace_tab(WorkspaceTab::Terminal),
@@ -658,7 +788,7 @@ fn work_tabs(
 fn workspace_tab_stack_name(tab: &WorkspaceTab) -> &'static str {
     match tab {
         WorkspaceTab::Chats => "chat-terminal",
-        WorkspaceTab::Changes | WorkspaceTab::Checks => "work",
+        WorkspaceTab::Changes | WorkspaceTab::Checks | WorkspaceTab::Review => "work",
         WorkspaceTab::Checkpoints => "checkpoints",
         WorkspaceTab::Todos => "todos",
         WorkspaceTab::Processes => "processes",
@@ -843,12 +973,39 @@ fn changes_checks_review_tabs(
         "Checks",
     );
     tabs.add_titled(
-        &workspace_review_panel(db_path, store, name, app_state, refresh_hub, toast_overlay),
+        &workspace_review_panel(
+            db_path,
+            store,
+            name,
+            app_state.clone(),
+            refresh_hub,
+            toast_overlay,
+        ),
         Some("review"),
         "Review",
     );
+    tabs.set_visible_child_name(changes_checks_review_tab_stack_name(
+        &app_state.snapshot().active_workspace_tab,
+    ));
+    let state_tabs = app_state.clone();
+    tabs.connect_visible_child_name_notify(move |stack| {
+        match stack.visible_child_name().as_deref() {
+            Some("checks") => state_tabs.set_active_workspace_tab(WorkspaceTab::Checks),
+            Some("review") => state_tabs.set_active_workspace_tab(WorkspaceTab::Review),
+            Some("changes") => state_tabs.set_active_workspace_tab(WorkspaceTab::Changes),
+            _ => {}
+        }
+    });
     panel.append(&tabs);
     panel
+}
+
+fn changes_checks_review_tab_stack_name(tab: &WorkspaceTab) -> &'static str {
+    match tab {
+        WorkspaceTab::Checks => "checks",
+        WorkspaceTab::Review => "review",
+        _ => "changes",
+    }
 }
 
 fn chat_terminal_split(
@@ -856,6 +1013,8 @@ fn chat_terminal_split(
     ws: &Workspace,
     app_state: AppState,
     refresh_hub: RefreshHub,
+    terminal_preferences: terminal::TerminalPreferences,
+    terminal_command_presets: Vec<terminal::TerminalCommandPreset>,
 ) -> Paned {
     let split = Paned::new(Orientation::Horizontal);
     split.set_wide_handle(true);
@@ -873,12 +1032,17 @@ fn chat_terminal_split(
         app_state,
         move || refresh_sessions.refresh(RefreshScope::Workspace),
     ));
-    for chat in history::conductor_sessions_for_workspace_path(&ws.path)
+    for chat in history::sessions_for_workspace_path(db_path, &ws.path)
         .into_iter()
         .take(8)
     {
         chat_box.append(&history::session_summary_row(&chat));
     }
+    chat_box.append(&linked_directories_panel(
+        db_path,
+        &ws.name,
+        refresh_hub.clone(),
+    ));
 
     let terminal_box = GBox::new(Orientation::Vertical, 8);
     terminal_box.add_css_class("command-panel");
@@ -889,11 +1053,112 @@ fn chat_terminal_split(
         &ws.path,
         false,
         refresh_hub,
+        terminal_preferences,
+        terminal_command_presets,
     ));
 
     split.set_start_child(Some(&chat_box));
     split.set_end_child(Some(&terminal_box));
     split
+}
+
+fn linked_directories_panel(db_path: &Path, name: &str, refresh_hub: RefreshHub) -> GBox {
+    let panel = GBox::new(Orientation::Vertical, 6);
+    panel.append(&section_title("Linked Directories"));
+
+    let links_view = TextView::new();
+    links_view.set_editable(false);
+    links_view.set_monospace(true);
+    links_view.add_css_class("history-view");
+    links_view
+        .buffer()
+        .set_text(&linked_directories_text(db_path, name));
+    let scroll = ScrolledWindow::new();
+    scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
+    scroll.set_min_content_height(86);
+    scroll.set_child(Some(&links_view));
+    panel.append(&scroll);
+
+    let row = GBox::new(Orientation::Horizontal, 8);
+    let target_entry = Entry::new();
+    target_entry.set_placeholder_text(Some("Target workspace name"));
+    target_entry.set_hexpand(true);
+    let link_btn = Button::with_label("Link");
+    let unlink_btn = Button::with_label("Unlink");
+    row.append(&target_entry);
+    row.append(&link_btn);
+    row.append(&unlink_btn);
+    panel.append(&row);
+
+    let db_for_link = db_path.to_path_buf();
+    let workspace_for_link = name.to_owned();
+    let target_for_link = target_entry.clone();
+    let buffer_for_link = links_view.buffer();
+    let hub_for_link = refresh_hub.clone();
+    link_btn.connect_clicked(move |_| {
+        let target = target_for_link.text().trim().to_owned();
+        if target.is_empty() {
+            buffer_for_link.set_text("Enter a target workspace name to link.\n");
+            return;
+        }
+        match WorkspaceStore::open(db_for_link.clone())
+            .and_then(|store| store.link_workspace_directory(&workspace_for_link, &target))
+        {
+            Ok(_) => {
+                buffer_for_link
+                    .set_text(&linked_directories_text(&db_for_link, &workspace_for_link));
+                hub_for_link.refresh(RefreshScope::Workspace);
+            }
+            Err(err) => buffer_for_link.set_text(&format!("Could not link directory: {err:#}\n")),
+        }
+    });
+
+    let db_for_unlink = db_path.to_path_buf();
+    let workspace_for_unlink = name.to_owned();
+    let target_for_unlink = target_entry;
+    let buffer_for_unlink = links_view.buffer();
+    let hub_for_unlink = refresh_hub;
+    unlink_btn.connect_clicked(move |_| {
+        let target = target_for_unlink.text().trim().to_owned();
+        if target.is_empty() {
+            buffer_for_unlink.set_text("Enter a target workspace name to unlink.\n");
+            return;
+        }
+        match WorkspaceStore::open(db_for_unlink.clone())
+            .and_then(|store| store.unlink_workspace_directory(&workspace_for_unlink, &target))
+        {
+            Ok(_) => {
+                buffer_for_unlink.set_text(&linked_directories_text(
+                    &db_for_unlink,
+                    &workspace_for_unlink,
+                ));
+                hub_for_unlink.refresh(RefreshScope::Workspace);
+            }
+            Err(err) => {
+                buffer_for_unlink.set_text(&format!("Could not unlink directory: {err:#}\n"))
+            }
+        }
+    });
+
+    panel
+}
+
+fn linked_directories_text(db_path: &Path, name: &str) -> String {
+    match WorkspaceStore::open(db_path).and_then(|store| store.list_linked_directories(name)) {
+        Ok(links) if links.is_empty() => "No linked directories.\n".to_owned(),
+        Ok(links) => links
+            .into_iter()
+            .map(|link| {
+                format!(
+                    "{} -> {}\nlink: {}\n",
+                    link.target_workspace_name,
+                    link.target_workspace_path.display(),
+                    link.link_path.display()
+                )
+            })
+            .collect(),
+        Err(err) => format!("Could not read linked directories: {err:#}\n"),
+    }
 }
 
 fn section_title(text: &str) -> Label {
@@ -1695,7 +1960,7 @@ fn workspace_checks_panel(
             .map(|method| method.to_string())
             .unwrap_or_else(|| "squash".to_owned());
         let result = WorkspaceStore::open(db_for_merge.clone()).and_then(|store| {
-            store.merge_and_maybe_archive_pull_request(&workspace_for_merge, &method)
+            store.merge_and_maybe_archive_pull_request(&workspace_for_merge, Some(&method))
         });
         apply_action_feedback(
             &feedback_for_merge,

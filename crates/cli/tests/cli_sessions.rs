@@ -70,6 +70,70 @@ fn cli_starts_logs_and_stops_real_shell_session() {
         .stdout(contains("Stopped session for berlin"));
 }
 
+#[test]
+fn cli_exports_and_imports_repository_settings() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo_path = init_repo(temp.path().join("demo"));
+    let conductor_dir = repo_path.join(".conductor");
+    fs::create_dir(&conductor_dir).unwrap();
+    fs::write(
+        conductor_dir.join("settings.toml"),
+        r#"
+[scripts]
+run = "cargo run"
+
+[customization.view]
+keybindings = "vim"
+"#,
+    )
+    .unwrap();
+    let export_path = temp.path().join("settings-export.toml");
+
+    app(temp.path())
+        .args([
+            "repo",
+            "add",
+            repo_path.to_str().unwrap(),
+            "--name",
+            "demo",
+            "--default-branch",
+            "main",
+        ])
+        .assert()
+        .success();
+    app(temp.path())
+        .args([
+            "repo",
+            "settings",
+            "demo",
+            "export",
+            "--output",
+            export_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(contains("Exported shared settings"));
+
+    let exported = fs::read_to_string(&export_path).unwrap();
+    assert!(exported.contains("keybindings = \"vim\""));
+
+    app(temp.path())
+        .args([
+            "repo",
+            "settings",
+            "demo",
+            "import",
+            export_path.to_str().unwrap(),
+            "--local",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("Imported local settings"));
+
+    let local_settings = fs::read_to_string(conductor_dir.join("settings.local.toml")).unwrap();
+    assert!(local_settings.contains("keybindings = \"vim\""));
+}
+
 fn app(root: &Path) -> AssertCommand {
     let mut command = AssertCommand::cargo_bin("linux-conductor").unwrap();
     command
