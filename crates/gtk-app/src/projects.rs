@@ -10,7 +10,7 @@ use linux_conductor_core::settings::{
     FilePatternSource, GitSettings, PromptSettings, ProviderSettings, RepositorySettings,
     ScriptSettings, SettingsLayer,
 };
-use linux_conductor_core::workspace::{CreateWorkspace, WorkspaceStore};
+use linux_conductor_core::workspace::{CreateWorkspace, WorkspaceSourcePreflight, WorkspaceStore};
 use std::path::PathBuf;
 
 use crate::{default_clone_parent, detail_row, repo_name_from_url};
@@ -93,6 +93,7 @@ pub(crate) fn build_projects_page(
     source_select.set_active_id(Some("branch"));
     let source_entry = Entry::new();
     source_entry.set_placeholder_text(Some("issue/PR id or prompt"));
+    let check_sources_btn = Button::with_label("Check Sources");
     let create_btn = Button::with_label("Create Workspace");
     let result = Label::new(None);
     result.add_css_class("card-meta");
@@ -103,6 +104,7 @@ pub(crate) fn build_projects_page(
     create_box.append(&base_entry);
     create_box.append(&source_select);
     create_box.append(&source_entry);
+    create_box.append(&check_sources_btn);
     create_box.append(&create_btn);
     body.append(&create_box);
     body.append(&result);
@@ -362,6 +364,19 @@ pub(crate) fn build_projects_page(
         }
     });
 
+    let db_path_check_sources = paths.database_path.clone();
+    let result_for_check_sources = result.clone();
+    check_sources_btn.connect_clicked(move |_| {
+        match WorkspaceStore::open(db_path_check_sources.clone()) {
+            Ok(store) => {
+                result_for_check_sources.set_text(&source_preflight_text(&store.source_preflight()))
+            }
+            Err(err) => {
+                result_for_check_sources.set_text(&format!("Source preflight failed: {err:#}"))
+            }
+        }
+    });
+
     let db_path_create = paths.database_path.clone();
     let refresh_after_create = refresh.clone();
     let refresh_after_settings_save = refresh.clone();
@@ -380,69 +395,23 @@ pub(crate) fn build_projects_page(
             return;
         }
         result.set_text("Creating workspace...");
-        let create_result =
-            WorkspaceStore::open(db_path_create.clone()).and_then(|store| match source.as_str() {
-                "github_issue" => {
-                    let issue = source_value
-                        .trim_start_matches('#')
-                        .parse::<u64>()
-                        .map_err(|_| anyhow::anyhow!("GitHub issue number is required"))?;
-                    store.create_from_issue(&repo, issue, None)
-                }
-                "github_pr" => {
-                    let pr = source_value
-                        .trim_start_matches('#')
-                        .parse::<u64>()
-                        .map_err(|_| anyhow::anyhow!("GitHub PR number is required"))?;
-                    if base.is_some() {
-                        anyhow::bail!("Base ref is fetched from GitHub for PR workspaces.");
-                    }
-                    store.create_from_pull_request(
-                        &repo,
-                        pr,
-                        (!typed_name.is_empty()).then_some(typed_name.as_str()),
-                        (!typed_branch.is_empty()).then_some(typed_branch.as_str()),
-                    )
-                }
-                "linear_issue" => store.create_from_linear_issue(
-                    &repo,
-                    &source_value,
-                    (!typed_name.is_empty()).then_some(typed_name.as_str()),
-                    (!typed_branch.is_empty()).then_some(typed_branch.as_str()),
-                    base.as_deref(),
-                ),
-                "prompt" => store.create_from_prompt(
-                    &repo,
-                    &source_value,
-                    (!typed_name.is_empty()).then_some(typed_name.as_str()),
-                    (!typed_branch.is_empty()).then_some(typed_branch.as_str()),
-                    base.as_deref(),
-                ),
-                _ => {
-                    if typed_name.is_empty() || typed_branch.is_empty() {
-                        anyhow::bail!("Workspace name and branch are required for Branch source.");
-                    }
-                    store.create(CreateWorkspace {
-                        repository_name: repo,
-                        name: typed_name.clone(),
-                        branch: typed_branch.clone(),
-                        base_ref: base,
-                    })
-                }
-            });
-        match create_result {
-            Ok(workspace) => {
-                result.set_text(&format!(
-                    "Created {} at {} from {}",
-                    workspace.name,
-                    workspace.path.display(),
-                    source
-                ));
-                refresh_after_create();
-                refresh_dashboard();
-                refresh_workspace();
-            }
-            Err(err) => result.set_text(&format!("Create failed: {err:#}")),
+        let request = workspace_source_request_from_form(
+            &source,
+            &source_value,
+            base,
+            (!typed_name.is_empty()).then_some(typed_name),
+            (!typed_branch.is_empty()).then_some(typed_branch),
+        );
+        let create_result = request.and_then(|request| {
+            WorkspaceStore::open(db_path_create.clone())
+                .and_then(|store| request.create_workspace(&store, &repo))
+        });
+        let created = create_result.is_ok();
+        result.set_text(&workspace_source_create_feedback(&source, create_result));
+        if created {
+            refresh_after_create();
+            refresh_dashboard();
+            refresh_workspace();
         }
     });
 
@@ -627,6 +596,29 @@ fn repository_root(db_path: &PathBuf, name: &str) -> anyhow::Result<PathBuf> {
         .ok_or_else(|| anyhow::anyhow!("repository {name} not found"))
 }
 
+fn source_preflight_text(preflight: &WorkspaceSourcePreflight) -> String {
+    format!(
+        "Source readiness: GitHub {}. Linear {}.",
+        preflight.github_status(),
+        preflight.linear_status()
+    )
+}
+
+fn workspace_source_create_feedback(
+    source: &str,
+    result: anyhow::Result<linux_conductor_core::workspace::Workspace>,
+) -> String {
+    match result {
+        Ok(workspace) => format!(
+            "Created {} at {} from {}",
+            workspace.name,
+            workspace.path.display(),
+            source
+        ),
+        Err(err) => format!("Create failed from {source}: {err:#}"),
+    }
+}
+
 fn settings_text_view(height: i32) -> (ScrolledWindow, gtk::TextBuffer, TextView) {
     let view = TextView::new();
     view.set_monospace(true);
@@ -642,6 +634,154 @@ fn settings_text_view(height: i32) -> (ScrolledWindow, gtk::TextBuffer, TextView
 fn optional_entry_text(entry: &Entry) -> Option<String> {
     let value = entry.text().trim().to_owned();
     (!value.is_empty()).then_some(value)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WorkspaceSourceRequest {
+    Branch {
+        name: String,
+        branch: String,
+        base: Option<String>,
+    },
+    GitHubIssue {
+        number: u64,
+    },
+    GitHubPullRequest {
+        number: u64,
+        name: Option<String>,
+        branch: Option<String>,
+    },
+    LinearIssue {
+        id: String,
+        name: Option<String>,
+        branch: Option<String>,
+        base: Option<String>,
+    },
+    Prompt {
+        prompt: String,
+        name: Option<String>,
+        branch: Option<String>,
+        base: Option<String>,
+    },
+}
+
+impl WorkspaceSourceRequest {
+    fn source_label(&self) -> &'static str {
+        match self {
+            Self::Branch { .. } => "branch",
+            Self::GitHubIssue { .. } => "github_issue",
+            Self::GitHubPullRequest { .. } => "github_pr",
+            Self::LinearIssue { .. } => "linear_issue",
+            Self::Prompt { .. } => "prompt",
+        }
+    }
+
+    fn create_workspace(
+        &self,
+        store: &WorkspaceStore,
+        repository_name: &str,
+    ) -> anyhow::Result<linux_conductor_core::workspace::Workspace> {
+        match self {
+            Self::Branch { name, branch, base } => store.create(CreateWorkspace {
+                repository_name: repository_name.to_owned(),
+                name: name.clone(),
+                branch: branch.clone(),
+                base_ref: base.clone(),
+            }),
+            Self::GitHubIssue { number } => store.create_from_issue(repository_name, *number, None),
+            Self::GitHubPullRequest {
+                number,
+                name,
+                branch,
+            } => store.create_from_pull_request(
+                repository_name,
+                *number,
+                name.as_deref(),
+                branch.as_deref(),
+            ),
+            Self::LinearIssue {
+                id,
+                name,
+                branch,
+                base,
+            } => store.create_from_linear_issue(
+                repository_name,
+                id,
+                name.as_deref(),
+                branch.as_deref(),
+                base.as_deref(),
+            ),
+            Self::Prompt {
+                prompt,
+                name,
+                branch,
+                base,
+            } => store.create_from_prompt(
+                repository_name,
+                prompt,
+                name.as_deref(),
+                branch.as_deref(),
+                base.as_deref(),
+            ),
+        }
+    }
+}
+
+fn workspace_source_request_from_form(
+    source: &str,
+    source_value: &str,
+    base: Option<String>,
+    typed_name: Option<String>,
+    typed_branch: Option<String>,
+) -> anyhow::Result<WorkspaceSourceRequest> {
+    match source {
+        "github_issue" => Ok(WorkspaceSourceRequest::GitHubIssue {
+            number: source_value
+                .trim()
+                .trim_start_matches('#')
+                .parse::<u64>()
+                .map_err(|_| anyhow::anyhow!("GitHub issue number is required"))?,
+        }),
+        "github_pr" => {
+            if base.is_some() {
+                anyhow::bail!("Base ref is fetched from GitHub for PR workspaces.");
+            }
+            Ok(WorkspaceSourceRequest::GitHubPullRequest {
+                number: source_value
+                    .trim()
+                    .trim_start_matches('#')
+                    .parse::<u64>()
+                    .map_err(|_| anyhow::anyhow!("GitHub PR number is required"))?,
+                name: typed_name,
+                branch: typed_branch,
+            })
+        }
+        "linear_issue" => {
+            let id = source_value.trim();
+            anyhow::ensure!(!id.is_empty(), "Linear issue id is required");
+            Ok(WorkspaceSourceRequest::LinearIssue {
+                id: id.to_owned(),
+                name: typed_name,
+                branch: typed_branch,
+                base,
+            })
+        }
+        "prompt" => {
+            let prompt = source_value.trim();
+            anyhow::ensure!(!prompt.is_empty(), "Prompt is required");
+            Ok(WorkspaceSourceRequest::Prompt {
+                prompt: prompt.to_owned(),
+                name: typed_name,
+                branch: typed_branch,
+                base,
+            })
+        }
+        _ => {
+            let name = typed_name.ok_or_else(|| anyhow::anyhow!("Workspace name is required"))?;
+            let branch = typed_branch.ok_or_else(|| anyhow::anyhow!("Branch name is required"))?;
+            Ok(WorkspaceSourceRequest::Branch { name, branch, base })
+        }
+    }
 }
 
 fn optional_buffer_text(buffer: &gtk::TextBuffer) -> Option<String> {
@@ -664,4 +804,86 @@ fn parse_environment_lines(text: &str) -> Vec<(String, String)> {
             (!key.is_empty()).then(|| (key.to_owned(), value.trim().to_owned()))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_preflight_text_summarizes_github_and_linear_readiness() {
+        let text = source_preflight_text(&WorkspaceSourcePreflight {
+            github_cli_installed: true,
+            github_authenticated: false,
+            linear_api_key_set: false,
+        });
+
+        assert_eq!(
+            text,
+            "Source readiness: GitHub gh auth required. Linear LINEAR_API_KEY missing."
+        );
+    }
+
+    #[test]
+    fn workspace_source_request_from_form_validates_source_specific_fields() {
+        let branch = workspace_source_request_from_form(
+            "branch",
+            "",
+            Some("main".to_owned()),
+            Some("berlin".to_owned()),
+            Some("lc/berlin".to_owned()),
+        )
+        .unwrap();
+        assert!(matches!(branch, WorkspaceSourceRequest::Branch { .. }));
+
+        let issue =
+            workspace_source_request_from_form("github_issue", "#123", None, None, None).unwrap();
+        assert_eq!(issue.source_label(), "github_issue");
+
+        let pr_with_base = workspace_source_request_from_form(
+            "github_pr",
+            "10",
+            Some("main".to_owned()),
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            pr_with_base.to_string(),
+            "Base ref is fetched from GitHub for PR workspaces."
+        );
+
+        let missing_prompt =
+            workspace_source_request_from_form("prompt", "   ", None, None, None).unwrap_err();
+        assert_eq!(missing_prompt.to_string(), "Prompt is required");
+    }
+
+    #[test]
+    fn workspace_source_create_feedback_summarizes_success_and_failure() {
+        let workspace = linux_conductor_core::workspace::Workspace {
+            id: 1,
+            repository_id: 2,
+            name: "pr-10".to_owned(),
+            path: PathBuf::from("/tmp/pr-10"),
+            branch: "lc/pr-10".to_owned(),
+            base_ref: "refs/linux-conductor/pull-requests/10".to_owned(),
+            port_base: 3000,
+            status: "active".to_owned(),
+            archived_at: None,
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+        };
+
+        assert_eq!(
+            workspace_source_create_feedback("github_pr", Ok(workspace)),
+            "Created pr-10 at /tmp/pr-10 from github_pr"
+        );
+        assert_eq!(
+            workspace_source_create_feedback(
+                "linear_issue",
+                Err(anyhow::anyhow!("LINEAR_API_KEY missing")),
+            ),
+            "Create failed from linear_issue: LINEAR_API_KEY missing"
+        );
+    }
 }

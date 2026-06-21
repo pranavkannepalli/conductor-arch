@@ -2965,6 +2965,7 @@ pub(crate) fn terminal_display_text(text: &str) -> String {
     let mut rendered = Vec::new();
     let mut cursor = None;
     let mut saved_cursor = None;
+    let mut normal_screen = None;
     let mut absolute_position_cursor = false;
     let mut chars = text.chars().peekable();
     while let Some(ch) = chars.next() {
@@ -3064,14 +3065,14 @@ pub(crate) fn terminal_display_text(text: &str) -> String {
                             csi_first_number(&sequence, 1),
                         ));
                     }
-                    Some('B') => {
+                    Some('B') | Some('e') => {
                         cursor = Some(move_terminal_display_cursor_down(
                             &rendered,
                             cursor.unwrap_or(rendered.len()),
                             csi_first_number(&sequence, 1),
                         ));
                     }
-                    Some('C') => {
+                    Some('C') | Some('a') => {
                         cursor = Some(move_terminal_display_cursor_right(
                             &rendered,
                             cursor.unwrap_or(rendered.len()),
@@ -3105,6 +3106,14 @@ pub(crate) fn terminal_display_text(text: &str) -> String {
                             cursor.unwrap_or(rendered.len()),
                             csi_first_number(&sequence, 1),
                         ));
+                    }
+                    Some('d') => {
+                        cursor = Some(move_terminal_display_cursor_to_line(
+                            &rendered,
+                            cursor.unwrap_or(rendered.len()),
+                            csi_first_number(&sequence, 1),
+                        ));
+                        absolute_position_cursor = true;
                     }
                     Some('H') => {
                         cursor = Some(move_terminal_display_cursor_to_position(
@@ -3210,6 +3219,34 @@ pub(crate) fn terminal_display_text(text: &str) -> String {
                         ));
                     }
                     Some('m') => {}
+                    Some('h') if csi_private_mode_enabled(&sequence, &["47", "1047", "1049"]) => {
+                        if normal_screen.is_none() {
+                            normal_screen = Some((
+                                rendered.clone(),
+                                cursor,
+                                saved_cursor,
+                                absolute_position_cursor,
+                            ));
+                        }
+                        rendered.clear();
+                        cursor = Some(0);
+                        saved_cursor = None;
+                        absolute_position_cursor = false;
+                    }
+                    Some('l') if csi_private_mode_enabled(&sequence, &["47", "1047", "1049"]) => {
+                        if let Some((
+                            saved_rendered,
+                            saved_position,
+                            saved_saved_cursor,
+                            saved_absolute,
+                        )) = normal_screen.take()
+                        {
+                            rendered = saved_rendered;
+                            cursor = saved_position;
+                            saved_cursor = saved_saved_cursor;
+                            absolute_position_cursor = saved_absolute;
+                        }
+                    }
                     Some('s') => {
                         saved_cursor = Some(cursor.unwrap_or(rendered.len()));
                     }
@@ -3526,6 +3563,21 @@ fn move_terminal_display_cursor_to_column(
     target.min(line_end_after(rendered, start))
 }
 
+fn move_terminal_display_cursor_to_line(rendered: &[char], cursor: usize, row: usize) -> usize {
+    let column = cursor.saturating_sub(line_start_before(rendered, cursor));
+    let mut start = 0;
+    for _ in 1..row.max(1) {
+        start = match rendered[start.min(rendered.len())..]
+            .iter()
+            .position(|ch| *ch == '\n')
+        {
+            Some(offset) => start + offset + 1,
+            None => rendered.len(),
+        };
+    }
+    (start + column).min(line_end_after(rendered, start))
+}
+
 fn move_terminal_display_cursor_next_line(rendered: &[char], cursor: usize, lines: usize) -> usize {
     let mut start = line_start_before(rendered, cursor);
     for _ in 0..lines {
@@ -3578,6 +3630,15 @@ fn csi_numbers(sequence: &str) -> Vec<usize> {
         .split(';')
         .filter_map(|part| part.parse::<usize>().ok())
         .collect()
+}
+
+fn csi_private_mode_enabled(sequence: &str, modes: &[&str]) -> bool {
+    let Some(private_modes) = sequence.strip_prefix('?') else {
+        return false;
+    };
+    private_modes
+        .split(';')
+        .any(|mode| modes.iter().any(|candidate| *candidate == mode))
 }
 
 fn move_terminal_display_cursor_to_position(rendered: &[char], numbers: Vec<usize>) -> usize {
@@ -4175,6 +4236,17 @@ mod tests {
     }
 
     #[test]
+    fn terminal_display_text_supports_cursor_position_csi_variants() {
+        let forward = terminal_display_text("abcde\u{1b}[2D\u{1b}[1aZ\n");
+        let vertical_absolute = terminal_display_text("one\ntwo\nthree\u{1b}[2dX\n");
+        let vertical_relative = terminal_display_text("12345\nabcde\nfghij\u{1b}[2;3HY\u{1b}[1eZ");
+
+        assert_eq!(forward, "abcdZ\n");
+        assert_eq!(vertical_absolute, "one\ntwoX\nthree");
+        assert_eq!(vertical_relative, "12345\nabYde\nfghZj");
+    }
+
+    #[test]
     fn terminal_display_text_applies_saved_cursor_restore() {
         let rendered = terminal_display_text("hello\u{1b}[2D\u{1b}[sXY\u{1b}[uZ\n");
 
@@ -4207,6 +4279,14 @@ mod tests {
         let rendered = terminal_display_text("hello\u{1b}[2D\u{1b}7XY\u{1b}8Z\n");
 
         assert_eq!(rendered, "helZY\n");
+    }
+
+    #[test]
+    fn terminal_display_text_restores_after_alternate_screen() {
+        let rendered =
+            terminal_display_text("before\n\u{1b}[?1049hfull screen ui\n\u{1b}[?1049lafter\n");
+
+        assert_eq!(rendered, "before\nafter\n");
     }
 
     #[test]

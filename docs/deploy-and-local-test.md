@@ -207,7 +207,16 @@ linux-conductor stop berlin
 linux-conductor diff berlin
 linux-conductor checks berlin
 linux-conductor conflicts berlin
+linux-conductor workspace source-preflight
+linux-conductor pr summary berlin
+linux-conductor pr resolve-thread berlin <thread-id>
+linux-conductor pr reopen-thread berlin <thread-id>
 ```
+
+For a workspace created with `workspace create <repo> --from-pr <number>`, `pr
+summary` should work even when the local workspace branch was renamed, because
+the app records and reuses the PR number. Review-thread resolve/reopen needs a
+GitHub review thread node ID from `pr summary`.
 
 Todos and checkpoints:
 

@@ -914,6 +914,7 @@ dependencies = [
  "portable-pty",
  "rusqlite",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
  "toml 0.8.23",

@@ -10,15 +10,20 @@ pub mod workspace;
 #[cfg(test)]
 mod pty_tests {
     use std::ffi::OsString;
+    use std::path::PathBuf;
     use std::time::Duration;
 
     #[test]
     fn pty_session_accepts_input_and_streams_output() {
         let temp = tempfile::tempdir().unwrap();
         let marker = "linux-conductor-pty-ready";
-        let mut session = crate::pty::PtySession::spawn_shell(
+        let mut session = crate::pty::PtySession::spawn(
+            PathBuf::from("/bin/sh"),
+            Vec::new(),
             temp.path(),
             vec![("LC_PTY_TEST_MARKER".to_owned(), OsString::from(marker))],
+            24,
+            80,
         )
         .unwrap();
 

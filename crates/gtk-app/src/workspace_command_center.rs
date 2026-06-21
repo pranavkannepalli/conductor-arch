@@ -5,7 +5,7 @@ use gtk::{
     ScrolledWindow, Stack, StackSwitcher, TextView,
 };
 use linux_conductor_core::workspace::{
-    DiffFileSummary, PullRequest, ReviewComment, Workspace, WorkspaceStore,
+    DiffFileSummary, PullRequest, PullRequestReviewThread, ReviewComment, Workspace, WorkspaceStore,
 };
 use std::path::Path;
 
@@ -635,6 +635,9 @@ fn work_tabs(
         Some("processes"),
         "Processes",
     );
+    tabs.set_visible_child_name(workspace_tab_stack_name(
+        &state.snapshot().active_workspace_tab,
+    ));
 
     let state_tabs = state.clone();
     tabs.connect_visible_child_name_notify(move |stack| {
@@ -650,6 +653,17 @@ fn work_tabs(
     });
     panel.append(&tabs);
     panel
+}
+
+fn workspace_tab_stack_name(tab: &WorkspaceTab) -> &'static str {
+    match tab {
+        WorkspaceTab::Chats => "chat-terminal",
+        WorkspaceTab::Changes | WorkspaceTab::Checks => "work",
+        WorkspaceTab::Checkpoints => "checkpoints",
+        WorkspaceTab::Todos => "todos",
+        WorkspaceTab::Processes => "processes",
+        WorkspaceTab::Terminal => "terminal",
+    }
 }
 
 fn workspace_checkpoint_panel(
@@ -1415,10 +1429,18 @@ fn workspace_checks_panel(
     let create_btn = Button::with_label("Create PR");
     let inspect_row = GBox::new(Orientation::Horizontal, 8);
     let refresh_pr_btn = Button::with_label("Refresh PR State");
+    let view_summary_btn = Button::with_label("View PR Summary");
+    let stage_summary_btn = Button::with_label("Stage PR Summary");
     let view_checks_btn = Button::with_label("View Checks");
     let stage_checks_btn = Button::with_label("Stage Failing Checks");
     let view_reviews_btn = Button::with_label("View PR Comments");
     let stage_reviews_btn = Button::with_label("Stage PR Comments");
+    let thread_row = GBox::new(Orientation::Horizontal, 8);
+    let thread_id_entry = Entry::new();
+    thread_id_entry.set_placeholder_text(Some("Review thread ID from PR summary"));
+    thread_id_entry.set_hexpand(true);
+    let resolve_thread_btn = Button::with_label("Resolve Thread");
+    let reopen_thread_btn = Button::with_label("Reopen Thread");
     let merge_row = GBox::new(Orientation::Horizontal, 8);
     let merge_method = ComboBoxText::new();
     merge_method.append(Some("squash"), "Squash");
@@ -1480,6 +1502,46 @@ fn workspace_checks_panel(
             true,
         );
         refresh_after_pr_refresh.refresh(RefreshScope::All);
+    });
+
+    let db_for_summary = db_path.to_path_buf();
+    let workspace_for_summary = name.to_owned();
+    let checks_output_for_summary = checks_output.clone();
+    let feedback_for_summary = feedback.clone();
+    let toast_for_summary = toast_overlay.clone();
+    view_summary_btn.connect_clicked(move |_| {
+        let result = WorkspaceStore::open(db_for_summary.clone())
+            .and_then(|store| store.pull_request_readiness_text(&workspace_for_summary));
+        let text = pull_request_readiness_feedback(result);
+        apply_action_feedback(&feedback_for_summary, &toast_for_summary, &text, true);
+        checks_output_for_summary.set_text(&text);
+    });
+
+    let db_for_stage_summary = db_path.to_path_buf();
+    let workspace_for_stage_summary = name.to_owned();
+    let feedback_for_stage_summary = feedback.clone();
+    let toast_for_stage_summary = toast_overlay.clone();
+    let app_state_for_stage_summary = app_state.clone();
+    stage_summary_btn.connect_clicked(move |_| {
+        match WorkspaceStore::open(db_for_stage_summary.clone()).and_then(|store| {
+            store.pull_request_readiness_agent_prompt(&workspace_for_stage_summary)
+        }) {
+            Ok(prompt) => {
+                app_state_for_stage_summary.set_staged_review_prompt(Some(prompt));
+                apply_action_feedback(
+                    &feedback_for_stage_summary,
+                    &toast_for_stage_summary,
+                    "Staged PR readiness summary for the selected agent session.",
+                    true,
+                );
+            }
+            Err(err) => apply_action_feedback(
+                &feedback_for_stage_summary,
+                &toast_for_stage_summary,
+                &format!("Could not stage PR readiness summary: {err:#}"),
+                true,
+            ),
+        }
     });
 
     let db_for_checks = db_path.to_path_buf();
@@ -1570,6 +1632,58 @@ fn workspace_checks_panel(
         }
     });
 
+    let db_for_resolve_thread = db_path.to_path_buf();
+    let workspace_for_resolve_thread = name.to_owned();
+    let thread_id_for_resolve = thread_id_entry.clone();
+    let feedback_for_resolve_thread = feedback.clone();
+    let toast_for_resolve_thread = toast_overlay.clone();
+    resolve_thread_btn.connect_clicked(move |_| {
+        let thread_id = thread_id_for_resolve.text().trim().to_owned();
+        let result = if thread_id.is_empty() {
+            Err(anyhow::anyhow!("review thread id is required"))
+        } else {
+            WorkspaceStore::open(db_for_resolve_thread.clone()).and_then(|store| {
+                store.set_pull_request_review_thread_resolution(
+                    &workspace_for_resolve_thread,
+                    &thread_id,
+                    true,
+                )
+            })
+        };
+        apply_action_feedback(
+            &feedback_for_resolve_thread,
+            &toast_for_resolve_thread,
+            &pull_request_review_thread_action_feedback("Resolve", result),
+            true,
+        );
+    });
+
+    let db_for_reopen_thread = db_path.to_path_buf();
+    let workspace_for_reopen_thread = name.to_owned();
+    let thread_id_for_reopen = thread_id_entry.clone();
+    let feedback_for_reopen_thread = feedback.clone();
+    let toast_for_reopen_thread = toast_overlay.clone();
+    reopen_thread_btn.connect_clicked(move |_| {
+        let thread_id = thread_id_for_reopen.text().trim().to_owned();
+        let result = if thread_id.is_empty() {
+            Err(anyhow::anyhow!("review thread id is required"))
+        } else {
+            WorkspaceStore::open(db_for_reopen_thread.clone()).and_then(|store| {
+                store.set_pull_request_review_thread_resolution(
+                    &workspace_for_reopen_thread,
+                    &thread_id,
+                    false,
+                )
+            })
+        };
+        apply_action_feedback(
+            &feedback_for_reopen_thread,
+            &toast_for_reopen_thread,
+            &pull_request_review_thread_action_feedback("Reopen", result),
+            true,
+        );
+    });
+
     let db_for_merge = db_path.to_path_buf();
     let workspace_for_merge = name.to_owned();
     let refresh_after_merge = refresh_hub.clone();
@@ -1616,11 +1730,17 @@ fn workspace_checks_panel(
     pr_form.append(&create_btn);
     panel.append(&pr_form);
     inspect_row.append(&refresh_pr_btn);
+    inspect_row.append(&view_summary_btn);
+    inspect_row.append(&stage_summary_btn);
     inspect_row.append(&view_checks_btn);
     inspect_row.append(&stage_checks_btn);
     inspect_row.append(&view_reviews_btn);
     inspect_row.append(&stage_reviews_btn);
     panel.append(&inspect_row);
+    thread_row.append(&thread_id_entry);
+    thread_row.append(&resolve_thread_btn);
+    thread_row.append(&reopen_thread_btn);
+    panel.append(&thread_row);
     merge_row.append(&merge_method);
     merge_row.append(&merge_btn);
     merge_row.append(&archive_after_merge_btn);
@@ -1953,6 +2073,44 @@ fn pull_request_review_feedback(result: anyhow::Result<String>) -> String {
             }
         }
         Err(err) => format!("View PR comments/reviews failed: {err:#}"),
+    }
+}
+
+fn pull_request_readiness_feedback(result: anyhow::Result<String>) -> String {
+    match result {
+        Ok(output) => {
+            let output = output.trim();
+            if output.is_empty() {
+                "PR readiness summary returned no output.".to_owned()
+            } else {
+                output.to_owned()
+            }
+        }
+        Err(err) => format!("View PR summary failed: {err:#}"),
+    }
+}
+
+fn pull_request_review_thread_action_feedback(
+    action: &str,
+    result: anyhow::Result<PullRequestReviewThread>,
+) -> String {
+    match result {
+        Ok(thread) => {
+            let id = thread.id.as_deref().unwrap_or("unknown thread");
+            let state = if thread.resolved {
+                "resolved"
+            } else {
+                "unresolved"
+            };
+            let location = match (thread.path.as_deref(), thread.line) {
+                (Some(path), Some(line)) => format!("{path}:{line}"),
+                (Some(path), None) => path.to_owned(),
+                (None, Some(line)) => format!("line {line}"),
+                (None, None) => "unknown location".to_owned(),
+            };
+            format!("{action} review thread {id}: {state} at {location}.")
+        }
+        Err(err) => format!("{action} review thread failed: {err:#}"),
     }
 }
 
@@ -2492,6 +2650,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn workspace_tab_stack_name_maps_palette_targets_to_tabs() {
+        assert_eq!(
+            workspace_tab_stack_name(&WorkspaceTab::Chats),
+            "chat-terminal"
+        );
+        assert_eq!(workspace_tab_stack_name(&WorkspaceTab::Changes), "work");
+        assert_eq!(workspace_tab_stack_name(&WorkspaceTab::Checks), "work");
+        assert_eq!(
+            workspace_tab_stack_name(&WorkspaceTab::Terminal),
+            "terminal"
+        );
+        assert_eq!(workspace_tab_stack_name(&WorkspaceTab::Todos), "todos");
+        assert_eq!(
+            workspace_tab_stack_name(&WorkspaceTab::Checkpoints),
+            "checkpoints"
+        );
+        assert_eq!(
+            workspace_tab_stack_name(&WorkspaceTab::Processes),
+            "processes"
+        );
+    }
+
+    #[test]
     fn runtime_action_failure_feedback_includes_status_and_toast() {
         let feedback = runtime_action_failure_feedback("Setup", &anyhow::anyhow!("missing setup"));
 
@@ -2805,6 +2986,45 @@ mod tests {
 
         let failure = pull_request_review_feedback(Err(anyhow::anyhow!("gh auth required")));
         assert_eq!(failure, "View PR comments/reviews failed: gh auth required");
+    }
+
+    #[test]
+    fn pull_request_readiness_feedback_summarizes_structured_pr_state() {
+        let success = pull_request_readiness_feedback(Ok(
+            "PR readiness for workspace berlin.\nReview decision: CHANGES_REQUESTED\n".to_owned(),
+        ));
+        assert_eq!(
+            success,
+            "PR readiness for workspace berlin.\nReview decision: CHANGES_REQUESTED"
+        );
+
+        let empty = pull_request_readiness_feedback(Ok(String::new()));
+        assert_eq!(empty, "PR readiness summary returned no output.");
+
+        let failure = pull_request_readiness_feedback(Err(anyhow::anyhow!("gh auth required")));
+        assert_eq!(failure, "View PR summary failed: gh auth required");
+    }
+
+    #[test]
+    fn pull_request_review_thread_action_feedback_reports_state_and_id() {
+        let success = pull_request_review_thread_action_feedback(
+            "Resolve",
+            Ok(linux_conductor_core::workspace::PullRequestReviewThread {
+                id: Some("PRRT_fake".to_owned()),
+                path: Some("src/lib.rs".to_owned()),
+                line: Some(42),
+                resolved: true,
+                comments: Vec::new(),
+            }),
+        );
+        assert_eq!(
+            success,
+            "Resolve review thread PRRT_fake: resolved at src/lib.rs:42."
+        );
+
+        let failure =
+            pull_request_review_thread_action_feedback("Reopen", Err(anyhow::anyhow!("bad id")));
+        assert_eq!(failure, "Reopen review thread failed: bad id");
     }
 
     #[test]
