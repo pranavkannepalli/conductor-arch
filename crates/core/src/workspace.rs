@@ -2,6 +2,7 @@ use crate::settings::load_repository_settings;
 use anyhow::{Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use rusqlite::{params, Connection};
+use serde_json::Value;
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
@@ -36,6 +37,39 @@ pub struct CreateWorkspace {
     pub name: String,
     pub branch: String,
     pub base_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceSourcePreflight {
+    pub github_cli_installed: bool,
+    pub github_authenticated: bool,
+    pub linear_api_key_set: bool,
+}
+
+impl WorkspaceSourcePreflight {
+    pub fn github_ready(&self) -> bool {
+        self.github_cli_installed && self.github_authenticated
+    }
+
+    pub fn linear_ready(&self) -> bool {
+        self.linear_api_key_set
+    }
+
+    pub fn github_status(&self) -> &'static str {
+        match (self.github_cli_installed, self.github_authenticated) {
+            (true, true) => "ready",
+            (false, _) => "gh missing",
+            (true, false) => "gh auth required",
+        }
+    }
+
+    pub fn linear_status(&self) -> &'static str {
+        if self.linear_api_key_set {
+            "ready"
+        } else {
+            "LINEAR_API_KEY missing"
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -329,6 +363,105 @@ impl PullRequestCheckRun {
             "fail" | "failed" | "failure" | "error" | "cancelled" | "timed_out"
         )
     }
+
+    pub fn is_pending(&self) -> bool {
+        matches!(
+            self.status.to_ascii_lowercase().as_str(),
+            "pending" | "queued" | "requested" | "waiting" | "in_progress" | "in progress"
+        )
+    }
+
+    pub fn is_success(&self) -> bool {
+        matches!(
+            self.status.to_ascii_lowercase().as_str(),
+            "pass" | "passed" | "success" | "successful" | "completed"
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequestReviewEntry {
+    pub author: String,
+    pub state: String,
+    pub body: Option<String>,
+    pub submitted_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequestCommentEntry {
+    pub author: String,
+    pub body: String,
+    pub created_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequestDeployment {
+    pub environment: String,
+    pub status: String,
+    pub url: Option<String>,
+}
+
+impl PullRequestDeployment {
+    pub fn is_failure(&self) -> bool {
+        matches!(
+            self.status.to_ascii_lowercase().as_str(),
+            "fail" | "failed" | "failure" | "error" | "inactive" | "cancelled" | "timed_out"
+        )
+    }
+
+    pub fn is_pending(&self) -> bool {
+        matches!(
+            self.status.to_ascii_lowercase().as_str(),
+            "pending" | "queued" | "requested" | "waiting" | "in_progress" | "in progress"
+        )
+    }
+
+    pub fn is_success(&self) -> bool {
+        matches!(
+            self.status.to_ascii_lowercase().as_str(),
+            "pass" | "passed" | "success" | "successful" | "active"
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequestThreadComment {
+    pub author: String,
+    pub body: String,
+    pub url: Option<String>,
+    pub created_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequestReviewThread {
+    pub id: Option<String>,
+    pub path: Option<String>,
+    pub line: Option<i64>,
+    pub resolved: bool,
+    pub comments: Vec<PullRequestThreadComment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequestReadiness {
+    pub review_decision: Option<String>,
+    pub latest_reviews: Vec<PullRequestReviewEntry>,
+    pub comments: Vec<PullRequestCommentEntry>,
+    pub review_threads: Vec<PullRequestReviewThread>,
+    pub checks: Vec<PullRequestCheckRun>,
+    pub deployments: Vec<PullRequestDeployment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GitHubDeploymentEntry {
+    id: i64,
+    environment: String,
+    status: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GitHubDeploymentStatus {
+    state: String,
+    url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1589,6 +1722,12 @@ impl WorkspaceStore {
         issue_number: u64,
         branch_prefix: Option<&str>,
     ) -> Result<Workspace> {
+        let preflight = self.source_preflight();
+        anyhow::ensure!(
+            preflight.github_ready(),
+            "GitHub source creation requires {}",
+            preflight.github_status()
+        );
         let repository = self.load_repository(repository_name)?;
         // Fetch issue title from gh
         let output = command_output(
@@ -1633,6 +1772,12 @@ impl WorkspaceStore {
         workspace_name: Option<&str>,
         branch_name: Option<&str>,
     ) -> Result<Workspace> {
+        let preflight = self.source_preflight();
+        anyhow::ensure!(
+            preflight.github_ready(),
+            "GitHub source creation requires {}",
+            preflight.github_status()
+        );
         let repository = self.load_repository(repository_name)?;
         let pr_number_text = pr_number.to_string();
         let output = command_output(
@@ -1734,6 +1879,12 @@ impl WorkspaceStore {
         branch_name: Option<&str>,
         base_ref: Option<&str>,
     ) -> Result<Workspace> {
+        let preflight = self.source_preflight();
+        anyhow::ensure!(
+            preflight.linear_ready(),
+            "Linear source creation requires {}",
+            preflight.linear_status()
+        );
         let issue_id = issue_id.trim();
         anyhow::ensure!(!issue_id.is_empty(), "Linear issue id is required");
         let issue = fetch_linear_issue(issue_id)?;
@@ -1761,6 +1912,16 @@ impl WorkspaceStore {
         Ok(workspace)
     }
 
+    pub fn source_preflight(&self) -> WorkspaceSourcePreflight {
+        WorkspaceSourcePreflight {
+            github_cli_installed: command_exists("gh"),
+            github_authenticated: command_success("gh", &["auth", "status"]),
+            linear_api_key_set: std::env::var_os("LINEAR_API_KEY")
+                .map(|value| !value.is_empty())
+                .unwrap_or(false),
+        }
+    }
+
     pub fn read_context_brief(&self, name: &str) -> Result<Option<String>> {
         let workspace = self.get_by_name(name)?;
         let path = workspace.path.join(".context/brief.md");
@@ -1783,7 +1944,8 @@ impl WorkspaceStore {
 
     pub fn pull_request_checks(&self, name: &str) -> Result<String> {
         let workspace = self.get_by_name(name)?;
-        command_output(&workspace.path, "gh", &["pr", "checks"])
+        let args = self.gh_pr_args_for_workspace(&workspace, "checks", &[])?;
+        command_output_owned(&workspace.path, "gh", &args)
     }
 
     pub fn pull_request_check_runs(&self, name: &str) -> Result<Vec<PullRequestCheckRun>> {
@@ -1798,12 +1960,206 @@ impl WorkspaceStore {
 
     pub fn pull_request_review_state(&self, name: &str) -> Result<String> {
         let workspace = self.get_by_name(name)?;
-        command_output(&workspace.path, "gh", &["pr", "view", "--comments"])
+        let args = self.gh_pr_args_for_workspace(&workspace, "view", &["--comments"])?;
+        command_output_owned(&workspace.path, "gh", &args)
     }
 
     pub fn pull_request_review_agent_prompt(&self, name: &str) -> Result<String> {
         let review_state = self.pull_request_review_state(name)?;
         Ok(format_pull_request_review_agent_prompt(name, &review_state))
+    }
+
+    pub fn pull_request_readiness(&self, name: &str) -> Result<PullRequestReadiness> {
+        let workspace = self.get_by_name(name)?;
+        let args = self.gh_pr_args_for_workspace(
+            &workspace,
+            "view",
+            &[
+                "--json",
+                "id,headRefOid,reviewDecision,latestReviews,comments,statusCheckRollup",
+            ],
+        )?;
+        let output = command_output_owned(&workspace.path, "gh", &args)?;
+        let mut readiness = parse_pull_request_readiness(&output)?;
+        if let Some(pr_id) = json_root_string(&output, "id")? {
+            readiness.review_threads =
+                self.pull_request_review_threads_by_id(&workspace, &pr_id)?;
+        }
+        if let Some(head_sha) = json_root_string(&output, "headRefOid")? {
+            append_unique_checks(
+                &mut readiness.checks,
+                self.pull_request_statuses_for_head(&workspace, &head_sha)?,
+            );
+            append_unique_deployments(
+                &mut readiness.deployments,
+                self.pull_request_deployments_for_head(&workspace, &head_sha)?,
+            );
+        }
+        Ok(readiness)
+    }
+
+    pub fn pull_request_readiness_text(&self, name: &str) -> Result<String> {
+        let readiness = self.pull_request_readiness(name)?;
+        Ok(format_pull_request_readiness(name, &readiness))
+    }
+
+    pub fn pull_request_readiness_agent_prompt(&self, name: &str) -> Result<String> {
+        let readiness = self.pull_request_readiness(name)?;
+        Ok(format_pull_request_readiness_agent_prompt(name, &readiness))
+    }
+
+    fn pull_request_review_threads_by_id(
+        &self,
+        workspace: &Workspace,
+        pr_id: &str,
+    ) -> Result<Vec<PullRequestReviewThread>> {
+        let query = "\
+query($prId: ID!) {
+  node(id: $prId) {
+    ... on PullRequest {
+      reviewThreads(first: 50) {
+        nodes {
+          id
+          isResolved
+          path
+          line
+          startLine
+          comments(first: 20) {
+            nodes {
+              author { login }
+              body
+              url
+              createdAt
+            }
+          }
+        }
+      }
+    }
+  }
+}
+";
+        let output = command_output_owned(
+            &workspace.path,
+            "gh",
+            &[
+                "api".to_owned(),
+                "graphql".to_owned(),
+                "-f".to_owned(),
+                format!("query={query}"),
+                "-F".to_owned(),
+                format!("prId={pr_id}"),
+            ],
+        )?;
+        parse_pull_request_review_threads(&output)
+    }
+
+    fn pull_request_statuses_for_head(
+        &self,
+        workspace: &Workspace,
+        head_sha: &str,
+    ) -> Result<Vec<PullRequestCheckRun>> {
+        let output = command_output_owned(
+            &workspace.path,
+            "gh",
+            &[
+                "api".to_owned(),
+                format!("repos/{{owner}}/{{repo}}/commits/{head_sha}/status"),
+            ],
+        )?;
+        parse_github_commit_status_checks(&output)
+    }
+
+    fn pull_request_deployments_for_head(
+        &self,
+        workspace: &Workspace,
+        head_sha: &str,
+    ) -> Result<Vec<PullRequestDeployment>> {
+        let output = command_output_owned(
+            &workspace.path,
+            "gh",
+            &[
+                "api".to_owned(),
+                format!("repos/{{owner}}/{{repo}}/deployments?sha={head_sha}"),
+            ],
+        )?;
+        let mut deployments = Vec::new();
+        for deployment in parse_github_deployment_entries(&output)? {
+            let statuses = command_output_owned(
+                &workspace.path,
+                "gh",
+                &[
+                    "api".to_owned(),
+                    format!(
+                        "repos/{{owner}}/{{repo}}/deployments/{}/statuses",
+                        deployment.id
+                    ),
+                ],
+            )?;
+            let latest = parse_github_deployment_latest_status(&statuses)?;
+            deployments.push(PullRequestDeployment {
+                environment: deployment.environment,
+                status: latest
+                    .as_ref()
+                    .map(|status| status.state.clone())
+                    .or(deployment.status)
+                    .unwrap_or_else(|| "UNKNOWN".to_owned()),
+                url: latest.and_then(|status| status.url),
+            });
+        }
+        Ok(deployments)
+    }
+
+    pub fn set_pull_request_review_thread_resolution(
+        &self,
+        name: &str,
+        thread_id: &str,
+        resolved: bool,
+    ) -> Result<PullRequestReviewThread> {
+        let workspace = self.get_by_name(name)?;
+        let thread_id = thread_id.trim();
+        anyhow::ensure!(!thread_id.is_empty(), "review thread id is required");
+        let (mutation_name, state_field) = if resolved {
+            ("resolveReviewThread", "resolved")
+        } else {
+            ("unresolveReviewThread", "unresolved")
+        };
+        let query = format!(
+            "\
+mutation($threadId: ID!) {{
+  {mutation_name}(input: {{threadId: $threadId}}) {{
+    thread {{
+      id
+      isResolved
+      path
+      line
+      startLine
+      comments(first: 20) {{
+        nodes {{
+          author {{ login }}
+          body
+          url
+          createdAt
+        }}
+      }}
+    }}
+  }}
+}}
+"
+        );
+        let output = command_output_owned(
+            &workspace.path,
+            "gh",
+            &[
+                "api".to_owned(),
+                "graphql".to_owned(),
+                "-f".to_owned(),
+                format!("query={query}"),
+                "-F".to_owned(),
+                format!("threadId={thread_id}"),
+            ],
+        )
+        .with_context(|| format!("mark GitHub review thread {thread_id} {state_field}"))?;
+        parse_pull_request_review_thread_mutation(&output, mutation_name)
     }
 
     pub fn pull_request(&self, name: &str) -> Result<Option<PullRequest>> {
@@ -1816,7 +2172,8 @@ impl WorkspaceStore {
         if self.pull_request_by_workspace_id(workspace.id)?.is_none() {
             return Ok(None);
         }
-        let state = command_output(&workspace.path, "gh", &["pr", "view", "--json", "state"])?;
+        let args = self.gh_pr_args_for_workspace(&workspace, "view", &["--json", "state"])?;
+        let state = command_output_owned(&workspace.path, "gh", &args)?;
         let state = extract_json_string_field(&state, "state").unwrap_or_else(|| "open".to_owned());
         let now = timestamp();
         self.conn.execute(
@@ -1824,6 +2181,20 @@ impl WorkspaceStore {
             params![state, now, workspace.id],
         )?;
         self.pull_request_by_workspace_id(workspace.id)
+    }
+
+    fn gh_pr_args_for_workspace(
+        &self,
+        workspace: &Workspace,
+        subcommand: &str,
+        extra: &[&str],
+    ) -> Result<Vec<String>> {
+        let mut args = vec!["pr".to_owned(), subcommand.to_owned()];
+        if let Some(pr) = self.pull_request_by_workspace_id(workspace.id)? {
+            args.push(pr.number.to_string());
+        }
+        args.extend(extra.iter().map(|arg| (*arg).to_owned()));
+        Ok(args)
     }
 
     fn record_pull_request(&self, workspace_id: i64, url: &str) -> Result<PullRequest> {
@@ -3088,6 +3459,314 @@ fn parse_pull_request_check_runs(output: &str) -> Vec<PullRequestCheckRun> {
         .collect()
 }
 
+fn parse_pull_request_readiness(output: &str) -> Result<PullRequestReadiness> {
+    let value: Value = serde_json::from_str(output).context("parse gh pull request JSON")?;
+    let latest_reviews = value
+        .get("latestReviews")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(parse_pull_request_review_entry)
+        .collect();
+    let comments = value
+        .get("comments")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(parse_pull_request_comment_entry)
+        .collect();
+    let mut checks = Vec::new();
+    let mut deployments = Vec::new();
+    for item in json_array_or_nodes(value.get("statusCheckRollup")) {
+        if is_deployment_rollup_item(item) {
+            if let Some(deployment) = parse_pull_request_deployment(item) {
+                deployments.push(deployment);
+            }
+        } else if let Some(check) = parse_pull_request_rollup_check(item) {
+            checks.push(check);
+        }
+    }
+    Ok(PullRequestReadiness {
+        review_decision: json_string(&value, "reviewDecision"),
+        latest_reviews,
+        comments,
+        review_threads: Vec::new(),
+        checks,
+        deployments,
+    })
+}
+
+fn parse_pull_request_review_threads(output: &str) -> Result<Vec<PullRequestReviewThread>> {
+    let value: Value = serde_json::from_str(output).context("parse GitHub review thread JSON")?;
+    let threads = value
+        .get("data")
+        .and_then(|data| data.get("node"))
+        .and_then(|node| node.get("reviewThreads"))
+        .and_then(|review_threads| review_threads.get("nodes"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(parse_pull_request_review_thread)
+        .collect();
+    Ok(threads)
+}
+
+fn parse_pull_request_review_thread_mutation(
+    output: &str,
+    mutation_name: &str,
+) -> Result<PullRequestReviewThread> {
+    let value: Value = serde_json::from_str(output).context("parse GitHub review thread JSON")?;
+    let thread = value
+        .get("data")
+        .and_then(|data| data.get(mutation_name))
+        .and_then(|mutation| mutation.get("thread"))
+        .and_then(parse_pull_request_review_thread)
+        .with_context(|| format!("parse GitHub {mutation_name} response"))?;
+    Ok(thread)
+}
+
+fn parse_pull_request_review_thread(value: &Value) -> Option<PullRequestReviewThread> {
+    let comments = value
+        .get("comments")
+        .and_then(|comments| comments.get("nodes"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(parse_pull_request_thread_comment)
+        .collect();
+    Some(PullRequestReviewThread {
+        id: json_string(value, "id"),
+        path: json_string(value, "path"),
+        line: json_i64(value, "line").or_else(|| json_i64(value, "startLine")),
+        resolved: value
+            .get("isResolved")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        comments,
+    })
+}
+
+fn parse_pull_request_thread_comment(value: &Value) -> Option<PullRequestThreadComment> {
+    Some(PullRequestThreadComment {
+        author: json_author_login(value).unwrap_or_else(|| "unknown".to_owned()),
+        body: json_string(value, "body")?,
+        url: json_string(value, "url"),
+        created_at: json_string(value, "createdAt"),
+    })
+}
+
+fn parse_pull_request_review_entry(value: &Value) -> Option<PullRequestReviewEntry> {
+    Some(PullRequestReviewEntry {
+        author: json_author_login(value).unwrap_or_else(|| "unknown".to_owned()),
+        state: json_string(value, "state")?,
+        body: json_string(value, "body"),
+        submitted_at: json_string(value, "submittedAt"),
+    })
+}
+
+fn parse_pull_request_comment_entry(value: &Value) -> Option<PullRequestCommentEntry> {
+    Some(PullRequestCommentEntry {
+        author: json_author_login(value).unwrap_or_else(|| "unknown".to_owned()),
+        body: json_string(value, "body")?,
+        created_at: json_string(value, "createdAt"),
+    })
+}
+
+fn parse_pull_request_rollup_check(value: &Value) -> Option<PullRequestCheckRun> {
+    let name = json_string(value, "name")
+        .or_else(|| json_string(value, "context"))
+        .or_else(|| json_string(value, "workflowName"))?;
+    let status = json_string(value, "conclusion")
+        .or_else(|| json_string(value, "state"))
+        .or_else(|| json_string(value, "status"))
+        .unwrap_or_else(|| "UNKNOWN".to_owned());
+    Some(PullRequestCheckRun {
+        name,
+        status,
+        detail: json_string(value, "detailsUrl")
+            .or_else(|| json_string(value, "targetUrl"))
+            .or_else(|| json_string(value, "url")),
+    })
+}
+
+fn parse_github_commit_status_checks(output: &str) -> Result<Vec<PullRequestCheckRun>> {
+    let value: Value = serde_json::from_str(output).context("parse GitHub commit status JSON")?;
+    Ok(value
+        .get("statuses")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(parse_github_commit_status_check)
+        .collect())
+}
+
+fn parse_github_commit_status_check(value: &Value) -> Option<PullRequestCheckRun> {
+    Some(PullRequestCheckRun {
+        name: json_string(value, "context")
+            .or_else(|| json_string(value, "name"))
+            .unwrap_or_else(|| "status".to_owned()),
+        status: json_string(value, "state")
+            .or_else(|| json_string(value, "status"))
+            .unwrap_or_else(|| "UNKNOWN".to_owned()),
+        detail: json_string(value, "target_url").or_else(|| json_string(value, "url")),
+    })
+}
+
+fn parse_pull_request_deployment(value: &Value) -> Option<PullRequestDeployment> {
+    let status = value
+        .get("latestStatus")
+        .and_then(|latest| json_string(latest, "state"))
+        .or_else(|| json_nested_string(value, "status", "state"))
+        .or_else(|| json_string(value, "conclusion"))
+        .or_else(|| json_string(value, "state"))
+        .or_else(|| json_string(value, "status"))
+        .unwrap_or_else(|| "UNKNOWN".to_owned());
+    Some(PullRequestDeployment {
+        environment: json_string(value, "environment")
+            .or_else(|| json_nested_string(value, "environment", "name"))
+            .or_else(|| json_string(value, "name"))
+            .unwrap_or_else(|| "deployment".to_owned()),
+        status,
+        url: json_string(value, "url")
+            .or_else(|| json_string(value, "latestEnvironmentUrl"))
+            .or_else(|| json_string(value, "targetUrl"))
+            .or_else(|| json_nested_string(value, "latestStatus", "environmentUrl"))
+            .or_else(|| json_nested_string(value, "latestStatus", "logUrl"))
+            .or_else(|| json_nested_string(value, "status", "targetUrl")),
+    })
+}
+
+fn parse_github_deployment_entries(output: &str) -> Result<Vec<GitHubDeploymentEntry>> {
+    let value: Value = serde_json::from_str(output).context("parse GitHub deployment JSON")?;
+    Ok(value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(parse_github_deployment_entry)
+        .collect())
+}
+
+fn parse_github_deployment_entry(value: &Value) -> Option<GitHubDeploymentEntry> {
+    Some(GitHubDeploymentEntry {
+        id: json_i64(value, "id")?,
+        environment: json_string(value, "environment")
+            .or_else(|| json_nested_string(value, "environment", "name"))
+            .unwrap_or_else(|| "deployment".to_owned()),
+        status: json_string(value, "state").or_else(|| json_string(value, "status")),
+    })
+}
+
+fn parse_github_deployment_latest_status(output: &str) -> Result<Option<GitHubDeploymentStatus>> {
+    let value: Value =
+        serde_json::from_str(output).context("parse GitHub deployment status JSON")?;
+    Ok(value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find_map(parse_github_deployment_status))
+}
+
+fn parse_github_deployment_status(value: &Value) -> Option<GitHubDeploymentStatus> {
+    Some(GitHubDeploymentStatus {
+        state: json_string(value, "state")?,
+        url: json_string(value, "environment_url")
+            .or_else(|| json_string(value, "log_url"))
+            .or_else(|| json_string(value, "target_url")),
+    })
+}
+
+fn is_deployment_rollup_item(value: &Value) -> bool {
+    json_string(value, "__typename")
+        .map(|name| name.eq_ignore_ascii_case("deployment"))
+        .unwrap_or(false)
+        || value.get("environment").is_some()
+}
+
+fn append_unique_checks(
+    checks: &mut Vec<PullRequestCheckRun>,
+    additional: Vec<PullRequestCheckRun>,
+) {
+    for check in additional {
+        if !checks.iter().any(|existing| {
+            existing.name.eq_ignore_ascii_case(&check.name)
+                && existing.status.eq_ignore_ascii_case(&check.status)
+                && normalized_optional_url(existing.detail.as_deref())
+                    == normalized_optional_url(check.detail.as_deref())
+        }) {
+            checks.push(check);
+        }
+    }
+}
+
+fn append_unique_deployments(
+    deployments: &mut Vec<PullRequestDeployment>,
+    additional: Vec<PullRequestDeployment>,
+) {
+    for deployment in additional {
+        if !deployments.iter().any(|existing| {
+            existing.environment == deployment.environment
+                && existing.status == deployment.status
+                && existing.url == deployment.url
+        }) {
+            deployments.push(deployment);
+        }
+    }
+}
+
+fn json_author_login(value: &Value) -> Option<String> {
+    value
+        .get("author")
+        .and_then(|author| json_string(author, "login"))
+}
+
+fn normalized_optional_url(value: Option<&str>) -> Option<String> {
+    value.map(|url| url.trim_end_matches('/').to_owned())
+}
+
+fn json_string(value: &Value, field: &str) -> Option<String> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn json_nested_string(value: &Value, parent: &str, field: &str) -> Option<String> {
+    value
+        .get(parent)
+        .and_then(|nested| json_string(nested, field))
+}
+
+fn json_array_or_nodes(value: Option<&Value>) -> Vec<&Value> {
+    if let Some(items) = value.and_then(Value::as_array) {
+        return items.iter().collect();
+    }
+    if let Some(items) = value
+        .and_then(|item| item.get("nodes"))
+        .and_then(Value::as_array)
+    {
+        return items.iter().collect();
+    }
+    if let Some(items) = value
+        .and_then(|item| item.get("contexts"))
+        .and_then(|contexts| contexts.get("nodes"))
+        .and_then(Value::as_array)
+    {
+        return items.iter().collect();
+    }
+    Vec::new()
+}
+
+fn json_i64(value: &Value, field: &str) -> Option<i64> {
+    value.get(field).and_then(Value::as_i64)
+}
+
+fn json_root_string(input: &str, field: &str) -> Result<Option<String>> {
+    let value: Value = serde_json::from_str(input).context("parse JSON")?;
+    Ok(json_string(&value, field))
+}
+
 fn extract_json_string_field(json: &str, field: &str) -> Option<String> {
     let needle = format!("\"{field}\"");
     let field_start = json.find(&needle)? + needle.len();
@@ -3205,6 +3884,304 @@ fn format_pull_request_review_agent_prompt(name: &str, review_state: &str) -> St
     prompt.push_str(review_state);
     prompt.push('\n');
     prompt
+}
+
+fn format_pull_request_readiness(name: &str, readiness: &PullRequestReadiness) -> String {
+    let mut out = format!("PR readiness for workspace {name}.\n");
+    out.push_str(&format!(
+        "Review decision: {}\n",
+        readiness.review_decision.as_deref().unwrap_or("UNKNOWN")
+    ));
+    append_rollup_entries(&mut out, readiness);
+    append_attention_entries(&mut out, readiness);
+    append_review_entries(&mut out, &readiness.latest_reviews);
+    append_comment_entries(&mut out, &readiness.comments);
+    append_review_thread_entries(&mut out, &readiness.review_threads);
+    append_check_entries(&mut out, &readiness.checks);
+    append_deployment_entries(&mut out, &readiness.deployments);
+    out
+}
+
+fn format_pull_request_readiness_agent_prompt(
+    name: &str,
+    readiness: &PullRequestReadiness,
+) -> String {
+    let mut prompt = format!("Address this PR readiness state for workspace {name}.\n");
+    prompt.push_str("Prioritize failing checks, failed deployments, and requested changes. Make the smallest safe changes, then run relevant tests.\n\n");
+    prompt.push_str(&format_pull_request_readiness(name, readiness));
+    prompt
+}
+
+fn append_rollup_entries(out: &mut String, readiness: &PullRequestReadiness) {
+    let unresolved_threads = readiness
+        .review_threads
+        .iter()
+        .filter(|thread| !thread.resolved)
+        .count();
+    let check_counts = gate_counts(
+        readiness.checks.iter(),
+        PullRequestCheckRun::is_success,
+        PullRequestCheckRun::is_failure,
+        PullRequestCheckRun::is_pending,
+    );
+    let deployment_counts = gate_counts(
+        readiness.deployments.iter(),
+        PullRequestDeployment::is_success,
+        PullRequestDeployment::is_failure,
+        PullRequestDeployment::is_pending,
+    );
+
+    out.push_str("\nRollup:\n");
+    out.push_str(&format!(
+        "- Reviews: {} latest, {} top-level {}\n",
+        readiness.latest_reviews.len(),
+        readiness.comments.len(),
+        plural(readiness.comments.len(), "comment", "comments")
+    ));
+    out.push_str(&format!(
+        "- Review threads: {} unresolved / {} total\n",
+        unresolved_threads,
+        readiness.review_threads.len()
+    ));
+    out.push_str(&format!(
+        "- Checks: {} passing, {} failing, {} pending, {} other\n",
+        check_counts.passing, check_counts.failing, check_counts.pending, check_counts.other
+    ));
+    out.push_str(&format!(
+        "- Deployments: {} passing, {} failing, {} pending, {} other\n",
+        deployment_counts.passing,
+        deployment_counts.failing,
+        deployment_counts.pending,
+        deployment_counts.other
+    ));
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct GateCounts {
+    passing: usize,
+    failing: usize,
+    pending: usize,
+    other: usize,
+}
+
+fn gate_counts<'a, T: 'a>(
+    items: impl Iterator<Item = &'a T>,
+    is_success: impl Fn(&T) -> bool,
+    is_failure: impl Fn(&T) -> bool,
+    is_pending: impl Fn(&T) -> bool,
+) -> GateCounts {
+    let mut counts = GateCounts::default();
+    for item in items {
+        if is_failure(item) {
+            counts.failing += 1;
+        } else if is_pending(item) {
+            counts.pending += 1;
+        } else if is_success(item) {
+            counts.passing += 1;
+        } else {
+            counts.other += 1;
+        }
+    }
+    counts
+}
+
+fn plural(count: usize, singular: &str, plural: &str) -> String {
+    if count == 1 {
+        singular.to_owned()
+    } else {
+        plural.to_owned()
+    }
+}
+
+fn append_attention_entries(out: &mut String, readiness: &PullRequestReadiness) {
+    let mut lines = Vec::new();
+    if matches!(
+        readiness
+            .review_decision
+            .as_deref()
+            .map(|decision| decision.to_ascii_uppercase())
+            .as_deref(),
+        Some("CHANGES_REQUESTED" | "REVIEW_REQUIRED")
+    ) {
+        lines.push(format!(
+            "- Review decision: {}",
+            readiness.review_decision.as_deref().unwrap_or("UNKNOWN")
+        ));
+    }
+    for thread in readiness
+        .review_threads
+        .iter()
+        .filter(|thread| !thread.resolved)
+    {
+        let id = thread.id.as_deref().unwrap_or("unknown thread");
+        lines.push(format!(
+            "- Unresolved review thread {id} at {}",
+            review_thread_location(thread)
+        ));
+    }
+    for check in readiness.checks.iter().filter(|check| check.is_failure()) {
+        lines.push(format_gate_attention(
+            "Failing check",
+            &check.name,
+            &check.status,
+            check.detail.as_deref(),
+        ));
+    }
+    for check in readiness.checks.iter().filter(|check| check.is_pending()) {
+        lines.push(format_gate_attention(
+            "Pending check",
+            &check.name,
+            &check.status,
+            check.detail.as_deref(),
+        ));
+    }
+    for deployment in readiness
+        .deployments
+        .iter()
+        .filter(|deployment| deployment.is_failure())
+    {
+        lines.push(format_gate_attention(
+            "Failing deployment",
+            &deployment.environment,
+            &deployment.status,
+            deployment.url.as_deref(),
+        ));
+    }
+    for deployment in readiness
+        .deployments
+        .iter()
+        .filter(|deployment| deployment.is_pending())
+    {
+        lines.push(format_gate_attention(
+            "Pending deployment",
+            &deployment.environment,
+            &deployment.status,
+            deployment.url.as_deref(),
+        ));
+    }
+
+    out.push_str("\nAttention needed:\n");
+    if lines.is_empty() {
+        out.push_str("- none\n");
+    } else {
+        for line in lines {
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
+}
+
+fn append_review_entries(out: &mut String, reviews: &[PullRequestReviewEntry]) {
+    out.push_str("\nLatest reviews:\n");
+    if reviews.is_empty() {
+        out.push_str("- none\n");
+        return;
+    }
+    for review in reviews {
+        match review.body.as_deref() {
+            Some(body) => out.push_str(&format!(
+                "- {}: {} - {}\n",
+                review.author, review.state, body
+            )),
+            None => out.push_str(&format!("- {}: {}\n", review.author, review.state)),
+        }
+    }
+}
+
+fn append_comment_entries(out: &mut String, comments: &[PullRequestCommentEntry]) {
+    out.push_str("\nComments:\n");
+    if comments.is_empty() {
+        out.push_str("- none\n");
+        return;
+    }
+    for comment in comments {
+        out.push_str(&format!("- {}: {}\n", comment.author, comment.body));
+    }
+}
+
+fn review_thread_location(thread: &PullRequestReviewThread) -> String {
+    match (thread.path.as_deref(), thread.line) {
+        (Some(path), Some(line)) => format!("{path}:{line}"),
+        (Some(path), None) => path.to_owned(),
+        (None, Some(line)) => format!("line {line}"),
+        (None, None) => "unknown location".to_owned(),
+    }
+}
+
+fn format_gate_attention(prefix: &str, name: &str, status: &str, detail: Option<&str>) -> String {
+    match detail {
+        Some(detail) => format!("- {prefix} {name}: {status} - {detail}"),
+        None => format!("- {prefix} {name}: {status}"),
+    }
+}
+
+fn append_review_thread_entries(out: &mut String, threads: &[PullRequestReviewThread]) {
+    out.push_str("\nReview threads:\n");
+    if threads.is_empty() {
+        out.push_str("- none\n");
+        return;
+    }
+    for thread in threads {
+        let location = review_thread_location(thread);
+        let state = if thread.resolved {
+            "resolved"
+        } else {
+            "unresolved"
+        };
+        match thread.id.as_deref() {
+            Some(id) => out.push_str(&format!("- {location} ({state}, {id})\n")),
+            None => out.push_str(&format!("- {location} ({state})\n")),
+        }
+        if thread.comments.is_empty() {
+            out.push_str("  - no comments\n");
+        }
+        for comment in &thread.comments {
+            match comment.url.as_deref() {
+                Some(url) => out.push_str(&format!(
+                    "  - {}: {} - {}\n",
+                    comment.author, comment.body, url
+                )),
+                None => out.push_str(&format!("  - {}: {}\n", comment.author, comment.body)),
+            }
+        }
+    }
+}
+
+fn append_check_entries(out: &mut String, checks: &[PullRequestCheckRun]) {
+    out.push_str("\nChecks:\n");
+    if checks.is_empty() {
+        out.push_str("- none\n");
+        return;
+    }
+    for check in checks {
+        match check.detail.as_deref() {
+            Some(detail) => out.push_str(&format!(
+                "- {}: {} - {}\n",
+                check.name, check.status, detail
+            )),
+            None => out.push_str(&format!("- {}: {}\n", check.name, check.status)),
+        }
+    }
+}
+
+fn append_deployment_entries(out: &mut String, deployments: &[PullRequestDeployment]) {
+    out.push_str("\nDeployments:\n");
+    if deployments.is_empty() {
+        out.push_str("- none\n");
+        return;
+    }
+    for deployment in deployments {
+        match deployment.url.as_deref() {
+            Some(url) => out.push_str(&format!(
+                "- {}: {} - {}\n",
+                deployment.environment, deployment.status, url
+            )),
+            None => out.push_str(&format!(
+                "- {}: {}\n",
+                deployment.environment, deployment.status
+            )),
+        }
+    }
 }
 
 fn parse_numstat_count(value: &str) -> Option<Option<usize>> {
@@ -3656,6 +4633,27 @@ fn command_output(cwd: &Path, program: &str, args: &[&str]) -> Result<String> {
         String::from_utf8_lossy(&output.stdout)
     );
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn command_output_owned(cwd: &Path, program: &str, args: &[String]) -> Result<String> {
+    let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    command_output(cwd, program, &refs)
+}
+
+fn command_success(program: &str, args: &[&str]) -> bool {
+    Command::new(program)
+        .args(args)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn command_exists(program: &str) -> bool {
+    Command::new(program)
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
 }
 
 fn timestamp() -> String {
@@ -4183,7 +5181,23 @@ exit 1
         let bin_dir = temp.join("bin");
         fs::create_dir(&bin_dir).unwrap();
         let gh_path = bin_dir.join("gh");
-        fs::write(&gh_path, script).unwrap();
+        let script_body = script.strip_prefix("#!/bin/sh").unwrap_or(script);
+        fs::write(
+            &gh_path,
+            format!(
+                "#!/bin/sh\n\
+if [ \"$1\" = \"--version\" ]; then\n\
+  printf 'gh version fake\\n'\n\
+  exit 0\n\
+fi\n\
+if [ \"$1\" = \"auth\" ] && [ \"$2\" = \"status\" ]; then\n\
+  printf 'Logged in to github.com account fake\\n'\n\
+  exit 0\n\
+fi\n\
+{script_body}"
+            ),
+        )
+        .unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -7056,6 +8070,846 @@ deploy\tpending\t10s\thttps://github.com/example/demo/actions/3
         );
         assert!(prompt.contains("Reviewers: changes requested"));
         assert!(prompt.contains("alice: please add a test"));
+    }
+
+    #[test]
+    fn source_preflight_statuses_explain_missing_github_and_linear_inputs() {
+        let missing = WorkspaceSourcePreflight {
+            github_cli_installed: false,
+            github_authenticated: false,
+            linear_api_key_set: false,
+        };
+        assert!(!missing.github_ready());
+        assert_eq!(missing.github_status(), "gh missing");
+        assert!(!missing.linear_ready());
+        assert_eq!(missing.linear_status(), "LINEAR_API_KEY missing");
+
+        let unauthenticated = WorkspaceSourcePreflight {
+            github_cli_installed: true,
+            github_authenticated: false,
+            linear_api_key_set: true,
+        };
+        assert!(!unauthenticated.github_ready());
+        assert_eq!(unauthenticated.github_status(), "gh auth required");
+        assert!(unauthenticated.linear_ready());
+        assert_eq!(unauthenticated.linear_status(), "ready");
+
+        let ready = WorkspaceSourcePreflight {
+            github_cli_installed: true,
+            github_authenticated: true,
+            linear_api_key_set: true,
+        };
+        assert!(ready.github_ready());
+        assert_eq!(ready.github_status(), "ready");
+        assert!(ready.linear_ready());
+        assert_eq!(ready.linear_status(), "ready");
+    }
+
+    #[test]
+    fn pull_request_readiness_summary_formats_reviews_checks_and_deployments() {
+        let json = r#"
+{
+  "reviewDecision": "CHANGES_REQUESTED",
+  "latestReviews": [
+    {
+      "author": {"login": "alice"},
+      "state": "CHANGES_REQUESTED",
+      "body": "Please add a regression test.",
+      "submittedAt": "2026-06-20T12:00:00Z"
+    },
+    {
+      "author": {"login": "bob"},
+      "state": "APPROVED",
+      "body": "",
+      "submittedAt": "2026-06-20T12:05:00Z"
+    }
+  ],
+  "comments": [
+    {
+      "author": {"login": "carol"},
+      "body": "This also needs docs.",
+      "createdAt": "2026-06-20T12:10:00Z"
+    }
+  ],
+  "statusCheckRollup": [
+    {
+      "__typename": "CheckRun",
+      "name": "unit",
+      "status": "COMPLETED",
+      "conclusion": "FAILURE",
+      "detailsUrl": "https://github.com/example/demo/actions/runs/1"
+    },
+    {
+      "__typename": "StatusContext",
+      "context": "lint",
+      "state": "SUCCESS",
+      "targetUrl": "https://github.com/example/demo/actions/runs/2"
+    },
+    {
+      "__typename": "Deployment",
+      "environment": "Preview",
+      "state": "ACTIVE",
+      "latestStatus": {"state": "SUCCESS"},
+      "url": "https://preview.example.com"
+    }
+  ]
+}
+"#;
+
+        let readiness = parse_pull_request_readiness(json).unwrap();
+        assert_eq!(
+            readiness.review_decision.as_deref(),
+            Some("CHANGES_REQUESTED")
+        );
+        assert_eq!(readiness.latest_reviews.len(), 2);
+        assert_eq!(readiness.comments.len(), 1);
+        assert_eq!(readiness.checks.len(), 2);
+        assert_eq!(readiness.deployments.len(), 1);
+
+        let text = format_pull_request_readiness("berlin", &readiness);
+        assert!(text.contains("PR readiness for workspace berlin."));
+        assert!(text.contains("Review decision: CHANGES_REQUESTED"));
+        assert!(text.contains("alice: CHANGES_REQUESTED - Please add a regression test."));
+        assert!(text.contains("carol: This also needs docs."));
+        assert!(text.contains("unit: FAILURE - https://github.com/example/demo/actions/runs/1"));
+        assert!(text.contains("lint: SUCCESS - https://github.com/example/demo/actions/runs/2"));
+        assert!(text.contains("Preview: SUCCESS - https://preview.example.com"));
+    }
+
+    #[test]
+    fn pull_request_readiness_parses_nested_deployment_rollup_shapes() {
+        let json = r#"
+{
+  "reviewDecision": "UNKNOWN",
+  "latestReviews": [],
+  "comments": [],
+  "statusCheckRollup": [
+    {
+      "__typename": "DeploymentStatus",
+      "environment": {"name": "Preview"},
+      "status": {"state": "FAILURE"},
+      "targetUrl": "https://preview.example.com/status"
+    }
+  ]
+}
+"#;
+
+        let readiness = parse_pull_request_readiness(json).unwrap();
+
+        assert_eq!(readiness.checks.len(), 0);
+        assert_eq!(
+            readiness.deployments,
+            vec![PullRequestDeployment {
+                environment: "Preview".to_owned(),
+                status: "FAILURE".to_owned(),
+                url: Some("https://preview.example.com/status".to_owned()),
+            }]
+        );
+        let text = format_pull_request_readiness("berlin", &readiness);
+        assert!(text.contains("Preview: FAILURE - https://preview.example.com/status"));
+        assert!(text.contains("- Deployments: 0 passing, 1 failing, 0 pending, 0 other"));
+    }
+
+    #[test]
+    fn pull_request_readiness_parses_latest_status_deployment_urls() {
+        let json = r#"
+{
+  "reviewDecision": "UNKNOWN",
+  "latestReviews": [],
+  "comments": [],
+  "statusCheckRollup": [
+    {
+      "__typename": "Deployment",
+      "environment": {"name": "Preview"},
+      "latestStatus": {
+        "state": "SUCCESS",
+        "environmentUrl": "https://preview.example.com",
+        "logUrl": "https://github.com/example/demo/deployments/activity_log"
+      }
+    }
+  ]
+}
+"#;
+
+        let readiness = parse_pull_request_readiness(json).unwrap();
+
+        assert_eq!(
+            readiness.deployments,
+            vec![PullRequestDeployment {
+                environment: "Preview".to_owned(),
+                status: "SUCCESS".to_owned(),
+                url: Some("https://preview.example.com".to_owned()),
+            }]
+        );
+    }
+
+    #[test]
+    fn pull_request_readiness_parses_connection_status_rollup_shapes() {
+        let json = r#"
+{
+  "reviewDecision": "UNKNOWN",
+  "latestReviews": [],
+  "comments": [],
+  "statusCheckRollup": {
+    "contexts": {
+      "nodes": [
+        {
+          "__typename": "CheckRun",
+          "name": "unit",
+          "status": "COMPLETED",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/example/demo/actions/runs/1"
+        },
+        {
+          "__typename": "StatusContext",
+          "context": "lint",
+          "state": "PENDING",
+          "targetUrl": "https://github.com/example/demo/actions/runs/2"
+        },
+        {
+          "__typename": "Deployment",
+          "environment": {"name": "Preview"},
+          "latestStatus": {"state": "SUCCESS"},
+          "latestEnvironmentUrl": "https://preview.example.com"
+        }
+      ]
+    }
+  }
+}
+"#;
+
+        let readiness = parse_pull_request_readiness(json).unwrap();
+
+        assert_eq!(
+            readiness.checks,
+            vec![
+                PullRequestCheckRun {
+                    name: "unit".to_owned(),
+                    status: "SUCCESS".to_owned(),
+                    detail: Some("https://github.com/example/demo/actions/runs/1".to_owned()),
+                },
+                PullRequestCheckRun {
+                    name: "lint".to_owned(),
+                    status: "PENDING".to_owned(),
+                    detail: Some("https://github.com/example/demo/actions/runs/2".to_owned()),
+                },
+            ]
+        );
+        assert_eq!(
+            readiness.deployments,
+            vec![PullRequestDeployment {
+                environment: "Preview".to_owned(),
+                status: "SUCCESS".to_owned(),
+                url: Some("https://preview.example.com".to_owned()),
+            }]
+        );
+    }
+
+    #[test]
+    fn pull_request_review_threads_parse_graphql_response() {
+        let json = r#"
+{
+  "data": {
+    "node": {
+      "reviewThreads": {
+        "nodes": [
+          {
+            "id": "PRRT_kwDOexample1",
+            "isResolved": false,
+            "path": "src/lib.rs",
+            "line": 42,
+            "comments": {
+              "nodes": [
+                {
+                  "author": {"login": "alice"},
+                  "body": "This needs a regression test.",
+                  "url": "https://github.com/example/demo/pull/7#discussion_r1",
+                  "createdAt": "2026-06-20T12:00:00Z"
+                }
+              ]
+            }
+          },
+          {
+            "isResolved": true,
+            "path": "README.md",
+            "startLine": 5,
+            "comments": {
+              "nodes": [
+                {
+                  "author": {"login": "bob"},
+                  "body": "Resolved doc note.",
+                  "url": "https://github.com/example/demo/pull/7#discussion_r2",
+                  "createdAt": "2026-06-20T12:05:00Z"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  }
+}
+"#;
+
+        let threads = parse_pull_request_review_threads(json).unwrap();
+
+        assert_eq!(threads.len(), 2);
+        assert_eq!(threads[0].path.as_deref(), Some("src/lib.rs"));
+        assert_eq!(threads[0].line, Some(42));
+        assert!(!threads[0].resolved);
+        assert_eq!(threads[0].comments[0].author, "alice");
+        assert_eq!(threads[1].path.as_deref(), Some("README.md"));
+        assert_eq!(threads[1].line, Some(5));
+        assert!(threads[1].resolved);
+
+        let readiness = PullRequestReadiness {
+            review_decision: None,
+            latest_reviews: Vec::new(),
+            comments: Vec::new(),
+            review_threads: threads,
+            checks: Vec::new(),
+            deployments: Vec::new(),
+        };
+        let text = format_pull_request_readiness("berlin", &readiness);
+        assert!(text.contains("PRRT_kwDOexample1"));
+    }
+
+    #[test]
+    fn pull_request_readiness_agent_prompt_includes_actionable_summary() {
+        let readiness = PullRequestReadiness {
+            review_decision: Some("REVIEW_REQUIRED".to_owned()),
+            latest_reviews: vec![PullRequestReviewEntry {
+                author: "alice".to_owned(),
+                state: "COMMENTED".to_owned(),
+                body: Some("Please explain the rollback path.".to_owned()),
+                submitted_at: Some("2026-06-20T12:00:00Z".to_owned()),
+            }],
+            comments: vec![PullRequestCommentEntry {
+                author: "bob".to_owned(),
+                body: "Check the preview deployment.".to_owned(),
+                created_at: Some("2026-06-20T12:10:00Z".to_owned()),
+            }],
+            review_threads: vec![PullRequestReviewThread {
+                id: Some("PRRT_kwDOexample1".to_owned()),
+                path: Some("src/lib.rs".to_owned()),
+                line: Some(42),
+                resolved: false,
+                comments: vec![PullRequestThreadComment {
+                    author: "carol".to_owned(),
+                    body: "Threaded comment still needs a fix.".to_owned(),
+                    url: Some("https://github.com/example/demo/pull/7#discussion_r1".to_owned()),
+                    created_at: Some("2026-06-20T12:15:00Z".to_owned()),
+                }],
+            }],
+            checks: vec![PullRequestCheckRun {
+                name: "build".to_owned(),
+                status: "FAILURE".to_owned(),
+                detail: Some("https://github.com/example/demo/actions/runs/3".to_owned()),
+            }],
+            deployments: vec![PullRequestDeployment {
+                environment: "Preview".to_owned(),
+                status: "FAILURE".to_owned(),
+                url: Some("https://preview.example.com".to_owned()),
+            }],
+        };
+
+        let prompt = format_pull_request_readiness_agent_prompt("berlin", &readiness);
+
+        assert!(prompt.contains("Address this PR readiness state for workspace berlin."));
+        assert!(prompt.contains("build: FAILURE"));
+        assert!(prompt.contains("Preview: FAILURE"));
+        assert!(prompt.contains("Please explain the rollback path."));
+        assert!(prompt.contains("Check the preview deployment."));
+        assert!(prompt.contains("src/lib.rs:42"));
+        assert!(prompt.contains("unresolved"));
+        assert!(prompt.contains("PRRT_kwDOexample1"));
+        assert!(prompt.contains("Threaded comment still needs a fix."));
+    }
+
+    #[test]
+    fn pull_request_readiness_summary_promotes_blockers_and_pending_gates() {
+        let readiness = PullRequestReadiness {
+            review_decision: Some("CHANGES_REQUESTED".to_owned()),
+            latest_reviews: Vec::new(),
+            comments: Vec::new(),
+            review_threads: vec![
+                PullRequestReviewThread {
+                    id: Some("PRRT_open".to_owned()),
+                    path: Some("src/lib.rs".to_owned()),
+                    line: Some(42),
+                    resolved: false,
+                    comments: Vec::new(),
+                },
+                PullRequestReviewThread {
+                    id: Some("PRRT_done".to_owned()),
+                    path: Some("README.md".to_owned()),
+                    line: Some(5),
+                    resolved: true,
+                    comments: Vec::new(),
+                },
+            ],
+            checks: vec![
+                PullRequestCheckRun {
+                    name: "unit".to_owned(),
+                    status: "FAILURE".to_owned(),
+                    detail: Some("https://github.com/example/demo/actions/runs/1".to_owned()),
+                },
+                PullRequestCheckRun {
+                    name: "e2e".to_owned(),
+                    status: "IN_PROGRESS".to_owned(),
+                    detail: None,
+                },
+                PullRequestCheckRun {
+                    name: "lint".to_owned(),
+                    status: "SUCCESS".to_owned(),
+                    detail: None,
+                },
+            ],
+            deployments: vec![
+                PullRequestDeployment {
+                    environment: "Preview".to_owned(),
+                    status: "FAILURE".to_owned(),
+                    url: Some("https://preview.example.com".to_owned()),
+                },
+                PullRequestDeployment {
+                    environment: "Docs".to_owned(),
+                    status: "PENDING".to_owned(),
+                    url: None,
+                },
+            ],
+        };
+
+        let text = format_pull_request_readiness("berlin", &readiness);
+
+        assert!(text.contains("Attention needed:"));
+        assert!(text.contains("- Review decision: CHANGES_REQUESTED"));
+        assert!(text.contains("- Unresolved review thread PRRT_open at src/lib.rs:42"));
+        assert!(text.contains(
+            "- Failing check unit: FAILURE - https://github.com/example/demo/actions/runs/1"
+        ));
+        assert!(text.contains("- Pending check e2e: IN_PROGRESS"));
+        assert!(
+            text.contains("- Failing deployment Preview: FAILURE - https://preview.example.com")
+        );
+        assert!(text.contains("- Pending deployment Docs: PENDING"));
+        assert!(!text.contains("PRRT_done at README.md:5"));
+        assert!(!text.contains("lint: SUCCESS -"));
+    }
+
+    #[test]
+    fn pull_request_readiness_summary_includes_compact_rollup_counts() {
+        let readiness = PullRequestReadiness {
+            review_decision: Some("APPROVED".to_owned()),
+            latest_reviews: vec![
+                PullRequestReviewEntry {
+                    author: "alice".to_owned(),
+                    state: "APPROVED".to_owned(),
+                    body: None,
+                    submitted_at: None,
+                },
+                PullRequestReviewEntry {
+                    author: "bob".to_owned(),
+                    state: "COMMENTED".to_owned(),
+                    body: None,
+                    submitted_at: None,
+                },
+            ],
+            comments: vec![PullRequestCommentEntry {
+                author: "carol".to_owned(),
+                body: "Please check this.".to_owned(),
+                created_at: None,
+            }],
+            review_threads: vec![
+                PullRequestReviewThread {
+                    id: Some("PRRT_open".to_owned()),
+                    path: Some("src/lib.rs".to_owned()),
+                    line: Some(7),
+                    resolved: false,
+                    comments: Vec::new(),
+                },
+                PullRequestReviewThread {
+                    id: Some("PRRT_done".to_owned()),
+                    path: Some("README.md".to_owned()),
+                    line: Some(1),
+                    resolved: true,
+                    comments: Vec::new(),
+                },
+            ],
+            checks: vec![
+                PullRequestCheckRun {
+                    name: "unit".to_owned(),
+                    status: "SUCCESS".to_owned(),
+                    detail: None,
+                },
+                PullRequestCheckRun {
+                    name: "lint".to_owned(),
+                    status: "FAILURE".to_owned(),
+                    detail: None,
+                },
+                PullRequestCheckRun {
+                    name: "e2e".to_owned(),
+                    status: "IN_PROGRESS".to_owned(),
+                    detail: None,
+                },
+            ],
+            deployments: vec![
+                PullRequestDeployment {
+                    environment: "Preview".to_owned(),
+                    status: "SUCCESS".to_owned(),
+                    url: None,
+                },
+                PullRequestDeployment {
+                    environment: "Docs".to_owned(),
+                    status: "PENDING".to_owned(),
+                    url: None,
+                },
+            ],
+        };
+
+        let text = format_pull_request_readiness("berlin", &readiness);
+
+        assert!(text.contains("Rollup:"));
+        assert!(text.contains("- Reviews: 2 latest, 1 top-level comment"));
+        assert!(text.contains("- Review threads: 1 unresolved / 2 total"));
+        assert!(text.contains("- Checks: 1 passing, 1 failing, 1 pending, 0 other"));
+        assert!(text.contains("- Deployments: 1 passing, 0 failing, 1 pending, 0 other"));
+    }
+
+    #[test]
+    fn github_pr_state_uses_recorded_pr_number_when_workspace_branch_differs() {
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        let old_path = install_fake_gh(
+            temp.path(),
+            r#"#!/bin/sh
+if [ "$1" = "pr" ] && [ "$2" = "checks" ] && [ "$3" = "42" ]; then
+  printf 'unit\tpass\t1m\thttps://github.com/example/demo/actions/1\n'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "42" ] && [ "$4" = "--comments" ]; then
+  printf 'alice: looks good\n'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "42" ] && [ "$4" = "--json" ] && [ "$5" = "state" ]; then
+  printf '{"state":"merged"}\n'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "42" ] && [ "$4" = "--json" ]; then
+  printf '{"id":"PR_fake","reviewDecision":"APPROVED","latestReviews":[],"comments":[],"statusCheckRollup":[]}\n'
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then
+  printf '{"data":{"node":{"reviewThreads":{"nodes":[]}}}}\n'
+  exit 0
+fi
+echo "unexpected gh args: $*" >&2
+exit 1
+"#,
+        );
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/local-copy-of-pr".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        store
+            .record_pull_request(workspace.id, "https://github.com/example/demo/pull/42")
+            .unwrap();
+
+        assert!(store
+            .pull_request_checks("berlin")
+            .unwrap()
+            .contains("unit"));
+        assert!(store
+            .pull_request_review_state("berlin")
+            .unwrap()
+            .contains("alice"));
+        assert!(store
+            .pull_request_readiness_text("berlin")
+            .unwrap()
+            .contains("Review decision: APPROVED"));
+        assert_eq!(
+            store
+                .refresh_pull_request_state("berlin")
+                .unwrap()
+                .unwrap()
+                .state,
+            "merged"
+        );
+
+        restore_path(old_path);
+    }
+
+    #[test]
+    fn pull_request_readiness_fetches_head_deployments_from_github_api() {
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        let old_path = install_fake_gh(
+            temp.path(),
+            r#"#!/bin/sh
+if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "42" ] && [ "$4" = "--json" ]; then
+  printf '{"id":"PR_fake","headRefOid":"abc123","reviewDecision":"APPROVED","latestReviews":[],"comments":[],"statusCheckRollup":[]}\n'
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then
+  printf '{"data":{"node":{"reviewThreads":{"nodes":[]}}}}\n'
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "repos/{owner}/{repo}/commits/abc123/status" ]; then
+  printf '{"statuses":[]}\n'
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "repos/{owner}/{repo}/deployments?sha=abc123" ]; then
+  printf '[{"id":99,"environment":"Preview"}]\n'
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "repos/{owner}/{repo}/deployments/99/statuses" ]; then
+  printf '[{"state":"success","environment_url":"https://preview.example.test"}]\n'
+  exit 0
+fi
+echo "unexpected gh args: $*" >&2
+exit 1
+"#,
+        );
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/local-copy-of-pr".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        store
+            .record_pull_request(workspace.id, "https://github.com/example/demo/pull/42")
+            .unwrap();
+
+        let text = store.pull_request_readiness_text("berlin").unwrap();
+
+        assert!(text.contains("Preview: success - https://preview.example.test"));
+        assert!(text.contains("- Deployments: 1 passing, 0 failing, 0 pending, 0 other"));
+
+        restore_path(old_path);
+    }
+
+    #[test]
+    fn pull_request_readiness_fetches_head_statuses_from_github_api() {
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        let old_path = install_fake_gh(
+            temp.path(),
+            r#"#!/bin/sh
+if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "42" ] && [ "$4" = "--json" ]; then
+  printf '{"id":"PR_fake","headRefOid":"abc123","reviewDecision":"APPROVED","latestReviews":[],"comments":[],"statusCheckRollup":[]}\n'
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then
+  printf '{"data":{"node":{"reviewThreads":{"nodes":[]}}}}\n'
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "repos/{owner}/{repo}/commits/abc123/status" ]; then
+  printf '{"statuses":[{"context":"matrix-success","state":"success","target_url":"https://example.test/success"},{"context":"matrix-failure","state":"failure","target_url":"https://example.test/failure"},{"context":"matrix-pending","state":"pending","target_url":"https://example.test/pending"}]}\n'
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "repos/{owner}/{repo}/deployments?sha=abc123" ]; then
+  printf '[]\n'
+  exit 0
+fi
+echo "unexpected gh args: $*" >&2
+exit 1
+"#,
+        );
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/local-copy-of-pr".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        store
+            .record_pull_request(workspace.id, "https://github.com/example/demo/pull/42")
+            .unwrap();
+
+        let text = store.pull_request_readiness_text("berlin").unwrap();
+
+        assert!(text.contains("matrix-success: success - https://example.test/success"));
+        assert!(text.contains("matrix-failure: failure - https://example.test/failure"));
+        assert!(text.contains("matrix-pending: pending - https://example.test/pending"));
+        assert!(text.contains("- Checks: 1 passing, 1 failing, 1 pending, 0 other"));
+
+        restore_path(old_path);
+    }
+
+    #[test]
+    fn pull_request_readiness_deduplicates_rollup_and_head_status_checks() {
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        let old_path = install_fake_gh(
+            temp.path(),
+            r#"#!/bin/sh
+if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "42" ] && [ "$4" = "--json" ]; then
+  printf '{"id":"PR_fake","headRefOid":"abc123","reviewDecision":"APPROVED","latestReviews":[],"comments":[],"statusCheckRollup":[{"__typename":"StatusContext","context":"unit","state":"SUCCESS","targetUrl":"https://example.test/unit"}]}\n'
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then
+  printf '{"data":{"node":{"reviewThreads":{"nodes":[]}}}}\n'
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "repos/{owner}/{repo}/commits/abc123/status" ]; then
+  printf '{"statuses":[{"context":"unit","state":"success","target_url":"https://example.test/unit"}]}\n'
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "repos/{owner}/{repo}/deployments?sha=abc123" ]; then
+  printf '[]\n'
+  exit 0
+fi
+echo "unexpected gh args: $*" >&2
+exit 1
+"#,
+        );
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/local-copy-of-pr".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        store
+            .record_pull_request(workspace.id, "https://github.com/example/demo/pull/42")
+            .unwrap();
+
+        let readiness = store.pull_request_readiness("berlin").unwrap();
+
+        assert_eq!(
+            readiness.checks,
+            vec![PullRequestCheckRun {
+                name: "unit".to_owned(),
+                status: "SUCCESS".to_owned(),
+                detail: Some("https://example.test/unit".to_owned()),
+            }]
+        );
+
+        restore_path(old_path);
+    }
+
+    #[test]
+    fn github_review_threads_can_be_resolved_and_reopened() {
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        let old_path = install_fake_gh(
+            temp.path(),
+            r#"#!/bin/sh
+if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then
+  case "$*" in
+    *unresolveReviewThread*threadId=PRRT_fake*)
+      printf '{"data":{"unresolveReviewThread":{"thread":{"id":"PRRT_fake","isResolved":false}}}}\n'
+      exit 0
+      ;;
+    *resolveReviewThread*threadId=PRRT_fake*)
+      printf '{"data":{"resolveReviewThread":{"thread":{"id":"PRRT_fake","isResolved":true}}}}\n'
+      exit 0
+      ;;
+  esac
+fi
+echo "unexpected gh args: $*" >&2
+exit 1
+"#,
+        );
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        let resolved = store
+            .set_pull_request_review_thread_resolution("berlin", "PRRT_fake", true)
+            .unwrap();
+        assert!(resolved.resolved);
+        assert_eq!(resolved.id.as_deref(), Some("PRRT_fake"));
+
+        let reopened = store
+            .set_pull_request_review_thread_resolution("berlin", "PRRT_fake", false)
+            .unwrap();
+        assert!(!reopened.resolved);
+        assert_eq!(reopened.id.as_deref(), Some("PRRT_fake"));
+
+        restore_path(old_path);
     }
 
     #[test]

@@ -8,7 +8,7 @@ use linux_conductor_core::workspace::{
     CreateWorkspace, SessionHarnessOptions, SessionKind, SessionLaunch, WorkspaceStatusLine,
     WorkspaceStore,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 
 #[derive(Debug, Parser)]
@@ -195,6 +195,7 @@ enum WorkspaceCommand {
         name: String,
         new_name: String,
     },
+    SourcePreflight,
 }
 
 #[derive(Debug, Subcommand)]
@@ -268,6 +269,19 @@ enum PrCommand {
     },
     Checks {
         workspace: String,
+    },
+    Summary {
+        workspace: String,
+        #[arg(long)]
+        agent_prompt: bool,
+    },
+    ResolveThread {
+        workspace: String,
+        thread_id: String,
+    },
+    ReopenThread {
+        workspace: String,
+        thread_id: String,
     },
     View {
         workspace: String,
@@ -527,6 +541,9 @@ fn main() -> Result<()> {
                         workspace.path.display()
                     );
                 }
+                WorkspaceCommand::SourcePreflight => {
+                    print_source_preflight(store.source_preflight());
+                }
             }
         }
         Command::Run { workspace } => {
@@ -616,6 +633,40 @@ fn main() -> Result<()> {
                 }
                 PrCommand::Checks { workspace } => {
                     print!("{}", store.pull_request_checks(&workspace)?);
+                }
+                PrCommand::Summary {
+                    workspace,
+                    agent_prompt,
+                } => {
+                    if agent_prompt {
+                        print!("{}", store.pull_request_readiness_agent_prompt(&workspace)?);
+                    } else {
+                        print!("{}", store.pull_request_readiness_text(&workspace)?);
+                    }
+                }
+                PrCommand::ResolveThread {
+                    workspace,
+                    thread_id,
+                } => {
+                    let thread = store
+                        .set_pull_request_review_thread_resolution(&workspace, &thread_id, true)?;
+                    println!(
+                        "Resolved review thread {} for {}",
+                        thread.id.as_deref().unwrap_or(thread_id.as_str()),
+                        workspace
+                    );
+                }
+                PrCommand::ReopenThread {
+                    workspace,
+                    thread_id,
+                } => {
+                    let thread = store
+                        .set_pull_request_review_thread_resolution(&workspace, &thread_id, false)?;
+                    println!(
+                        "Reopened review thread {} for {}",
+                        thread.id.as_deref().unwrap_or(thread_id.as_str()),
+                        workspace
+                    );
                 }
                 PrCommand::View { workspace } => {
                     match store.refresh_pull_request_state(&workspace)? {
@@ -925,6 +976,12 @@ fn print_checks_summary(summary: linux_conductor_core::workspace::ChecksSummary)
     }
 }
 
+fn print_source_preflight(preflight: linux_conductor_core::workspace::WorkspaceSourcePreflight) {
+    println!("Workspace source preflight");
+    println!("GitHub: {}", preflight.github_status());
+    println!("Linear: {}", preflight.linear_status());
+}
+
 fn print_mcp_status(status: linux_conductor_core::mcp::McpStatus) {
     println!("MCP status for {}", status.workspace_path.display());
     let groups = [
@@ -1022,7 +1079,8 @@ struct TerminalInvocation {
 }
 
 fn build_terminal_invocation(terminal: &str, command: &str) -> Option<TerminalInvocation> {
-    let args = match terminal {
+    let terminal_key = terminal_key(terminal)?;
+    let args = match terminal_key.as_str() {
         "gnome-terminal" | "kgx" => vec![
             "--".to_owned(),
             "bash".to_owned(),
@@ -1043,6 +1101,14 @@ fn build_terminal_invocation(terminal: &str, command: &str) -> Option<TerminalIn
                 format!("bash -lc {}", quote_shell_word(command)),
             ]
         }
+        "foot" => vec!["bash".to_owned(), "-lc".to_owned(), command.to_owned()],
+        "wezterm" => vec![
+            "start".to_owned(),
+            "--".to_owned(),
+            "bash".to_owned(),
+            "-lc".to_owned(),
+            command.to_owned(),
+        ],
         "macos-terminal" | "terminal.app" => {
             return Some(TerminalInvocation {
                 program: "osascript".to_owned(),
@@ -1069,6 +1135,18 @@ fn build_terminal_invocation(terminal: &str, command: &str) -> Option<TerminalIn
         program: terminal.to_owned(),
         args,
     })
+}
+
+fn terminal_key(terminal: &str) -> Option<String> {
+    let trimmed = terminal.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Path::new(trimmed)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_ascii_lowercase())
+        .or_else(|| Some(trimmed.to_ascii_lowercase()))
 }
 
 fn detect_terminal() -> Option<String> {
@@ -1226,6 +1304,30 @@ mod tests {
                 "-e",
                 "tell application \"Terminal\" to activate"
             ]
+        );
+    }
+
+    #[test]
+    fn terminal_invocation_accepts_path_and_case_variants() {
+        let invocation =
+            build_terminal_invocation("/usr/bin/Kitty", "cd /tmp && exec codex").unwrap();
+
+        assert_eq!(invocation.program, "/usr/bin/Kitty");
+        assert_eq!(
+            invocation.args,
+            vec!["-e", "bash", "-lc", "cd /tmp && exec codex"]
+        );
+    }
+
+    #[test]
+    fn terminal_invocation_matches_gtk_terminal_adapters() {
+        let foot = build_terminal_invocation("foot", "cd /tmp && exec codex").unwrap();
+        assert_eq!(foot.args, vec!["bash", "-lc", "cd /tmp && exec codex"]);
+
+        let wezterm = build_terminal_invocation("wezterm", "cd /tmp && exec codex").unwrap();
+        assert_eq!(
+            wezterm.args,
+            vec!["start", "--", "bash", "-lc", "cd /tmp && exec codex"]
         );
     }
 

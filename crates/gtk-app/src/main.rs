@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 #![allow(clippy::ptr_arg, clippy::too_many_arguments)]
 
+mod command_palette;
 mod dashboard;
 mod history;
 mod projects;
@@ -13,6 +14,7 @@ mod workspace_command_center;
 
 use adw::prelude::*;
 use adw::{Application, ApplicationWindow, HeaderBar};
+use command_palette::{palette_commands, PaletteCommand, PaletteTarget};
 use gtk::{
     Box as GBox, Button, CssProvider, Label, Orientation, Stack,
     STYLE_PROVIDER_PRIORITY_APPLICATION,
@@ -131,7 +133,46 @@ fn build_ui(app: &Application, initial_workspace: Option<String>) {
     refresh_btn.connect_clicked(move |_| {
         hub_refresh.refresh(RefreshScope::All);
     });
+    let palette_btn = Button::from_icon_name("edit-find-symbolic");
+    palette_btn.set_tooltip_text(Some("Command palette"));
+
+    let open_palette: Rc<dyn Fn()> = {
+        let window_for_palette = window.clone();
+        let state_for_palette = app_state.clone();
+        let main_stack_for_palette = main_stack.clone();
+        let split_for_palette = split.clone();
+        let hub_for_palette = refresh_hub.clone();
+        let refresh_workspace_for_palette = refresh_workspace_detail.clone();
+        Rc::new(move || {
+            let commands =
+                palette_commands(state_for_palette.snapshot().selected_workspace.is_some());
+            let state_for_action = state_for_palette.clone();
+            let stack_for_action = main_stack_for_palette.clone();
+            let split_for_action = split_for_palette.clone();
+            let hub_for_action = hub_for_palette.clone();
+            let refresh_workspace_for_action = refresh_workspace_for_palette.clone();
+            show_command_palette(
+                &window_for_palette,
+                commands,
+                Rc::new(move |target| {
+                    apply_palette_target(
+                        target,
+                        &state_for_action,
+                        &stack_for_action,
+                        &split_for_action,
+                        &hub_for_action,
+                        &refresh_workspace_for_action,
+                    );
+                }),
+            );
+        })
+    };
+    let open_palette_button = open_palette.clone();
+    palette_btn.connect_clicked(move |_| {
+        open_palette_button();
+    });
     header.pack_start(&toggle_btn);
+    header.pack_end(&palette_btn);
     header.pack_end(&refresh_btn);
 
     let toolbar_view = adw::ToolbarView::new();
@@ -203,12 +244,22 @@ fn build_ui(app: &Application, initial_workspace: Option<String>) {
         });
     }
 
-    // Keyboard shortcut: Ctrl+R → refresh all panels
+    // Keyboard shortcuts: Ctrl+R refresh, Ctrl+B sidebar, Ctrl+K command palette.
     let evk = gtk::EventControllerKey::new();
     let hub_kb = refresh_hub.clone();
+    let split_kb = split.clone();
+    let open_palette_kb = open_palette.clone();
     evk.connect_key_pressed(move |_, keyval, _, modifiers| {
         if modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK) && keyval == gtk::gdk::Key::r {
             hub_kb.refresh(RefreshScope::All);
+            return gtk::glib::Propagation::Stop;
+        }
+        if modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK) && keyval == gtk::gdk::Key::b {
+            split_kb.set_show_sidebar(!split_kb.shows_sidebar());
+            return gtk::glib::Propagation::Stop;
+        }
+        if modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK) && keyval == gtk::gdk::Key::k {
+            open_palette_kb();
             return gtk::glib::Propagation::Stop;
         }
         gtk::glib::Propagation::Proceed
@@ -243,6 +294,87 @@ fn build_ui(app: &Application, initial_workspace: Option<String>) {
         );
         glib::ControlFlow::Continue
     });
+}
+
+fn show_command_palette(
+    parent: &ApplicationWindow,
+    commands: Vec<PaletteCommand>,
+    apply: Rc<dyn Fn(PaletteTarget)>,
+) {
+    let dialog = gtk::Window::builder()
+        .title("Command Palette")
+        .transient_for(parent)
+        .modal(true)
+        .default_width(420)
+        .default_height(360)
+        .build();
+    let body = GBox::new(Orientation::Vertical, 8);
+    body.add_css_class("command-palette");
+    body.set_margin_top(12);
+    body.set_margin_bottom(12);
+    body.set_margin_start(12);
+    body.set_margin_end(12);
+    let title = Label::new(Some("Command Palette"));
+    title.add_css_class("section-title");
+    title.set_xalign(0.0);
+    body.append(&title);
+
+    for command in commands {
+        let label = match command.shortcut {
+            Some(shortcut) => format!("{}  {}", command.label, shortcut),
+            None => command.label.to_owned(),
+        };
+        let button = Button::with_label(&label);
+        button.set_halign(gtk::Align::Fill);
+        button.set_hexpand(true);
+        let target = command.target;
+        let apply_command = apply.clone();
+        let dialog_to_close = dialog.clone();
+        button.connect_clicked(move |_| {
+            apply_command(target.clone());
+            dialog_to_close.close();
+        });
+        body.append(&button);
+    }
+
+    dialog.set_child(Some(&body));
+    dialog.present();
+}
+
+fn apply_palette_target(
+    target: PaletteTarget,
+    state: &AppState,
+    main_stack: &Stack,
+    split: &adw::OverlaySplitView,
+    refresh_hub: &RefreshHub,
+    refresh_workspace: &impl Fn(),
+) {
+    match target {
+        PaletteTarget::Page(page) => {
+            state.set_active_page(page.clone());
+            main_stack.set_visible_child_name(page_stack_name(&page));
+            if page == AppPage::Workspace {
+                refresh_workspace();
+            }
+        }
+        PaletteTarget::WorkspaceTab(tab) => {
+            state.set_active_page(AppPage::Workspace);
+            state.set_active_workspace_tab(tab);
+            main_stack.set_visible_child_name("workspace");
+            refresh_workspace();
+        }
+        PaletteTarget::Refresh => refresh_hub.refresh(RefreshScope::All),
+        PaletteTarget::ToggleSidebar => split.set_show_sidebar(!split.shows_sidebar()),
+    }
+}
+
+fn page_stack_name(page: &AppPage) -> &'static str {
+    match page {
+        AppPage::Dashboard => "dashboard",
+        AppPage::Projects => "projects",
+        AppPage::History => "history",
+        AppPage::Workspace | AppPage::Settings | AppPage::Review => "workspace",
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -108,3 +108,15 @@ git push origin v0.1.0
 
 The workflow builds tarball + .deb + .rpm + AppImage on `ubuntu-24.04` GitHub
 hosted runners and attaches all artifacts to the GitHub release.
+
+Release readiness requires more than attached artifacts. Before a public
+release, add or verify publishing pipelines for every supported Linux package
+channel: AppImage/GitHub releases, `.deb` repositories for APT, `.rpm`
+repositories for DNF or zypper, AUR, and Flatpak. Each channel should be
+tag-driven, publish checksums where supported, and have documented rollback or
+yanking steps.
+
+The release pipeline must also build the website as a subset of `perceo.ai`, or
+treat that website build as a required release gate. The site should include
+release downloads, install instructions, supported Linux targets, known limits,
+and links to the GitHub release artifacts.

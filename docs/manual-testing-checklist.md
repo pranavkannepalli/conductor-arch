@@ -65,10 +65,20 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] Create a GitHub issue workspace with authenticated `gh`.
 - [ ] Create a GitHub PR workspace with authenticated `gh`; confirm the PR head
   ref is fetched before the worktree is created.
+- [ ] For a PR-sourced workspace whose local branch name differs from the remote
+  PR branch, run `linux-conductor pr summary <workspace>` and confirm it uses
+  the stored PR number instead of failing branch inference.
 - [ ] Confirm GitHub source creation fails clearly when `gh auth status` is not
   authenticated.
+- [ ] Click Check Sources on the Projects page and confirm GitHub reports ready
+  only when `gh` is installed and authenticated.
+- [ ] With authenticated `gh`, click through GitHub issue and GitHub PR
+  workspace creation in GTK and confirm the created workspaces include source
+  context in `.context/brief.md`.
 - [ ] Create a Linear issue workspace with `LINEAR_API_KEY`.
 - [ ] Confirm Linear source creation fails clearly without `LINEAR_API_KEY`.
+- [ ] Click Check Sources on the Projects page and confirm Linear reports ready
+  only when `LINEAR_API_KEY` is set.
 - [ ] Confirm each workspace maps to one branch and one Git worktree.
 - [ ] Confirm each workspace has `.context/brief.md`, `.context/agent-notes.md`,
   and `.context/todos.md`.
@@ -92,6 +102,11 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] Run a one-shot terminal command and confirm stdout, stderr, and exit code.
 - [ ] Start multiple PTY shells, select one, send input to it, and stop only
   that shell.
+- [ ] Run a full-screen TUI command that enters/exits the alternate screen and
+  confirm the transcript view returns to the normal shell output afterward.
+- [ ] Run cursor-heavy shell output or a TUI transcript and confirm CSI cursor
+  variants such as forward, vertical absolute, and vertical relative movement
+  do not leave duplicate or misplaced text.
 - [ ] Confirm stopped/exited terminal process rows reconcile after restart.
 - [ ] Confirm terminal transcripts are persisted, searchable, and reloadable.
 
@@ -132,6 +147,33 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] Stage failing PR checks for the selected agent.
 - [ ] View raw PR comments/reviews.
 - [ ] Stage PR comments/reviews for the selected agent.
+- [ ] View the structured PR summary and confirm it includes review decision,
+  aggregate rollup counts, latest reviews, comments, review threads, status
+  rollup checks, and deployment rollup entries when GitHub returns them.
+- [ ] For a PR with a deployment attached to the head commit, confirm the
+  structured PR summary includes the deployment environment, latest status, and
+  environment/log URL even when it is absent from `statusCheckRollup`.
+- [ ] For a PR with legacy commit statuses attached to the head commit, confirm
+  the structured PR summary includes success, failure, pending, and error
+  statuses even when they are absent from `statusCheckRollup`.
+- [ ] Confirm duplicate check/status entries are collapsed when the same status
+  appears in both `statusCheckRollup` and the PR-head commit status API result.
+- [ ] Confirm the structured PR summary promotes requested changes, unresolved
+  review threads, failing/pending checks, and failing/pending deployments into
+  the attention section.
+- [ ] Confirm cancelled check/deployment states are treated as attention items
+  when GitHub returns them in provider rollups.
+- [ ] Confirm skipped check states are visible in the raw detail list when
+  GitHub returns them, and decide whether skipped should stay neutral or be
+  promoted to attention.
+- [ ] For a PR with review threads, confirm the structured PR summary includes
+  GitHub review thread node IDs.
+- [ ] Run `linux-conductor pr resolve-thread <workspace> <thread-id>` and
+  `linux-conductor pr reopen-thread <workspace> <thread-id>` against a real
+  review thread and confirm GitHub updates the thread state.
+- [ ] Enter the same thread ID in the Checks tab and confirm Resolve Thread and
+  Reopen Thread update the GitHub thread state.
+- [ ] Stage the structured PR summary for the selected agent.
 - [ ] Confirm merge is blocked by open todos or open local review comments.
 - [ ] Merge the PR with squash, merge, or rebase.
 - [ ] Confirm `archive_on_merge = true` archives after merge.
@@ -145,20 +187,34 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] History shows archived workspaces.
 - [ ] History reads old macOS Conductor chats when
   `~/Library/Application Support/com.conductor.app/conductor.db` exists.
+- [ ] `Ctrl+K` opens the command palette.
 - [ ] `Ctrl+R` refreshes the visible workspace state.
+- [ ] `Ctrl+B` toggles the sidebar.
+- [ ] Use the command palette to navigate Dashboard, Projects, History,
+  Workspace, Changes, Chat/Terminal, Big Terminal, Todos, Processes, and
+  Checkpoints.
+- [ ] Confirm command palette workspace-tab commands are hidden until a
+  workspace is selected.
 
 ## Known Gaps To Keep Visible
 
 - [ ] Agent chat is still PTY/transcript-oriented, not a polished structured
   message UI with attachments.
 - [ ] Terminal rendering is not a full terminal emulator.
-- [ ] Command palette, broad shortcuts, and deep links are not complete.
+- [ ] Command palette search/filtering, customizable shortcuts, and deep links
+  are not complete.
 - [ ] Theme/view customization is not complete.
 - [ ] Full naming-template, hook, notification, shortcut, and prompt-pack
   customization is not complete.
 - [ ] Monorepo directory selection and linked-directory workflows are not
   complete.
-- [ ] GitHub review-thread sync and deployment/check aggregation are still raw.
+- [ ] GitHub review-thread resolution has CLI and GTK GraphQL controls with a
+  live-proven CLI mutation path; check/deployment aggregation has live-proven
+  CLI coverage for success/failure/pending/error commit statuses,
+  success/failure/pending/inactive deployments, PR-head deployment API
+  coverage, and rollup/head-status de-duplication. Cancelled/skipped remain
+  dependent on real provider rollups rather than synthetic commit status API
+  proof.
 - [ ] Unified local history for all chats is not complete.
 - [ ] Visual parity with Conductor is not complete.
 
@@ -172,3 +228,13 @@ you want to test. Run `gh auth login` before GitHub checks. Set
   `./dist/linux-conductor-0.1.0-x86_64.AppImage doctor`
 - [ ] Flatpak build status is documented if it fails because of sandbox or
   dependency limitations.
+- [ ] Tag-driven publish pipeline creates or updates GitHub release artifacts,
+  AppImage, APT `.deb` repository metadata, DNF/zypper `.rpm` repository
+  metadata, AUR package state, and Flatpak release state.
+- [ ] Checksums, provenance, and rollback/yank steps are documented for each
+  supported Linux package channel where the channel supports them.
+- [ ] Install, upgrade, and launch smoke tests pass from each supported package
+  channel, not only from locally built files.
+- [ ] Website build for the Linux product subset of `perceo.ai` succeeds and
+  publishes matching release downloads, install instructions, supported targets,
+  known limits, and GitHub release links.
