@@ -120,10 +120,10 @@ jobs:
       - name: Generate checksums
         run: |
           cd dist
-          sha256sum * > SHA256SUMS
+          sha256sum ./* > SHA256SUMS
 
       - name: Scan release artifacts with Trivy
-        uses: aquasecurity/trivy-action@0.34.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
           scan-ref: dist

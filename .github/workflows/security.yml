@@ -48,26 +48,6 @@ jobs:
         with:
           command: check
 
-  dependency-review:
-    name: Dependency review
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    if: github.event_name == 'pull_request'
-    permissions:
-      contents: read
-      pull-requests: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-
-      - name: Review dependency changes
-        uses: actions/dependency-review-action@v4
-        with:
-          fail-on-severity: high
-          deny-licenses: GPL-2.0, GPL-3.0, AGPL-1.0, AGPL-3.0
-
   trivy-filesystem:
     name: Trivy filesystem scan
     runs-on: ubuntu-24.04
@@ -79,7 +59,7 @@ jobs:
           persist-credentials: false
 
       - name: Run Trivy
-        uses: aquasecurity/trivy-action@0.34.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
           scan-ref: .

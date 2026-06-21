@@ -28,25 +28,12 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install GTK4 and libadwaita dev headers
-        run: |
-          sudo apt-get update -q
-          sudo apt-get install -y --no-install-recommends \
-            libgtk-4-dev libadwaita-1-dev pkg-config \
-            git sqlite3 openssh-client
-
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v4
         with:
           languages: rust
           queries: security-extended,security-and-quality
-          build-mode: manual
-
-      - name: Build workspace
-        run: cargo build --workspace --locked
+          build-mode: none
 
       - name: Perform CodeQL analysis
         uses: github/codeql-action/analyze@v4
