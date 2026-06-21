@@ -11,7 +11,6 @@ on:
 
 permissions:
   contents: read
-  security-events: write
   actions: read
   pull-requests: read
 
@@ -58,23 +57,38 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Run Trivy
+      - name: Run Trivy vulnerability gate
         uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          exit-code: "1"
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          scanners: vuln
+          timeout: 10m
+
+      - name: Generate Trivy SARIF
+        uses: aquasecurity/trivy-action@v0.36.0
+        if: always()
         with:
           scan-type: fs
           scan-ref: .
           format: sarif
           output: trivy-filesystem.sarif
+          exit-code: "0"
           severity: HIGH,CRITICAL
           ignore-unfixed: true
+          scanners: vuln
           timeout: 10m
 
-      - name: Upload Trivy results
-        uses: github/codeql-action/upload-sarif@v4
+      - name: Upload Trivy SARIF artifact
+        uses: actions/upload-artifact@v4
         if: always()
         with:
-          sarif_file: trivy-filesystem.sarif
-          category: trivy-filesystem
+          name: trivy-filesystem-sarif
+          path: trivy-filesystem.sarif
+          if-no-files-found: error
 
   workflow-security:
     name: Workflow security
@@ -93,3 +107,5 @@ jobs:
         uses: zizmorcore/zizmor-action@v0.5.6
         with:
           persona: pedantic
+          advanced-security: false
+          annotations: true
