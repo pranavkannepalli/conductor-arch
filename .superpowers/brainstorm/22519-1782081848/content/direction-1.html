@@ -1,0 +1,97 @@
+<h2>Conductor Docs Parity Direction</h2>
+<p class="subtitle">Recommended: keep the app structure, replace the visual system and interaction texture.</p>
+
+<div class="cards">
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">A. Full Docs Shell</div>
+        <div class="mockup-body" style="display:flex; min-height:280px; background:#f6f6f3; color:#111;">
+          <div style="width:28%; border-right:1px solid #d8d8d0; padding:18px; background:#fbfbf8;">
+            <div style="font-weight:700; margin-bottom:16px;">Conductor</div>
+            <div style="font-size:12px; color:#666; line-height:1.8;">Introduction<br>Workflow<br>Parallel agents<br>Settings<br>Checks</div>
+          </div>
+          <div style="flex:1; padding:28px 32px;">
+            <div style="height:12px; width:120px; background:#d6d6cf; border-radius:999px; margin-bottom:18px;"></div>
+            <div style="height:28px; width:55%; background:#202020; border-radius:6px; margin-bottom:14px;"></div>
+            <div style="height:12px; width:82%; background:#d6d6cf; border-radius:999px; margin-bottom:8px;"></div>
+            <div style="height:12px; width:74%; background:#d6d6cf; border-radius:999px; margin-bottom:24px;"></div>
+            <div style="height:80px; border:1px solid #d8d8d0; border-radius:14px; background:#fff;"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>Full docs shell</h3>
+      <p>Closest visual match to conductor.build/docs, but risks making workspace tooling feel too soft and roomy.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">B. Hybrid Linux Docs</div>
+        <div class="mockup-body" style="display:flex; min-height:280px; background:#f4f4f0; color:#111;">
+          <div style="width:26%; border-right:1px solid #d9dad3; padding:18px; background:#f8f8f4;">
+            <div style="font-weight:700; margin-bottom:16px;">Linux Conductor</div>
+            <div style="font-size:12px; color:#667085; line-height:1.9;">Dashboard<br>Projects<br>History<br><span style='color:#111827; font-weight:600;'>Workspaces</span></div>
+            <div style="margin-top:18px; border:1px solid #d9dad3; border-radius:12px; background:#fff; padding:10px; font-size:11px; color:#475467;">berlin · PR #28<br>2 sessions · checks pending</div>
+          </div>
+          <div style="flex:1; padding:24px 28px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:18px;">
+              <div>
+                <div style="font-size:11px; text-transform:uppercase; letter-spacing:.12em; color:#667085;">Workspace</div>
+                <div style="font-size:26px; font-weight:700;">Berlin</div>
+              </div>
+              <div style="font-family:monospace; font-size:11px; color:#667085; border:1px solid #d9dad3; border-radius:999px; padding:6px 10px;">linux flavored</div>
+            </div>
+            <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-bottom:12px;">
+              <div style="border:1px solid #d9dad3; border-radius:14px; background:#fff; height:86px;"></div>
+              <div style="border:1px solid #d9dad3; border-radius:14px; background:#fff; height:86px;"></div>
+              <div style="border:1px solid #d9dad3; border-radius:14px; background:#fff; height:86px;"></div>
+            </div>
+            <div style="border:1px solid #d9dad3; border-radius:16px; background:#101418; color:#d0d5dd; height:96px; padding:14px; font-family:monospace; font-size:11px;">$ cargo test --workspace<br>running checks...</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>Hybrid Linux docs</h3>
+      <p><strong>Recommended.</strong> Match Conductor docs hierarchy, spacing, and restraint across the shell, then keep denser terminal/review surfaces where the Linux workflow needs them.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">C. Keep Layout, Only Restyle</div>
+        <div class="mockup-body" style="display:flex; min-height:280px; background:#191c20; color:#eef2f6;">
+          <div style="width:26%; border-right:1px solid #2f3540; padding:16px;">
+            <div style="height:34px; background:#262c36; border-radius:10px; margin-bottom:10px;"></div>
+            <div style="height:34px; background:#262c36; border-radius:10px; margin-bottom:10px;"></div>
+            <div style="height:34px; background:#262c36; border-radius:10px; margin-bottom:18px;"></div>
+            <div style="height:150px; background:#12161b; border:1px solid #2f3540; border-radius:12px;"></div>
+          </div>
+          <div style="flex:1; padding:20px;">
+            <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:12px;">
+              <div style="height:118px; background:#12161b; border:1px solid #2f3540; border-radius:12px;"></div>
+              <div style="height:118px; background:#12161b; border:1px solid #2f3540; border-radius:12px;"></div>
+              <div style="height:118px; background:#12161b; border:1px solid #2f3540; border-radius:12px;"></div>
+              <div style="height:118px; background:#12161b; border:1px solid #2f3540; border-radius:12px;"></div>
+            </div>
+            <div style="height:96px; background:#12161b; border:1px solid #2f3540; border-radius:12px;"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>Keep layout, only restyle</h3>
+      <p>Fastest diff, but it will still read like a generic AI tool with better paint.</p>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>Recommendation</h3>
+  <p>Pick <strong>B</strong>. The current app is already dense and tool-heavy. Forcing the whole workspace experience into a docs page would hurt utility. The right move is docs-style typography, spacing, navigation, and calm surfaces everywhere, then a stronger Linux tone inside terminal, checks, and agent panes.</p>
+</div>

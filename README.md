@@ -108,6 +108,19 @@ cargo build --workspace --release --locked
 ./target/release/linux-conductor-gtk
 ```
 
+Or use the short `make` targets:
+
+```bash
+make gtk
+make cli
+make build
+make build-release
+make check
+make release VERSION=0.1.0
+make tag VERSION=0.1.0
+make publish-tag VERSION=0.1.0
+```
+
 Optional install:
 
 ```bash
