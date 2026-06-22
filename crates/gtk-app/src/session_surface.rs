@@ -32,6 +32,7 @@ pub fn agent_session_panel(
 ) -> GBox {
     let root = GBox::new(Orientation::Vertical, 10);
     root.add_css_class("agent-panel");
+    root.add_css_class("session-surface");
 
     let title = Label::new(Some("Agent sessions"));
     title.add_css_class("section-title");
@@ -132,6 +133,7 @@ pub fn agent_session_panel(
     transcript.set_editable(false);
     transcript.set_monospace(true);
     transcript.add_css_class("history-view");
+    transcript.add_css_class("session-transcript");
     transcript.set_vexpand(true);
     let transcript_buffer = transcript.buffer();
     let transcript_text = initial_session_text(&database_path, workspace_name);

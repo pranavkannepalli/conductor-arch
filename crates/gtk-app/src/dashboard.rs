@@ -8,9 +8,11 @@ use crate::title_case_workspace;
 pub(crate) fn build_dashboard_panel(paths: &AppPaths) -> (GBox, impl Fn() + Clone + 'static) {
     let root = GBox::new(Orientation::Vertical, 0);
     root.add_css_class("dashboard");
+    root.add_css_class("page-shell");
 
     let header = GBox::new(Orientation::Vertical, 14);
     header.add_css_class("dashboard-header");
+    header.add_css_class("page-header");
 
     let title = Label::new(Some("Dashboard"));
     title.add_css_class("dashboard-title");
@@ -28,6 +30,7 @@ pub(crate) fn build_dashboard_panel(paths: &AppPaths) -> (GBox, impl Fn() + Clon
 
     let board = GBox::new(Orientation::Horizontal, 22);
     board.add_css_class("kanban-board");
+    board.add_css_class("page-board");
     scroll.set_child(Some(&board));
     root.append(&scroll);
 
@@ -145,6 +148,7 @@ fn build_dashboard_card(line: &WorkspaceStatusLine, store: &WorkspaceStore) -> G
     let ws = &line.workspace;
     let card = GBox::new(Orientation::Vertical, 10);
     card.add_css_class("workspace-card");
+    card.add_css_class("shell-card");
 
     let top = GBox::new(Orientation::Horizontal, 8);
     let branch = Label::new(Some(&ws.branch));

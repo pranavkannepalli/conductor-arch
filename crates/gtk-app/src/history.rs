@@ -12,8 +12,10 @@ use std::rc::Rc;
 pub(crate) fn build_history_page(database_path: PathBuf) -> (GBox, impl Fn() + Clone + 'static) {
     let root = GBox::new(Orientation::Vertical, 0);
     root.add_css_class("dashboard");
+    root.add_css_class("page-shell");
     let header = GBox::new(Orientation::Vertical, 8);
     header.add_css_class("dashboard-header");
+    header.add_css_class("page-header");
     let title = Label::new(Some("History"));
     title.add_css_class("dashboard-title");
     title.set_xalign(0.0);
@@ -33,6 +35,7 @@ pub(crate) fn build_history_page(database_path: PathBuf) -> (GBox, impl Fn() + C
     list_scroll.set_width_request(380);
     let list = ListBox::new();
     list.add_css_class("workspace-list");
+    list.add_css_class("shell-list");
     list_scroll.set_child(Some(&list));
     let message_view = TextView::new();
     message_view.set_editable(false);

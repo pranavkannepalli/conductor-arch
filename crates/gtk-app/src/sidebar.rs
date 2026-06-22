@@ -21,6 +21,9 @@ pub(crate) fn build_app_sidebar(
     sidebar_box.add_css_class("sidebar");
     sidebar_box.set_width_request(240);
 
+    let nav_group = GBox::new(Orientation::Vertical, 4);
+    nav_group.add_css_class("sidebar-nav-group");
+
     let dashboard_btn = Button::with_label("Dashboard");
     dashboard_btn.add_css_class("nav-button-active");
     let stack_dashboard = stack.clone();
@@ -29,7 +32,7 @@ pub(crate) fn build_app_sidebar(
         state_dashboard.set_active_page(AppPage::Dashboard);
         stack_dashboard.set_visible_child_name("dashboard");
     });
-    sidebar_box.append(&dashboard_btn);
+    nav_group.append(&dashboard_btn);
 
     let history_btn = Button::with_label("History");
     history_btn.add_css_class("nav-button");
@@ -39,7 +42,7 @@ pub(crate) fn build_app_sidebar(
         state_history.set_active_page(AppPage::History);
         stack_history.set_visible_child_name("history");
     });
-    sidebar_box.append(&history_btn);
+    nav_group.append(&history_btn);
 
     let projects_btn = Button::with_label("Projects");
     projects_btn.add_css_class("nav-button");
@@ -49,7 +52,8 @@ pub(crate) fn build_app_sidebar(
         state_projects.set_active_page(AppPage::Projects);
         stack_projects.set_visible_child_name("projects");
     });
-    sidebar_box.append(&projects_btn);
+    nav_group.append(&projects_btn);
+    sidebar_box.append(&nav_group);
 
     let divider = Separator::new(Orientation::Horizontal);
     sidebar_box.append(&divider);
@@ -211,6 +215,7 @@ fn build_workspace_row(
 ) -> ListBoxRow {
     let row_box = GBox::new(Orientation::Horizontal, 10);
     row_box.add_css_class("project-row");
+    row_box.add_css_class("workspace-row-shell");
 
     let icon = Label::new(Some(if run_active { "◐" } else { "◦" }));
     icon.add_css_class(if run_active {
@@ -220,6 +225,7 @@ fn build_workspace_row(
     });
 
     let text_box = GBox::new(Orientation::Vertical, 2);
+    text_box.add_css_class("workspace-row-text");
     text_box.set_hexpand(true);
     let name_label = Label::new(Some(name));
     name_label.add_css_class("workspace-name");

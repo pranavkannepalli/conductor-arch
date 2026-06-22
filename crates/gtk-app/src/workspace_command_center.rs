@@ -23,9 +23,11 @@ pub(crate) fn build_workspace_command_center(
 ) -> (GBox, impl Fn() + Clone + 'static) {
     let root = GBox::new(Orientation::Vertical, 0);
     root.add_css_class("dashboard");
+    root.add_css_class("page-shell");
 
     let header = GBox::new(Orientation::Vertical, 8);
     header.add_css_class("dashboard-header");
+    header.add_css_class("page-header");
     let title = Label::new(Some("Workspace"));
     title.add_css_class("dashboard-title");
     title.set_xalign(0.0);
@@ -42,6 +44,7 @@ pub(crate) fn build_workspace_command_center(
     scroll.set_vexpand(true);
     let body = GBox::new(Orientation::Vertical, 14);
     body.add_css_class("detail-body");
+    body.add_css_class("page-body");
     scroll.set_child(Some(&body));
     root.append(&scroll);
 
@@ -122,6 +125,7 @@ fn workspace_status_strip(
 ) -> GBox {
     let strip = GBox::new(Orientation::Horizontal, 10);
     strip.add_css_class("command-center-strip");
+    strip.add_css_class("workspace-summary-strip");
     strip.append(&metric_card("Status", &ws.status));
     strip.append(&metric_card("Port", &ws.port_base.to_string()));
     strip.append(&metric_card(
@@ -175,6 +179,7 @@ fn agents_panel(
 ) -> GBox {
     let panel = GBox::new(Orientation::Vertical, 10);
     panel.add_css_class("command-panel");
+    panel.add_css_class("session-tool-surface");
     panel.set_hexpand(true);
     panel.append(&section_title("Agents"));
 
@@ -1022,6 +1027,7 @@ fn chat_terminal_split(
 
     let chat_box = GBox::new(Orientation::Vertical, 8);
     chat_box.add_css_class("command-panel");
+    chat_box.add_css_class("session-tool-surface");
     chat_box.append(&section_title("Chat"));
     let db_for_sessions = db_path.to_path_buf();
     let workspace_for_sessions = ws.name.clone();
@@ -1046,6 +1052,7 @@ fn chat_terminal_split(
 
     let terminal_box = GBox::new(Orientation::Vertical, 8);
     terminal_box.add_css_class("command-panel");
+    terminal_box.add_css_class("session-tool-surface");
     terminal_box.append(&section_title("Terminal"));
     terminal_box.append(&terminal::embedded_terminal_panel(
         db_path.to_path_buf(),
