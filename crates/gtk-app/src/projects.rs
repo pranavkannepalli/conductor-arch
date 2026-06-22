@@ -22,8 +22,10 @@ pub(crate) fn build_projects_page(
 ) -> (GBox, impl Fn() + Clone + 'static) {
     let root = GBox::new(Orientation::Vertical, 0);
     root.add_css_class("dashboard");
+    root.add_css_class("page-shell");
     let header = GBox::new(Orientation::Vertical, 8);
     header.add_css_class("dashboard-header");
+    header.add_css_class("page-header");
     let title = Label::new(Some("Projects"));
     title.add_css_class("dashboard-title");
     title.set_xalign(0.0);
@@ -39,6 +41,7 @@ pub(crate) fn build_projects_page(
     scroll.set_vexpand(true);
     let body = GBox::new(Orientation::Vertical, 14);
     body.add_css_class("detail-body");
+    body.add_css_class("page-body");
     scroll.set_child(Some(&body));
     root.append(&scroll);
 

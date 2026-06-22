@@ -109,6 +109,7 @@ pub fn embedded_terminal_panel(
 ) -> GBox {
     let root = GBox::new(Orientation::Vertical, 8);
     root.add_css_class("terminal-panel");
+    root.add_css_class("session-tool-surface");
     if full_mode {
         root.set_vexpand(true);
     }
@@ -124,6 +125,7 @@ pub fn embedded_terminal_panel(
     transcript.set_editable(false);
     transcript.set_monospace(true);
     transcript.add_css_class("history-view");
+    transcript.add_css_class("terminal-transcript-dark");
     apply_terminal_preferences(&transcript, &preferences);
     set_terminal_buffer_scrollback(&transcript.buffer(), preferences.scrollback_lines);
     transcript.buffer().set_text(&initial_terminal_text(
