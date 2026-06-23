@@ -1399,6 +1399,15 @@ fn command_exists(command: &str) -> bool {
 }
 
 fn interactive_session_command(launch: &SessionLaunch) -> String {
+    if matches!(launch.kind, SessionKind::Codex)
+        && launch.env_value("CONDUCTOR_SESSION_BOOTSTRAP").is_some()
+    {
+        let inner = format!(
+            "printf '%s\\n' \"$CONDUCTOR_SESSION_BOOTSTRAP\" | exec {}",
+            shell_words(&launch.program, &launch.args)
+        );
+        return format!("sh -lc {}", quote_shell_word(&inner));
+    }
     format!("exec {}", shell_words(&launch.program, &launch.args))
 }
 
@@ -1566,6 +1575,31 @@ mod tests {
         assert!(command.contains("CONDUCTOR_PORT=3000"));
         assert!(command.contains("CONDUCTOR_PORT=3000 exec codex"));
         assert!(command.ends_with("exec codex"));
+    }
+
+    #[test]
+    fn manual_codex_session_command_pipes_bootstrap_payload() {
+        let launch = SessionLaunch {
+            kind: SessionKind::Codex,
+            program: PathBuf::from("codex"),
+            args: Vec::new(),
+            cwd: PathBuf::from("/tmp/work"),
+            env: vec![
+                (
+                    "CONDUCTOR_WORKSPACE_NAME".to_owned(),
+                    OsString::from("berlin"),
+                ),
+                (
+                    "CONDUCTOR_SESSION_BOOTSTRAP".to_owned(),
+                    OsString::from("[conductor bootstrap for codex]\n/plan\n"),
+                ),
+            ],
+            harness_metadata: Some("harness=codex;plan=true".to_owned()),
+        };
+
+        let command = render_manual_session_command(&launch);
+        assert!(command.contains("CONDUCTOR_SESSION_BOOTSTRAP"));
+        assert!(command.contains("sh -lc"));
     }
 
     #[test]

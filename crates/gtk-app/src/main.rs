@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 #![allow(clippy::ptr_arg, clippy::too_many_arguments)]
 
+mod buttons;
 mod command_palette;
 mod dashboard;
 mod history;
@@ -14,14 +15,15 @@ mod terminal;
 mod theme;
 mod workspace_command_center;
 
+use crate::buttons::{icon_button, text_button};
 use adw::prelude::*;
-use adw::{Application, ApplicationWindow, ColorScheme, HeaderBar, StyleManager};
+use adw::{Application, ApplicationWindow, ColorScheme, StyleManager};
 use command_palette::{
     filter_palette_commands, palette_commands, Keybindings, PaletteCommand, PaletteTarget,
     ShortcutAction,
 };
 use gtk::{
-    Box as GBox, Button, CssProvider, Entry, Label, Orientation, ScrolledWindow, Stack,
+    Align, Box as GBox, CssProvider, Entry, Label, Orientation, Overlay, ScrolledWindow, Stack,
     STYLE_PROVIDER_PRIORITY_APPLICATION,
 };
 use linux_conductor_core::paths::AppPaths;
@@ -395,9 +397,14 @@ fn build_ui(app: &Application, launch_target: LaunchTarget) {
     apply_view_preferences(&window, &initial_view_preferences);
 
     let split = adw::OverlaySplitView::new();
-    split.set_min_sidebar_width(220.0);
-    split.set_max_sidebar_width(280.0);
-    split.set_show_sidebar(true);
+    split.set_min_sidebar_width(180.0);
+    split.set_max_sidebar_width(480.0);
+    split.set_pin_sidebar(false);
+    split.set_collapsed(false);
+    let collapse_sidebar: Rc<dyn Fn()> = {
+        let split = split.clone();
+        Rc::new(move || split.set_collapsed(true))
+    };
 
     let toast_overlay = adw::ToastOverlay::new();
     let (dashboard, refresh_dashboard) = dashboard::build_dashboard_panel(&app_state.paths);
@@ -410,19 +417,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget) {
             &app_state,
             refresh_hub.clone(),
             toast_overlay.clone(),
-            Rc::new({
-                let state = app_state.clone();
-                let refresh_hub = refresh_hub.clone();
-                let stack_handle = main_stack_handle.clone();
-                move || {
-                    state.set_active_page(AppPage::Projects);
-                    if let Some(stack) = stack_handle.borrow().as_ref() {
-                        stack.set_visible_child_name("projects");
-                    }
-                    refresh_hub.refresh(RefreshScope::Sidebar);
-                    refresh_hub.refresh(RefreshScope::Projects);
-                }
-            }),
+            collapse_sidebar.clone(),
         );
     let (projects_page, refresh_projects) = projects::build_projects_page(
         &app_state.paths,
@@ -469,6 +464,8 @@ fn build_ui(app: &Application, launch_target: LaunchTarget) {
         &app_state,
         refresh_hub.clone(),
         main_stack.clone(),
+        window.clone(),
+        split.clone(),
         refresh_workspace_detail.clone(),
         refresh_view_preferences.clone(),
     );
@@ -488,33 +485,33 @@ fn build_ui(app: &Application, launch_target: LaunchTarget) {
 
     split.set_sidebar(Some(&sidebar));
     toast_overlay.set_child(Some(&main_stack));
-    split.set_content(Some(&toast_overlay));
 
-    // Header bar
-    let header = HeaderBar::new();
-    header.add_css_class("app-header");
-    header.set_show_end_title_buttons(true);
-    let toggle_btn = Button::from_icon_name("sidebar-show-symbolic");
-    toggle_btn.add_css_class("chrome-button");
-    toggle_btn.set_tooltip_text(Some("Toggle sidebar"));
-    let split_clone = split.clone();
-    toggle_btn.connect_clicked(move |_| {
-        split_clone.set_show_sidebar(!split_clone.shows_sidebar());
-    });
-    // Refresh button
-    let refresh_btn = Button::from_icon_name("view-refresh-symbolic");
-    refresh_btn.add_css_class("chrome-button");
-    refresh_btn.set_tooltip_text(Some("Refresh workspace state"));
-    let hub_refresh = refresh_hub.clone();
-    refresh_btn.connect_clicked(move |_| {
-        hub_refresh.refresh(RefreshScope::All);
-    });
-    let palette_btn = Button::from_icon_name("edit-find-symbolic");
-    palette_btn.add_css_class("chrome-button");
-    palette_btn.set_tooltip_text(Some("Command palette"));
-    let settings_btn = Button::from_icon_name("emblem-system-symbolic");
-    settings_btn.add_css_class("chrome-button");
-    settings_btn.set_tooltip_text(Some("Settings"));
+    let content_overlay = Overlay::new();
+    content_overlay.set_child(Some(&toast_overlay));
+
+    let reopen_sidebar_btn = icon_button("sidebar-show-symbolic", "Show sidebar");
+    reopen_sidebar_btn.add_css_class("sidebar-reopen-button");
+    reopen_sidebar_btn.set_tooltip_text(Some("Show sidebar"));
+    reopen_sidebar_btn.set_halign(Align::Start);
+    reopen_sidebar_btn.set_valign(Align::Start);
+    reopen_sidebar_btn.set_margin_start(10);
+    reopen_sidebar_btn.set_margin_top(10);
+    {
+        let split = split.clone();
+        reopen_sidebar_btn.connect_clicked(move |_| {
+            split.set_collapsed(false);
+        });
+    }
+    content_overlay.add_overlay(&reopen_sidebar_btn);
+    reopen_sidebar_btn.set_visible(split.is_collapsed());
+    {
+        let reopen_sidebar_btn = reopen_sidebar_btn.clone();
+        split.connect_collapsed_notify(move |split| {
+            reopen_sidebar_btn.set_visible(split.is_collapsed());
+        });
+    }
+
+    split.set_content(Some(&content_overlay));
 
     let open_palette: Rc<dyn Fn()> = {
         let window_for_palette = window.clone();
@@ -561,29 +558,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget) {
             );
         })
     };
-    let open_palette_button = open_palette.clone();
-    palette_btn.connect_clicked(move |_| {
-        open_palette_button();
-    });
-    let stack_settings = main_stack.clone();
-    let state_settings = app_state.clone();
-    let hub_settings = refresh_hub.clone();
-    settings_btn.connect_clicked(move |_| {
-        state_settings.set_active_page(AppPage::Settings);
-        stack_settings.set_visible_child_name("settings");
-        hub_settings.refresh(RefreshScope::Sidebar);
-        hub_settings.refresh(RefreshScope::Projects);
-    });
-    header.pack_start(&toggle_btn);
-    header.pack_end(&settings_btn);
-    header.pack_end(&palette_btn);
-    header.pack_end(&refresh_btn);
-
-    let toolbar_view = adw::ToolbarView::new();
-    toolbar_view.add_top_bar(&header);
-    toolbar_view.set_content(Some(&split));
-
-    window.set_content(Some(&toolbar_view));
+    window.set_content(Some(&split));
     window.present();
 
     if reconcile_runtime_state(&app_state.workspace_database_path())
@@ -659,6 +634,20 @@ fn build_ui(app: &Application, launch_target: LaunchTarget) {
     let refresh_workspace_kb = refresh_workspace_detail.clone();
     evk.connect_key_pressed(move |_, keyval, _, modifiers| {
         if let Some(key) = keyval.to_unicode() {
+            if key.eq_ignore_ascii_case(&'t')
+                && (modifiers.contains(gtk::gdk::ModifierType::META_MASK)
+                    || modifiers.contains(gtk::gdk::ModifierType::SUPER_MASK))
+            {
+                apply_palette_target(
+                    PaletteTarget::WorkspaceTab(WorkspaceTab::Terminal),
+                    &state_kb,
+                    &stack_kb,
+                    &split_kb,
+                    &hub_kb,
+                    &refresh_workspace_kb,
+                );
+                return gtk::glib::Propagation::Stop;
+            }
             let action = keybindings_kb.borrow().action_for_event(
                 key,
                 modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK),
@@ -866,7 +855,7 @@ fn render_command_palette_results(
             Some(shortcut) => format!("{}  {}", command.label, shortcut),
             None => command.label.to_owned(),
         };
-        let button = Button::with_label(&label);
+        let button = text_button(&label);
         button.set_halign(gtk::Align::Fill);
         button.set_hexpand(true);
         let target = command.target.clone();
@@ -890,7 +879,7 @@ fn apply_palette_target(
 ) {
     match target {
         PaletteTarget::Page(page) => {
-            state.set_active_page(page.clone());
+            state.navigate_to_page(page.clone());
             main_stack.set_visible_child_name(page_stack_name(&page));
             refresh_hub.refresh(RefreshScope::Sidebar);
             if page == AppPage::Workspace {
@@ -898,8 +887,7 @@ fn apply_palette_target(
             }
         }
         PaletteTarget::WorkspaceTab(tab) => {
-            state.set_active_page(AppPage::Workspace);
-            state.set_active_workspace_tab(tab);
+            state.navigate_to_workspace_tab(tab);
             main_stack.set_visible_child_name("workspace");
             refresh_hub.refresh(RefreshScope::Sidebar);
             refresh_workspace();

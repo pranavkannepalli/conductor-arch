@@ -1,7 +1,7 @@
 use gtk::prelude::*;
 use gtk::{
-    Box as GBox, Button, CheckButton, ComboBoxText, Entry, Label, Orientation, ScrolledWindow,
-    TextBuffer, TextView,
+    Align, Box as GBox, Button, CheckButton, ComboBoxText, Entry, EventControllerKey, Image, Label,
+    Orientation, Overlay, Popover, ScrolledWindow, TextBuffer, TextView, ToggleButton, Widget,
 };
 use linux_conductor_core::pty::PtySession;
 use linux_conductor_core::workspace::{
@@ -15,7 +15,9 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use std::{env, fs as stdfs};
 
+use crate::buttons::{icon_button, style_icon_button, style_text_button, text_button};
 use crate::state::AppState;
 use crate::terminal::terminal_display_text;
 
@@ -24,6 +26,13 @@ const SESSION_TAIL_HISTORY: usize = 120;
 const SESSION_POLL_INTERVAL_MS: u64 = 100;
 const SESSION_RECONCILE_EVERY_TICKS: u32 = 10;
 
+#[derive(Clone)]
+struct EditorChoice {
+    name: String,
+    icon: &'static str,
+    command: String,
+}
+
 fn session_action_row() -> GBox {
     let row = GBox::new(Orientation::Horizontal, 8);
     row.add_css_class("action-row");
@@ -31,50 +40,572 @@ fn session_action_row() -> GBox {
 }
 
 fn session_secondary_button(label: &str) -> Button {
-    let button = Button::with_label(label);
+    let button = text_button(label);
     button.add_css_class("secondary-action");
     button
 }
 
 fn session_flat_button(label: &str) -> Button {
-    let button = Button::with_label(label);
+    let button = text_button(label);
     button.add_css_class("flat-action");
     button
 }
 
 fn session_destructive_button(label: &str) -> Button {
-    let button = Button::with_label(label);
+    let button = text_button(label);
     button.add_css_class("destructive-action");
     button
 }
 
 pub fn agent_session_panel(
+    _database_path: PathBuf,
+    _workspace_name: &str,
+    repository_name: &str,
+    branch_name: &str,
+    collapse_sidebar: Rc<dyn Fn()>,
+    _app_state: AppState,
+    _refresh: impl Fn() + Clone + 'static,
+    include_header: bool,
+) -> GBox {
+    let root = GBox::new(Orientation::Vertical, 0);
+    root.add_css_class("chat-surface");
+    root.set_vexpand(true);
+    root.set_hexpand(true);
+
+    if include_header {
+        root.append(&session_header_row(
+            repository_name,
+            branch_name,
+            collapse_sidebar.clone(),
+        ));
+    }
+
+    // ── Messages scroll area ──────────────────────────────────────────
+    let messages = GBox::new(Orientation::Vertical, 0);
+    messages.add_css_class("chat-messages");
+    messages.set_vexpand(true);
+    messages.set_hexpand(true);
+
+    messages.append(&chat_user_bubble(
+        "Walk me through how this workspace is set up.",
+    ));
+
+    let agent1 = Label::new(Some(
+        "This workspace runs coding agents in parallel. Each agent gets its own branch, files, chat, terminal, preview, and reviewable diff.\n\n1. Send a task.\n2. Run the app (Ctrl R).\n3. Review the diff before keeping it.",
+    ));
+    agent1.add_css_class("chat-agent-text");
+    agent1.set_wrap(true);
+    agent1.set_xalign(0.0);
+    agent1.set_hexpand(true);
+    agent1.set_margin_bottom(28);
+    messages.append(&agent1);
+
+    messages.append(&chat_user_bubble("Add a 10-train milestone animation."));
+
+    let agent2 = Label::new(Some(
+        "Done. I updated the animation in this workspace and kept the preview running. The code is isolated from main until you review the diff.",
+    ));
+    agent2.add_css_class("chat-agent-text");
+    agent2.set_wrap(true);
+    agent2.set_xalign(0.0);
+    agent2.set_hexpand(true);
+    messages.append(&agent2);
+
+    let scroll = ScrolledWindow::new();
+    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    scroll.set_vexpand(true);
+    scroll.set_child(Some(&messages));
+    root.append(&scroll);
+
+    // ── Composer ─────────────────────────────────────────────────────
+    let composer_wrap = GBox::new(Orientation::Vertical, 0);
+    composer_wrap.add_css_class("chat-composer");
+
+    let composer_box = GBox::new(Orientation::Vertical, 0);
+    composer_box.add_css_class("chat-composer-box");
+
+    let input_view = TextView::new();
+    input_view.set_wrap_mode(gtk::WrapMode::WordChar);
+    input_view.add_css_class("chat-input-view");
+    input_view.set_accepts_tab(false);
+    input_view.set_left_margin(16);
+    input_view.set_right_margin(16);
+    input_view.set_top_margin(14);
+    input_view.set_bottom_margin(6);
+
+    let input_scroll = ScrolledWindow::new();
+    input_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    input_scroll.set_min_content_height(54);
+    input_scroll.set_max_content_height(120);
+    input_scroll.add_css_class("chat-input-scroll");
+    input_scroll.set_child(Some(&input_view));
+    let input_shell = GBox::new(Orientation::Horizontal, 8);
+    input_shell.set_hexpand(true);
+    let input_overlay = Overlay::new();
+    input_overlay.set_hexpand(true);
+    input_overlay.set_child(Some(&input_scroll));
+    let placeholder = Label::new(Some(
+        "Ask to make changes, @mention files, or run /commands",
+    ));
+    placeholder.add_css_class("chat-placeholder");
+    placeholder.set_halign(Align::Start);
+    placeholder.set_valign(Align::Start);
+    placeholder.set_margin_start(18);
+    placeholder.set_margin_top(18);
+    input_overlay.add_overlay(&placeholder);
+    input_shell.append(&input_overlay);
+
+    let focus_btn = icon_button("focus-windows-symbolic", "Quick focus composer (Ctrl+L)");
+    focus_btn.add_css_class("chat-focus-btn");
+    focus_btn.set_tooltip_text(Some("Quick focus composer (Ctrl+L)"));
+    input_shell.append(&focus_btn);
+
+    let toolbar = GBox::new(Orientation::Horizontal, 8);
+    toolbar.add_css_class("chat-toolbar");
+    toolbar.set_hexpand(true);
+
+    let left_group = GBox::new(Orientation::Horizontal, 8);
+    left_group.set_hexpand(true);
+
+    let interface_btn = mode_menu_button(
+        "Codex",
+        "code-symbolic",
+        &["Codex", "Claude", "Cursor", "Shell"],
+        0,
+    );
+    let fast_btn = mode_icon_toggle_button("Fast", "weather-clear-symbolic", true);
+    let thinking_btn = mode_menu_button("High", "◔", &["Low", "Medium", "High", "Extra high"], 2);
+    thinking_btn.add_css_class("chat-thinking-menu");
+    let goal_btn = mode_icon_toggle_button("Goal", "target-symbolic", false);
+    let plan_btn = mode_icon_toggle_button("Plan", "map-symbolic", false);
+
+    left_group.append(&interface_btn);
+    left_group.append(&fast_btn);
+    left_group.append(&thinking_btn);
+    left_group.append(&goal_btn);
+    left_group.append(&plan_btn);
+
+    let right_group = GBox::new(Orientation::Horizontal, 8);
+    right_group.set_halign(Align::End);
+    right_group.set_hexpand(false);
+
+    let context_btn = icon_text_button("◔", "chat-context-btn");
+    context_btn.set_tooltip_text(Some("Context used"));
+    let attach_btn = icon_button("mail-attachment-symbolic", "Attach file");
+    attach_btn.add_css_class("chat-toolbar-btn");
+    attach_btn.set_tooltip_text(Some("Attach file"));
+    let issue_btn = icon_button("github-symbolic", "Link GitHub issue");
+    issue_btn.add_css_class("chat-toolbar-btn");
+    issue_btn.set_tooltip_text(Some("Link GitHub issue"));
+
+    let send_btn = icon_button("send-symbolic", "Send message");
+    send_btn.add_css_class("chat-send-btn");
+    send_btn.set_tooltip_text(Some("Send message"));
+
+    right_group.append(&context_btn);
+    right_group.append(&attach_btn);
+    right_group.append(&issue_btn);
+    right_group.append(&send_btn);
+
+    toolbar.append(&left_group);
+    toolbar.append(&right_group);
+
+    composer_box.append(&input_shell);
+    composer_box.append(&toolbar);
+    composer_wrap.append(&composer_box);
+    root.append(&composer_wrap);
+
+    let buffer = input_view.buffer();
+    let buffer_for_update = buffer.clone();
+    let update_composer_state = {
+        let placeholder = placeholder.clone();
+        let send_btn = send_btn.clone();
+        let input_view = input_view.clone();
+        Rc::new(move || {
+            let start = buffer_for_update.start_iter();
+            let end = buffer_for_update.end_iter();
+            let text = buffer_for_update.text(&start, &end, true);
+            let has_text = !text.as_str().trim().is_empty();
+            placeholder.set_visible(!has_text);
+            send_btn.set_sensitive(has_text);
+            if has_text {
+                send_btn.add_css_class("chat-send-btn-active");
+            } else {
+                send_btn.remove_css_class("chat-send-btn-active");
+            }
+            input_view.queue_draw();
+        })
+    };
+    buffer.connect_changed({
+        let update = update_composer_state.clone();
+        move |_| update()
+    });
+    update_composer_state();
+
+    focus_btn.connect_clicked({
+        let input_view = input_view.clone();
+        move |_| {
+            input_view.grab_focus();
+        }
+    });
+    let keybind = EventControllerKey::new();
+    keybind.connect_key_pressed({
+        let input_view = input_view.clone();
+        move |_, keyval, _, modifiers| {
+            let ctrl = modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+            if ctrl
+                && keyval
+                    .to_unicode()
+                    .is_some_and(|ch| ch.eq_ignore_ascii_case(&'l'))
+            {
+                input_view.grab_focus();
+                return gtk::glib::Propagation::Stop;
+            }
+            gtk::glib::Propagation::Proceed
+        }
+    });
+    root.add_controller(keybind);
+
+    root
+}
+
+pub(crate) fn session_header_row(
+    repository_name: &str,
+    branch_name: &str,
+    collapse_sidebar: Rc<dyn Fn()>,
+) -> GBox {
+    let header = GBox::new(Orientation::Horizontal, 10);
+    header.add_css_class("chat-header-row");
+    header.set_hexpand(true);
+
+    let breadcrumb = GBox::new(Orientation::Horizontal, 8);
+    breadcrumb.set_hexpand(true);
+
+    let repo_icon = Image::from_icon_name("folder-symbolic");
+    repo_icon.add_css_class("chat-repo-icon");
+    breadcrumb.append(&repo_icon);
+
+    let repo_label = Label::new(Some(repository_name));
+    repo_label.add_css_class("chat-repo-label");
+    repo_label.set_xalign(0.0);
+    breadcrumb.append(&repo_label);
+
+    let branch_sep = Label::new(Some(">"));
+    branch_sep.add_css_class("chat-branch-separator");
+    breadcrumb.append(&branch_sep);
+
+    let branch_label = Label::new(Some(branch_name));
+    branch_label.add_css_class("chat-branch-label");
+    branch_label.set_xalign(0.0);
+    breadcrumb.append(&branch_label);
+
+    let editor_picker = editor_picker_button();
+    let sidebar_btn = icon_button("sidebar-hide-symbolic", "Collapse right sidebar");
+    sidebar_btn.add_css_class("chat-focus-btn");
+    sidebar_btn.set_tooltip_text(Some("Collapse right sidebar"));
+    sidebar_btn.connect_clicked(move |_| collapse_sidebar());
+    header.append(&breadcrumb);
+    header.append(&editor_picker);
+    header.append(&sidebar_btn);
+    header
+}
+
+fn chat_user_bubble(text: &str) -> GBox {
+    let row = GBox::new(Orientation::Horizontal, 0);
+    row.set_halign(gtk::Align::Fill);
+    row.set_hexpand(true);
+    row.add_css_class("chat-user-row");
+
+    let bubble = Label::new(Some(text));
+    bubble.add_css_class("chat-user-bubble");
+    bubble.set_wrap(true);
+    bubble.set_xalign(0.0);
+    bubble.set_hexpand(true);
+    bubble.set_halign(gtk::Align::Fill);
+    row.append(&bubble);
+    row
+}
+
+fn icon_text_button(text: &str, class_name: &str) -> Button {
+    let button = text_button(text);
+    button.add_css_class(class_name);
+    button.set_tooltip_text(Some(match class_name {
+        "chat-context-btn" => "Context used",
+        _ => text,
+    }));
+    button
+}
+
+fn mode_icon_toggle_button(label: &str, icon_name: &str, active: bool) -> ToggleButton {
+    let button = ToggleButton::new();
+    button.add_css_class("chat-mode-btn");
+    button.add_css_class("chat-footer-toggle");
+    style_icon_button(&button);
+    button.set_active(active);
+    button.set_tooltip_text(Some(label));
+    let icon = Image::from_icon_name(icon_name);
+    icon.add_css_class("chat-mode-icon");
+    button.set_child(Some(&icon));
+    button.connect_toggled({
+        let button = button.clone();
+        move |_| {
+            if button.is_active() {
+                button.add_css_class("chat-mode-selected");
+            } else {
+                button.remove_css_class("chat-mode-selected");
+            }
+        }
+    });
+    if active {
+        button.add_css_class("chat-mode-selected");
+    }
+    button
+}
+
+fn mode_menu_button(
+    label: &str,
+    icon_name: &str,
+    options: &[&str],
+    selected_index: usize,
+) -> Button {
+    let selected_label = options.get(selected_index).copied().unwrap_or(label);
+    let button = Button::new();
+    button.add_css_class("chat-mode-menu");
+    style_text_button(&button);
+    button.set_tooltip_text(Some(selected_label));
+
+    let shell = mode_menu_child(icon_name, selected_label);
+    button.set_child(Some(&shell));
+    let popover = mode_menu_popover(button.clone(), icon_name, options, selected_index);
+    popover.set_parent(&button);
+    button.connect_clicked(move |_| {
+        popover.popup();
+    });
+    button
+}
+
+fn mode_menu_child(icon_name: &str, text_label: &str) -> GBox {
+    let shell = GBox::new(Orientation::Horizontal, 6);
+    let icon: Widget = if icon_name.chars().count() == 1 {
+        let icon = Label::new(Some(icon_name));
+        icon.add_css_class("chat-mode-glyph");
+        icon.upcast()
+    } else {
+        let icon = Image::from_icon_name(icon_name);
+        icon.add_css_class("chat-mode-icon");
+        icon.upcast()
+    };
+    let text = Label::new(Some(text_label));
+    text.add_css_class("chat-mode-label");
+    let arrow = Image::from_icon_name("pan-down-symbolic");
+    arrow.add_css_class("chat-mode-arrow");
+    shell.append(&icon);
+    shell.append(&text);
+    shell.append(&arrow);
+    shell
+}
+
+fn mode_menu_popover(
+    button: Button,
+    icon_name: &str,
+    options: &[&str],
+    selected_index: usize,
+) -> Popover {
+    let popover = Popover::new();
+    popover.add_css_class("chat-menu-popover");
+    let list = GBox::new(Orientation::Vertical, 4);
+    list.add_css_class("chat-menu-list");
+
+    for (index, option) in options.iter().enumerate() {
+        let row = Button::new();
+        row.add_css_class("chat-menu-item");
+        let row_box = GBox::new(Orientation::Horizontal, 10);
+        let icon = Image::from_icon_name("application-x-executable-symbolic");
+        icon.add_css_class("chat-menu-item-icon");
+        let name = Label::new(Some(option));
+        name.add_css_class("chat-menu-item-label");
+        name.set_xalign(0.0);
+        name.set_hexpand(true);
+        let shortcut = Label::new(Some(&index.to_string()));
+        shortcut.add_css_class("chat-menu-shortcut");
+        row_box.append(&icon);
+        row_box.append(&name);
+        row_box.append(&shortcut);
+        row.set_child(Some(&row_box));
+        if index == selected_index {
+            row.add_css_class("chat-menu-item-selected");
+        }
+        let button_for_row = button.clone();
+        let icon_name = icon_name.to_owned();
+        let option = (*option).to_owned();
+        let popover_for_row = popover.clone();
+        row.connect_clicked(move |_| {
+            let shell = mode_menu_child(&icon_name, &option);
+            button_for_row.set_child(Some(&shell));
+            button_for_row.set_tooltip_text(Some(&option));
+            popover_for_row.popdown();
+        });
+        list.append(&row);
+    }
+    popover.set_child(Some(&list));
+    popover
+}
+
+fn editor_picker_button() -> Button {
+    let choices = Rc::new(RefCell::new(detected_editor_choices()));
+    let initial = choices
+        .borrow()
+        .iter()
+        .position(|choice| choice.name == "Cursor")
+        .unwrap_or(0);
+    let button = Button::new();
+    button.add_css_class("chat-editor-menu");
+    style_text_button(&button);
+    editor_picker_set_button_child(&button, &choices.borrow()[initial]);
+    let popover = editor_picker_popover(choices.clone(), initial, &button);
+    popover.set_parent(&button);
+    button.connect_clicked(move |_| {
+        popover.popup();
+    });
+    button
+}
+
+fn editor_picker_set_button_child(button: &Button, choice: &EditorChoice) {
+    let shell = GBox::new(Orientation::Horizontal, 6);
+    let icon = Image::from_icon_name(choice.icon);
+    icon.add_css_class("chat-editor-icon");
+    let text = Label::new(Some(&choice.name));
+    text.add_css_class("chat-editor-label");
+    let arrow = Image::from_icon_name("pan-down-symbolic");
+    arrow.add_css_class("chat-mode-arrow");
+    shell.append(&icon);
+    shell.append(&text);
+    shell.append(&arrow);
+    button.set_child(Some(&shell));
+}
+
+fn editor_picker_popover(
+    choices: Rc<RefCell<Vec<EditorChoice>>>,
+    initial: usize,
+    button: &Button,
+) -> Popover {
+    let popover = Popover::new();
+    popover.add_css_class("chat-menu-popover");
+    let list = GBox::new(Orientation::Vertical, 4);
+    list.add_css_class("chat-menu-list");
+    for (index, choice) in choices.borrow().iter().enumerate() {
+        let row = Button::new();
+        row.add_css_class("chat-menu-item");
+        let row_box = GBox::new(Orientation::Horizontal, 10);
+        let icon = Image::from_icon_name(choice.icon);
+        icon.add_css_class("chat-menu-item-icon");
+        let name = Label::new(Some(&choice.name));
+        name.add_css_class("chat-menu-item-label");
+        name.set_xalign(0.0);
+        name.set_hexpand(true);
+        let shortcut = Label::new(Some(&index.to_string()));
+        shortcut.add_css_class("chat-menu-shortcut");
+        row_box.append(&icon);
+        row_box.append(&name);
+        row_box.append(&shortcut);
+        row.set_child(Some(&row_box));
+        if index == initial {
+            row.add_css_class("chat-menu-item-selected");
+        }
+        let button = button.clone();
+        let choice = choice.clone();
+        let popover_for_row = popover.clone();
+        row.connect_clicked(move |_| {
+            editor_picker_set_button_child(&button, &choice);
+            popover_for_row.popdown();
+        });
+        list.append(&row);
+    }
+    popover.set_child(Some(&list));
+    popover
+}
+
+fn detected_editor_choices() -> Vec<EditorChoice> {
+    let mut choices = Vec::new();
+    for (name, icon, command) in [
+        ("Cursor", "cursor-symbolic", "cursor"),
+        ("VS Code", "code-symbolic", "code"),
+        ("VSCodium", "code-symbolic", "codium"),
+        ("Zed", "zed-symbolic", "zed"),
+        ("Sublime Text", "accessories-text-editor-symbolic", "subl"),
+        ("Kate", "accessories-text-editor-symbolic", "kate"),
+        (
+            "GNOME Text Editor",
+            "accessories-text-editor-symbolic",
+            "gnome-text-editor",
+        ),
+        ("Mousepad", "accessories-text-editor-symbolic", "mousepad"),
+    ] {
+        if command_on_path(command) {
+            choices.push(EditorChoice {
+                name: name.to_owned(),
+                icon,
+                command: command.to_owned(),
+            });
+        }
+    }
+    if choices.is_empty() {
+        choices.push(EditorChoice {
+            name: "Cursor".to_owned(),
+            icon: "cursor-symbolic",
+            command: "cursor".to_owned(),
+        });
+    }
+    choices
+}
+
+fn command_on_path(command: &str) -> bool {
+    let Some(path) = env::var_os("PATH") else {
+        return false;
+    };
+    env::split_paths(&path).any(|dir| {
+        let candidate = dir.join(command);
+        candidate.is_file() || executable_file_exists(&candidate)
+    })
+}
+
+fn executable_file_exists(path: &Path) -> bool {
+    let Ok(meta) = stdfs::metadata(path) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        meta.is_file()
+    }
+}
+
+#[allow(dead_code)]
+fn agent_session_panel_impl(
     database_path: PathBuf,
     workspace_name: &str,
     app_state: AppState,
     refresh: impl Fn() + Clone + 'static,
 ) -> GBox {
-    let root = GBox::new(Orientation::Vertical, 10);
+    let root = GBox::new(Orientation::Vertical, 0);
     root.add_css_class("agent-panel");
     root.add_css_class("session-surface");
 
-    let title = Label::new(Some("Agent sessions"));
-    title.add_css_class("section-title");
-    title.set_xalign(0.0);
-    root.append(&title);
-
+    // ── Status labels ────────────────────────────────────────────
     let provider_status = Label::new(Some("Loading provider and MCP status..."));
     provider_status.add_css_class("card-meta");
     provider_status.set_xalign(0.0);
     provider_status.set_wrap(true);
-    root.append(&provider_status);
 
     let active_status = Label::new(Some("No active session."));
     active_status.add_css_class("card-meta");
     active_status.set_xalign(0.0);
-    root.append(&active_status);
 
-    let control_wrapper = GBox::new(Orientation::Vertical, 8);
+    // ── Config options (collapsed by default) ────────────────────
     let harness_row = GBox::new(Orientation::Horizontal, 8);
     let plan_mode = CheckButton::with_label("Plan mode");
     let fast_mode = CheckButton::with_label("Fast mode");
@@ -95,13 +626,11 @@ pub fn agent_session_panel(
     effort_mode.append(Some("medium"), "Effort: medium");
     effort_mode.append(Some("high"), "Effort: high");
     effort_mode.set_active(Some(0));
-
     plan_mode.set_tooltip_text(Some("Plan mode applies to session startup."));
     fast_mode.set_tooltip_text(Some("Fast mode applies to session startup."));
     approval_mode.set_tooltip_text(Some("Tool approval preference for this session."));
     reasoning_mode.set_tooltip_text(Some("Reasoning preference for this session."));
     effort_mode.set_tooltip_text(Some("Effort preference for this session."));
-
     harness_row.append(&plan_mode);
     harness_row.append(&fast_mode);
     harness_row.append(&approval_mode);
@@ -126,11 +655,7 @@ pub fn agent_session_panel(
     codex_row.append(&codex_goals);
     codex_row.append(&codex_skills);
 
-    control_wrapper.append(&harness_row);
-    control_wrapper.append(&codex_row);
-    root.append(&control_wrapper);
-
-    let launch_row = session_action_row();
+    // ── Launch buttons ───────────────────────────────────────────
     let mut agent_buttons: Vec<(Button, SessionKind)> = Vec::new();
     for (label, kind) in [
         ("Shell", SessionKind::Shell),
@@ -138,7 +663,7 @@ pub fn agent_session_panel(
         ("Claude", SessionKind::Claude),
         ("Cursor", SessionKind::Cursor),
     ] {
-        let button = Button::with_label(label);
+        let button = text_button(label);
         match kind {
             SessionKind::Codex | SessionKind::Claude => button.add_css_class("suggested-action"),
             SessionKind::Cursor => button.add_css_class("secondary-action"),
@@ -153,11 +678,15 @@ pub fn agent_session_panel(
         button.set_tooltip_text(Some(tooltip));
         agent_buttons.push((button, kind));
     }
-    for (button, _) in &agent_buttons {
-        launch_row.append(button);
-    }
-    root.append(&launch_row);
 
+    // ── Session selector + controls ──────────────────────────────
+    let sessions_combo = ComboBoxText::new();
+    sessions_combo.set_hexpand(true);
+    let refresh_btn = session_flat_button("Refresh");
+    let stop_btn = session_destructive_button("Stop session");
+    stop_btn.set_tooltip_text(Some("Stop the selected running session."));
+
+    // ── Transcript ───────────────────────────────────────────────
     let transcript = TextView::new();
     transcript.set_editable(false);
     transcript.set_monospace(true);
@@ -167,34 +696,23 @@ pub fn agent_session_panel(
     let transcript_buffer = transcript.buffer();
     let transcript_text = initial_session_text(&database_path, workspace_name);
     transcript_buffer.set_text(&transcript_text);
-
     let transcript_scroll = ScrolledWindow::new();
     transcript_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+    transcript_scroll.set_vexpand(true);
     transcript_scroll.set_child(Some(&transcript));
-    root.append(&transcript_scroll);
 
-    let history_row = session_action_row();
-    let sessions_combo = ComboBoxText::new();
-    sessions_combo.set_hexpand(true);
-    let refresh_btn = session_flat_button("Refresh");
-    let stop_btn = session_destructive_button("Stop session");
-    stop_btn.set_tooltip_text(Some("Stop the selected running session."));
-    history_row.append(&sessions_combo);
-    history_row.append(&refresh_btn);
-    history_row.append(&stop_btn);
-    root.append(&history_row);
-
+    // ── Input row ────────────────────────────────────────────────
     let input_row = session_action_row();
     let input = Entry::new();
     input.set_placeholder_text(Some("Type session input..."));
     input.set_hexpand(true);
-    let send_btn = Button::with_label("Send");
+    let send_btn = text_button("Send");
     send_btn.add_css_class("suggested-action");
     send_btn.set_tooltip_text(Some("Send a line to the selected session."));
     input_row.append(&input);
     input_row.append(&send_btn);
-    root.append(&input_row);
 
+    // ── Staged review row ────────────────────────────────────────
     let staged_review_row = session_action_row();
     let staged_review_status = Label::new(Some("No staged review prompt."));
     staged_review_status.add_css_class("card-meta");
@@ -207,8 +725,8 @@ pub fn agent_session_panel(
     ));
     staged_review_row.append(&staged_review_status);
     staged_review_row.append(&send_review_btn);
-    root.append(&staged_review_row);
 
+    // ── Checkpoint row ───────────────────────────────────────────
     let checkpoint_row = session_action_row();
     let checkpoint_message = Entry::new();
     checkpoint_message.set_placeholder_text(Some("Checkpoint message (optional)"));
@@ -219,7 +737,43 @@ pub fn agent_session_panel(
     ));
     checkpoint_row.append(&checkpoint_message);
     checkpoint_row.append(&checkpoint_btn);
-    root.append(&checkpoint_row);
+
+    // ── Layout: top bar → spawn bar → options → transcript → input ──
+
+    // Top bar: active session selector + stop + refresh
+    let top_bar = session_action_row();
+    top_bar.append(&sessions_combo);
+    top_bar.append(&refresh_btn);
+    top_bar.append(&stop_btn);
+
+    // Spawn bar: pick what to launch
+    let spawn_bar = session_action_row();
+    let spawn_label = Label::new(Some("New:"));
+    spawn_label.add_css_class("detail-label");
+    spawn_bar.append(&spawn_label);
+    for (button, _) in &agent_buttons {
+        spawn_bar.append(button);
+    }
+
+    // Options expander (collapsed by default): harness config + checkpoint
+    let options_inner = GBox::new(Orientation::Vertical, 6);
+    options_inner.set_margin_top(4);
+    options_inner.set_margin_bottom(4);
+    options_inner.append(&harness_row);
+    options_inner.append(&codex_row);
+    options_inner.append(&provider_status);
+    options_inner.append(&checkpoint_row);
+    let options_expander = gtk::Expander::new(Some("Session options"));
+    options_expander.set_child(Some(&options_inner));
+    options_expander.set_expanded(false);
+
+    root.append(&top_bar);
+    root.append(&spawn_bar);
+    root.append(&options_expander);
+    root.append(&active_status);
+    root.append(&transcript_scroll);
+    root.append(&staged_review_row);
+    root.append(&input_row);
 
     let record_state = Rc::new(RefCell::new(Vec::<ProcessRecord>::new()));
     let selected_session: Rc<RefCell<Option<i64>>> =
@@ -607,6 +1161,19 @@ pub fn agent_session_panel(
                 }
             };
 
+            if matches!(kind, SessionKind::Codex) {
+                if let Some(bootstrap) = launch.env_value("CONDUCTOR_SESSION_BOOTSTRAP") {
+                    if let Err(err) = pty.write(&(bootstrap.to_owned() + "\n")) {
+                        let _ = pty.stop();
+                        append_text(
+                            &buffer_for_launch,
+                            &format!("[session start] failed to send Codex bootstrap: {err:#}\n"),
+                        );
+                        return;
+                    }
+                }
+            }
+
             let pid = match pty.process_id() {
                 Some(pid) => pid,
                 None => {
@@ -873,16 +1440,22 @@ fn session_transcript_event_summary(events: &[SessionTranscriptEvent]) -> String
     let mut review = 0usize;
     let mut system = 0usize;
     let mut agent = 0usize;
+    let mut tool = 0usize;
+    let mut skill = 0usize;
+    let mut harness = 0usize;
     for event in events {
         match event.role {
             SessionTranscriptRole::User => user += 1,
             SessionTranscriptRole::ReviewPrompt => review += 1,
             SessionTranscriptRole::System => system += 1,
             SessionTranscriptRole::Agent => agent += 1,
+            SessionTranscriptRole::Tool => tool += 1,
+            SessionTranscriptRole::Skill => skill += 1,
+            SessionTranscriptRole::Harness => harness += 1,
         }
     }
     format!(
-        "{} total, {user} user, {review} review, {system} system, {agent} agent",
+        "{} total, {user} user, {review} review, {system} system, {agent} agent, {tool} tool, {skill} skill, {harness} harness",
         events.len()
     )
 }
@@ -899,6 +1472,9 @@ enum SessionTranscriptRole {
     User,
     ReviewPrompt,
     Agent,
+    Tool,
+    Skill,
+    Harness,
 }
 
 impl SessionTranscriptRole {
@@ -908,6 +1484,9 @@ impl SessionTranscriptRole {
             Self::User => "You",
             Self::ReviewPrompt => "Review Prompt",
             Self::Agent => "Agent",
+            Self::Tool => "Tool",
+            Self::Skill => "Skill",
+            Self::Harness => "Harness",
         }
     }
 }
@@ -974,8 +1553,8 @@ fn parse_session_transcript_events(transcript: &str) -> Vec<SessionTranscriptEve
             continue;
         }
 
-        if is_system_event_marker(line) {
-            push_session_event(&mut events, SessionTranscriptRole::System, line.to_owned());
+        if let Some(role) = session_event_role_for_marker(line) {
+            push_session_event(&mut events, role, line.to_owned());
             index += 1;
             continue;
         }
@@ -1062,18 +1641,31 @@ fn is_session_event_marker(line: &str) -> bool {
     is_user_input_marker(line)
         || line == "[staged review prompt]"
         || line == "[/staged review prompt]"
-        || is_system_event_marker(line)
+        || session_event_role_for_marker(line).is_some()
 }
 
 fn is_user_input_marker(line: &str) -> bool {
     line.starts_with("[user input ") && line.ends_with(']')
 }
 
-fn is_system_event_marker(line: &str) -> bool {
-    line.starts_with("[session ")
+fn session_event_role_for_marker(line: &str) -> Option<SessionTranscriptRole> {
+    if line.starts_with("[session ")
         || line.starts_with("[checkpoint")
         || line.starts_with("[could not ")
         || line.starts_with("[error")
+    {
+        return Some(SessionTranscriptRole::System);
+    }
+    if line.starts_with("[conductor bootstrap") || line.starts_with("[harness ") {
+        return Some(SessionTranscriptRole::Harness);
+    }
+    if line.starts_with("[tool ") {
+        return Some(SessionTranscriptRole::Tool);
+    }
+    if line.starts_with("[skill ") {
+        return Some(SessionTranscriptRole::Skill);
+    }
+    None
 }
 
 fn seed_running_sessions(
@@ -1554,6 +2146,9 @@ mod tests {
         );
         let transcript = "\
 [session started] #11 kind=Cursor pid=1234
+\n[conductor bootstrap for codex]
+\n[tool bash]
+\n[skill tests]
 \n[user input memphis#11]
 open the project
 \n[staged review prompt]
@@ -1564,10 +2159,15 @@ Fix the failing checks
         let surface = format_selected_session_surface(&record, transcript, "waiting", true);
 
         assert!(surface.contains("System\n[session started] #11 kind=Cursor pid=1234"));
+        assert!(surface.contains("Harness\n[conductor bootstrap for codex]"));
+        assert!(surface.contains("Tool\n[tool bash]"));
+        assert!(surface.contains("Skill\n[skill tests]"));
         assert!(surface.contains("You\nopen the project"));
         assert!(surface.contains("Review Prompt\nFix the failing checks"));
         assert!(surface.contains("Agent\nBuild succeeded"));
-        assert!(surface.contains("Events: 4 total, 1 user, 1 review, 1 system, 1 agent"));
+        assert!(surface.contains(
+            "Events: 7 total, 1 user, 1 review, 1 system, 1 agent, 1 tool, 1 skill, 1 harness"
+        ));
         assert!(!surface.contains("[user input memphis#11]"));
     }
 

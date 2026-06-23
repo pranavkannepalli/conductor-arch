@@ -14,6 +14,12 @@ help:
 		'make tag VERSION=x.y.z        Create git tag vVERSION' \
 		'make publish-tag VERSION=x.y.z Push git tag vVERSION'
 
+dev:
+	@trap 'kill 0' INT TERM EXIT; \
+	cargo watch -x "run --bin linux-conductor-gtk" & \
+	cargo watch -x "run --bin linux-conductor --" & \
+	wait
+
 gtk:
 	cargo run --bin linux-conductor-gtk
 

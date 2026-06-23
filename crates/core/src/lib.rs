@@ -1,4 +1,5 @@
 pub mod doctor;
+pub mod harness;
 pub mod import;
 pub mod mcp;
 pub mod paths;

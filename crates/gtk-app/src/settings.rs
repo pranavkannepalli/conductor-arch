@@ -1,7 +1,8 @@
+use crate::buttons::text_button;
 use gtk::prelude::*;
 use gtk::{
-    Box as GBox, Button, CheckButton, ComboBoxText, Entry, Label, Orientation, PolicyType,
-    ScrolledWindow, Stack, StackSwitcher, TextView,
+    Align, Box as GBox, Button, CheckButton, ComboBoxText, Entry, Label, Orientation, PolicyType,
+    ScrolledWindow, Stack, TextView,
 };
 use linux_conductor_core::paths::AppPaths;
 use linux_conductor_core::repository::RepositoryStore;
@@ -10,12 +11,22 @@ use linux_conductor_core::settings::{
     load_repository_settings, save_repository_settings, FilePatternSource, GitSettings,
     PromptSettings, ProviderSettings, RepositorySettings, ScriptSettings, SettingsLayer,
 };
+use std::cell::RefCell;
 use std::path::PathBuf;
+use std::rc::Rc;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SettingsSection {
+    id: &'static str,
+    title: &'static str,
+    description: &'static str,
+}
 
 pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone + 'static) {
     let root = GBox::new(Orientation::Vertical, 0);
     root.add_css_class("dashboard");
     root.add_css_class("page-shell");
+
     let header = GBox::new(Orientation::Vertical, 8);
     header.add_css_class("dashboard-header");
     header.add_css_class("page-header");
@@ -23,7 +34,7 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
     title.add_css_class("dashboard-title");
     title.set_xalign(0.0);
     let subtitle = Label::new(Some(
-        "Repository settings belong here, not buried in Projects.",
+        "Repository settings live in a panel-style editor, not a loose form page.",
     ));
     subtitle.add_css_class("card-meta");
     subtitle.set_xalign(0.0);
@@ -34,173 +45,353 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
     let scroll = ScrolledWindow::new();
     scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
     scroll.set_vexpand(true);
-    let body = GBox::new(Orientation::Vertical, 14);
+    let body = GBox::new(Orientation::Vertical, 16);
     body.add_css_class("detail-body");
     body.add_css_class("page-body");
     scroll.set_child(Some(&body));
     root.append(&scroll);
 
-    let settings_grid = GBox::new(Orientation::Vertical, 10);
-    settings_grid.add_css_class("settings-panel");
-    body.append(&settings_grid);
+    let settings_shell = GBox::new(Orientation::Vertical, 14);
+    settings_shell.add_css_class("settings-shell");
+    body.append(&settings_shell);
 
+    let settings_toolbar = GBox::new(Orientation::Vertical, 10);
+    settings_toolbar.add_css_class("settings-toolbar");
     let settings_top = GBox::new(Orientation::Horizontal, 8);
+    settings_top.add_css_class("settings-toolbar-row");
     let settings_repo_entry = Entry::new();
     settings_repo_entry.set_placeholder_text(Some("repository name"));
+    settings_repo_entry.set_hexpand(true);
     let layer_select = ComboBoxText::new();
     layer_select.append(Some("shared"), "Shared");
     layer_select.append(Some("local"), "Local");
     layer_select.set_active_id(Some("shared"));
-    let load_settings_btn = Button::with_label("Load Settings");
-    let save_settings_btn = Button::with_label("Save Settings");
+    let load_settings_btn = text_button("Load");
+    let save_settings_btn = text_button("Save");
+    save_settings_btn.add_css_class("suggested-action");
     settings_top.append(&settings_repo_entry);
     settings_top.append(&layer_select);
     settings_top.append(&load_settings_btn);
     settings_top.append(&save_settings_btn);
-    settings_grid.append(&settings_top);
+    settings_toolbar.append(&settings_top);
 
     let settings_result = Label::new(Some(
-        "Shared settings are commit-safe. Use Local for machine secrets and overrides.",
+        "Shared settings are commit-safe. Use Local for machine secrets and per-machine overrides.",
     ));
+    settings_result.add_css_class("settings-status");
     settings_result.add_css_class("card-meta");
     settings_result.set_xalign(0.0);
     settings_result.set_wrap(true);
-    settings_grid.append(&settings_result);
+    settings_toolbar.append(&settings_result);
+    settings_shell.append(&settings_toolbar);
 
-    let tab_switcher = StackSwitcher::new();
-    tab_switcher.add_css_class("settings-tab-strip");
-    tab_switcher.set_halign(gtk::Align::Start);
-    settings_grid.append(&tab_switcher);
+    let inspector = GBox::new(Orientation::Horizontal, 16);
+    inspector.add_css_class("settings-inspector");
+    settings_shell.append(&inspector);
 
-    let tab_stack = Stack::new();
-    tab_stack.add_css_class("settings-tab-stack");
-    settings_grid.append(&tab_stack);
-    tab_switcher.set_stack(Some(&tab_stack));
+    let settings_rail = GBox::new(Orientation::Vertical, 6);
+    settings_rail.add_css_class("settings-rail");
+    settings_rail.set_width_request(230);
+    inspector.append(&settings_rail);
 
-    let general_panel = settings_tab_panel();
-    let prompts_panel = settings_tab_panel();
-    let providers_panel = settings_tab_panel();
-    let git_panel = settings_tab_panel();
-    let advanced_panel = settings_tab_panel();
-    tab_stack.add_titled(&general_panel, Some("general"), "General");
-    tab_stack.add_titled(&prompts_panel, Some("prompts"), "Prompts");
-    tab_stack.add_titled(&providers_panel, Some("providers"), "Providers");
-    tab_stack.add_titled(&git_panel, Some("git"), "Git & Workspaces");
-    tab_stack.add_titled(&advanced_panel, Some("advanced"), "Advanced");
+    let content_shell = GBox::new(Orientation::Vertical, 0);
+    content_shell.add_css_class("settings-content-shell");
+    content_shell.set_hexpand(true);
+    inspector.append(&content_shell);
 
-    let scripts_section = Label::new(Some("Scripts"));
-    scripts_section.add_css_class("section-title");
-    scripts_section.set_xalign(0.0);
-    general_panel.append(&scripts_section);
+    let content_scroll = ScrolledWindow::new();
+    content_scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
+    content_scroll.set_vexpand(true);
+    let content_stack = Stack::new();
+    content_stack.add_css_class("settings-content-stack");
+    content_scroll.set_child(Some(&content_stack));
+    content_shell.append(&content_scroll);
 
-    let scripts_row = GBox::new(Orientation::Horizontal, 8);
-    let setup_entry = Entry::new();
-    setup_entry.set_placeholder_text(Some("setup script"));
-    let run_entry = Entry::new();
-    run_entry.set_placeholder_text(Some("run script"));
-    let archive_entry = Entry::new();
-    archive_entry.set_placeholder_text(Some("archive script"));
-    let run_mode_entry = Entry::new();
-    run_mode_entry.set_placeholder_text(Some("run mode: concurrent/nonconcurrent"));
-    scripts_row.append(&setup_entry);
-    scripts_row.append(&run_entry);
-    scripts_row.append(&archive_entry);
-    scripts_row.append(&run_mode_entry);
-    general_panel.append(&scripts_row);
+    let general_panel = settings_content_panel();
+    let prompts_panel = settings_content_panel();
+    let providers_panel = settings_content_panel();
+    let git_panel = settings_content_panel();
+    let advanced_panel = settings_content_panel();
+    content_stack.add_named(&general_panel, Some("general"));
+    content_stack.add_named(&prompts_panel, Some("prompts"));
+    content_stack.add_named(&providers_panel, Some("providers"));
+    content_stack.add_named(&git_panel, Some("git"));
+    content_stack.add_named(&advanced_panel, Some("advanced"));
 
-    let booleans_row = GBox::new(Orientation::Horizontal, 10);
-    let spotlight_check = CheckButton::with_label("Spotlight testing");
-    let privacy_check = CheckButton::with_label("Enterprise data privacy");
-    let archive_on_merge_check = CheckButton::with_label("Archive on merge");
-    let delete_branch_check = CheckButton::with_label("Delete branch on archive");
-    let auto_upstream_check = CheckButton::with_label("Auto setup upstream");
-    booleans_row.append(&spotlight_check);
-    booleans_row.append(&privacy_check);
-    booleans_row.append(&archive_on_merge_check);
-    booleans_row.append(&delete_branch_check);
-    booleans_row.append(&auto_upstream_check);
-    general_panel.append(&booleans_row);
+    let rail_buttons: Rc<RefCell<Vec<(String, Button)>>> = Rc::new(RefCell::new(Vec::new()));
+    let active_section = Rc::new(RefCell::new(String::from("general")));
+    let sync_rail_state: Rc<dyn Fn()> = {
+        let rail_buttons = rail_buttons.clone();
+        let active_section = active_section.clone();
+        Rc::new(move || {
+            let active = active_section.borrow().clone();
+            for (id, button) in rail_buttons.borrow().iter() {
+                button.remove_css_class("settings-rail-button-active");
+                button.add_css_class("settings-rail-button");
+                if *id == active {
+                    button.remove_css_class("settings-rail-button");
+                    button.add_css_class("settings-rail-button-active");
+                }
+            }
+        })
+    };
 
-    let provider_row = GBox::new(Orientation::Horizontal, 8);
-    let claude_path_entry = Entry::new();
-    claude_path_entry.set_placeholder_text(Some("Claude executable"));
-    let codex_path_entry = Entry::new();
-    codex_path_entry.set_placeholder_text(Some("Codex executable"));
-    let claude_provider_entry = Entry::new();
-    claude_provider_entry.set_placeholder_text(Some("Claude provider"));
-    let codex_provider_entry = Entry::new();
-    codex_provider_entry.set_placeholder_text(Some("Codex provider"));
-    provider_row.append(&claude_path_entry);
-    provider_row.append(&codex_path_entry);
-    provider_row.append(&claude_provider_entry);
-    provider_row.append(&codex_provider_entry);
-    providers_panel.append(&provider_row);
+    for section in settings_sections() {
+        let button = settings_rail_button(section);
+        let stack_for_button = content_stack.clone();
+        let active_for_button = active_section.clone();
+        let sync_for_button = sync_rail_state.clone();
+        let id = section.id.to_owned();
+        button.connect_clicked(move |_| {
+            *active_for_button.borrow_mut() = id.clone();
+            stack_for_button.set_visible_child_name(&id);
+            sync_for_button();
+        });
+        settings_rail.append(&button);
+        rail_buttons
+            .borrow_mut()
+            .push((section.id.to_owned(), button.clone()));
+    }
+    content_stack.set_visible_child_name("general");
+    sync_rail_state();
 
-    let git_row = GBox::new(Orientation::Horizontal, 8);
-    let branch_prefix_type_entry = Entry::new();
-    branch_prefix_type_entry.set_placeholder_text(Some("branch prefix type"));
-    let branch_prefix_entry = Entry::new();
-    branch_prefix_entry.set_placeholder_text(Some("branch prefix"));
-    let bedrock_region_entry = Entry::new();
-    bedrock_region_entry.set_placeholder_text(Some("Bedrock region"));
-    let vertex_project_entry = Entry::new();
-    vertex_project_entry.set_placeholder_text(Some("Vertex project id"));
-    git_row.append(&branch_prefix_type_entry);
-    git_row.append(&branch_prefix_entry);
-    git_row.append(&bedrock_region_entry);
-    git_row.append(&vertex_project_entry);
-    git_panel.append(&git_row);
+    let setup_entry = machine_entry("setup script");
+    let run_entry = machine_entry("run script");
+    let archive_entry = machine_entry("archive script");
+    let run_mode_entry = machine_entry("run mode: concurrent/nonconcurrent");
+    let spotlight_check = CheckButton::with_label("Enable spotlight testing");
+    let privacy_check = CheckButton::with_label("Use enterprise privacy mode");
+    let archive_on_merge_check = CheckButton::with_label("Archive workspace on merge");
+    let delete_branch_check = CheckButton::with_label("Delete branch when archiving");
+    let auto_upstream_check = CheckButton::with_label("Auto setup upstream remote");
 
-    let files_label = Label::new(Some("Files to copy"));
-    files_label.add_css_class("detail-label");
-    files_label.set_xalign(0.0);
-    git_panel.append(&files_label);
-    let file_globs_view = settings_text_view(72);
-    git_panel.append(&file_globs_view.0);
+    let general_intro = settings_group(
+        "Repository runtime",
+        "Commands and runtime flags Linux Conductor uses when preparing and running this repository.",
+    );
+    general_panel.append(&general_intro.0);
+    general_intro.1.append(&settings_field_pair(
+        settings_field(
+            "Setup script",
+            "Runs after a workspace is created or prepared.",
+            &setup_entry,
+        ),
+        settings_field(
+            "Run script",
+            "Starts the repository runtime from the workspace.",
+            &run_entry,
+        ),
+    ));
+    general_intro.1.append(&settings_field_pair(
+        settings_field(
+            "Archive script",
+            "Runs before a workspace is archived if you use custom cleanup.",
+            &archive_entry,
+        ),
+        settings_field(
+            "Run mode",
+            "Usually `concurrent` unless this repository must serialize runs.",
+            &run_mode_entry,
+        ),
+    ));
 
-    let env_label = Label::new(Some("Environment variables (KEY=value)"));
-    env_label.add_css_class("detail-label");
-    env_label.set_xalign(0.0);
-    general_panel.append(&env_label);
-    let env_view = settings_text_view(72);
-    general_panel.append(&env_view.0);
+    let runtime_flags = settings_group(
+        "Runtime flags",
+        "Toggle repository-level behavior that affects merges, upstream setup, and privacy defaults.",
+    );
+    general_panel.append(&runtime_flags.0);
+    runtime_flags.1.append(&settings_toggle_row(
+        &spotlight_check,
+        "Turns on spotlight state tracking for workspace sync flows.",
+    ));
+    runtime_flags.1.append(&settings_toggle_row(
+        &privacy_check,
+        "Uses privacy-safe behavior for repository and agent operations.",
+    ));
+    runtime_flags.1.append(&settings_toggle_row(
+        &archive_on_merge_check,
+        "Archives the workspace automatically after a successful merge.",
+    ));
+    runtime_flags.1.append(&settings_toggle_row(
+        &delete_branch_check,
+        "Deletes the local branch during archive cleanup.",
+    ));
+    runtime_flags.1.append(&settings_toggle_row(
+        &auto_upstream_check,
+        "Automatically configures upstream remotes for new worktree branches.",
+    ));
 
-    let prompts_section = Label::new(Some("Prompts"));
-    prompts_section.add_css_class("section-title");
-    prompts_section.set_xalign(0.0);
-    prompts_panel.append(&prompts_section);
+    let env_view = settings_editor_view(120);
+    let environment_group = settings_group(
+        "Environment",
+        "Machine-style environment values passed into scripts and sessions as `KEY=value` lines.",
+    );
+    general_panel.append(&environment_group.0);
+    environment_group.1.append(&settings_editor_field(
+        "Environment variables",
+        "One `KEY=value` per line. Leave blank when the repo does not need extra environment.",
+        &env_view.0,
+    ));
+
+    let claude_path_entry = machine_entry("Claude executable");
+    let codex_path_entry = machine_entry("Codex executable");
+    let claude_provider_entry = machine_entry("Claude provider");
+    let codex_provider_entry = machine_entry("Codex provider");
+    let bedrock_region_entry = machine_entry("Bedrock region");
+    let vertex_project_entry = machine_entry("Vertex project id");
+
+    let provider_paths = settings_group(
+        "Provider paths",
+        "Executable paths and provider routing for local agent launches.",
+    );
+    providers_panel.append(&provider_paths.0);
+    provider_paths.1.append(&settings_field_pair(
+        settings_field(
+            "Claude executable",
+            "Absolute path or command name used to start Claude Code.",
+            &claude_path_entry,
+        ),
+        settings_field(
+            "Codex executable",
+            "Absolute path or command name used to start Codex.",
+            &codex_path_entry,
+        ),
+    ));
+    provider_paths.1.append(&settings_field_pair(
+        settings_field(
+            "Claude provider",
+            "Provider override used when Claude sessions need a specific backend.",
+            &claude_provider_entry,
+        ),
+        settings_field(
+            "Codex provider",
+            "Provider override used when Codex sessions need a specific backend.",
+            &codex_provider_entry,
+        ),
+    ));
+
+    let provider_platforms = settings_group(
+        "Platform settings",
+        "Provider-specific machine values for Bedrock and Vertex-backed setups.",
+    );
+    providers_panel.append(&provider_platforms.0);
+    provider_platforms.1.append(&settings_field_pair(
+        settings_field(
+            "Bedrock region",
+            "AWS region used for Bedrock requests when that provider is active.",
+            &bedrock_region_entry,
+        ),
+        settings_field(
+            "Vertex project id",
+            "Google Cloud project id used for Vertex provider calls.",
+            &vertex_project_entry,
+        ),
+    ));
+
+    let branch_prefix_type_entry = machine_entry("branch prefix type");
+    let branch_prefix_entry = machine_entry("branch prefix");
+    let git_behavior = settings_group(
+        "Git behavior",
+        "Naming and branch defaults that shape generated workspaces.",
+    );
+    git_panel.append(&git_behavior.0);
+    git_behavior.1.append(&settings_field_pair(
+        settings_field(
+            "Branch prefix type",
+            "Optional naming mode for branch prefixes if your repository uses one.",
+            &branch_prefix_type_entry,
+        ),
+        settings_field(
+            "Branch prefix",
+            "Short prefix used when Linux Conductor generates branch names.",
+            &branch_prefix_entry,
+        ),
+    ));
+
+    let file_globs_view = settings_editor_view(120);
+    let copy_rules = settings_group(
+        "Files to copy",
+        "Ignored local files copied into new workspaces unless `.worktreeinclude` takes over.",
+    );
+    git_panel.append(&copy_rules.0);
+    copy_rules.1.append(&settings_editor_field(
+        "File copy rules",
+        "One glob per line. This becomes read-only when `.worktreeinclude` is present.",
+        &file_globs_view.0,
+    ));
 
     let prompt_specs = [
-        ("General agent instructions", 84),
-        ("Code review", 84),
-        ("Create PR", 84),
-        ("Fix errors / failing checks", 84),
-        ("Resolve merge conflicts", 84),
-        ("Rename branch", 84),
-        ("Commit message generation", 84),
-        ("Test fixing", 84),
-        ("Refactor style", 84),
+        (
+            "General agent instructions",
+            "The default prompt context used for agent work in this repository.",
+            120,
+        ),
+        (
+            "Code review",
+            "Prompt guidance used when asking an agent to review code.",
+            110,
+        ),
+        (
+            "Create PR",
+            "Prompt template used when generating PR content.",
+            110,
+        ),
+        (
+            "Fix errors / failing checks",
+            "Prompt guidance for CI failures and broken builds.",
+            110,
+        ),
+        (
+            "Resolve merge conflicts",
+            "Prompt guidance for conflict-resolution flows.",
+            110,
+        ),
+        (
+            "Rename branch",
+            "Prompt used when branch naming needs refinement later in the workflow.",
+            110,
+        ),
+        (
+            "Commit message generation",
+            "Prompt guidance for generating repository-specific commit messages.",
+            110,
+        ),
+        (
+            "Test fixing",
+            "Prompt guidance for agents fixing failing tests.",
+            110,
+        ),
+        (
+            "Refactor style",
+            "Prompt guidance for safe structural cleanup and refactors.",
+            110,
+        ),
     ];
+    let prompt_group = settings_group(
+        "Prompt editors",
+        "Machine-owned prompt bodies. Keep these concise, explicit, and repository-specific.",
+    );
+    prompts_panel.append(&prompt_group.0);
     let mut prompt_views = Vec::new();
-    for (label, height) in prompt_specs {
-        let title = Label::new(Some(label));
-        title.add_css_class("detail-label");
-        title.set_xalign(0.0);
-        prompts_panel.append(&title);
-        let view = settings_text_view(height);
-        prompts_panel.append(&view.0);
+    for (label, help, height) in prompt_specs {
+        let view = settings_editor_view(height);
+        prompt_group
+            .1
+            .append(&settings_editor_field(label, help, &view.0));
         prompt_views.push(view);
     }
 
-    let advanced_label = Label::new(Some(
-        "Advanced customization TOML: naming, automation, agent profiles, merge rules, workspace defaults, and view settings",
+    let customization_view = settings_editor_view(240);
+    let advanced_group = settings_group(
+        "Advanced customization",
+        "Raw TOML for naming, automation, agent profiles, merge rules, workspace defaults, and view settings.",
+    );
+    advanced_panel.append(&advanced_group.0);
+    advanced_group.1.append(&settings_editor_field(
+        "Customization TOML",
+        "Use this when the higher-level fields are not enough. Keep it valid TOML.",
+        &customization_view.0,
     ));
-    advanced_label.add_css_class("detail-label");
-    advanced_label.set_xalign(0.0);
-    advanced_label.set_wrap(true);
-    advanced_panel.append(&advanced_label);
-    let customization_view = settings_text_view(180);
-    advanced_panel.append(&customization_view.0);
 
     let db_path_load_settings = paths.database_path.clone();
     let settings_repo_entry_load = settings_repo_entry.clone();
@@ -237,28 +428,62 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
             return;
         }
         match repository_root(&db_path_load_settings, &repo_name)
-            .and_then(|repo_path| load_repository_settings(&repo_path).map(|settings| (repo_path, settings)))
+            .and_then(|repo_path| {
+                load_repository_settings(&repo_path).map(|settings| (repo_path, settings))
+            })
             .and_then(|(repo_path, settings)| {
-                inspect_repository_settings(&repo_path).map(|inspection| (repo_path, settings, inspection))
+                inspect_repository_settings(&repo_path)
+                    .map(|inspection| (repo_path, settings, inspection))
             }) {
             Ok((repo_path, settings, inspection)) => {
                 setup_entry_load.set_text(settings.scripts.setup.as_deref().unwrap_or(""));
                 run_entry_load.set_text(settings.scripts.run.as_deref().unwrap_or(""));
                 archive_entry_load.set_text(settings.scripts.archive.as_deref().unwrap_or(""));
-                run_mode_entry_load.set_text(settings.scripts.run_mode.as_deref().unwrap_or("concurrent"));
+                run_mode_entry_load
+                    .set_text(settings.scripts.run_mode.as_deref().unwrap_or("concurrent"));
                 spotlight_check_load.set_active(settings.spotlight_testing.unwrap_or(false));
                 privacy_check_load.set_active(settings.enterprise_data_privacy.unwrap_or(false));
-                archive_on_merge_check_load.set_active(settings.git.archive_on_merge.unwrap_or(false));
-                delete_branch_check_load.set_active(settings.git.delete_branch_on_archive.unwrap_or(false));
-                auto_upstream_check_load.set_active(settings.git.worktree_push_auto_setup_remote.unwrap_or(false));
-                claude_path_entry_load.set_text(settings.providers.claude_code_executable_path.as_deref().unwrap_or(""));
-                codex_path_entry_load.set_text(settings.providers.codex_executable_path.as_deref().unwrap_or(""));
-                claude_provider_entry_load.set_text(settings.providers.claude_provider.as_deref().unwrap_or(""));
-                codex_provider_entry_load.set_text(settings.providers.codex_provider.as_deref().unwrap_or(""));
-                bedrock_region_entry_load.set_text(settings.providers.bedrock_region.as_deref().unwrap_or(""));
-                vertex_project_entry_load.set_text(settings.providers.vertex_project_id.as_deref().unwrap_or(""));
-                branch_prefix_type_entry_load.set_text(settings.git.branch_prefix_type.as_deref().unwrap_or(""));
-                branch_prefix_entry_load.set_text(settings.git.branch_prefix.as_deref().unwrap_or(""));
+                archive_on_merge_check_load
+                    .set_active(settings.git.archive_on_merge.unwrap_or(false));
+                delete_branch_check_load
+                    .set_active(settings.git.delete_branch_on_archive.unwrap_or(false));
+                auto_upstream_check_load.set_active(
+                    settings
+                        .git
+                        .worktree_push_auto_setup_remote
+                        .unwrap_or(false),
+                );
+                claude_path_entry_load.set_text(
+                    settings
+                        .providers
+                        .claude_code_executable_path
+                        .as_deref()
+                        .unwrap_or(""),
+                );
+                codex_path_entry_load.set_text(
+                    settings
+                        .providers
+                        .codex_executable_path
+                        .as_deref()
+                        .unwrap_or(""),
+                );
+                claude_provider_entry_load
+                    .set_text(settings.providers.claude_provider.as_deref().unwrap_or(""));
+                codex_provider_entry_load
+                    .set_text(settings.providers.codex_provider.as_deref().unwrap_or(""));
+                bedrock_region_entry_load
+                    .set_text(settings.providers.bedrock_region.as_deref().unwrap_or(""));
+                vertex_project_entry_load.set_text(
+                    settings
+                        .providers
+                        .vertex_project_id
+                        .as_deref()
+                        .unwrap_or(""),
+                );
+                branch_prefix_type_entry_load
+                    .set_text(settings.git.branch_prefix_type.as_deref().unwrap_or(""));
+                branch_prefix_entry_load
+                    .set_text(settings.git.branch_prefix.as_deref().unwrap_or(""));
                 if inspection.worktreeinclude_exists {
                     file_globs_text_load.set_editable(false);
                     file_globs_buffer_load.set_text(&inspection.active_file_patterns.join("\n"));
@@ -266,7 +491,14 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
                     file_globs_text_load.set_editable(true);
                     file_globs_buffer_load.set_text(&settings.file_include_globs.join("\n"));
                 }
-                env_buffer_load.set_text(&settings.environment_variables.iter().map(|(key, value)| format!("{key}={value}")).collect::<Vec<_>>().join("\n"));
+                env_buffer_load.set_text(
+                    &settings
+                        .environment_variables
+                        .iter()
+                        .map(|(key, value)| format!("{key}={value}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                );
                 let prompts = settings.prompts.unwrap_or_default();
                 let prompt_values = [
                     prompts.general,
@@ -286,9 +518,15 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
                     &customization_settings_to_toml(&settings.customization).unwrap_or_default(),
                 );
                 let source = match inspection.active_file_patterns_source {
-                    FilePatternSource::Worktreeinclude => ".worktreeinclude wins; Files to copy is read-only preview for new workspace copying.",
-                    FilePatternSource::RepositorySettings => "repository settings provide Files to copy patterns.",
-                    FilePatternSource::BuiltInDefault => "built-in default .env* pattern applies until settings are saved.",
+                    FilePatternSource::Worktreeinclude => {
+                        ".worktreeinclude wins; file rules are read-only here."
+                    }
+                    FilePatternSource::RepositorySettings => {
+                        "Repository settings define file copy rules."
+                    }
+                    FilePatternSource::BuiltInDefault => {
+                        "Built-in `.env*` defaults apply until custom rules are saved."
+                    }
                 };
                 settings_result_load.set_text(&format!(
                     "Loaded {}. Shared={} Local={} Worktreeinclude={} Active files: {} ({})",
@@ -395,6 +633,143 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
     (root, || {})
 }
 
+fn settings_sections() -> Vec<SettingsSection> {
+    vec![
+        SettingsSection {
+            id: "general",
+            title: "General",
+            description: "Scripts, runtime flags, and environment.",
+        },
+        SettingsSection {
+            id: "prompts",
+            title: "Prompts",
+            description: "Prompt bodies for agent tasks and workflows.",
+        },
+        SettingsSection {
+            id: "providers",
+            title: "Providers",
+            description: "Executable paths and provider platform values.",
+        },
+        SettingsSection {
+            id: "git",
+            title: "Git & Workspaces",
+            description: "Branch behavior and file copy rules.",
+        },
+        SettingsSection {
+            id: "advanced",
+            title: "Advanced",
+            description: "Raw TOML for deeper repository customization.",
+        },
+    ]
+}
+
+fn settings_rail_button(section: SettingsSection) -> Button {
+    let button = text_button(section.title);
+    button.add_css_class("settings-rail-button");
+    button.set_halign(Align::Fill);
+    button.set_hexpand(true);
+    button.set_tooltip_text(Some(section.description));
+    button
+}
+
+fn settings_content_panel() -> GBox {
+    let panel = GBox::new(Orientation::Vertical, 12);
+    panel.add_css_class("settings-content-panel");
+    panel.set_margin_top(4);
+    panel.set_margin_bottom(4);
+    panel.set_margin_start(4);
+    panel.set_margin_end(4);
+    panel
+}
+
+fn settings_group(title: &str, description: &str) -> (GBox, GBox) {
+    let shell = GBox::new(Orientation::Vertical, 10);
+    shell.add_css_class("settings-group");
+
+    let header = GBox::new(Orientation::Vertical, 4);
+    let title_label = Label::new(Some(title));
+    title_label.add_css_class("settings-group-title");
+    title_label.set_xalign(0.0);
+    let copy_label = Label::new(Some(description));
+    copy_label.add_css_class("settings-group-copy");
+    copy_label.set_wrap(true);
+    copy_label.set_xalign(0.0);
+    header.append(&title_label);
+    header.append(&copy_label);
+    shell.append(&header);
+
+    let body = GBox::new(Orientation::Vertical, 10);
+    body.add_css_class("settings-group-body");
+    shell.append(&body);
+    (shell, body)
+}
+
+fn settings_field(label: &str, help: &str, widget: &impl IsA<gtk::Widget>) -> GBox {
+    let field = GBox::new(Orientation::Vertical, 4);
+    field.add_css_class("settings-field");
+    field.set_hexpand(true);
+
+    let title = Label::new(Some(label));
+    title.add_css_class("settings-field-title");
+    title.set_xalign(0.0);
+    let copy = Label::new(Some(help));
+    copy.add_css_class("settings-field-copy");
+    copy.set_wrap(true);
+    copy.set_xalign(0.0);
+    field.append(&title);
+    field.append(&copy);
+    field.append(widget);
+    field
+}
+
+fn settings_editor_field(label: &str, help: &str, widget: &impl IsA<gtk::Widget>) -> GBox {
+    let field = settings_field(label, help, widget);
+    field.add_css_class("settings-editor-field");
+    field
+}
+
+fn settings_field_pair(left: GBox, right: GBox) -> GBox {
+    let row = GBox::new(Orientation::Horizontal, 12);
+    row.add_css_class("settings-field-row");
+    row.append(&left);
+    row.append(&right);
+    row
+}
+
+fn settings_toggle_row(check: &CheckButton, help: &str) -> GBox {
+    let row = GBox::new(Orientation::Vertical, 4);
+    row.add_css_class("settings-toggle-row");
+    check.set_halign(Align::Start);
+    let copy = Label::new(Some(help));
+    copy.add_css_class("settings-field-copy");
+    copy.set_wrap(true);
+    copy.set_xalign(0.0);
+    row.append(check);
+    row.append(&copy);
+    row
+}
+
+fn machine_entry(placeholder: &str) -> Entry {
+    let entry = Entry::new();
+    entry.set_placeholder_text(Some(placeholder));
+    entry.add_css_class("settings-machine-entry");
+    entry
+}
+
+fn settings_editor_view(height: i32) -> (ScrolledWindow, gtk::TextBuffer, TextView) {
+    let view = TextView::new();
+    view.set_monospace(true);
+    view.add_css_class("settings-editor");
+    view.set_wrap_mode(gtk::WrapMode::WordChar);
+    view.set_size_request(-1, height);
+    let buffer = view.buffer();
+    let scroll = ScrolledWindow::new();
+    scroll.add_css_class("settings-editor-shell");
+    scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
+    scroll.set_child(Some(&view));
+    (scroll, buffer, view)
+}
+
 fn repository_root(db_path: &PathBuf, name: &str) -> anyhow::Result<PathBuf> {
     RepositoryStore::open(db_path)?
         .list()?
@@ -402,24 +777,6 @@ fn repository_root(db_path: &PathBuf, name: &str) -> anyhow::Result<PathBuf> {
         .find(|repo| repo.name == name)
         .map(|repo| repo.root_path)
         .ok_or_else(|| anyhow::anyhow!("repository {name} not found"))
-}
-
-fn settings_text_view(height: i32) -> (ScrolledWindow, gtk::TextBuffer, TextView) {
-    let view = TextView::new();
-    view.set_monospace(true);
-    view.set_wrap_mode(gtk::WrapMode::WordChar);
-    view.set_size_request(-1, height);
-    let buffer = view.buffer();
-    let scroll = ScrolledWindow::new();
-    scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
-    scroll.set_child(Some(&view));
-    (scroll, buffer, view)
-}
-
-fn settings_tab_panel() -> GBox {
-    let panel = GBox::new(Orientation::Vertical, 10);
-    panel.add_css_class("settings-tab-panel");
-    panel
 }
 
 fn optional_entry_text(entry: &Entry) -> Option<String> {
@@ -447,4 +804,30 @@ fn parse_environment_lines(text: &str) -> Vec<(String, String)> {
             (!key.is_empty()).then(|| (key.to_owned(), value.trim().to_owned()))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_sections_keep_expected_order() {
+        let ids = settings_sections()
+            .iter()
+            .map(|section| section.id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            vec!["general", "prompts", "providers", "git", "advanced"]
+        );
+    }
+
+    #[test]
+    fn prompt_section_uses_editor_style_fields() {
+        let prompts = settings_sections()
+            .into_iter()
+            .find(|section| section.id == "prompts")
+            .unwrap();
+        assert!(prompts.description.contains("Prompt") || prompts.description.contains("prompt"));
+    }
 }

@@ -1,3 +1,4 @@
+use crate::harness;
 use crate::settings::load_repository_settings;
 use anyhow::{Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -1773,6 +1774,23 @@ impl WorkspaceStore {
         Ok(summaries)
     }
 
+    pub fn untracked_files(&self, name: &str) -> Result<Vec<String>> {
+        let workspace = self.get_by_name(name)?;
+        let status = git_output(
+            &workspace.path,
+            ["status", "--porcelain", "--untracked-files=all"],
+        )?;
+        Ok(parse_untracked_status_paths(&status))
+    }
+
+    pub fn git_show_commit(&self, name: &str, commit: &str) -> Result<String> {
+        let workspace = self.get_by_name(name)?;
+        git_output_dynamic(
+            &workspace.path,
+            &["show", "--stat", "--patch", "--format=medium", commit],
+        )
+    }
+
     pub fn push_branch(&self, name: &str) -> Result<String> {
         let workspace = self.get_by_name(name)?;
         git_output_dynamic(
@@ -2959,8 +2977,7 @@ mutation($threadId: ID!) {{
         let cwd = workspace_working_directory(&settings, &workspace)?;
         let mut env = conductor_environment(&settings, &repository, &workspace);
         env.extend(self.linked_directory_env(&workspace)?);
-        harness.apply_to_env(&mut env);
-        let (program, args) = match kind {
+        let (program, mut args) = match kind {
             SessionKind::Shell => (
                 std::env::var_os("SHELL")
                     .filter(|shell| !shell.is_empty())
@@ -2991,6 +3008,14 @@ mutation($threadId: ID!) {{
                 vec![cwd.to_string_lossy().to_string()],
             ),
         };
+        let harness::SessionHarnessLaunchPlan {
+            args: harness_args,
+            env: harness_env,
+            harness_metadata,
+            ..
+        } = harness::build_session_harness_launch_plan(kind, &cwd, &harness);
+        env.extend(harness_env);
+        args.extend(harness_args);
 
         Ok(SessionLaunch {
             kind,
@@ -2998,7 +3023,7 @@ mutation($threadId: ID!) {{
             args,
             cwd,
             env,
-            harness_metadata: harness.metadata(),
+            harness_metadata,
         })
     }
 
@@ -4414,6 +4439,9 @@ fn is_local_system_marker(line: &str) -> bool {
         || line.starts_with("[provider ")
         || line.starts_with("[mcp ")
         || line.starts_with("[harness ")
+        || line.starts_with("[tool ")
+        || line.starts_with("[skill ")
+        || line.starts_with("[conductor bootstrap")
 }
 
 fn local_chat_agent_type(command: &str) -> String {
@@ -9215,6 +9243,144 @@ working_directory = "apps/worker"
         );
         assert_eq!(launch.cwd, workspace.path);
         assert_eq!(launch.env_value("CONDUCTOR_WORKSPACE_NAME"), Some("berlin"));
+    }
+
+    #[test]
+    fn session_launch_for_codex_uses_harness_bootstrap_payload() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        let launch = store
+            .session_launch_with_options(
+                "berlin",
+                SessionKind::Codex,
+                SessionHarnessOptions {
+                    plan_mode: true,
+                    fast_mode: true,
+                    approval_mode: Some("ask".to_owned()),
+                    reasoning_mode: Some("high".to_owned()),
+                    effort_mode: Some("medium".to_owned()),
+                    codex_personality: Some("careful".to_owned()),
+                    codex_goals: Some("ship the fix".to_owned()),
+                    codex_skills: Some("tests".to_owned()),
+                },
+            )
+            .unwrap();
+
+        let codex_cwd = launch.cwd.to_str().unwrap().to_owned();
+        let codex_bootstrap = launch
+            .env_value("CONDUCTOR_SESSION_BOOTSTRAP")
+            .unwrap()
+            .to_owned();
+        assert_eq!(&launch.program, &PathBuf::from("codex"));
+        assert_eq!(
+            &launch.args,
+            &vec![
+                "-C",
+                codex_cwd.as_str(),
+                "--ask-for-approval",
+                "on-request",
+                "--enable",
+                "goals"
+            ]
+        );
+        assert_eq!(
+            launch.harness_metadata.as_deref(),
+            Some(
+                "harness=codex;plan=true;fast=true;approval=ask;reasoning=high;effort=medium;personality=careful;goals=ship the fix;skills=tests"
+            )
+        );
+        assert!(codex_bootstrap.contains("/goal"));
+    }
+
+    #[test]
+    fn session_launch_for_claude_uses_documented_flags_and_bootstrap() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        let launch = store
+            .session_launch_with_options(
+                "berlin",
+                SessionKind::Claude,
+                SessionHarnessOptions {
+                    plan_mode: true,
+                    fast_mode: true,
+                    approval_mode: Some("never".to_owned()),
+                    reasoning_mode: Some("low".to_owned()),
+                    effort_mode: Some("high".to_owned()),
+                    codex_personality: Some("thorough".to_owned()),
+                    codex_goals: Some("stabilize the fix".to_owned()),
+                    codex_skills: Some("rust, tests".to_owned()),
+                },
+            )
+            .unwrap();
+
+        let claude_bootstrap = launch
+            .env_value("CONDUCTOR_SESSION_BOOTSTRAP")
+            .unwrap()
+            .to_owned();
+        assert_eq!(&launch.program, &PathBuf::from("claude"));
+        assert_eq!(
+            &launch.args,
+            &vec![
+                "--permission-mode",
+                "plan",
+                "--effort",
+                "high",
+                "--append-system-prompt",
+                claude_bootstrap.as_str(),
+            ]
+        );
+        assert_eq!(
+            launch.harness_metadata.as_deref(),
+            Some(
+                "harness=claude;plan=true;fast=true;approval=never;reasoning=low;effort=high;personality=thorough;goals=stabilize the fix;skills=rust, tests"
+            )
+        );
     }
 
     #[test]

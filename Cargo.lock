@@ -877,6 +877,7 @@ dependencies = [
  "linux-conductor-core",
  "notify",
  "rusqlite",
+ "serde_json",
  "tempfile",
 ]
 

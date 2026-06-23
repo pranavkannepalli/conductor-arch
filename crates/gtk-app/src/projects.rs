@@ -1,7 +1,8 @@
+use anyhow::{Context, Result};
 use gtk::prelude::*;
 use gtk::{
     Box as GBox, Button, CheckButton, ComboBoxText, Entry, Label, Orientation, PolicyType,
-    ScrolledWindow, TextView,
+    ScrolledWindow, Stack, TextView,
 };
 use linux_conductor_core::paths::AppPaths;
 use linux_conductor_core::repository::{AddRepository, RepositoryStore};
@@ -11,8 +12,13 @@ use linux_conductor_core::settings::{
     PromptSettings, ProviderSettings, RepositorySettings, ScriptSettings, SettingsLayer,
 };
 use linux_conductor_core::workspace::{CreateWorkspace, WorkspaceSourcePreflight, WorkspaceStore};
-use std::path::PathBuf;
+use serde_json::Value;
+use std::cell::RefCell;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::rc::Rc;
 
+use crate::buttons::text_button;
 use crate::{default_clone_parent, detail_row, repo_name_from_url};
 
 pub(crate) fn build_projects_page(
@@ -52,11 +58,13 @@ pub(crate) fn build_projects_page(
 
     let repo_actions = GBox::new(Orientation::Horizontal, 8);
     repo_actions.add_css_class("project-actions-row");
-    let open_add_local_btn = Button::with_label("Add Local Repository");
+    let open_add_local_btn = text_button("Add Local Repository");
     open_add_local_btn.add_css_class("suggested-action");
-    let open_clone_btn = Button::with_label("Clone Repository");
+    let open_clone_btn = text_button("Clone Repository");
+    let open_new_project_btn = text_button("New Project");
     repo_actions.append(&open_add_local_btn);
     repo_actions.append(&open_clone_btn);
+    repo_actions.append(&open_new_project_btn);
     body.append(&repo_actions);
 
     let repo_box = GBox::new(Orientation::Horizontal, 8);
@@ -65,8 +73,8 @@ pub(crate) fn build_projects_page(
     repo_path_entry.set_hexpand(true);
     let repo_name_entry = Entry::new();
     repo_name_entry.set_placeholder_text(Some("project name, optional"));
-    let add_repo_btn = Button::with_label("Add Local");
-    let clone_repo_btn = Button::with_label("Clone");
+    let add_repo_btn = text_button("Add Local");
+    let clone_repo_btn = text_button("Clone");
     let repo_result = Label::new(Some(&format!(
         "Clones go to {}. Local repos infer the project name from the folder when blank.",
         default_clone_parent().display()
@@ -90,9 +98,9 @@ pub(crate) fn build_projects_page(
 
     let workspace_actions = GBox::new(Orientation::Horizontal, 8);
     workspace_actions.add_css_class("project-actions-row");
-    let open_workspace_modal_btn = Button::with_label("Create Workspace");
+    let open_workspace_modal_btn = text_button("Create Workspace");
     open_workspace_modal_btn.add_css_class("suggested-action");
-    let open_source_check_btn = Button::with_label("Check Sources");
+    let open_source_check_btn = text_button("Check Sources");
     workspace_actions.append(&open_workspace_modal_btn);
     workspace_actions.append(&open_source_check_btn);
     body.append(&workspace_actions);
@@ -116,8 +124,8 @@ pub(crate) fn build_projects_page(
     source_select.set_active_id(Some("branch"));
     let source_entry = Entry::new();
     source_entry.set_placeholder_text(Some("issue/PR id or prompt"));
-    let check_sources_btn = Button::with_label("Check Sources");
-    let create_btn = Button::with_label("Create Workspace");
+    let check_sources_btn = text_button("Check Sources");
+    let create_btn = text_button("Create Workspace");
     let result = Label::new(None);
     result.add_css_class("card-meta");
     result.set_xalign(0.0);
@@ -163,8 +171,8 @@ pub(crate) fn build_projects_page(
     layer_select.append(Some("shared"), "Shared");
     layer_select.append(Some("local"), "Local");
     layer_select.set_active_id(Some("shared"));
-    let load_settings_btn = Button::with_label("Load Settings");
-    let save_settings_btn = Button::with_label("Save Settings");
+    let load_settings_btn = text_button("Load Settings");
+    let save_settings_btn = text_button("Save Settings");
     settings_top.append(&settings_repo_entry);
     settings_top.append(&layer_select);
     settings_top.append(&load_settings_btn);
@@ -463,155 +471,44 @@ pub(crate) fn build_projects_page(
         }
     });
 
+    let quick_add_refresh: Rc<dyn Fn()> = Rc::new({
+        let refresh_after_quick_add = refresh.clone();
+        let refresh_dashboard_after_quick_add = refresh_dashboard.clone();
+        let refresh_workspace_after_quick_add = refresh_workspace.clone();
+        move || {
+            refresh_after_quick_add();
+            refresh_dashboard_after_quick_add();
+            refresh_workspace_after_quick_add();
+        }
+    });
     let db_path_modal_add = paths.database_path.clone();
-    let refresh_after_modal_add = refresh.clone();
-    let repo_entry_after_modal_add = repo_entry.clone();
-    let settings_repo_after_modal_add = settings_repo_entry.clone();
+    let quick_add_refresh_for_folder = quick_add_refresh.clone();
     open_add_local_btn.connect_clicked(move |_| {
-        let dialog = gtk::Window::builder()
-            .title("Add Local Repository")
-            .modal(true)
-            .default_width(520)
-            .default_height(180)
-            .build();
-        let body = dialog_body("Add a checked-out repository.");
-        let path_entry = Entry::new();
-        path_entry.set_placeholder_text(Some("local path"));
-        let name_entry = Entry::new();
-        name_entry.set_placeholder_text(Some("project name, optional"));
-        let feedback = Label::new(None);
-        feedback.add_css_class("card-meta");
-        feedback.set_xalign(0.0);
-        let actions = dialog_actions(&dialog, "Add");
-        let confirm = actions.1.clone();
-        let dialog_for_add = dialog.clone();
-        let path_entry_for_add = path_entry.clone();
-        let name_entry_for_add = name_entry.clone();
-        let feedback_for_add = feedback.clone();
-        let db_path_for_add = db_path_modal_add.clone();
-        let repo_entry_for_add = repo_entry_after_modal_add.clone();
-        let settings_repo_for_add = settings_repo_after_modal_add.clone();
-        let refresh_for_add = refresh_after_modal_add.clone();
-        confirm.connect_clicked(move |_| {
-            let path = path_entry_for_add.text().trim().to_owned();
-            let name = name_entry_for_add.text().trim().to_owned();
-            if path.is_empty() {
-                feedback_for_add.set_text("Local repository path is required.");
-                return;
-            }
-            match RepositoryStore::open(db_path_for_add.clone()).and_then(|store| {
-                store.add(AddRepository {
-                    name: (!name.is_empty()).then_some(name),
-                    root_path: PathBuf::from(path),
-                    default_branch: None,
-                    remote_name: "origin".to_owned(),
-                    workspace_parent_path: None,
-                })
-            }) {
-                Ok(repo) => {
-                    repo_entry_for_add.set_text(&repo.name);
-                    settings_repo_for_add.set_text(&repo.name);
-                    refresh_for_add();
-                    dialog_for_add.close();
-                }
-                Err(err) => feedback_for_add.set_text(&format!("Add failed: {err:#}")),
-            }
-        });
-        body.append(&path_entry);
-        body.append(&name_entry);
-        body.append(&feedback);
-        body.append(&actions.0);
-        dialog.set_child(Some(&body));
-        dialog.present();
+        show_repository_quick_add_dialog(
+            db_path_modal_add.clone(),
+            quick_add_refresh_for_folder.clone(),
+            Some("folder"),
+        );
     });
 
     let db_path_modal_clone = paths.database_path.clone();
-    let refresh_after_modal_clone = refresh.clone();
-    let repo_entry_after_modal_clone = repo_entry.clone();
-    let settings_repo_after_modal_clone = settings_repo_entry.clone();
+    let quick_add_refresh_for_clone = quick_add_refresh.clone();
     open_clone_btn.connect_clicked(move |_| {
-        let dialog = gtk::Window::builder()
-            .title("Clone Repository")
-            .modal(true)
-            .default_width(520)
-            .default_height(180)
-            .build();
-        let body = dialog_body("Clone a repository into the default projects directory.");
-        let url_entry = Entry::new();
-        url_entry.set_placeholder_text(Some("git URL"));
-        let name_entry = Entry::new();
-        name_entry.set_placeholder_text(Some("project name, optional"));
-        let feedback = Label::new(None);
-        feedback.add_css_class("card-meta");
-        feedback.set_xalign(0.0);
-        let actions = dialog_actions(&dialog, "Clone");
-        let confirm = actions.1.clone();
-        let dialog_for_clone = dialog.clone();
-        let url_entry_for_clone = url_entry.clone();
-        let name_entry_for_clone = name_entry.clone();
-        let feedback_for_clone = feedback.clone();
-        let db_path_for_clone = db_path_modal_clone.clone();
-        let repo_entry_for_clone = repo_entry_after_modal_clone.clone();
-        let settings_repo_for_clone = settings_repo_after_modal_clone.clone();
-        let refresh_for_clone = refresh_after_modal_clone.clone();
-        confirm.connect_clicked(move |_| {
-            let url = url_entry_for_clone.text().trim().to_owned();
-            let explicit_name = name_entry_for_clone.text().trim().to_owned();
-            if url.is_empty() {
-                feedback_for_clone.set_text("Git URL is required.");
-                return;
-            }
-            let name = if explicit_name.is_empty() {
-                repo_name_from_url(&url)
-            } else {
-                explicit_name
-            };
-            let clone_path = default_clone_parent().join(&name);
-            let clone_result = if clone_path.exists() {
-                Ok(())
-            } else {
-                if let Some(parent) = clone_path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                std::process::Command::new("git")
-                    .args(["clone", &url])
-                    .arg(&clone_path)
-                    .status()
-                    .map(|status| {
-                        if status.success() {
-                            Ok(())
-                        } else {
-                            Err(anyhow::anyhow!("git clone exited with {status}"))
-                        }
-                    })
-                    .unwrap_or_else(|err| Err(err.into()))
-            };
-            match clone_result.and_then(|_| {
-                RepositoryStore::open(db_path_for_clone.clone()).and_then(|store| {
-                    store.add(AddRepository {
-                        name: Some(name),
-                        root_path: clone_path,
-                        default_branch: None,
-                        remote_name: "origin".to_owned(),
-                        workspace_parent_path: None,
-                    })
-                })
-            }) {
-                Ok(repo) => {
-                    repo_entry_for_clone.set_text(&repo.name);
-                    settings_repo_for_clone.set_text(&repo.name);
-                    refresh_for_clone();
-                    dialog_for_clone.close();
-                }
-                Err(err) => feedback_for_clone.set_text(&format!("Clone failed: {err:#}")),
-            }
-        });
-        body.append(&url_entry);
-        body.append(&name_entry);
-        body.append(&feedback);
-        body.append(&actions.0);
-        dialog.set_child(Some(&body));
-        dialog.present();
+        show_repository_quick_add_dialog(
+            db_path_modal_clone.clone(),
+            quick_add_refresh_for_clone.clone(),
+            Some("clone"),
+        );
+    });
+
+    let db_path_modal_new = paths.database_path.clone();
+    let quick_add_refresh_for_new = quick_add_refresh.clone();
+    open_new_project_btn.connect_clicked(move |_| {
+        show_repository_quick_add_dialog(
+            db_path_modal_new.clone(),
+            quick_add_refresh_for_new.clone(),
+            Some("new"),
+        );
     });
 
     let db_path_check_sources = paths.database_path.clone();
@@ -696,96 +593,13 @@ pub(crate) fn build_projects_page(
     let refresh_dashboard_modal_workspace = refresh_dashboard.clone();
     let refresh_workspace_modal_workspace = refresh_workspace.clone();
     open_workspace_modal_btn.connect_clicked(move |_| {
-        let dialog = gtk::Window::builder()
-            .title("Create Workspace")
-            .modal(true)
-            .default_width(680)
-            .default_height(240)
-            .build();
-        let body = dialog_body("Create a branch, issue, PR, prompt, or Linear workspace.");
-        let grid = GBox::new(Orientation::Horizontal, 8);
-        let repo_entry = Entry::new();
-        repo_entry.set_placeholder_text(Some("repository name"));
-        repo_entry.set_width_chars(18);
-        let name_entry = Entry::new();
-        name_entry.set_placeholder_text(Some("workspace name"));
-        let branch_entry = Entry::new();
-        branch_entry.set_placeholder_text(Some("branch name"));
-        let base_entry = Entry::new();
-        base_entry.set_placeholder_text(Some("base ref, optional"));
-        let source_select = ComboBoxText::new();
-        source_select.append(Some("branch"), "Branch");
-        source_select.append(Some("github_issue"), "GitHub Issue");
-        source_select.append(Some("github_pr"), "GitHub PR");
-        source_select.append(Some("linear_issue"), "Linear Issue");
-        source_select.append(Some("prompt"), "Prompt");
-        source_select.set_active_id(Some("branch"));
-        let source_entry = Entry::new();
-        source_entry.set_placeholder_text(Some("issue/PR id or prompt"));
-        grid.append(&repo_entry);
-        grid.append(&name_entry);
-        grid.append(&branch_entry);
-        grid.append(&base_entry);
-        grid.append(&source_select);
-        grid.append(&source_entry);
-        let feedback = Label::new(None);
-        feedback.add_css_class("card-meta");
-        feedback.set_xalign(0.0);
-        feedback.set_wrap(true);
-        let actions = dialog_actions(&dialog, "Create");
-        let confirm = actions.1.clone();
-        let dialog_for_create = dialog.clone();
-        let repo_entry_for_create = repo_entry.clone();
-        let name_entry_for_create = name_entry.clone();
-        let branch_entry_for_create = branch_entry.clone();
-        let base_entry_for_create = base_entry.clone();
-        let source_select_for_create = source_select.clone();
-        let source_entry_for_create = source_entry.clone();
-        let feedback_for_create = feedback.clone();
-        let db_path_for_create = db_path_modal_workspace.clone();
-        let refresh_for_create = refresh_after_modal_workspace.clone();
-        let refresh_dashboard_for_create = refresh_dashboard_modal_workspace.clone();
-        let refresh_workspace_for_create = refresh_workspace_modal_workspace.clone();
-        confirm.connect_clicked(move |_| {
-            let repo = repo_entry_for_create.text().trim().to_owned();
-            let typed_name = name_entry_for_create.text().trim().to_owned();
-            let typed_branch = branch_entry_for_create.text().trim().to_owned();
-            let base = optional_entry_text(&base_entry_for_create);
-            let source = source_select_for_create
-                .active_id()
-                .map(|id| id.to_string())
-                .unwrap_or_else(|| "branch".to_owned());
-            let source_value = source_entry_for_create.text().trim().to_owned();
-            if repo.is_empty() {
-                feedback_for_create.set_text("Repository is required.");
-                return;
-            }
-            let request = workspace_source_request_from_form(
-                &source,
-                &source_value,
-                base,
-                (!typed_name.is_empty()).then_some(typed_name),
-                (!typed_branch.is_empty()).then_some(typed_branch),
-            );
-            let create_result = request.and_then(|request| {
-                WorkspaceStore::open(db_path_for_create.clone())
-                    .and_then(|store| request.create_workspace(&store, &repo))
-            });
-            match create_result {
-                Ok(_) => {
-                    refresh_for_create();
-                    refresh_dashboard_for_create();
-                    refresh_workspace_for_create();
-                    dialog_for_create.close();
-                }
-                Err(err) => feedback_for_create.set_text(&format!("Create failed: {err:#}")),
-            }
-        });
-        body.append(&grid);
-        body.append(&feedback);
-        body.append(&actions.0);
-        dialog.set_child(Some(&body));
-        dialog.present();
+        show_create_workspace_dialog(
+            db_path_modal_workspace.clone(),
+            Rc::new(refresh_after_modal_workspace.clone()),
+            Rc::new(refresh_dashboard_modal_workspace.clone()),
+            Rc::new(refresh_workspace_modal_workspace.clone()),
+            None,
+        );
     });
 
     let db_path_load_settings = paths.database_path.clone();
@@ -983,6 +797,457 @@ pub(crate) fn build_projects_page(
     (root, refresh)
 }
 
+pub(crate) fn show_create_workspace_dialog(
+    database_path: PathBuf,
+    refresh: Rc<dyn Fn()>,
+    refresh_dashboard: Rc<dyn Fn()>,
+    refresh_workspace: Rc<dyn Fn()>,
+    preselected_repo: Option<String>,
+) {
+    let dialog = gtk::Window::builder()
+        .title("Create Workspace")
+        .modal(true)
+        .default_width(720)
+        .default_height(520)
+        .build();
+    let body = dialog_body("Create a branch, issue, PR, prompt, or Linear workspace.");
+    body.add_css_class("workspace-modal");
+
+    let repo_label = Label::new(Some("Repository"));
+    repo_label.add_css_class("detail-label");
+    repo_label.set_xalign(0.0);
+    body.append(&repo_label);
+    let repo_select = ComboBoxText::new();
+    repo_select.add_css_class("workspace-modal-field");
+    if let Ok(store) = RepositoryStore::open(database_path.clone()) {
+        if let Ok(repos) = store.list() {
+            for repo in repos {
+                let summary = format!("{} · {}", repo.name, repo.root_path.display());
+                repo_select.append(Some(&repo.name), &summary);
+            }
+        }
+    }
+    if let Some(repo) = preselected_repo {
+        repo_select.set_active_id(Some(&repo));
+    }
+    if repo_select.active_id().is_none() {
+        repo_select.set_active(Some(0));
+    }
+    body.append(&repo_select);
+
+    let source_header = GBox::new(Orientation::Vertical, 10);
+    source_header.add_css_class("workspace-modal-split");
+    let start_column = GBox::new(Orientation::Vertical, 6);
+    start_column.set_hexpand(true);
+    let start_label = Label::new(Some("Start from"));
+    start_label.add_css_class("detail-label");
+    start_label.set_xalign(0.0);
+    let name_entry = Entry::new();
+    name_entry.add_css_class("workspace-modal-field");
+    name_entry.set_placeholder_text(Some("workspace name"));
+    let branch_entry = Entry::new();
+    branch_entry.add_css_class("workspace-modal-field");
+    branch_entry.set_placeholder_text(Some("branch name"));
+    let base_entry = Entry::new();
+    base_entry.add_css_class("workspace-modal-field");
+    base_entry.set_placeholder_text(Some("base ref, optional"));
+    let source_select = ComboBoxText::new();
+    source_select.append(Some("branch"), "Branch");
+    source_select.append(Some("github_issue"), "GitHub Issue");
+    source_select.append(Some("github_pr"), "GitHub PR");
+    source_select.append(Some("linear_issue"), "Linear Issue");
+    source_select.append(Some("prompt"), "Prompt");
+    source_select.set_active_id(Some("branch"));
+    source_select.add_css_class("workspace-modal-field");
+    let source_stack = Stack::new();
+    source_stack.add_css_class("workspace-modal-field");
+
+    let branch_select = ComboBoxText::new();
+    branch_select.add_css_class("workspace-modal-field");
+    branch_select.set_hexpand(true);
+    let branch_refresh_btn = text_button("Load branches");
+    let branch_row = GBox::new(Orientation::Vertical, 8);
+    branch_row.append(&branch_select);
+    branch_row.append(&branch_refresh_btn);
+    let branch_hint = Label::new(Some("Select a branch from the repository."));
+    branch_hint.add_css_class("surface-note");
+    branch_hint.set_wrap(true);
+    branch_hint.set_xalign(0.0);
+    let branch_panel = GBox::new(Orientation::Vertical, 6);
+    branch_panel.append(&branch_row);
+    branch_panel.append(&branch_hint);
+    source_stack.add_named(&branch_panel, Some("branch"));
+
+    let github_issue_select = ComboBoxText::new();
+    github_issue_select.add_css_class("workspace-modal-field");
+    github_issue_select.set_hexpand(true);
+    let github_issue_refresh_btn = text_button("Load issues");
+    let github_issue_row = GBox::new(Orientation::Vertical, 8);
+    github_issue_row.append(&github_issue_select);
+    github_issue_row.append(&github_issue_refresh_btn);
+    let github_issue_hint = Label::new(Some("Choose an open GitHub issue."));
+    github_issue_hint.add_css_class("surface-note");
+    github_issue_hint.set_wrap(true);
+    github_issue_hint.set_xalign(0.0);
+    let github_issue_panel = GBox::new(Orientation::Vertical, 6);
+    github_issue_panel.append(&github_issue_row);
+    github_issue_panel.append(&github_issue_hint);
+    source_stack.add_named(&github_issue_panel, Some("github_issue"));
+
+    let github_pr_select = ComboBoxText::new();
+    github_pr_select.add_css_class("workspace-modal-field");
+    github_pr_select.set_hexpand(true);
+    let github_pr_refresh_btn = text_button("Load PRs");
+    let github_pr_row = GBox::new(Orientation::Vertical, 8);
+    github_pr_row.append(&github_pr_select);
+    github_pr_row.append(&github_pr_refresh_btn);
+    let github_pr_hint = Label::new(Some("Choose an open GitHub pull request."));
+    github_pr_hint.add_css_class("surface-note");
+    github_pr_hint.set_wrap(true);
+    github_pr_hint.set_xalign(0.0);
+    let github_pr_panel = GBox::new(Orientation::Vertical, 6);
+    github_pr_panel.append(&github_pr_row);
+    github_pr_panel.append(&github_pr_hint);
+    source_stack.add_named(&github_pr_panel, Some("github_pr"));
+
+    let linear_entry = Entry::new();
+    linear_entry.add_css_class("workspace-modal-field");
+    linear_entry.set_placeholder_text(Some("Linear issue id"));
+    let linear_hint = Label::new(Some(
+        "Type a Linear issue ID. We do not have a list endpoint yet.",
+    ));
+    linear_hint.add_css_class("surface-note");
+    linear_hint.set_wrap(true);
+    linear_hint.set_xalign(0.0);
+    let linear_panel = GBox::new(Orientation::Vertical, 6);
+    linear_panel.append(&linear_entry);
+    linear_panel.append(&linear_hint);
+    source_stack.add_named(&linear_panel, Some("linear_issue"));
+
+    let prompt_entry = Entry::new();
+    prompt_entry.add_css_class("workspace-modal-field");
+    prompt_entry.set_placeholder_text(Some("Describe the task"));
+    let prompt_hint = Label::new(Some("Type the prompt that should seed the workspace."));
+    prompt_hint.add_css_class("surface-note");
+    prompt_hint.set_wrap(true);
+    prompt_hint.set_xalign(0.0);
+    let prompt_panel = GBox::new(Orientation::Vertical, 6);
+    prompt_panel.append(&prompt_entry);
+    prompt_panel.append(&prompt_hint);
+    source_stack.add_named(&prompt_panel, Some("prompt"));
+
+    start_column.append(&start_label);
+    start_column.append(&base_entry);
+    start_column.append(&source_select);
+    source_header.append(&start_column);
+
+    let source_column = GBox::new(Orientation::Vertical, 6);
+    source_column.set_hexpand(true);
+    let source_value_label = Label::new(Some("Task source"));
+    source_value_label.add_css_class("detail-label");
+    source_value_label.set_xalign(0.0);
+    source_column.append(&source_value_label);
+    source_column.append(&source_stack);
+    source_header.append(&source_column);
+    body.append(&source_header);
+
+    let workspace_header = GBox::new(Orientation::Vertical, 10);
+    workspace_header.add_css_class("workspace-modal-split");
+    let name_column = GBox::new(Orientation::Vertical, 6);
+    name_column.set_hexpand(true);
+    let workspace_label = Label::new(Some("Workspace"));
+    workspace_label.add_css_class("detail-label");
+    workspace_label.set_xalign(0.0);
+    name_column.append(&workspace_label);
+    name_column.append(&name_entry);
+    workspace_header.append(&name_column);
+
+    let branch_column = GBox::new(Orientation::Vertical, 6);
+    branch_column.set_hexpand(true);
+    let branch_label = Label::new(Some("Branch"));
+    branch_label.add_css_class("detail-label");
+    branch_label.set_xalign(0.0);
+    branch_column.append(&branch_label);
+    branch_column.append(&branch_entry);
+    workspace_header.append(&branch_column);
+    body.append(&workspace_header);
+
+    let source_hint = Label::new(None);
+    source_hint.add_css_class("surface-note");
+    source_hint.add_css_class("workspace-modal-hint");
+    source_hint.set_wrap(true);
+    source_hint.set_xalign(0.0);
+    body.append(&source_hint);
+
+    let preview_panel = GBox::new(Orientation::Vertical, 6);
+    preview_panel.add_css_class("workspace-modal-preview");
+    let preview_title = Label::new(Some("Setup preview"));
+    preview_title.add_css_class("detail-label");
+    preview_title.set_xalign(0.0);
+    let preview_body = Label::new(None);
+    preview_body.add_css_class("workspace-meta");
+    preview_body.add_css_class("workspace-modal-preview-copy");
+    preview_body.set_wrap(true);
+    preview_body.set_xalign(0.0);
+    preview_panel.append(&preview_title);
+    preview_panel.append(&preview_body);
+    body.append(&preview_panel);
+
+    let feedback = Label::new(None);
+    feedback.add_css_class("card-meta");
+    feedback.add_css_class("workspace-modal-feedback");
+    feedback.set_xalign(0.0);
+    feedback.set_wrap(true);
+    let actions = dialog_actions(&dialog, "Create");
+    let confirm = actions.1.clone();
+    let dialog_for_create = dialog.clone();
+    let repo_select_for_create = repo_select.clone();
+    let name_entry_for_create = name_entry.clone();
+    let base_entry_for_create = base_entry.clone();
+    let source_select_for_create = source_select.clone();
+    let feedback_for_create = feedback.clone();
+    let db_path_for_create = database_path.clone();
+    let refresh_for_create = refresh.clone();
+    let refresh_dashboard_for_create = refresh_dashboard.clone();
+    let refresh_workspace_for_create = refresh_workspace.clone();
+    let loaded_source_choices = Rc::new(RefCell::new(None::<(String, String)>));
+    let refresh_modal_copy: Rc<dyn Fn()> = {
+        let source_select = source_select.clone();
+        let source_stack = source_stack.clone();
+        let branch_select = branch_select.clone();
+        let github_issue_select = github_issue_select.clone();
+        let github_pr_select = github_pr_select.clone();
+        let linear_entry = linear_entry.clone();
+        let prompt_entry = prompt_entry.clone();
+        let source_value_label = source_value_label.clone();
+        let base_entry = base_entry.clone();
+        let preview_body = preview_body.clone();
+        let repo_select = repo_select.clone();
+        let name_entry = name_entry.clone();
+        let branch_entry = branch_entry.clone();
+        let database_path = database_path.clone();
+        let source_hint = source_hint.clone();
+        let loaded_source_choices = loaded_source_choices.clone();
+        Rc::new(move || {
+            let source = source_select
+                .active_id()
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "branch".to_owned());
+            let copy = workspace_source_form_copy(&source);
+            source_value_label.set_text(copy.field_label);
+            source_stack.set_visible_child_name(&source);
+            source_hint.set_text(copy.help_text);
+            base_entry.set_sensitive(copy.base_allowed);
+            if !copy.base_allowed {
+                base_entry.set_text("");
+            }
+
+            let repo_name = repo_select
+                .active_id()
+                .map(|id| id.to_string())
+                .unwrap_or_default();
+            if !repo_name.is_empty() {
+                let desired_key = (repo_name.clone(), source.clone());
+                if loaded_source_choices.borrow().as_ref() != Some(&desired_key) {
+                    if let Ok(repo_root) = repository_root(&database_path, &repo_name) {
+                        match source.as_str() {
+                            "branch" => {
+                                load_branch_choices(&repo_root, &branch_select);
+                            }
+                            "github_issue" => {
+                                load_github_issue_choices(&repo_root, &github_issue_select);
+                            }
+                            "github_pr" => {
+                                load_github_pr_choices(&repo_root, &github_pr_select);
+                            }
+                            _ => {}
+                        }
+                    }
+                    *loaded_source_choices.borrow_mut() = Some(desired_key);
+                }
+            }
+
+            let repo = repo_select
+                .active_id()
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "pick a repository".to_owned());
+            let base =
+                optional_entry_text(&base_entry).unwrap_or_else(|| "repo default".to_owned());
+            let source_value = match source.as_str() {
+                "branch" => branch_select
+                    .active_id()
+                    .map(|id| id.to_string())
+                    .unwrap_or_default(),
+                "github_issue" => github_issue_select
+                    .active_id()
+                    .map(|id| id.to_string())
+                    .unwrap_or_default(),
+                "github_pr" => github_pr_select
+                    .active_id()
+                    .map(|id| id.to_string())
+                    .unwrap_or_default(),
+                "linear_issue" => linear_entry.text().trim().to_owned(),
+                "prompt" => prompt_entry.text().trim().to_owned(),
+                _ => String::new(),
+            };
+            let name = name_entry.text().trim().to_owned();
+            let branch = branch_entry.text().trim().to_owned();
+            let source_summary = if source_value.is_empty() {
+                copy.preview_empty.to_owned()
+            } else {
+                format!("{} {}", copy.preview_prefix, source_value)
+            };
+            let workspace_summary = if name.is_empty() {
+                "auto".to_owned()
+            } else {
+                name
+            };
+            let branch_summary = if branch.is_empty() {
+                "auto".to_owned()
+            } else {
+                branch
+            };
+            preview_body.set_text(&format!(
+                "Repository: {repo}\nBase: {base}\nSource: {source_summary}\nWorkspace: {workspace_summary}\nBranch: {branch_summary}"
+            ));
+        })
+    };
+    refresh_modal_copy();
+    let refresh_modal_copy_select = refresh_modal_copy.clone();
+    source_select.connect_changed(move |_| refresh_modal_copy_select());
+    let refresh_modal_copy_repo = refresh_modal_copy.clone();
+    repo_select.connect_changed(move |_| refresh_modal_copy_repo());
+    let refresh_modal_copy_branch = refresh_modal_copy.clone();
+    branch_select.connect_changed(move |_| refresh_modal_copy_branch());
+    let refresh_modal_copy_issue = refresh_modal_copy.clone();
+    github_issue_select.connect_changed(move |_| refresh_modal_copy_issue());
+    let refresh_modal_copy_pr = refresh_modal_copy.clone();
+    github_pr_select.connect_changed(move |_| refresh_modal_copy_pr());
+    let refresh_modal_copy_base = refresh_modal_copy.clone();
+    base_entry.connect_changed(move |_| refresh_modal_copy_base());
+    let refresh_modal_copy_name = refresh_modal_copy.clone();
+    name_entry.connect_changed(move |_| refresh_modal_copy_name());
+    let refresh_modal_copy_branch = refresh_modal_copy.clone();
+    branch_entry.connect_changed(move |_| refresh_modal_copy_branch());
+    branch_refresh_btn.connect_clicked({
+        let database_path = database_path.clone();
+        let repo_select = repo_select.clone();
+        let branch_select = branch_select.clone();
+        let loaded_source_choices = loaded_source_choices.clone();
+        move |_| {
+            if let Some(repo_name) = repo_select.active_id().map(|id| id.to_string()) {
+                if let Ok(repo_root) = repository_root(&database_path, &repo_name) {
+                    *loaded_source_choices.borrow_mut() = None;
+                    load_branch_choices(&repo_root, &branch_select);
+                }
+            }
+        }
+    });
+    github_issue_refresh_btn.connect_clicked({
+        let database_path = database_path.clone();
+        let repo_select = repo_select.clone();
+        let github_issue_select = github_issue_select.clone();
+        let loaded_source_choices = loaded_source_choices.clone();
+        move |_| {
+            if let Some(repo_name) = repo_select.active_id().map(|id| id.to_string()) {
+                if let Ok(repo_root) = repository_root(&database_path, &repo_name) {
+                    *loaded_source_choices.borrow_mut() = None;
+                    load_github_issue_choices(&repo_root, &github_issue_select);
+                }
+            }
+        }
+    });
+    github_pr_refresh_btn.connect_clicked({
+        let database_path = database_path.clone();
+        let repo_select = repo_select.clone();
+        let github_pr_select = github_pr_select.clone();
+        let loaded_source_choices = loaded_source_choices.clone();
+        move |_| {
+            if let Some(repo_name) = repo_select.active_id().map(|id| id.to_string()) {
+                if let Ok(repo_root) = repository_root(&database_path, &repo_name) {
+                    *loaded_source_choices.borrow_mut() = None;
+                    load_github_pr_choices(&repo_root, &github_pr_select);
+                }
+            }
+        }
+    });
+    confirm.connect_clicked(move |_| {
+        let Some(repo) = repo_select_for_create.active_id().map(|id| id.to_string()) else {
+            feedback_for_create.set_text("Add a repository first.");
+            return;
+        };
+        let typed_name = name_entry_for_create.text().trim().to_owned();
+        let typed_branch = match source_select_for_create
+            .active_id()
+            .map(|id| id.to_string())
+            .as_deref()
+        {
+            Some("branch") => branch_select
+                .active_id()
+                .map(|id| id.to_string())
+                .unwrap_or_default(),
+            Some("github_issue") => github_issue_select
+                .active_id()
+                .map(|id| id.to_string())
+                .unwrap_or_default(),
+            Some("github_pr") => github_pr_select
+                .active_id()
+                .map(|id| id.to_string())
+                .unwrap_or_default(),
+            Some("linear_issue") => linear_entry.text().trim().to_owned(),
+            Some("prompt") => prompt_entry.text().trim().to_owned(),
+            _ => String::new(),
+        };
+        let base = optional_entry_text(&base_entry_for_create);
+        let source = source_select_for_create
+            .active_id()
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "branch".to_owned());
+        let source_value = match source.as_str() {
+            "branch" => branch_select
+                .active_id()
+                .map(|id| id.to_string())
+                .unwrap_or_default(),
+            "github_issue" => github_issue_select
+                .active_id()
+                .map(|id| id.to_string())
+                .unwrap_or_default(),
+            "github_pr" => github_pr_select
+                .active_id()
+                .map(|id| id.to_string())
+                .unwrap_or_default(),
+            "linear_issue" => linear_entry.text().trim().to_owned(),
+            "prompt" => prompt_entry.text().trim().to_owned(),
+            _ => String::new(),
+        };
+        feedback_for_create.set_text("Creating workspace...");
+        let request = workspace_source_request_from_form(
+            &source,
+            &source_value,
+            base,
+            (!typed_name.is_empty()).then_some(typed_name),
+            (!typed_branch.is_empty()).then_some(typed_branch),
+        );
+        let create_result = request.and_then(|request| {
+            WorkspaceStore::open(db_path_for_create.clone())
+                .and_then(|store| request.create_workspace(&store, &repo))
+        });
+        match create_result {
+            Ok(_) => {
+                refresh_for_create();
+                refresh_dashboard_for_create();
+                refresh_workspace_for_create();
+                dialog_for_create.close();
+            }
+            Err(err) => feedback_for_create.set_text(&format!("Create failed: {err:#}")),
+        }
+    });
+    body.append(&feedback);
+    body.append(&actions.0);
+    dialog.set_child(Some(&body));
+    dialog.present();
+}
+
 fn repository_root(db_path: &PathBuf, name: &str) -> anyhow::Result<PathBuf> {
     RepositoryStore::open(db_path)?
         .list()?
@@ -1042,11 +1307,65 @@ fn dialog_body(subtitle: &str) -> GBox {
     body
 }
 
+struct WorkspaceSourceFormCopy {
+    field_label: &'static str,
+    placeholder: &'static str,
+    help_text: &'static str,
+    preview_prefix: &'static str,
+    preview_empty: &'static str,
+    base_allowed: bool,
+}
+
+fn workspace_source_form_copy(source: &str) -> WorkspaceSourceFormCopy {
+    match source {
+        "github_issue" => WorkspaceSourceFormCopy {
+            field_label: "GitHub issue",
+            placeholder: "#123",
+            help_text: "GitHub creates the branch and workspace name from the issue. Base ref comes from the repository default.",
+            preview_prefix: "Issue",
+            preview_empty: "Issue number missing",
+            base_allowed: false,
+        },
+        "github_pr" => WorkspaceSourceFormCopy {
+            field_label: "GitHub PR",
+            placeholder: "#456",
+            help_text: "PR workspaces pull branch and base from GitHub. Workspace and branch names are optional overrides.",
+            preview_prefix: "PR",
+            preview_empty: "PR number missing",
+            base_allowed: false,
+        },
+        "linear_issue" => WorkspaceSourceFormCopy {
+            field_label: "Linear issue",
+            placeholder: "ENG-42",
+            help_text: "Linear issue ID drives the task. Leave workspace or branch blank if the generated values are fine.",
+            preview_prefix: "Linear",
+            preview_empty: "Linear issue missing",
+            base_allowed: true,
+        },
+        "prompt" => WorkspaceSourceFormCopy {
+            field_label: "Prompt",
+            placeholder: "Describe the task",
+            help_text: "Prompt workspaces generate a workspace and branch from the task text. Base ref is optional.",
+            preview_prefix: "Prompt",
+            preview_empty: "Prompt missing",
+            base_allowed: true,
+        },
+        _ => WorkspaceSourceFormCopy {
+            field_label: "Task source",
+            placeholder: "Optional note or ticket",
+            help_text: "Manual branch mode can auto-generate the workspace and branch. Fill either field only if you want an override.",
+            preview_prefix: "Manual",
+            preview_empty: "Manual branch",
+            base_allowed: true,
+        },
+    }
+}
+
 fn dialog_actions(dialog: &gtk::Window, primary_label: &str) -> (GBox, Button) {
     let row = GBox::new(Orientation::Horizontal, 8);
     row.set_halign(gtk::Align::End);
-    let cancel = Button::with_label("Cancel");
-    let primary = Button::with_label(primary_label);
+    let cancel = text_button("Cancel");
+    let primary = text_button(primary_label);
     primary.add_css_class("suggested-action");
     let dialog_for_cancel = dialog.clone();
     cancel.connect_clicked(move |_| {
@@ -1202,11 +1521,11 @@ fn workspace_source_request_from_form(
                 base,
             })
         }
-        _ => {
-            let name = typed_name.ok_or_else(|| anyhow::anyhow!("Workspace name is required"))?;
-            let branch = typed_branch.ok_or_else(|| anyhow::anyhow!("Branch name is required"))?;
-            Ok(WorkspaceSourceRequest::Branch { name, branch, base })
-        }
+        _ => Ok(WorkspaceSourceRequest::Branch {
+            name: typed_name.unwrap_or_default(),
+            branch: typed_branch.unwrap_or_default(),
+            base,
+        }),
     }
 }
 
@@ -1232,9 +1551,524 @@ fn parse_environment_lines(text: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GithubRepoChoice {
+    label: String,
+    url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NewProjectTemplate {
+    id: &'static str,
+    label: &'static str,
+    description: &'static str,
+}
+
+pub(crate) fn show_repository_quick_add_dialog(
+    database_path: PathBuf,
+    refresh: Rc<dyn Fn()>,
+    initial_mode: Option<&str>,
+) {
+    let dialog = gtk::Window::builder()
+        .title("Add Repository")
+        .modal(true)
+        .default_width(720)
+        .default_height(420)
+        .build();
+    let body = dialog_body("Open a checked-out folder, clone from GitHub, or start a new project.");
+    body.add_css_class("workspace-modal");
+
+    let mode_label = Label::new(Some("Add mode"));
+    mode_label.add_css_class("detail-label");
+    mode_label.set_xalign(0.0);
+    body.append(&mode_label);
+
+    let mode_select = ComboBoxText::new();
+    mode_select.add_css_class("workspace-modal-field");
+    mode_select.append(Some("folder"), "Folder");
+    mode_select.append(Some("clone"), "Clone");
+    mode_select.append(Some("new"), "New");
+    mode_select.set_active_id(initial_mode.or(Some("folder")));
+    body.append(&mode_select);
+
+    let stack = Stack::new();
+    stack.set_vexpand(true);
+    body.append(&stack);
+
+    let folder_box = GBox::new(Orientation::Vertical, 8);
+    let folder_path_row = GBox::new(Orientation::Horizontal, 8);
+    let folder_path_entry = Entry::new();
+    folder_path_entry.add_css_class("workspace-modal-field");
+    folder_path_entry.set_hexpand(true);
+    folder_path_entry.set_placeholder_text(Some("repository folder"));
+    let folder_browse_btn = text_button("Browse");
+    folder_path_row.append(&folder_path_entry);
+    folder_path_row.append(&folder_browse_btn);
+    let folder_name_entry = Entry::new();
+    folder_name_entry.add_css_class("workspace-modal-field");
+    folder_name_entry.set_placeholder_text(Some("project name, optional"));
+    folder_box.append(&folder_path_row);
+    folder_box.append(&folder_name_entry);
+    stack.add_named(&folder_box, Some("folder"));
+
+    let clone_box = GBox::new(Orientation::Vertical, 8);
+    let github_row = GBox::new(Orientation::Horizontal, 8);
+    let github_repo_select = ComboBoxText::new();
+    github_repo_select.add_css_class("workspace-modal-field");
+    github_repo_select.set_hexpand(true);
+    let load_github_btn = text_button("Load GitHub Repos");
+    github_row.append(&github_repo_select);
+    github_row.append(&load_github_btn);
+    let clone_url_entry = Entry::new();
+    clone_url_entry.add_css_class("workspace-modal-field");
+    clone_url_entry.set_placeholder_text(Some("git URL"));
+    let clone_name_entry = Entry::new();
+    clone_name_entry.add_css_class("workspace-modal-field");
+    clone_name_entry.set_placeholder_text(Some("project name, optional"));
+    clone_box.append(&github_row);
+    clone_box.append(&clone_url_entry);
+    clone_box.append(&clone_name_entry);
+    stack.add_named(&clone_box, Some("clone"));
+
+    let new_box = GBox::new(Orientation::Vertical, 8);
+    let template_select = ComboBoxText::new();
+    template_select.add_css_class("workspace-modal-field");
+    for template in new_project_templates() {
+        template_select.append(Some(template.id), template.label);
+    }
+    template_select.set_active(Some(0));
+    let new_parent_row = GBox::new(Orientation::Horizontal, 8);
+    let new_parent_entry = Entry::new();
+    new_parent_entry.add_css_class("workspace-modal-field");
+    new_parent_entry.set_hexpand(true);
+    new_parent_entry.set_placeholder_text(Some("parent folder"));
+    let new_parent_browse_btn = text_button("Browse");
+    new_parent_row.append(&new_parent_entry);
+    new_parent_row.append(&new_parent_browse_btn);
+    let new_name_entry = Entry::new();
+    new_name_entry.add_css_class("workspace-modal-field");
+    new_name_entry.set_placeholder_text(Some("project name"));
+    new_box.append(&template_select);
+    new_box.append(&new_parent_row);
+    new_box.append(&new_name_entry);
+    stack.add_named(&new_box, Some("new"));
+
+    let feedback = Label::new(None);
+    feedback.add_css_class("card-meta");
+    feedback.set_xalign(0.0);
+    feedback.set_wrap(true);
+    body.append(&feedback);
+
+    let refresh_mode: Rc<dyn Fn()> = {
+        let stack = stack.clone();
+        let mode_select = mode_select.clone();
+        Rc::new(move || {
+            let mode = mode_select
+                .active_id()
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "folder".to_owned());
+            stack.set_visible_child_name(&mode);
+        })
+    };
+    refresh_mode();
+    let refresh_mode_on_change = refresh_mode.clone();
+    mode_select.connect_changed(move |_| refresh_mode_on_change());
+
+    let folder_path_entry_for_picker = folder_path_entry.clone();
+    folder_browse_btn.connect_clicked(move |_| {
+        choose_folder_for_entry(
+            &folder_path_entry_for_picker,
+            "Pick a checked-out repository",
+        );
+    });
+    let new_parent_entry_for_picker = new_parent_entry.clone();
+    new_parent_browse_btn.connect_clicked(move |_| {
+        choose_folder_for_entry(&new_parent_entry_for_picker, "Pick a parent folder");
+    });
+
+    let clone_url_entry_for_select = clone_url_entry.clone();
+    let clone_name_entry_for_select = clone_name_entry.clone();
+    github_repo_select.connect_changed(move |select| {
+        if let Some(url) = select.active_id().map(|id| id.to_string()) {
+            clone_url_entry_for_select.set_text(&url);
+            if clone_name_entry_for_select.text().trim().is_empty() {
+                clone_name_entry_for_select.set_text(&repo_name_from_url(&url));
+            }
+        }
+    });
+
+    let github_repo_select_for_load = github_repo_select.clone();
+    let feedback_for_load = feedback.clone();
+    load_github_btn.connect_clicked(move |_| match load_github_repo_choices() {
+        Ok(repos) if repos.is_empty() => {
+            feedback_for_load.set_text("No GitHub repos returned by gh repo list.");
+        }
+        Ok(repos) => {
+            github_repo_select_for_load.remove_all();
+            for repo in repos {
+                github_repo_select_for_load.append(Some(&repo.url), &repo.label);
+            }
+            github_repo_select_for_load.set_active(Some(0));
+            feedback_for_load.set_text("Loaded GitHub repos.");
+        }
+        Err(err) => feedback_for_load.set_text(&format!("GitHub repo load failed: {err:#}")),
+    });
+
+    let actions = dialog_actions(&dialog, "Add");
+    let confirm = actions.1.clone();
+    let dialog_for_confirm = dialog.clone();
+    confirm.connect_clicked(move |_| {
+        let mode = mode_select
+            .active_id()
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "folder".to_owned());
+        let result = match mode.as_str() {
+            "clone" => {
+                let url = clone_url_entry.text().trim().to_owned();
+                let explicit_name = optional_entry_text(&clone_name_entry);
+                clone_repository_into_default_parent(&database_path, &url, explicit_name)
+            }
+            "new" => {
+                let parent = new_parent_entry.text().trim().to_owned();
+                let name = new_name_entry.text().trim().to_owned();
+                let template = template_select
+                    .active_id()
+                    .map(|id| id.to_string())
+                    .unwrap_or_else(|| "empty".to_owned());
+                create_repository_from_template(&database_path, &parent, &name, &template)
+            }
+            _ => {
+                let path = folder_path_entry.text().trim().to_owned();
+                let explicit_name = optional_entry_text(&folder_name_entry);
+                add_repository_from_path(&database_path, &path, explicit_name)
+            }
+        };
+
+        match result {
+            Ok(_) => {
+                refresh();
+                dialog_for_confirm.close();
+            }
+            Err(err) => feedback.set_text(&format!("Add failed: {err:#}")),
+        }
+    });
+    body.append(&actions.0);
+    dialog.set_child(Some(&body));
+    dialog.present();
+}
+
+fn choose_folder_for_entry(entry: &Entry, title: &str) {
+    let dialog = gtk::FileChooserNative::builder()
+        .title(title)
+        .action(gtk::FileChooserAction::SelectFolder)
+        .accept_label("Select")
+        .cancel_label("Cancel")
+        .build();
+    let entry = entry.clone();
+    dialog.connect_response(move |dialog, response| {
+        if response == gtk::ResponseType::Accept {
+            if let Some(path) = dialog.file().and_then(|file| file.path()) {
+                entry.set_text(&path.display().to_string());
+            }
+        }
+        dialog.destroy();
+    });
+    dialog.show();
+}
+
+fn add_repository_from_path(
+    database_path: &Path,
+    path: &str,
+    explicit_name: Option<String>,
+) -> Result<linux_conductor_core::repository::Repository> {
+    let trimmed = path.trim();
+    anyhow::ensure!(!trimmed.is_empty(), "Local repository path is required.");
+    RepositoryStore::open(database_path)?.add(AddRepository {
+        name: explicit_name,
+        root_path: PathBuf::from(trimmed),
+        default_branch: None,
+        remote_name: "origin".to_owned(),
+        workspace_parent_path: None,
+    })
+}
+
+fn clone_repository_into_default_parent(
+    database_path: &Path,
+    url: &str,
+    explicit_name: Option<String>,
+) -> Result<linux_conductor_core::repository::Repository> {
+    let trimmed = url.trim();
+    anyhow::ensure!(!trimmed.is_empty(), "Git URL is required.");
+    let name = explicit_name.unwrap_or_else(|| repo_name_from_url(trimmed));
+    let clone_path = default_clone_parent().join(&name);
+    if !clone_path.exists() {
+        if let Some(parent) = clone_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create clone parent {}", parent.display()))?;
+        }
+        let status = Command::new("git")
+            .args(["clone", trimmed])
+            .arg(&clone_path)
+            .status()
+            .with_context(|| format!("clone repository {trimmed}"))?;
+        anyhow::ensure!(status.success(), "git clone exited with {status}");
+    }
+    RepositoryStore::open(database_path)?.add(AddRepository {
+        name: Some(name),
+        root_path: clone_path,
+        default_branch: None,
+        remote_name: "origin".to_owned(),
+        workspace_parent_path: None,
+    })
+}
+
+fn create_repository_from_template(
+    database_path: &Path,
+    parent_folder: &str,
+    project_name: &str,
+    template: &str,
+) -> Result<linux_conductor_core::repository::Repository> {
+    let parent = parent_folder.trim();
+    anyhow::ensure!(!parent.is_empty(), "Parent folder is required.");
+    let path = scaffold_new_repository(Path::new(parent), project_name, template)?;
+    RepositoryStore::open(database_path)?.add(AddRepository {
+        name: Some(project_name.trim().to_owned()),
+        root_path: path,
+        default_branch: None,
+        remote_name: "origin".to_owned(),
+        workspace_parent_path: None,
+    })
+}
+
+fn parse_github_repo_choices(raw: &str) -> Vec<GithubRepoChoice> {
+    serde_json::from_str::<Value>(raw)
+        .ok()
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|repo| {
+            let label = repo.get("nameWithOwner")?.as_str()?.trim();
+            let url = repo.get("url")?.as_str()?.trim();
+            if label.is_empty() || url.is_empty() {
+                None
+            } else {
+                Some(GithubRepoChoice {
+                    label: label.to_owned(),
+                    url: url.to_owned(),
+                })
+            }
+        })
+        .collect()
+}
+
+fn load_github_repo_choices() -> Result<Vec<GithubRepoChoice>> {
+    let output = Command::new("gh")
+        .args([
+            "repo",
+            "list",
+            "--limit",
+            "200",
+            "--json",
+            "nameWithOwner,url",
+        ])
+        .output()
+        .context("run gh repo list")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "gh repo list exited with {}",
+        output.status
+    );
+    Ok(parse_github_repo_choices(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
+}
+
+fn clear_combo_text(combo: &ComboBoxText) {
+    combo.remove_all();
+    combo.append(Some(""), "Select...");
+}
+
+fn load_branch_choices(repo_root: &Path, combo: &ComboBoxText) {
+    clear_combo_text(combo);
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args([
+            "for-each-ref",
+            "--format=%(refname:short)",
+            "refs/heads",
+            "refs/remotes/origin",
+        ])
+        .output();
+    let Ok(output) = output else {
+        return;
+    };
+    if !output.status.success() {
+        return;
+    }
+    let mut branches = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter(|line| !line.ends_with("/HEAD"))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    branches.sort();
+    branches.dedup();
+    let has_items = !branches.is_empty();
+    for branch in branches {
+        combo.append(Some(&branch), &branch);
+    }
+    combo.set_active(Some(if has_items { 1 } else { 0 }));
+}
+
+fn parse_github_numbered_choices(raw: &str) -> Vec<(String, String)> {
+    serde_json::from_str::<Value>(raw)
+        .ok()
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|item| {
+            let number = item.get("number")?.as_u64()?.to_string();
+            let title = item.get("title")?.as_str()?.trim();
+            if title.is_empty() {
+                None
+            } else {
+                Some((number.clone(), format!("#{number} {title}")))
+            }
+        })
+        .collect()
+}
+
+fn load_github_issue_choices(repo_root: &Path, combo: &ComboBoxText) {
+    clear_combo_text(combo);
+    let output = Command::new("gh")
+        .arg("-C")
+        .arg(repo_root)
+        .args([
+            "issue",
+            "list",
+            "--limit",
+            "100",
+            "--state",
+            "open",
+            "--json",
+            "number,title",
+        ])
+        .output();
+    let Ok(output) = output else {
+        return;
+    };
+    if !output.status.success() {
+        return;
+    }
+    let choices = parse_github_numbered_choices(&String::from_utf8_lossy(&output.stdout));
+    let has_items = !choices.is_empty();
+    for (value, label) in choices {
+        combo.append(Some(&value), &label);
+    }
+    combo.set_active(Some(if has_items { 1 } else { 0 }));
+}
+
+fn load_github_pr_choices(repo_root: &Path, combo: &ComboBoxText) {
+    clear_combo_text(combo);
+    let output = Command::new("gh")
+        .arg("-C")
+        .arg(repo_root)
+        .args([
+            "pr",
+            "list",
+            "--limit",
+            "100",
+            "--state",
+            "open",
+            "--json",
+            "number,title",
+        ])
+        .output();
+    let Ok(output) = output else {
+        return;
+    };
+    if !output.status.success() {
+        return;
+    }
+    let choices = parse_github_numbered_choices(&String::from_utf8_lossy(&output.stdout));
+    let has_items = !choices.is_empty();
+    for (value, label) in choices {
+        combo.append(Some(&value), &label);
+    }
+    combo.set_active(Some(if has_items { 1 } else { 0 }));
+}
+
+fn new_project_templates() -> Vec<NewProjectTemplate> {
+    vec![
+        NewProjectTemplate {
+            id: "empty",
+            label: "Empty Git Repo",
+            description: "Initialize an empty Git repository with a README.",
+        },
+        NewProjectTemplate {
+            id: "rust-bin",
+            label: "Rust CLI",
+            description: "cargo new --bin",
+        },
+        NewProjectTemplate {
+            id: "rust-lib",
+            label: "Rust Library",
+            description: "cargo new --lib",
+        },
+    ]
+}
+
+fn scaffold_new_repository(parent: &Path, project_name: &str, template: &str) -> Result<PathBuf> {
+    let name = project_name.trim();
+    anyhow::ensure!(!name.is_empty(), "Project name is required.");
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("create parent folder {}", parent.display()))?;
+    let repo_path = parent.join(name);
+    anyhow::ensure!(
+        !repo_path.exists(),
+        "Project folder already exists: {}",
+        repo_path.display()
+    );
+    match template {
+        "rust-bin" => {
+            let status = Command::new("cargo")
+                .args(["new", "--bin"])
+                .arg(&repo_path)
+                .status()
+                .with_context(|| format!("create Rust CLI project {}", repo_path.display()))?;
+            anyhow::ensure!(status.success(), "cargo new exited with {status}");
+        }
+        "rust-lib" => {
+            let status = Command::new("cargo")
+                .args(["new", "--lib"])
+                .arg(&repo_path)
+                .status()
+                .with_context(|| format!("create Rust library project {}", repo_path.display()))?;
+            anyhow::ensure!(status.success(), "cargo new exited with {status}");
+        }
+        _ => {
+            std::fs::create_dir_all(&repo_path)
+                .with_context(|| format!("create project folder {}", repo_path.display()))?;
+            let status = Command::new("git")
+                .args(["init", "--initial-branch", "main"])
+                .arg(&repo_path)
+                .status()
+                .with_context(|| format!("initialize git repo {}", repo_path.display()))?;
+            anyhow::ensure!(status.success(), "git init exited with {status}");
+            std::fs::write(repo_path.join("README.md"), format!("# {name}\n"))
+                .with_context(|| format!("write README for {}", repo_path.display()))?;
+        }
+    }
+    Ok(repo_path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::process::Command;
 
     #[test]
     fn source_preflight_text_summarizes_github_and_linear_readiness() {
@@ -1252,14 +2086,9 @@ mod tests {
 
     #[test]
     fn workspace_source_request_from_form_validates_source_specific_fields() {
-        let branch = workspace_source_request_from_form(
-            "branch",
-            "",
-            Some("main".to_owned()),
-            Some("berlin".to_owned()),
-            Some("lc/berlin".to_owned()),
-        )
-        .unwrap();
+        let branch =
+            workspace_source_request_from_form("branch", "", Some("main".to_owned()), None, None)
+                .unwrap();
         assert!(matches!(branch, WorkspaceSourceRequest::Branch { .. }));
 
         let issue =
@@ -1310,6 +2139,62 @@ mod tests {
                 Err(anyhow::anyhow!("LINEAR_API_KEY missing")),
             ),
             "Create failed from linear_issue: LINEAR_API_KEY missing"
+        );
+    }
+
+    #[test]
+    fn workspace_source_form_copy_matches_source_requirements() {
+        let branch = workspace_source_form_copy("branch");
+        assert_eq!(branch.field_label, "Task source");
+        assert!(branch.base_allowed);
+
+        let pr = workspace_source_form_copy("github_pr");
+        assert_eq!(pr.field_label, "GitHub PR");
+        assert!(!pr.base_allowed);
+        assert_eq!(pr.placeholder, "#456");
+    }
+
+    #[test]
+    fn parse_github_repo_choices_reads_repo_names_and_urls() {
+        let repos = parse_github_repo_choices(
+            r#"[
+  {"nameWithOwner":"acme/api","url":"https://github.com/acme/api"},
+  {"nameWithOwner":"acme/web","url":"https://github.com/acme/web"}
+]"#,
+        );
+
+        assert_eq!(repos.len(), 2);
+        assert_eq!(repos[0].label, "acme/api");
+        assert_eq!(repos[0].url, "https://github.com/acme/api");
+        assert_eq!(repos[1].label, "acme/web");
+    }
+
+    #[test]
+    fn new_project_templates_offer_three_choices() {
+        let templates = new_project_templates();
+        assert_eq!(templates.len(), 3);
+        assert_eq!(templates[0].id, "empty");
+        assert_eq!(templates[1].id, "rust-bin");
+        assert_eq!(templates[2].id, "rust-lib");
+    }
+
+    #[test]
+    fn scaffold_new_repository_creates_empty_git_repo() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = scaffold_new_repository(temp.path(), "demo", "empty").unwrap();
+
+        assert!(repo_path.join(".git").is_dir());
+        assert!(repo_path.join("README.md").is_file());
+        let branch = Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["branch", "--show-current"])
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&branch.stdout).trim(), "main");
+        assert_eq!(
+            fs::read_to_string(repo_path.join("README.md")).unwrap(),
+            "# demo\n"
         );
     }
 }

@@ -248,7 +248,6 @@ pub(crate) fn palette_commands(
     };
     let mut commands = vec![
         cmd("Dashboard", PaletteTarget::Page(AppPage::Dashboard)),
-        cmd("Projects", PaletteTarget::Page(AppPage::Projects)),
         cmd("Settings", PaletteTarget::Page(AppPage::Settings)),
         cmd("History", PaletteTarget::Page(AppPage::History)),
         cmd("Refresh", PaletteTarget::Refresh),
@@ -368,7 +367,7 @@ fn palette_command_search_terms(command: &PaletteCommand) -> Vec<String> {
     }
     terms.extend(match &command.target {
         PaletteTarget::Page(AppPage::Dashboard) => vec!["home".to_owned(), "overview".to_owned()],
-        PaletteTarget::Page(AppPage::Projects) => vec!["repo".to_owned(), "repository".to_owned()],
+        PaletteTarget::Page(AppPage::Projects) => Vec::new(),
         PaletteTarget::Page(AppPage::History) => vec!["archive".to_owned(), "past".to_owned()],
         PaletteTarget::Page(AppPage::Workspace) => vec!["worktree".to_owned(), "branch".to_owned()],
         PaletteTarget::Page(AppPage::Settings) => vec!["config".to_owned()],
@@ -484,9 +483,7 @@ mod tests {
         let commands = palette_commands(false, &keybindings, &[]);
 
         assert!(filter_palette_commands(&commands, "terminal").is_empty());
-        assert!(filter_palette_commands(&commands, "project")
-            .iter()
-            .any(|command| command.label == "Projects"));
+        assert!(filter_palette_commands(&commands, "project").is_empty());
     }
 
     #[test]

@@ -336,6 +336,13 @@ labeled section header instead of a single combined label. Full suite:
 
 - Terminal rendering handles common ANSI/control redraws but is not a full
   terminal emulator.
+- Later backlog: repository-native knowledge graph and RAG grounding are not
+  built yet. Each repository should get its own managed knowledge graph so
+  workspace/repository chats can retrieve local context natively. Knowledge
+  points should be tagged by repository plus workspace, then promoted from
+  workspace scope to the main repository graph when the underlying work is
+  pulled in. Claude harness/tooling should also expose the installed tools
+  needed to read/write that graph and use the retrieval flow.
 - GitHub review-thread sync now has structured read plus CLI resolve/reopen
   mutation paths that were live-proven against temporary PR #12 with a real
   review thread. Check/deployment aggregation now has live-proven CLI coverage

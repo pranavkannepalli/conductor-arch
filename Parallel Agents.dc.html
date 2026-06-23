@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; }
+  body { font-family: 'Inter', system-ui, -apple-system, sans-serif; -webkit-font-smoothing: antialiased; }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: rgba(120,120,120,.3); border-radius: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  textarea::placeholder { color:#73776f; }
+</style>
+</helmet>
+
+<div style="display:flex; height:100vh; width:100vw; overflow:hidden; background:#14171a; color:#1a1a1a; font-size:14px;">
+
+  <!-- ===================== SIDEBAR ===================== -->
+  <aside style="width:268px; flex:none; background:#1e201f; border-right:1px solid #0c0d0c; display:flex; flex-direction:column;">
+    <!-- header -->
+    <div style="height:49px; flex:none; display:flex; align-items:center; gap:10px; padding:0 14px; border-bottom:1px solid #2a2c2a;">
+      <button style="background:none; border:none; padding:4px; cursor:pointer; color:#8a8f88; display:flex;" title="Toggle sidebar">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"></rect><line x1="9" y1="4" x2="9" y2="20"></line></svg>
+      </button>
+      <button style="background:none; border:none; padding:4px; cursor:pointer; color:#8a8f88; display:flex;" title="Split">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"></rect><line x1="14" y1="4" x2="14" y2="20"></line></svg>
+      </button>
+    </div>
+
+    <!-- History -->
+    <div style="display:flex; align-items:center; gap:9px; padding:13px 16px; color:#d4d8d4; font-weight:500;">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 2"></path></svg>
+      <span style="font-size:15px;">History</span>
+    </div>
+
+    <div style="height:1px; background:#2a2c2a; margin:0 0 6px;"></div>
+
+    <!-- Workspaces -->
+    <div style="display:flex; align-items:center; justify-content:space-between; padding:8px 16px 6px;">
+      <span style="font-size:12px; letter-spacing:.02em; color:#86898600; color:#86897f; font-weight:600;">Workspaces</span>
+      <div style="display:flex; gap:8px; color:#9a9d9a;">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="cursor:pointer;"><path d="M3 5h18M6 12h12M10 19h4"></path></svg>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="cursor:pointer;"><rect x="3" y="5" width="18" height="14" rx="2"></rect><path d="M12 10v4M10 12h4"></path></svg>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="cursor:pointer;"><path d="M9 12a3 3 0 0 0 3 3h2a3 3 0 0 0 0-6M15 12a3 3 0 0 0-3-3h-2a3 3 0 0 0 0 6"></path></svg>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="cursor:pointer;"><path d="M12 5v14M5 12h14"></path></svg>
+      </div>
+    </div>
+
+    <!-- Quickstart project -->
+    <div style="display:flex; align-items:center; justify-content:space-between; padding:7px 16px;">
+      <div style="display:flex; align-items:center; gap:9px;">
+        <span style="width:20px; height:20px; display:flex; align-items:center; justify-content:center; font-size:16px; line-height:1;">🚂</span>
+        <span style="font-weight:600; font-size:15px; color:#e4e8e4;">Quickstart</span>
+        <span style="font-size:12px; color:#9a9d9a;">3</span>
+      </div>
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#9a9d9a" stroke-width="2" style="cursor:pointer;"><path d="M12 5v14M5 12h14"></path></svg>
+    </div>
+
+    <!-- items -->
+    <div style="padding:4px 8px; display:flex; flex-direction:column; gap:2px; white-space:nowrap;">
+      <!-- active -->
+      <div style="display:flex; align-items:center; justify-content:space-between; padding:9px 10px; border-radius:7px; background:#2c2f2c; cursor:pointer;">
+        <div style="display:flex; align-items:center; gap:9px; min-width:0;">
+          <svg width="6" height="14" viewBox="0 0 6 14" fill="#565956"><circle cx="3" cy="3" r="1.4"></circle><circle cx="3" cy="7" r="1.4"></circle><circle cx="3" cy="11" r="1.4"></circle></svg>
+          <span style="font-weight:500; color:#e4e8e4;">1. Start here</span>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#9a9d9a" stroke-width="1.7"><path d="M6 16a4 4 0 0 1 .9-7.9A5 5 0 0 1 17 8a3.5 3.5 0 0 1 0 8H6z"></path></svg>
+        </div>
+        <span style="display:flex; align-items:center; gap:4px; font-size:12px; color:#7c7f7c;">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="6" width="3" height="12" rx="1"></rect><rect x="8" y="3" width="3" height="15" rx="1"></rect><rect x="13" y="9" width="3" height="9" rx="1"></rect><rect x="18" y="6" width="3" height="12" rx="1"></rect></svg>
+          preview
+        </span>
+      </div>
+      <!-- item 2 -->
+      <div style="display:flex; align-items:center; justify-content:space-between; padding:9px 10px; border-radius:7px; cursor:pointer;" style-hover="background:#26282a;">
+        <div style="display:flex; align-items:center; gap:9px; min-width:0;">
+          <svg width="6" height="14" viewBox="0 0 6 14" fill="#4a4d4a"><circle cx="3" cy="3" r="1.4"></circle><circle cx="3" cy="7" r="1.4"></circle><circle cx="3" cy="11" r="1.4"></circle></svg>
+          <span style="color:#b4b8b4; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">2. Run a parall…</span>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#9a9d9a" stroke-width="1.7"><path d="M6 16a4 4 0 0 1 .9-7.9A5 5 0 0 1 17 8a3.5 3.5 0 0 1 0 8H6z"></path></svg>
+        </div>
+        <span style="display:flex; align-items:center; gap:4px; font-size:12px; color:#7c7fe0; color:#6f73c9;">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="6" width="3" height="12" rx="1"></rect><rect x="8" y="3" width="3" height="15" rx="1"></rect><rect x="13" y="9" width="3" height="9" rx="1"></rect><rect x="18" y="6" width="3" height="12" rx="1"></rect></svg>
+          night…
+        </span>
+      </div>
+      <!-- item 3 -->
+      <div style="display:flex; align-items:center; gap:9px; padding:9px 10px; border-radius:7px; cursor:pointer;" style-hover="background:#26282a;">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#9a9d9a" stroke-width="1.8"><path d="M6 3v12a3 3 0 0 0 3 3h9"></path><path d="M15 15l3 3-3 3"></path></svg>
+        <span style="color:#b4b8b4;">3. Next steps</span>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#9a9d9a" stroke-width="1.7"><path d="M6 16a4 4 0 0 1 .9-7.9A5 5 0 0 1 17 8a3.5 3.5 0 0 1 0 8H6z"></path></svg>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ===================== MAIN AREA ===================== -->
+  <div style="flex:1; min-width:0; display:flex; flex-direction:column;">
+
+    <!-- title bar (dark, spans center + right) -->
+    <div style="height:49px; flex:none; background:#1c201d; border-bottom:1px solid #000; display:flex; align-items:center; padding:0 4px 0 14px; color:#c8ccc8;">
+      <div style="display:flex; align-items:center; gap:6px; color:#7e827e;">
+        <button style="background:none;border:none;padding:5px;cursor:pointer;color:inherit;display:flex;" style-hover="color:#c8ccc8;"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 6l-6 6 6 6"></path></svg></button>
+        <button style="background:none;border:none;padding:5px;cursor:pointer;color:inherit;display:flex;" style-hover="color:#c8ccc8;"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"></path></svg></button>
+      </div>
+      <!-- breadcrumb -->
+      <div style="display:flex; align-items:center; gap:9px; margin-left:14px; font-size:14px; min-width:0; overflow:hidden; white-space:nowrap;">
+        <span style="width:20px; height:20px; display:flex; align-items:center; justify-content:center; font-size:16px; line-height:1;">🚂</span>
+        <span style="color:#dfe3df; font-weight:500;">Quickstart</span>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#5d615d" stroke-width="2"><path d="M9 6l6 6-6 6"></path></svg>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#7e827e" stroke-width="2"><circle cx="6" cy="6" r="2.5"></circle><circle cx="6" cy="18" r="2.5"></circle><circle cx="18" cy="9" r="2.5"></circle><path d="M6 8.5v7M8.5 6H14a4 4 0 0 1 4 4v0"></path></svg>
+        <span style="color:#dfe3df; font-weight:500;">1. Start here</span>
+        <span style="color:#5d615d; letter-spacing:2px;">···</span>
+      </div>
+
+      <div style="flex:1;"></div>
+
+      <!-- PR badge -->
+      <div style="display:flex; align-items:stretch; border-radius:7px; overflow:hidden; font-size:13px; font-weight:600; margin-right:12px; flex:none; white-space:nowrap;">
+        <span style="display:flex; align-items:center; gap:6px; padding:7px 11px; background:#274b30; background:color-mix(in oklab, {{ accent }} 24%, #16241a); color:#9ff0bf; color:color-mix(in oklab, {{ accent }} 70%, white);">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="6" cy="6" r="2.5"></circle><circle cx="6" cy="18" r="2.5"></circle><circle cx="18" cy="9" r="2.5"></circle><path d="M6 8.5v7M8.5 6H14a4 4 0 0 1 4 4v0"></path></svg>
+          PR #1432
+        </span>
+        <span style="display:flex; align-items:center; gap:6px; padding:7px 13px; background:#1e3b25; background:color-mix(in oklab, {{ accent }} 14%, #15211a); color:#7fdf9f; color:color-mix(in oklab, {{ accent }} 62%, white);">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6L9 17l-5-5"></path></svg>
+          Ready for review
+        </span>
+      </div>
+
+      <!-- right-panel toggle -->
+      <button style="background:none;border:none;padding:6px;cursor:pointer;color:#7e827e;display:flex;margin-right:8px;" style-hover="color:#c8ccc8;">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"></rect><line x1="15" y1="4" x2="15" y2="20"></line></svg>
+      </button>
+
+      <!-- Linux window controls -->
+      <div style="display:flex; align-items:center; gap:2px;">
+        <button title="Minimize" style="width:30px;height:30px;border:none;background:none;border-radius:6px;cursor:pointer;color:#9a9e9a;display:flex;align-items:center;justify-content:center;" style-hover="background:#2c302d;color:#dfe3df;">
+          <svg width="12" height="12" viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.3"><line x1="2.5" y1="6" x2="9.5" y2="6"></line></svg>
+        </button>
+        <button title="Maximize" style="width:30px;height:30px;border:none;background:none;border-radius:6px;cursor:pointer;color:#9a9e9a;display:flex;align-items:center;justify-content:center;" style-hover="background:#2c302d;color:#dfe3df;">
+          <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="2.5" y="2.5" width="7" height="7" rx="1"></rect></svg>
+        </button>
+        <button title="Close" style="width:30px;height:30px;border:none;background:none;border-radius:6px;cursor:pointer;color:#9a9e9a;display:flex;align-items:center;justify-content:center;" style-hover="background:#c2422d;color:#fff;">
+          <svg width="12" height="12" viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.3"><line x1="3" y1="3" x2="9" y2="9"></line><line x1="9" y1="3" x2="3" y2="9"></line></svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- body: center + right -->
+    <div style="flex:1; min-height:0; display:flex;">
+
+      <!-- ===== CENTER ===== -->
+      <section style="flex:1; min-width:0; background:#181a18; display:flex; flex-direction:column;">
+        <!-- tabs -->
+        <div style="height:46px; flex:none; display:flex; align-items:stretch; gap:18px; padding:0 18px; border-bottom:1px solid #26282a; white-space:nowrap;">
+          <div onClick="{{ tabStart }}" style="display:flex; align-items:center; gap:8px; padding:0 4px; cursor:pointer; font-size:14px; border-bottom:2px solid transparent; {{ cStart }}">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 3v5h5"></path><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"></path></svg>
+            Start here
+          </div>
+          <div onClick="{{ tabApp }}" style="display:flex; align-items:center; gap:8px; padding:0 4px; cursor:pointer; font-size:14px; border-bottom:2px solid transparent; {{ cApp }}">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 3v5h5"></path><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"></path></svg>
+            main.rs
+          </div>
+          <div onClick="{{ tabTerm }}" style="display:flex; align-items:center; gap:8px; padding:0 4px; cursor:pointer; font-size:14px; border-bottom:2px solid transparent; {{ cTerm }}">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M7 9l3 3-3 3M13 15h4"></path></svg>
+            Terminal
+          </div>
+        </div>
+
+        <!-- chat -->
+        <div style="flex:1; min-height:0; overflow-y:auto; padding:26px 30px 8px;">
+          <!-- user 1 -->
+          <div style="display:flex; justify-content:flex-end; margin-bottom:26px;">
+            <div style="background:#2c2f2c; color:#e4e8e4; padding:11px 16px; border-radius:14px; max-width:70%; line-height:1.4;">Walk me through how this workspace is set up.</div>
+          </div>
+          <!-- assistant 1 -->
+          <div style="color:#c4c8c4; line-height:1.55; max-width:88%;">
+            <p style="margin:0 0 14px;">This workspace runs coding agents in parallel. I'll use one isolated workspace for this task: its own branch, files, chat, terminal, preview, and reviewable diff.</p>
+            <p style="margin:0 0 4px;">1. Send the drafted task.</p>
+            <p style="margin:0 0 4px;">2. Run the app with <kbd style="font-family:'JetBrains Mono',ui-monospace,monospace; background:#2a2c2a; border:1px solid #3a3d3a; border-radius:4px; padding:1px 5px; font-size:12px;">Ctrl R</kbd>.</p>
+            <p style="margin:0 0 18px;">3. Review the diff before you keep it.</p>
+            <div style="display:flex; flex-direction:column; gap:13px; font-family:'JetBrains Mono',ui-monospace,monospace; font-size:13px;">
+              <div style="display:flex; align-items:center; gap:9px;"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#9a9d9a" stroke-width="1.8"><path d="M14 3v5h5"></path><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"></path></svg><span style="font-family:system-ui,sans-serif; font-weight:600; color:#e4e8e4;">Read</span> <span style="color:#8a8f88;">README.md</span></div>
+              <div style="display:flex; align-items:center; gap:9px;"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#9a9d9a" stroke-width="1.8"><path d="M14 3v5h5"></path><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"></path></svg><span style="font-family:system-ui,sans-serif; font-weight:600; color:#e4e8e4;">Read</span> <span style="color:#8a8f88;">.agents/config.toml</span></div>
+              <div style="display:flex; align-items:center; gap:9px;"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#9a9d9a" stroke-width="1.8"><path d="M14 3v5h5"></path><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"></path></svg><span style="font-family:system-ui,sans-serif; font-weight:600; color:#e4e8e4;">Read</span> <span style="color:#8a8f88;">src/main.rs</span></div>
+            </div>
+          </div>
+
+          <!-- user 2 -->
+          <div style="display:flex; justify-content:flex-end; margin:34px 0 26px;">
+            <div style="background:#2c2f2c; color:#e4e8e4; padding:11px 16px; border-radius:14px; max-width:70%; line-height:1.4;">Add a 10-train milestone animation.</div>
+          </div>
+          <!-- assistant 2 -->
+          <div style="color:#c4c8c4; line-height:1.55; max-width:88%;">
+            <p style="margin:0 0 18px;">Done. I changed the train app in this workspace, kept the preview running, and ran clippy. The code is isolated from main until you review it in the <a href="#" style="color:#c4c8c4; text-decoration:underline; text-underline-offset:2px;">diff viewer</a>.</p>
+            <div style="display:flex; flex-direction:column; gap:13px; font-family:'JetBrains Mono',ui-monospace,monospace; font-size:13px;">
+              <div style="display:flex; align-items:center; gap:9px;"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#9a9d9a" stroke-width="1.8"><path d="M12 20h9"></path><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"></path></svg><span style="font-family:system-ui,sans-serif; font-weight:600; color:#e4e8e4;">Update</span> <span style="color:#8a8f88;">src/main.rs</span></div>
+              <div style="display:flex; align-items:center; gap:9px;"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#9a9d9a" stroke-width="1.8"><path d="M12 20h9"></path><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"></path></svg><span style="font-family:system-ui,sans-serif; font-weight:600; color:#e4e8e4;">Update</span> <span style="color:#8a8f88;">src/app.rs</span></div>
+            </div>
+          </div>
+
+          <!-- appended follow-ups -->
+          <sc-for list="{{ extra }}" as="m" hint-placeholder-count="0">
+            <div style="display:flex; justify-content:flex-end; margin:26px 0 0;">
+              <div style="background:#2c2f2c; color:#e4e8e4; padding:11px 16px; border-radius:14px; max-width:70%; line-height:1.4;">{{ m.text }}</div>
+            </div>
+          </sc-for>
+        </div>
+
+        <!-- composer -->
+        <div style="flex:none; padding:0 22px 22px;">
+          <div style="border:1px solid #2c2f2c; border-radius:14px; background:#202220; overflow:hidden;">
+            <textarea value="{{ draft }}" onChange="{{ onDraft }}" onKeyDown="{{ onKey }}" placeholder="Add a follow-up, attach files, or start another agent…" rows="2" style="width:100%; border:none; outline:none; resize:none; padding:15px 16px 6px; font-family:inherit; font-size:14px; color:#e4e8e4; background:transparent; line-height:1.4;"></textarea>
+            <div style="display:flex; align-items:center; gap:16px; padding:8px 12px 10px; color:#86897f;">
+              <span style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer;"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v10M7 12h10"></path></svg>GPT-5.5</span>
+              <span style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer; color:#b08a3e;"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M13 2L4 14h6l-1 8 9-12h-6z"></path></svg>Fast</span>
+              <span style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer; color:#3e7db0;"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="13" width="4" height="8" rx="1"></rect><rect x="10" y="8" width="4" height="13" rx="1"></rect><rect x="17" y="3" width="4" height="18" rx="1"></rect></svg>High</span>
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" style="cursor:pointer;"><path d="M4 6h10M4 12h16M4 18h7"></path></svg>
+              <div style="flex:1;"></div>
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="cursor:pointer;"><path d="M12 5v14M5 12h14"></path></svg>
+              <button onClick="{{ send }}" style="width:30px; height:30px; border:none; border-radius:8px; background:#2c2f2c; color:#8a8f88; cursor:pointer; display:flex; align-items:center; justify-content:center;" style-hover="background:#383b38;">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19V5M6 11l6-6 6 6"></path></svg>
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== RIGHT (diff / run) ===== -->
+      <aside style="width:300px; flex:none; background:#15181b; border-left:1px solid #000; display:flex; flex-direction:column; color:#c8ccc8;">
+        <!-- tabs -->
+        <div style="height:46px; flex:none; display:flex; align-items:center; gap:4px; padding:0 12px; border-bottom:1px solid #23272a;">
+          <div onClick="{{ rTabAll }}" style="padding:5px 11px; border-radius:7px; font-size:13px; cursor:pointer; {{ rAll }}">All files</div>
+          <div onClick="{{ rTabChanges }}" style="display:flex; align-items:center; gap:7px; padding:5px 11px; border-radius:7px; font-size:13px; cursor:pointer; {{ rChanges }}">Changes <span style="background:#3a3f43; color:#cdd2ce; border-radius:5px; padding:0 6px; font-size:11px; font-weight:600;">2</span></div>
+          <div onClick="{{ rTabChecks }}" style="padding:5px 11px; border-radius:7px; font-size:13px; cursor:pointer; {{ rChecks }}">Checks</div>
+        </div>
+
+        <!-- file list -->
+        <div style="flex:1; min-height:0; overflow-y:auto; padding:10px; display:flex; flex-direction:column; gap:3px;">
+          <div onClick="{{ fileMain }}" style="padding:8px 11px; border-radius:7px; font-size:13px; font-family:'JetBrains Mono',ui-monospace,monospace; cursor:pointer; {{ fMain }}">src/main.rs</div>
+          <div onClick="{{ fileApp }}" style="padding:8px 11px; border-radius:7px; font-size:13px; font-family:'JetBrains Mono',ui-monospace,monospace; cursor:pointer; {{ fApp }}">src/app.rs</div>
+        </div>
+
+        <!-- run console -->
+        <div style="flex:none; border-top:1px solid #23272a;">
+          <div style="height:42px; display:flex; align-items:center; gap:4px; padding:0 10px;">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#7e827e" stroke-width="2" style="margin-right:4px;"><path d="M6 9l6 6 6-6"></path></svg>
+            <div style="padding:5px 11px; border-radius:7px; font-size:13px; color:#9a9e9a; cursor:pointer;" style-hover="background:#23272a;">Setup</div>
+            <div style="display:flex; align-items:center; gap:7px; padding:5px 11px; border-radius:7px; font-size:13px; color:#dfe3df; background:#23272a; cursor:pointer;">
+              <span style="width:8px; height:8px; border-radius:50%; background:#3fb950; background:{{ accent }};"></span>
+              Run
+            </div>
+            <div style="padding:5px 9px; border-radius:7px; font-size:13px; color:#9a9e9a; cursor:pointer;" style-hover="background:#23272a;">+</div>
+          </div>
+          <div style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:12px; line-height:1.6; padding:6px 14px 16px; position:relative; white-space:nowrap; overflow-x:auto;">
+            <div style="color:#cdd2ce;">$ cargo run</div>
+            <div style="height:6px;"></div>
+            <div style="color:#7fb98a;">&nbsp;&nbsp;&nbsp;Compiling welcome-to-conductor v0.0.0</div>
+            <div style="color:#7fb98a;">&nbsp;&nbsp;&nbsp;&nbsp;Finished dev [unoptimized] in 0.42s</div>
+            <div style="color:#9a9e9a;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Running `target/debug/app`</div>
+            <div style="height:6px;"></div>
+            <div style="color:#4ec77f; color:{{ accent }};">Preview ready in 426ms</div>
+            <div style="color:#7e827e;">watching src/main.rs and src/app.rs</div>
+            <!-- console controls -->
+            <div style="position:absolute; right:12px; top:2px; display:flex; gap:6px; color:#7e827e;">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" style="cursor:pointer;"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"></path></svg>
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" style="cursor:pointer;"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"></path><path d="M3 3v5h5"></path></svg>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1284,&quot;height&quot;:734},&quot;accent&quot;:{&quot;editor&quot;:&quot;color&quot;,&quot;default&quot;:&quot;#3fb950&quot;,&quot;tsType&quot;:&quot;string&quot;}}">
+class Component extends DCLogic {
+  state = {
+    centerTab: 'start',
+    rightTab: 'changes',
+    file: 'main.rs',
+    draft: '',
+    extra: []
+  };
+
+  renderVals() {
+    const ct = this.state.centerTab;
+    const rt = this.state.rightTab;
+    const f = this.state.file;
+
+    const tab = (a) => a
+      ? 'color:#e8eae8;border-bottom:2px solid #e8eae8;font-weight:600;'
+      : 'color:#8a8f88;';
+    const rtab = (a) => a
+      ? 'background:#23272a;color:#e8eae8;'
+      : 'color:#8b908c;';
+    const frow = (a) => a
+      ? 'background:#23272a;color:#e8eae8;'
+      : 'color:#b1b6b2;';
+
+    const sendNow = () => {
+      const d = (this.state.draft || '').trim();
+      if (!d) return;
+      this.setState(s => ({ extra: [...s.extra, { text: d }], draft: '' }));
+    };
+
+    return {
+      accent: this.props.accent ?? '#3fb950',
+
+      cStart: tab(ct === 'start'),
+      cApp: tab(ct === 'app'),
+      cTerm: tab(ct === 'terminal'),
+      tabStart: () => this.setState({ centerTab: 'start' }),
+      tabApp: () => this.setState({ centerTab: 'app' }),
+      tabTerm: () => this.setState({ centerTab: 'terminal' }),
+
+      rAll: rtab(rt === 'all'),
+      rChanges: rtab(rt === 'changes'),
+      rChecks: rtab(rt === 'checks'),
+      rTabAll: () => this.setState({ rightTab: 'all' }),
+      rTabChanges: () => this.setState({ rightTab: 'changes' }),
+      rTabChecks: () => this.setState({ rightTab: 'checks' }),
+
+      fMain: frow(f === 'main.rs'),
+      fApp: frow(f === 'app.rs'),
+      fileMain: () => this.setState({ file: 'main.rs' }),
+      fileApp: () => this.setState({ file: 'app.rs' }),
+
+      draft: this.state.draft,
+      onDraft: (e) => this.setState({ draft: e.target.value }),
+      onKey: (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendNow(); } },
+      send: sendNow,
+      extra: this.state.extra
+    };
+  }
+}
+</script>
+</body>
+</html>
