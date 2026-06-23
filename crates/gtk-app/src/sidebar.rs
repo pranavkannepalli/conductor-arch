@@ -25,7 +25,44 @@ pub(crate) fn build_app_sidebar(
     sidebar_box.add_css_class("sidebar");
     sidebar_box.set_width_request(240);
 
-    // Minimal search bar at top
+    // Workspaces header with add button
+    let projects_header = GBox::new(Orientation::Horizontal, 8);
+    projects_header.add_css_class("projects-header");
+    let header_lbl = Label::new(Some("Workspaces"));
+    header_lbl.add_css_class("sidebar-header");
+    header_lbl.set_xalign(0.0);
+    header_lbl.set_hexpand(true);
+    projects_header.append(&header_lbl);
+    let add_workspace_btn = Button::from_icon_name("list-add-symbolic");
+    add_workspace_btn.add_css_class("mini-action-button");
+    add_workspace_btn.set_tooltip_text(Some("Add repository or workspace"));
+    {
+        let db_path_hdr = app_state.workspace_database_path();
+        let hub_hdr = refresh_hub.clone();
+        let rw_hdr = refresh_workspace.clone();
+        let rvp_hdr = refresh_view_preferences.clone();
+        add_workspace_btn.connect_clicked(move |_| {
+            show_repository_quick_add_dialog(
+                db_path_hdr.clone(),
+                Rc::new({
+                    let hub_hdr = hub_hdr.clone();
+                    let rw_hdr = rw_hdr.clone();
+                    let rvp_hdr = rvp_hdr.clone();
+                    move || {
+                        hub_hdr.refresh(RefreshScope::Projects);
+                        hub_hdr.refresh(RefreshScope::Sidebar);
+                        rw_hdr();
+                        rvp_hdr();
+                    }
+                }),
+                Some("folder"),
+            );
+        });
+    }
+    projects_header.append(&add_workspace_btn);
+    sidebar_box.append(&projects_header);
+
+    // Minimal search bar
     let search_entry = Entry::new();
     search_entry.set_placeholder_text(Some("Filter workspaces..."));
     search_entry.add_css_class("sidebar-search-minimal");
