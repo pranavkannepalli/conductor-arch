@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900" role="img" aria-labelledby="title desc">
-  <title id="title">Linux Conductor review and checks UI sketch</title>
+  <title id="title">Linux Archductor review and checks UI sketch</title>
   <desc id="desc">Dark wireframe showing a diff viewer, file list, local review comments, checks, PR state, and merge readiness.</desc>
   <defs>
     <style>
@@ -66,9 +66,9 @@
   <rect class="add" x="326" y="158" width="742" height="30"/>
   <text class="mono" x="334" y="178">+    let port = self.port_allocator.allocate(repo_id, workspace_name)?;</text>
   <rect class="add" x="326" y="188" width="742" height="30"/>
-  <text class="mono" x="334" y="208">+    env.insert("CONDUCTOR_PORT".into(), port.to_string());</text>
+  <text class="mono" x="334" y="208">+    env.insert("ARCHDUCTOR_PORT".into(), port.to_string());</text>
   <rect class="add" x="326" y="218" width="742" height="30"/>
-  <text class="mono" x="334" y="238">+    env.insert("CONDUCTOR_IS_LOCAL".into(), "1".into());</text>
+  <text class="mono" x="334" y="238">+    env.insert("ARCHDUCTOR_IS_LOCAL".into(), "1".into());</text>
 
   <text class="mono" x="334" y="286">@@ -144,6 +166,14 @@ fn create_context_dir(path: &amp;Path) {</text>
   <rect class="add" x="326" y="304" width="742" height="30"/>

@@ -147,8 +147,8 @@ pub struct ViewSettings {
 }
 
 pub fn load_repository_settings(repo_path: &Path) -> Result<RepositorySettings> {
-    let shared = load_optional_settings(&repo_path.join(".conductor/settings.toml"))?;
-    let local = load_optional_settings(&repo_path.join(".conductor/settings.local.toml"))?;
+    let shared = load_optional_settings(&repo_path.join(".archductor/settings.toml"))?;
+    let local = load_optional_settings(&repo_path.join(".archductor/settings.local.toml"))?;
     Ok(shared.merge(local).into_settings())
 }
 
@@ -176,8 +176,8 @@ pub enum FilePatternSource {
 }
 
 pub fn inspect_repository_settings(repo_path: &Path) -> Result<RepositorySettingsInspection> {
-    let shared_settings_path = repo_path.join(".conductor/settings.toml");
-    let local_settings_path = repo_path.join(".conductor/settings.local.toml");
+    let shared_settings_path = repo_path.join(".archductor/settings.toml");
+    let local_settings_path = repo_path.join(".archductor/settings.local.toml");
     let worktreeinclude_path = repo_path.join(".worktreeinclude");
     let worktreeinclude_patterns = if worktreeinclude_path.exists() {
         split_patterns(Some(
@@ -219,7 +219,7 @@ pub fn save_repository_settings(
     settings: &RepositorySettings,
 ) -> Result<()> {
     validate_repository_settings(settings)?;
-    let conductor_dir = repo_path.join(".conductor");
+    let conductor_dir = repo_path.join(".archductor");
     std::fs::create_dir_all(&conductor_dir)
         .with_context(|| format!("create {}", conductor_dir.display()))?;
     let path = match layer {
@@ -1251,7 +1251,7 @@ mod tests {
     #[test]
     fn loads_shared_settings_file() {
         let temp = tempfile::tempdir().unwrap();
-        let conductor_dir = temp.path().join(".conductor");
+        let conductor_dir = temp.path().join(".archductor");
         fs::create_dir(&conductor_dir).unwrap();
         fs::write(
             conductor_dir.join("settings.toml"),
@@ -1263,7 +1263,7 @@ config/*.local.json
 
 [scripts]
 setup = "pnpm install"
-run = "pnpm dev --port $CONDUCTOR_PORT"
+run = "pnpm dev --port $ARCHDUCTOR_PORT"
 run_mode = "concurrent"
 
 [environment_variables]
@@ -1281,7 +1281,7 @@ API_BASE_URL = "http://localhost:3000"
         assert_eq!(settings.scripts.setup, Some("pnpm install".to_owned()));
         assert_eq!(
             settings.scripts.run,
-            Some("pnpm dev --port $CONDUCTOR_PORT".to_owned())
+            Some("pnpm dev --port $ARCHDUCTOR_PORT".to_owned())
         );
         assert_eq!(settings.scripts.run_mode, Some("concurrent".to_owned()));
         assert_eq!(
@@ -1296,7 +1296,7 @@ API_BASE_URL = "http://localhost:3000"
     #[test]
     fn local_settings_override_shared_settings() {
         let temp = tempfile::tempdir().unwrap();
-        let conductor_dir = temp.path().join(".conductor");
+        let conductor_dir = temp.path().join(".archductor");
         fs::create_dir(&conductor_dir).unwrap();
         fs::write(
             conductor_dir.join("settings.toml"),
@@ -1359,7 +1359,7 @@ LOCAL_ONLY = "1"
             enterprise_data_privacy: Some(false),
             scripts: ScriptSettings {
                 setup: Some("pnpm install".to_owned()),
-                run: Some("pnpm dev --port $CONDUCTOR_PORT".to_owned()),
+                run: Some("pnpm dev --port $ARCHDUCTOR_PORT".to_owned()),
                 archive: Some("./script/archive.sh".to_owned()),
                 run_mode: Some("nonconcurrent".to_owned()),
             },
@@ -1401,14 +1401,14 @@ LOCAL_ONLY = "1"
         let loaded = load_repository_settings(temp.path()).unwrap();
 
         assert_eq!(loaded, settings);
-        assert!(temp.path().join(".conductor/settings.toml").exists());
-        assert!(!temp.path().join(".conductor/settings.local.toml").exists());
+        assert!(temp.path().join(".archductor/settings.toml").exists());
+        assert!(!temp.path().join(".archductor/settings.local.toml").exists());
     }
 
     #[test]
     fn loads_merges_and_saves_customization_settings() {
         let temp = tempfile::tempdir().unwrap();
-        let conductor_dir = temp.path().join(".conductor");
+        let conductor_dir = temp.path().join(".archductor");
         fs::create_dir(&conductor_dir).unwrap();
         fs::write(
             conductor_dir.join("settings.toml"),
@@ -1596,7 +1596,7 @@ keybindings = "palette=ctrl+p,refresh=ctrl+shift+r"
     #[test]
     fn inspect_repository_settings_reports_worktreeinclude_precedence() {
         let temp = tempfile::tempdir().unwrap();
-        let conductor_dir = temp.path().join(".conductor");
+        let conductor_dir = temp.path().join(".archductor");
         fs::create_dir(&conductor_dir).unwrap();
         fs::write(
             conductor_dir.join("settings.toml"),

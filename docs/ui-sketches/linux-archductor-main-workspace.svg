@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900" role="img" aria-labelledby="title desc">
-  <title id="title">Linux Conductor main workspace UI sketch</title>
+  <title id="title">Linux Archductor main workspace UI sketch</title>
   <desc id="desc">Dark desktop app wireframe with a left workspace sidebar, central agent terminal, right review panel, and bottom prompt composer.</desc>
   <defs>
     <style>
@@ -32,12 +32,12 @@
   <circle cx="42" cy="42" r="6" fill="#ff6b6b"/>
   <circle cx="62" cy="42" r="6" fill="#ffd166"/>
   <circle cx="82" cy="42" r="6" fill="#72d572"/>
-  <text class="title" x="34" y="82">conductor-linux</text>
+  <text class="title" x="34" y="82">archductor-linux</text>
   <rect class="button" x="206" y="60" width="86" height="30" rx="6"/>
   <text class="small" x="226" y="80">New</text>
 
   <line class="line" x1="18" y1="100" x2="318" y2="100"/>
-  <text class="muted" x="34" y="128">conductor</text>
+  <text class="muted" x="34" y="128">archductor</text>
   <rect class="panel2" x="30" y="142" width="272" height="58" rx="6"/>
   <circle class="green" cx="48" cy="162" r="5"/>
   <text class="text" x="62" y="166">tel-aviv</text>
@@ -62,7 +62,7 @@
 
   <line class="line" x1="330" y1="74" x2="1100" y2="74"/>
   <text class="title" x="354" y="48">tel-aviv</text>
-  <text class="muted" x="430" y="48">conductor · lc/linux-port-main</text>
+  <text class="muted" x="430" y="48">archductor · lc/linux-port-main</text>
   <rect class="button" x="770" y="32" width="76" height="30" rx="6"/>
   <text class="small" x="792" y="52">Run</text>
   <rect class="button" x="854" y="32" width="88" height="30" rx="6"/>
@@ -82,13 +82,13 @@
   <rect class="panel2" x="354" y="260" width="706" height="178" rx="8"/>
   <text class="small" x="378" y="288">Codex</text>
   <text class="text" x="378" y="316">I created the workspace runtime and wired setup scripts.</text>
-  <text class="mono" x="378" y="350">$ git worktree add ~/conductor/workspaces/app/tel-aviv -b lc/linux-port-main origin/main</text>
+  <text class="mono" x="378" y="350">$ git worktree add ~/archductor/workspaces/app/tel-aviv -b lc/linux-port-main origin/main</text>
   <text class="mono" x="378" y="378">$ pnpm install</text>
-  <text class="green" x="378" y="408">setup complete · CONDUCTOR_PORT=42030</text>
+  <text class="green" x="378" y="408">setup complete · ARCHDUCTOR_PORT=42030</text>
 
   <rect class="panel2" x="354" y="456" width="706" height="192" rx="8"/>
   <text class="small" x="378" y="484">Terminal · run script</text>
-  <text class="mono" x="378" y="518">$ linux-conductor run tel-aviv</text>
+  <text class="mono" x="378" y="518">$ linux-archductor run tel-aviv</text>
   <text class="mono" x="378" y="550">&gt; vite --host 127.0.0.1 --port 42030</text>
   <text class="green" x="378" y="582">Local: http://127.0.0.1:42030/</text>
   <text class="muted" x="378" y="614">watching src/main.rs, crates/core/src/workspace.rs</text>

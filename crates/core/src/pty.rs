@@ -6,12 +6,15 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+use tracing::{debug, trace, warn};
+use vt100::Parser;
 
 pub struct PtySession {
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send>,
     writer: Box<dyn Write + Send>,
-    output: Arc<Mutex<String>>,
+    output: Arc<Mutex<Vec<u8>>>,
+    screen: Arc<Mutex<Parser>>,
     read_cursor: usize,
 }
 
@@ -32,6 +35,15 @@ impl PtySession {
         rows: u16,
         cols: u16,
     ) -> Result<Self> {
+        debug!(
+            program = %program.display(),
+            cwd = %cwd.display(),
+            args = ?args,
+            env_count = env.len(),
+            rows,
+            cols,
+            "spawning pty session"
+        );
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -57,20 +69,28 @@ impl PtySession {
 
         let mut reader = pair.master.try_clone_reader().context("clone pty reader")?;
         let writer = pair.master.take_writer().context("take pty writer")?;
-        let output = Arc::new(Mutex::new(String::new()));
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let screen = Arc::new(Mutex::new(Parser::new(rows, cols, 0)));
         let output_for_reader = Arc::clone(&output);
+        let screen_for_reader = Arc::clone(&screen);
         thread::spawn(move || {
             let mut buffer = [0u8; 4096];
             loop {
                 match reader.read(&mut buffer) {
                     Ok(0) => break,
                     Ok(n) => {
-                        let chunk = String::from_utf8_lossy(&buffer[..n]);
+                        trace!(bytes = n, "pty read chunk");
                         if let Ok(mut output) = output_for_reader.lock() {
-                            output.push_str(&chunk);
+                            output.extend_from_slice(&buffer[..n]);
+                        }
+                        if let Ok(mut screen) = screen_for_reader.lock() {
+                            screen.process(&buffer[..n]);
                         }
                     }
-                    Err(_) => break,
+                    Err(err) => {
+                        warn!(error = %err, "pty reader stopped");
+                        break;
+                    }
                 }
             }
         });
@@ -80,15 +100,27 @@ impl PtySession {
             child,
             writer,
             output,
+            screen,
             read_cursor: 0,
         })
     }
 
     pub fn write(&mut self, input: &str) -> Result<()> {
-        self.writer
-            .write_all(input.as_bytes())
-            .context("write to pty")?;
+        self.write_bytes(input.as_bytes())
+    }
+
+    pub fn write_bytes(&mut self, input: &[u8]) -> Result<()> {
+        trace!(bytes = input.len(), "writing to pty");
+        self.writer.write_all(input).context("write to pty")?;
         self.writer.flush().context("flush pty writer")
+    }
+
+    pub fn send_line(&mut self, input: &str) -> Result<()> {
+        let bytes = crate::codex_tui::encode_send_line(input);
+        let (line, enter) = bytes.split_at(bytes.len().saturating_sub(1));
+        self.write_bytes(line)?;
+        thread::sleep(Duration::from_millis(20));
+        self.write_bytes(enter)
     }
 
     pub fn process_id(&self) -> Option<u32> {
@@ -96,6 +128,7 @@ impl PtySession {
     }
 
     pub fn resize(&self, rows: u16, cols: u16) -> Result<()> {
+        trace!(rows, cols, "resizing pty");
         self.master
             .resize(PtySize {
                 rows,
@@ -103,7 +136,11 @@ impl PtySession {
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .context("resize pty")
+            .context("resize pty")?;
+        if let Ok(mut screen) = self.screen.lock() {
+            screen.screen_mut().set_size(rows, cols);
+        }
+        Ok(())
     }
 
     pub fn has_exited(&mut self) -> Result<bool> {
@@ -114,12 +151,19 @@ impl PtySession {
         let Ok(output) = self.output.lock() else {
             return String::new();
         };
-        let next = output
-            .get(self.read_cursor..)
-            .unwrap_or_default()
-            .to_owned();
+        let next = output.get(self.read_cursor..).unwrap_or_default().to_vec();
         self.read_cursor = output.len();
-        next
+        if !next.is_empty() {
+            trace!(bytes = next.len(), "drained pty output");
+        }
+        String::from_utf8_lossy(&next).into_owned()
+    }
+
+    pub fn visible_screen_text(&self) -> String {
+        let Ok(screen) = self.screen.lock() else {
+            return String::new();
+        };
+        screen.screen().contents()
     }
 
     pub fn read_until(&mut self, needle: &str, timeout: Duration) -> Result<String> {
@@ -136,6 +180,7 @@ impl PtySession {
     }
 
     pub fn stop(&mut self) -> Result<()> {
+        debug!(pid = self.process_id(), "stopping pty session");
         if self.child.try_wait().context("poll pty child")?.is_none() {
             self.child.kill().context("kill pty child")?;
         }

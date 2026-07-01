@@ -1,8 +1,31 @@
-# Conductor Docs Parity Map
+# Archductor Docs Parity Map
 
-Use this map when updating the Linux Conductor MVP docs or implementing the GUI.
-The product target is Conductor parity first. Better-than-Conductor features
+Use this map when updating the Linux Archductor MVP docs or implementing the GUI.
+The product target is Archductor parity first. Better-than-Archductor features
 should be explicit product decisions after parity is understood.
+
+## Canonical Structure
+
+Use this structure consistently across docs, code comments, UI copy, and agent
+instructions:
+
+- `Project`: the Archductor entry for one codebase. It owns repository-level
+  settings, scripts, instructions, and the list of workspaces.
+- `Repository`: the Git codebase behind a project.
+- `Workspace`: one isolated copy of a project/repository for one task or PR.
+- `Branch`: the Git branch checked out inside a workspace.
+- `Working tree`: the files on disk for that workspace.
+- `Running environment`: terminals, agents, setup/run scripts, servers, tests,
+  and watchers inside the workspace.
+
+Relationship model:
+
+- `1 project contains 1 repository`
+- `1 repository contains many workspaces`
+- `1 workspace maps to 1 branch`
+- `1 branch has 1 working tree`
+- `1 working tree belongs to 1 workspace`
+- `1 workspace can run many processes in its running environment`
 
 ## Core Product Loop
 
@@ -11,8 +34,9 @@ should be explicit product decisions after parity is understood.
 - Your first workspace: <https://www.conductor.build/docs/first-workspace>
 - Configure your project: <https://www.conductor.build/docs/configure-your-project>
 
-Key expectation: the app guides the user from repository onboarding to workspace
-creation, agent work, review, pull request, merge, archive, and history.
+Key expectation: the app guides the user from project and repository onboarding
+to workspace creation, agent work, review, pull request, merge, archive, and
+history.
 
 ## Workspace Model
 
@@ -23,9 +47,10 @@ creation, agent work, review, pull request, merge, archive, and history.
 - Testing: <https://www.conductor.build/docs/concepts/testing>
 - Git worktrees: <https://www.conductor.build/docs/concepts/git-worktrees>
 
-Key expectation: one workspace is one branch and one Git worktree for one stream
-of work. Multiple workspaces are for independently reviewable work; multiple
-sessions in one workspace are for shared branch state.
+Key expectation: one workspace is one branch and one Git worktree for one
+stream of work. Multiple workspaces are for independently reviewable work;
+multiple sessions in one workspace are shared running-environment state inside
+that workspace, not separate workspaces.
 
 ## Project Setup
 
@@ -43,7 +68,8 @@ sessions in one workspace are for shared branch state.
 
 Key expectation: setup/run/archive scripts, run mode, Spotlight testing, copied
 gitignored files, environment variables, prompts, providers, and Git behavior
-are visible and editable from the app, not only through CLI flags.
+are project/repository-level controls visible and editable from the app, not
+only through CLI flags.
 
 Linux-specific expectation: customization should go deeper than the default app
 surface. Prompts should be GUI-editable because they are part of daily agent
@@ -76,8 +102,9 @@ abstraction before it is realistic.
 - Cursor: <https://www.conductor.build/docs/reference/harnesses/cursor>
 
 Key expectation: Claude Code, Codex, and Cursor are harnesses inside the
-workspace workflow. Conductor owns the workspace, branch, terminal, diff,
-checks, PR state, and archive/history flow around those agents.
+workspace running environment. Archductor owns the project, repository,
+workspace, branch, terminal, diff, checks, PR state, and archive/history flow
+around those agents.
 
 ## Review And Merge
 

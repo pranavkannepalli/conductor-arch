@@ -1,6 +1,6 @@
 # Deploy And Test Locally
 
-This guide validates Linux Conductor on a local machine. It covers both the GTK
+This guide validates Linux Archductor on a local machine. It covers both the GTK
 app and the CLI backend used by the app.
 
 The happy path is app-first: add a repository, create workspaces, run agent
@@ -52,37 +52,37 @@ CLI authentication.
 
 ```bash
 cargo fmt --all -- --check
-cargo test -p linux-conductor-core -p linux-conductor -p linux-conductor-gtk
+cargo test -p linux-archductor-core -p linux-archductor -p linux-archductor-gtk
 cargo build --workspace --release --locked
 ```
 
 Binaries:
 
 ```text
-target/release/linux-conductor
-target/release/linux-conductor-gtk
+target/release/linux-archductor
+target/release/linux-archductor-gtk
 ```
 
 Optional install:
 
 ```bash
-sudo install -Dm755 target/release/linux-conductor /usr/local/bin/linux-conductor
-sudo install -Dm755 target/release/linux-conductor-gtk /usr/local/bin/linux-conductor-gtk
+sudo install -Dm755 target/release/linux-archductor /usr/local/bin/linux-archductor
+sudo install -Dm755 target/release/linux-archductor-gtk /usr/local/bin/linux-archductor-gtk
 ```
 
 ## 4. Launch The App
 
 ```bash
-linux-conductor-gtk
+linux-archductor-gtk
 ```
 
 Or preselect a workspace:
 
 ```bash
-linux-conductor-gtk --workspace berlin
-linux-conductor-gtk --workspace berlin --tab checks
-linux-conductor-gtk 'linux-conductor://workspace/berlin?tab=review'
-linux-conductor-gtk 'linux-conductor://history'
+linux-archductor-gtk --workspace berlin
+linux-archductor-gtk --workspace berlin --tab checks
+linux-archductor-gtk 'linux-archductor://workspace/berlin?tab=review'
+linux-archductor-gtk 'linux-archductor://history'
 ```
 
 Validate the app path with
@@ -93,7 +93,7 @@ Validate the app path with
 For a repository that needs setup/run commands, add this at the repository root:
 
 ```toml
-# .conductor/settings.toml
+# .archductor/settings.toml
 "$schema" = "https://conductor.build/schemas/settings.repo.schema.json"
 
 file_include_globs = """
@@ -109,7 +109,7 @@ run_mode = "concurrent"
 ```
 
 Replace `true` with real project commands. Commit shared settings. Put
-machine-local overrides and secrets in `.conductor/settings.local.toml`.
+machine-local overrides and secrets in `.archductor/settings.local.toml`.
 If `.worktreeinclude` exists, it takes precedence over `file_include_globs`.
 
 Repository prompts are part of the customization surface and should be editable
@@ -207,50 +207,50 @@ saved, and preserved for workflow surfaces that use them.
 Register a repository:
 
 ```bash
-linux-conductor doctor
-linux-conductor repo add /path/to/repo --name demo
-linux-conductor repo list
-linux-conductor repo settings demo export --output /tmp/demo-settings.toml
-linux-conductor repo settings demo import /tmp/demo-settings.toml
-linux-conductor repo settings demo import /tmp/demo-settings.toml --local
+linux-archductor doctor
+linux-archductor repo add /path/to/repo --name demo
+linux-archductor repo list
+linux-archductor repo settings demo export --output /tmp/demo-settings.toml
+linux-archductor repo settings demo import /tmp/demo-settings.toml
+linux-archductor repo settings demo import /tmp/demo-settings.toml --local
 ```
 
 Create two workspaces:
 
 ```bash
-linux-conductor workspace create demo --name berlin --branch lc/berlin-demo
-linux-conductor workspace create demo --name tokyo --branch lc/tokyo-demo
-linux-conductor workspace list
-linux-conductor workspace link-dir berlin tokyo
-linux-conductor workspace linked-dirs berlin
+linux-archductor workspace create demo --name berlin --branch lc/berlin-demo
+linux-archductor workspace create demo --name tokyo --branch lc/tokyo-demo
+linux-archductor workspace list
+linux-archductor workspace link-dir berlin tokyo
+linux-archductor workspace linked-dirs berlin
 ```
 
 Open sessions:
 
 ```bash
-linux-conductor session open berlin --kind codex
-linux-conductor session open tokyo --kind claude
-linux-conductor session start berlin --kind shell
-linux-conductor session list berlin
-linux-conductor session stop berlin
-linux-conductor history list --workspace berlin
-linux-conductor history show <process-id>
+linux-archductor session open berlin --kind codex
+linux-archductor session open tokyo --kind claude
+linux-archductor session start berlin --kind shell
+linux-archductor session list berlin
+linux-archductor session stop berlin
+linux-archductor history list --workspace berlin
+linux-archductor history show <process-id>
 ```
 
 Run scripts and inspect work:
 
 ```bash
-linux-conductor run berlin
-linux-conductor logs berlin --run
-linux-conductor stop berlin
+linux-archductor run berlin
+linux-archductor logs berlin --run
+linux-archductor stop berlin
 
-linux-conductor diff berlin
-linux-conductor checks berlin
-linux-conductor conflicts berlin
-linux-conductor workspace source-preflight
-linux-conductor pr summary berlin
-linux-conductor pr resolve-thread berlin <thread-id>
-linux-conductor pr reopen-thread berlin <thread-id>
+linux-archductor diff berlin
+linux-archductor checks berlin
+linux-archductor conflicts berlin
+linux-archductor workspace source-preflight
+linux-archductor pr summary berlin
+linux-archductor pr resolve-thread berlin <thread-id>
+linux-archductor pr reopen-thread berlin <thread-id>
 ```
 
 For a workspace created with `workspace create <repo> --from-pr <number>`, `pr
@@ -261,40 +261,40 @@ GitHub review thread node ID from `pr summary`.
 Todos and checkpoints:
 
 ```bash
-linux-conductor todo add berlin "manual smoke todo"
-linux-conductor todo list berlin
-linux-conductor todo done <id>
+linux-archductor todo add berlin "manual smoke todo"
+linux-archductor todo list berlin
+linux-archductor todo done <id>
 
-linux-conductor checkpoint create berlin "manual smoke checkpoint"
-linux-conductor checkpoint list berlin
+linux-archductor checkpoint create berlin "manual smoke checkpoint"
+linux-archductor checkpoint list berlin
 ```
 
 GitHub PR flow:
 
 ```bash
-cd ~/conductor/workspaces/demo/berlin
-echo "linux-conductor smoke $(date)" >> linux-conductor-smoke.txt
-git add linux-conductor-smoke.txt
-git commit -m "test: linux conductor smoke"
+cd ~/archductor/workspaces/demo/berlin
+echo "linux-archductor smoke $(date)" >> linux-archductor-smoke.txt
+git add linux-archductor-smoke.txt
+git commit -m "test: linux archductor smoke"
 
-linux-conductor pr create berlin --title "test: linux conductor smoke" \
-  --body "Manual Linux Conductor smoke test"
-linux-conductor pr view berlin
-linux-conductor pr checks berlin
+linux-archductor pr create berlin --title "test: linux archductor smoke" \
+  --body "Manual Linux Archductor smoke test"
+linux-archductor pr view berlin
+linux-archductor pr checks berlin
 ```
 
 Merge only in a disposable repository:
 
 ```bash
-linux-conductor pr merge berlin --method squash
-linux-conductor workspace archive berlin --remove-worktree
+linux-archductor pr merge berlin --method squash
+linux-archductor workspace archive berlin --remove-worktree
 ```
 
 For a non-disposable repository, close the PR manually and discard the
 workspace:
 
 ```bash
-linux-conductor workspace discard berlin
+linux-archductor workspace discard berlin
 ```
 
 ## 7. Import macOS Conductor Data
@@ -302,9 +302,9 @@ linux-conductor workspace discard berlin
 On macOS, existing Conductor repositories/workspaces can be imported:
 
 ```bash
-linux-conductor import conductor
-linux-conductor repo list
-linux-conductor workspace list
+linux-archductor import conductor
+linux-archductor repo list
+linux-archductor workspace list
 ```
 
 The importer reads
@@ -339,19 +339,19 @@ sudo curl -fsSL -o /usr/local/bin/appimagetool \
   https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
 sudo chmod +x /usr/local/bin/appimagetool
 
-install -Dm755 target/release/linux-conductor \
-  packaging/appimage/linux-conductor.AppDir/usr/bin/linux-conductor
-install -Dm755 target/release/linux-conductor-gtk \
-  packaging/appimage/linux-conductor.AppDir/usr/bin/linux-conductor-gtk
+install -Dm755 target/release/linux-archductor \
+  packaging/appimage/linux-archductor.AppDir/usr/bin/linux-archductor
+install -Dm755 target/release/linux-archductor-gtk \
+  packaging/appimage/linux-archductor.AppDir/usr/bin/linux-archductor-gtk
 
 appimagetool --appimage-extract-and-run \
-  packaging/appimage/linux-conductor.AppDir \
-  dist/linux-conductor-0.1.0-x86_64.AppImage
+  packaging/appimage/linux-archductor.AppDir \
+  dist/linux-archductor-0.1.0-x86_64.AppImage
 ```
 
 Smoke the AppImage:
 
 ```bash
-./dist/linux-conductor-0.1.0-x86_64.AppImage
-./dist/linux-conductor-0.1.0-x86_64.AppImage doctor
+./dist/linux-archductor-0.1.0-x86_64.AppImage
+./dist/linux-archductor-0.1.0-x86_64.AppImage doctor
 ```

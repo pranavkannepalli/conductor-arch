@@ -1,4 +1,4 @@
-# Conductor Docs Parity Implementation Plan
+# Archductor Docs Parity Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -36,7 +36,7 @@
 **Files:**
 - Create: `crates/gtk-app/src/theme.rs`
 - Modify: `crates/gtk-app/src/main.rs`
-- Test: `cargo test -p linux-conductor-gtk`
+- Test: `cargo test -p linux-archductor-gtk`
 
 - [ ] **Step 1: Add a focused theme module**
 
@@ -77,7 +77,7 @@ const APP_CSS: &str = r#"... "#;
 Run:
 
 ```bash
-cargo test -p linux-conductor-gtk
+cargo test -p linux-archductor-gtk
 ```
 
 Expected:
@@ -97,7 +97,7 @@ git commit -m "refactor(gtk): extract app theme module"
 
 **Files:**
 - Modify: `crates/gtk-app/src/theme.rs`
-- Test: `cargo test -p linux-conductor-gtk`
+- Test: `cargo test -p linux-archductor-gtk`
 
 - [ ] **Step 1: Write the new token block inside `theme.rs`**
 
@@ -186,7 +186,7 @@ Preserve Linux utility contrast with a dedicated group instead of mixing many un
 Run:
 
 ```bash
-cargo test -p linux-conductor-gtk
+cargo test -p linux-archductor-gtk
 ```
 
 Expected:
@@ -208,7 +208,7 @@ git commit -m "feat(gtk): define docs-inspired shell theme"
 - Modify: `crates/gtk-app/src/sidebar.rs`
 - Modify: `crates/gtk-app/src/main.rs`
 - Modify: `crates/gtk-app/src/theme.rs`
-- Test: `cargo test -p linux-conductor-gtk`
+- Test: `cargo test -p linux-archductor-gtk`
 
 - [ ] **Step 1: Add structural classes for the top nav group**
 
@@ -281,7 +281,7 @@ Add:
 Run:
 
 ```bash
-cargo test -p linux-conductor-gtk
+cargo test -p linux-archductor-gtk
 ```
 
 Expected:
@@ -304,7 +304,7 @@ git commit -m "feat(gtk): restyle shared shell primitives"
 - Modify: `crates/gtk-app/src/projects.rs`
 - Modify: `crates/gtk-app/src/history.rs`
 - Modify: `crates/gtk-app/src/theme.rs`
-- Test: `cargo test -p linux-conductor-gtk`
+- Test: `cargo test -p linux-archductor-gtk`
 
 - [ ] **Step 1: Add shell container classes where missing**
 
@@ -372,7 +372,7 @@ Add:
 Run:
 
 ```bash
-cargo test -p linux-conductor-gtk
+cargo test -p linux-archductor-gtk
 ```
 
 Expected:
@@ -394,7 +394,7 @@ git commit -m "feat(gtk): restyle top-level app pages"
 - Modify: `crates/gtk-app/src/workspace_command_center.rs`
 - Modify: `crates/gtk-app/src/session_surface.rs`
 - Modify: `crates/gtk-app/src/theme.rs`
-- Test: `cargo test -p linux-conductor-gtk`
+- Test: `cargo test -p linux-archductor-gtk`
 
 - [ ] **Step 1: Add shared page-shell classes to the workspace root**
 
@@ -457,7 +457,7 @@ Add:
 Run:
 
 ```bash
-cargo test -p linux-conductor-gtk
+cargo test -p linux-archductor-gtk
 ```
 
 Expected:
@@ -478,7 +478,7 @@ git commit -m "feat(gtk): align workspace command center with shell theme"
 **Files:**
 - Modify: `crates/gtk-app/src/terminal.rs`
 - Modify: `crates/gtk-app/src/theme.rs`
-- Test: `cargo test -p linux-conductor-gtk`
+- Test: `cargo test -p linux-archductor-gtk`
 
 - [ ] **Step 1: Add stable classes for dense tool panes**
 
@@ -531,7 +531,7 @@ Update related classes in `theme.rs`:
 Run:
 
 ```bash
-cargo test -p linux-conductor-gtk
+cargo test -p linux-archductor-gtk
 ```
 
 Expected:
@@ -552,8 +552,8 @@ git commit -m "feat(gtk): polish dense workspace tool panes"
 **Files:**
 - Modify: `crates/gtk-app/src/theme.rs` (only if needed after visual verification)
 - Test: `cargo fmt --all -- --check`
-- Test: `cargo test -p linux-conductor-gtk`
-- Test: `cargo build -p linux-conductor-gtk`
+- Test: `cargo test -p linux-archductor-gtk`
+- Test: `cargo build -p linux-archductor-gtk`
 
 - [ ] **Step 1: Run formatting check**
 
@@ -574,7 +574,7 @@ no output and exit code 0
 Run:
 
 ```bash
-cargo test -p linux-conductor-gtk
+cargo test -p linux-archductor-gtk
 ```
 
 Expected:
@@ -588,7 +588,7 @@ test result: ok
 Run:
 
 ```bash
-cargo build -p linux-conductor-gtk
+cargo build -p linux-archductor-gtk
 ```
 
 Expected:
@@ -602,7 +602,7 @@ Finished
 Run:
 
 ```bash
-cargo run -p linux-conductor-gtk
+cargo run -p linux-archductor-gtk
 ```
 
 Review:
@@ -641,6 +641,6 @@ Type consistency:
 
 ## Execution Handoff
 
-Plan complete and saved to `docs/superpowers/plans/2026-06-21-conductor-docs-parity.md`.
+Plan complete and saved to `docs/superpowers/plans/2026-06-21-archductor-docs-parity.md`.
 
 Execution choice already supplied by user intent: continue with inline execution in this session.

@@ -1,4 +1,4 @@
-name: linux-conductor
+name: linux-archductor
 arch: amd64
 platform: linux
 version: ${VERSION}
@@ -10,33 +10,33 @@ description: |
   A Linux-native parallel coding-agent workflow tool built around Git worktrees.
   Each task gets its own isolated workspace: a branch, a directory, a terminal,
   agent sessions, run scripts, diffs, checks, and a pull request path.
-vendor: linux-conductor
+vendor: linux-archductor
 homepage: https://github.com/pranavkannepalli/conductor-arch
 license: MIT
 
 contents:
-  - src: target/release/linux-conductor
-    dst: /usr/bin/linux-conductor
+  - src: target/release/linux-archductor
+    dst: /usr/bin/linux-archductor
     file_info:
       mode: 0755
 
-  - src: target/release/linux-conductor-gtk
-    dst: /usr/bin/linux-conductor-gtk
+  - src: target/release/linux-archductor-gtk
+    dst: /usr/bin/linux-archductor-gtk
     file_info:
       mode: 0755
 
-  - src: packaging/linux-conductor-gtk.desktop
-    dst: /usr/share/applications/linux-conductor-gtk.desktop
+  - src: packaging/linux-archductor-gtk.desktop
+    dst: /usr/share/applications/linux-archductor-gtk.desktop
     file_info:
       mode: 0644
 
-  - src: packaging/linux-conductor.svg
-    dst: /usr/share/icons/hicolor/scalable/apps/linux-conductor.svg
+  - src: packaging/linux-archductor.svg
+    dst: /usr/share/icons/hicolor/scalable/apps/linux-archductor.svg
     file_info:
       mode: 0644
 
   - src: README.md
-    dst: /usr/share/doc/linux-conductor/README.md
+    dst: /usr/share/doc/linux-archductor/README.md
     file_info:
       mode: 0644
 

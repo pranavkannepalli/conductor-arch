@@ -1,7 +1,7 @@
-# Linux Conductor Manual Testing Checklist
+# Linux Archductor Manual Testing Checklist
 
 Use this checklist before calling the app flow healthy or cutting a public
-artifact. It focuses on the real Conductor loop: one repository, many
+artifact. It focuses on the real Archductor loop: one repository, many
 workspaces, multiple agent sessions, review, GitHub PR, merge, archive, repeat.
 
 Run on a machine with `git`, `gh`, Rust, GTK4, libadwaita, and any agent CLIs
@@ -11,10 +11,10 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 ## Build And Launch
 
 - [ ] `cargo fmt --all -- --check`
-- [ ] `cargo test -p linux-conductor-core -p linux-conductor -p linux-conductor-gtk`
+- [ ] `cargo test -p linux-archductor-core -p linux-archductor -p linux-archductor-gtk`
 - [ ] `cargo build --workspace --release --locked`
-- [ ] `./target/release/linux-conductor doctor` prints distro guidance.
-- [ ] `./target/release/linux-conductor-gtk` opens the GTK app.
+- [ ] `./target/release/linux-archductor doctor` prints distro guidance.
+- [ ] `./target/release/linux-archductor-gtk` opens the GTK app.
 
 ## Repository Setup
 
@@ -22,12 +22,12 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] Clone a Git repository from the Projects page.
 - [ ] Confirm the repository row shows path, remote/default branch metadata, and
   workspace parent.
-- [ ] Edit shared `.conductor/settings.toml` from Projects.
-- [ ] Edit local `.conductor/settings.local.toml` from Projects.
+- [ ] Edit shared `.archductor/settings.toml` from Projects.
+- [ ] Edit local `.archductor/settings.local.toml` from Projects.
 - [ ] Export shared settings with
-  `linux-conductor repo settings <name> export --output <file>`.
+  `linux-archductor repo settings <name> export --output <file>`.
 - [ ] Import that file back into shared and local settings with
-  `linux-conductor repo settings <name> import <file>` and `--local`.
+  `linux-archductor repo settings <name> import <file>` and `--local`.
 - [ ] Configure setup, run, archive, run mode, Spotlight testing, Files to copy,
   environment variables, provider executable fields, prompts, and Git behavior.
 - [ ] Confirm all repository action prompts are editable from the GUI: general,
@@ -75,7 +75,7 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] Create a GitHub PR workspace with authenticated `gh`; confirm the PR head
   ref is fetched before the worktree is created.
 - [ ] For a PR-sourced workspace whose local branch name differs from the remote
-  PR branch, run `linux-conductor pr summary <workspace>` and confirm it uses
+  PR branch, run `linux-archductor pr summary <workspace>` and confirm it uses
   the stored PR number instead of failing branch inference.
 - [ ] Confirm GitHub source creation fails clearly when `gh auth status` is not
   authenticated.
@@ -92,19 +92,19 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] Confirm each workspace has `.context/brief.md`, `.context/agent-notes.md`,
   and `.context/todos.md`.
 - [ ] Confirm two workspaces in the same repository receive different
-  `CONDUCTOR_PORT` ranges.
+  `ARCHDUCTOR_PORT` ranges.
 - [ ] Confirm branch/worktree conflicts are surfaced clearly.
 
 ## Agent Sessions And Terminal
 
 - [ ] Start Shell, Codex, Claude Code, and Cursor sessions from the workspace
   page.
-- [ ] Confirm sessions run from the workspace directory with `CONDUCTOR_*`
+- [ ] Confirm sessions run from the workspace directory with `ARCHDUCTOR_*`
   environment variables.
 - [ ] In a monorepo, set `customization.workspace_defaults.working_directory`
   to a tracked subdirectory and confirm setup/run scripts, terminal commands,
-  and agent sessions run from that directory while `CONDUCTOR_WORKSPACE_PATH`
-  still points at the worktree root and `CONDUCTOR_WORKING_DIRECTORY` points at
+  and agent sessions run from that directory while `ARCHDUCTOR_WORKSPACE_PATH`
+  still points at the worktree root and `ARCHDUCTOR_WORKING_DIRECTORY` points at
   the subdirectory.
 - [ ] Start multiple sessions in one workspace.
 - [ ] Start sessions in two workspaces for the same repository.
@@ -119,10 +119,10 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] Confirm provider/auth/MCP status text appears where applicable.
 - [ ] Link one workspace to another from the workspace page and confirm
   `.context/linked-directories/<target>` points at the target workspace.
-- [ ] Run `linux-conductor workspace linked-dirs <workspace>` and confirm the
+- [ ] Run `linux-archductor workspace linked-dirs <workspace>` and confirm the
   same target and symlink path are listed.
 - [ ] Start a session in the source workspace and confirm
-  `CONDUCTOR_LINKED_DIRECTORIES` and `CONDUCTOR_LINKED_DIRECTORY_<NAME>` are
+  `ARCHDUCTOR_LINKED_DIRECTORIES` and `ARCHDUCTOR_LINKED_DIRECTORY_<NAME>` are
   available to the agent process.
 - [ ] Run a one-shot terminal command and confirm stdout, stderr, and exit code.
 - [ ] Start multiple PTY shells, select one, send input to it, and stop only
@@ -193,8 +193,8 @@ you want to test. Run `gh auth login` before GitHub checks. Set
   promoted to attention.
 - [ ] For a PR with review threads, confirm the structured PR summary includes
   GitHub review thread node IDs.
-- [ ] Run `linux-conductor pr resolve-thread <workspace> <thread-id>` and
-  `linux-conductor pr reopen-thread <workspace> <thread-id>` against a real
+- [ ] Run `linux-archductor pr resolve-thread <workspace> <thread-id>` and
+  `linux-archductor pr reopen-thread <workspace> <thread-id>` against a real
   review thread and confirm GitHub updates the thread state.
 - [ ] Enter the same thread ID in the Checks tab and confirm Resolve Thread and
   Reopen Thread update the GitHub thread state.
@@ -212,9 +212,9 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] History shows archived workspaces.
 - [ ] Start a local Shell/Codex/Claude/Cursor session, send at least one
   composer message, refresh History, and confirm the saved Linux session appears.
-- [ ] Run `linux-conductor history list --workspace <name>` and confirm the
+- [ ] Run `linux-archductor history list --workspace <name>` and confirm the
   saved session row appears with message count and preview.
-- [ ] Run `linux-conductor history show <process-id>` and confirm the saved
+- [ ] Run `linux-archductor history show <process-id>` and confirm the saved
   transcript is labeled as You, Agent, System, or Review Prompt.
 - [ ] History reads old macOS Conductor chats when
   `~/Library/Application Support/com.conductor.app/conductor.db` exists.
@@ -228,11 +228,11 @@ you want to test. Run `gh auth login` before GitHub checks. Set
   Processes, and Checkpoints.
 - [ ] Confirm command palette workspace-tab commands are hidden until a
   workspace is selected.
-- [ ] Launch `linux-conductor-gtk --workspace <name> --tab checks` and confirm
+- [ ] Launch `linux-archductor-gtk --workspace <name> --tab checks` and confirm
   the workspace opens on Checks.
-- [ ] Launch `linux-conductor-gtk 'linux-conductor://workspace/<name>?tab=review'`
+- [ ] Launch `linux-archductor-gtk 'linux-archductor://workspace/<name>?tab=review'`
   and confirm the workspace opens on Review.
-- [ ] Launch `linux-conductor-gtk 'linux-conductor://history'` and confirm
+- [ ] Launch `linux-archductor-gtk 'linux-archductor://history'` and confirm
   History opens directly.
 - [ ] Set `customization.workspace_defaults.default_visible_tab = "checks"` and
   confirm opening/selecting that workspace lands on Checks when no explicit tab
@@ -263,16 +263,16 @@ you want to test. Run `gh auth login` before GitHub checks. Set
   success/failure/pending/inactive deployments, PR-head deployment API
   coverage, rollup/head-status de-duplication, and real provider
   cancelled/skipped check rollups.
-- [ ] Visual parity with Conductor is not complete.
+- [ ] Visual parity with Archductor is not complete.
 
 ## Packaging Smoke
 
 - [ ] `VERSION=0.1.0 nfpm package --packager deb --target dist/`
 - [ ] `VERSION=0.1.0 nfpm package --packager rpm --target dist/`
 - [ ] AppImage launches GUI with no args:
-  `./dist/linux-conductor-0.1.0-x86_64.AppImage`
+  `./dist/linux-archductor-0.1.0-x86_64.AppImage`
 - [ ] AppImage forwards CLI args:
-  `./dist/linux-conductor-0.1.0-x86_64.AppImage doctor`
+  `./dist/linux-archductor-0.1.0-x86_64.AppImage doctor`
 - [ ] Flatpak build status is documented if it fails because of sandbox or
   dependency limitations.
 - [ ] Tag-driven publish pipeline creates or updates GitHub release artifacts,

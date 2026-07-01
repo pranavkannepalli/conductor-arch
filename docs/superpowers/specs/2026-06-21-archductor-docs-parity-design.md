@@ -1,14 +1,14 @@
-# Conductor Docs Parity Design
+# Archductor Docs Parity Design
 
 ## Goal
 
-Make Linux Conductor feel much closer to `conductor.build/docs` without
+Make Linux Archductor feel much closer to `conductor.build/docs` without
 rewriting the product or losing the denser Linux-specific workflow areas that
 already exist.
 
 This is a visual and interaction-quality pass, not a product-scope change.
 The target is to remove the current "generic AI app" feel and replace it with
-Conductor-like hierarchy, spacing, restraint, and clarity.
+Archductor-like hierarchy, spacing, restraint, and clarity.
 
 ## Customer Impact
 
@@ -33,7 +33,7 @@ That means:
 - the app should keep its current structure instead of being rebuilt into a
   literal docs website
 - denser workspace tools should stay denser, but fit the same design system
-- Linux flavor should be visible, but secondary to Conductor parity
+- Linux flavor should be visible, but secondary to Archductor parity
 
 This is the smallest change that can materially improve quality without
 breaking the current workspace-heavy product shape.
@@ -48,9 +48,9 @@ breaking the current workspace-heavy product shape.
 
 ## Design Principles
 
-### 1. Conductor first
+### 1. Archductor first
 
-The app should read as "Conductor-like desktop control plane" before it reads
+The app should read as "Archductor desktop control plane" before it reads
 as "Linux customization layer" or "AI tool".
 
 ### 2. Calm shell, dense tools
@@ -106,7 +106,7 @@ It should not come from turning the whole app into a dark terminal dashboard.
 - border weight
 - surface simplicity
 
-Linux Conductor should not copy docs literally where the product shape differs.
+Linux Archductor should not copy docs literally where the product shape differs.
 The docs site is the reference for taste and hierarchy, not a strict layout
 template for every screen.
 
@@ -254,7 +254,7 @@ Use simpler panel framing:
 
 ### Buttons and Inputs
 
-Controls should feel more like Conductor docs utility controls and less like
+Controls should feel more like Archductor docs utility controls and less like
 generic SaaS dashboard controls.
 
 Expected changes:
@@ -377,7 +377,7 @@ Mitigation:
 - avoid broad rewrites unless a specific screen proves impossible to fix with
   targeted adjustments
 
-### Risk: Linux flavor overwhelms Conductor parity
+### Risk: Linux flavor overwhelms Archductor parity
 
 Too much dark chrome or mono usage will pull the app back toward "developer
 tool dashboard".
@@ -394,7 +394,7 @@ Verification should focus on visual quality and no-regression behavior.
 Required checks:
 
 - `cargo fmt --all -- --check`
-- `cargo test -p linux-conductor-gtk`
+- `cargo test -p linux-archductor-gtk`
 - GTK app launch after styling changes
 
 Manual review targets:

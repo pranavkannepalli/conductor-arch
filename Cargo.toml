@@ -3,6 +3,7 @@ members = [
   "crates/core",
   "crates/cli",
   "crates/gtk-app",
+  "crates/archcar",
 ]
 resolver = "2"
 

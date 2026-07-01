@@ -1,20 +1,233 @@
+use crate::codex_tui::{
+    detect_directory_trust_prompt, merge_screen_messages, parse_codex_screen_messages,
+    ScreenMessage,
+};
+use crate::harness;
+use crate::pty::PtySession;
 use crate::settings::load_repository_settings;
 use anyhow::{Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use rusqlite::{params, Connection};
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use uuid::Uuid;
 use walkdir::WalkDir;
 
 const SIGTERM_EXIT_CODE: i32 = 143;
+const CODEX_PTY_ROWS: u16 = 24;
+const CODEX_PTY_COLS: u16 = 80;
+const CODEX_PTY_POLL_INTERVAL_MS: u64 = 50;
 const TERMINAL_SEARCH_CONTEXT_LINES: usize = 4;
+const WORKSPACE_CITY_NAMES: [&str; 200] = [
+    "berlin",
+    "tokyo",
+    "helsinki",
+    "lisbon",
+    "nairobi",
+    "seoul",
+    "oslo",
+    "kyoto",
+    "zurich",
+    "sydney",
+    "dublin",
+    "vancouver",
+    "london",
+    "paris",
+    "rome",
+    "madrid",
+    "barcelona",
+    "amsterdam",
+    "vienna",
+    "prague",
+    "budapest",
+    "athens",
+    "istanbul",
+    "copenhagen",
+    "stockholm",
+    "edinburgh",
+    "glasgow",
+    "manchester",
+    "liverpool",
+    "birmingham",
+    "brussels",
+    "antwerp",
+    "rotterdam",
+    "hamburg",
+    "munich",
+    "frankfurt",
+    "cologne",
+    "milan",
+    "naples",
+    "florence",
+    "venice",
+    "turin",
+    "bologna",
+    "palermo",
+    "valencia",
+    "seville",
+    "granada",
+    "malaga",
+    "porto",
+    "warsaw",
+    "krakow",
+    "wroclaw",
+    "gdansk",
+    "bergen",
+    "reykjavik",
+    "tallinn",
+    "riga",
+    "vilnius",
+    "ljubljana",
+    "zagreb",
+    "dubrovnik",
+    "split",
+    "belgrade",
+    "sarajevo",
+    "skopje",
+    "sofia",
+    "bucharest",
+    "cluj-napoca",
+    "chisinau",
+    "tirana",
+    "ankara",
+    "izmir",
+    "antalya",
+    "tbilisi",
+    "yerevan",
+    "baku",
+    "jerusalem",
+    "tel-aviv",
+    "haifa",
+    "beirut",
+    "amman",
+    "cairo",
+    "alexandria",
+    "casablanca",
+    "marrakesh",
+    "rabat",
+    "fes",
+    "tunis",
+    "algiers",
+    "lagos",
+    "accra",
+    "dakar",
+    "abidjan",
+    "addis-ababa",
+    "kampala",
+    "kigali",
+    "dar-es-salaam",
+    "zanzibar",
+    "johannesburg",
+    "cape-town",
+    "durban",
+    "pretoria",
+    "gaborone",
+    "windhoek",
+    "lusaka",
+    "harare",
+    "maputo",
+    "luanda",
+    "dubai",
+    "abu-dhabi",
+    "doha",
+    "riyadh",
+    "jeddah",
+    "muscat",
+    "manama",
+    "kuwait-city",
+    "tehran",
+    "shiraz",
+    "isfahan",
+    "karachi",
+    "lahore",
+    "islamabad",
+    "delhi",
+    "mumbai",
+    "bangalore",
+    "kolkata",
+    "chennai",
+    "hyderabad",
+    "pune",
+    "jaipur",
+    "udaipur",
+    "varanasi",
+    "agra",
+    "kochi",
+    "goa",
+    "colombo",
+    "kathmandu",
+    "thimphu",
+    "dhaka",
+    "yangon",
+    "bangkok",
+    "chiang-mai",
+    "phuket",
+    "hanoi",
+    "ho-chi-minh-city",
+    "hoi-an",
+    "da-nang",
+    "singapore",
+    "kuala-lumpur",
+    "penang",
+    "jakarta",
+    "bandung",
+    "yogyakarta",
+    "bali",
+    "surabaya",
+    "manila",
+    "cebu",
+    "davao",
+    "taipei",
+    "kaohsiung",
+    "hong-kong",
+    "macau",
+    "shanghai",
+    "beijing",
+    "guangzhou",
+    "shenzhen",
+    "chengdu",
+    "chongqing",
+    "xian",
+    "hangzhou",
+    "suzhou",
+    "nanjing",
+    "wuhan",
+    "qingdao",
+    "tianjin",
+    "osaka",
+    "nara",
+    "kobe",
+    "fukuoka",
+    "sapporo",
+    "hiroshima",
+    "nagoya",
+    "busan",
+    "incheon",
+    "jeju",
+    "ulaanbaatar",
+    "perth",
+    "melbourne",
+    "brisbane",
+    "adelaide",
+    "auckland",
+    "wellington",
+    "queenstown",
+    "christchurch",
+    "suva",
+    "honolulu",
+    "seattle",
+    "portland",
+    "san-francisco",
+    "los-angeles",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Workspace {
@@ -72,12 +285,12 @@ impl WorkspaceSourcePreflight {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SessionKind {
     Shell,
     Codex,
     Claude,
-    Cursor,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,6 +301,7 @@ pub struct SessionLaunch {
     pub cwd: PathBuf,
     pub env: Vec<(String, OsString)>,
     pub harness_metadata: Option<String>,
+    pub session_resume_id: Option<String>,
 }
 
 impl SessionLaunch {
@@ -99,7 +313,7 @@ impl SessionLaunch {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct SessionHarnessOptions {
     pub plan_mode: bool,
     pub fast_mode: bool,
@@ -126,49 +340,49 @@ impl SessionHarnessOptions {
     pub fn apply_to_env(&self, env: &mut Vec<(String, OsString)>) {
         if self.plan_mode {
             env.push((
-                "CONDUCTOR_SESSION_PLAN_MODE".to_owned(),
+                "ARCHDUCTOR_SESSION_PLAN_MODE".to_owned(),
                 OsString::from("true"),
             ));
         }
         if self.fast_mode {
             env.push((
-                "CONDUCTOR_SESSION_FAST_MODE".to_owned(),
+                "ARCHDUCTOR_SESSION_FAST_MODE".to_owned(),
                 OsString::from("true"),
             ));
         }
         if let Some(value) = sanitize_empty_text(self.approval_mode.as_deref()) {
             env.push((
-                "CONDUCTOR_SESSION_APPROVAL_MODE".to_owned(),
+                "ARCHDUCTOR_SESSION_APPROVAL_MODE".to_owned(),
                 OsString::from(value),
             ));
         }
         if let Some(value) = sanitize_empty_text(self.reasoning_mode.as_deref()) {
             env.push((
-                "CONDUCTOR_SESSION_REASONING_MODE".to_owned(),
+                "ARCHDUCTOR_SESSION_REASONING_MODE".to_owned(),
                 OsString::from(value),
             ));
         }
         if let Some(value) = sanitize_empty_text(self.effort_mode.as_deref()) {
             env.push((
-                "CONDUCTOR_SESSION_EFFORT_MODE".to_owned(),
+                "ARCHDUCTOR_SESSION_EFFORT_MODE".to_owned(),
                 OsString::from(value),
             ));
         }
         if let Some(value) = sanitize_empty_text(self.codex_personality.as_deref()) {
             env.push((
-                "CONDUCTOR_SESSION_CODEX_PERSONALITY".to_owned(),
+                "ARCHDUCTOR_SESSION_CODEX_PERSONALITY".to_owned(),
                 OsString::from(value),
             ));
         }
         if let Some(value) = sanitize_empty_text(self.codex_goals.as_deref()) {
             env.push((
-                "CONDUCTOR_SESSION_CODEX_GOALS".to_owned(),
+                "ARCHDUCTOR_SESSION_CODEX_GOALS".to_owned(),
                 OsString::from(value),
             ));
         }
         if let Some(value) = sanitize_empty_text(self.codex_skills.as_deref()) {
             env.push((
-                "CONDUCTOR_SESSION_CODEX_SKILLS".to_owned(),
+                "ARCHDUCTOR_SESSION_CODEX_SKILLS".to_owned(),
                 OsString::from(value),
             ));
         }
@@ -205,6 +419,46 @@ impl SessionHarnessOptions {
         } else {
             Some(entries.join(";"))
         }
+    }
+
+    pub fn from_metadata(metadata: Option<&str>) -> Self {
+        let mut options = Self::default();
+        let Some(metadata) = metadata else {
+            return options;
+        };
+
+        for entry in metadata.split(';') {
+            let Some((key, value)) = entry.split_once('=') else {
+                continue;
+            };
+            let key = key.trim();
+            let value = value.trim();
+            match key {
+                "plan" => options.plan_mode = value.eq_ignore_ascii_case("true"),
+                "fast" => options.fast_mode = value.eq_ignore_ascii_case("true"),
+                "approval" | "approvals" => {
+                    options.approval_mode = (!value.is_empty()).then(|| value.to_owned());
+                }
+                "reasoning" => {
+                    options.reasoning_mode = (!value.is_empty()).then(|| value.to_owned());
+                }
+                "effort" => {
+                    options.effort_mode = (!value.is_empty()).then(|| value.to_owned());
+                }
+                "personality" => {
+                    options.codex_personality = (!value.is_empty()).then(|| value.to_owned());
+                }
+                "goals" => {
+                    options.codex_goals = (!value.is_empty()).then(|| value.to_owned());
+                }
+                "skills" => {
+                    options.codex_skills = (!value.is_empty()).then(|| value.to_owned());
+                }
+                _ => {}
+            }
+        }
+
+        options
     }
 }
 
@@ -292,6 +546,7 @@ impl ProcessStatus {
 pub struct ProcessRecord {
     pub id: i64,
     pub workspace_id: i64,
+    pub chat_thread_id: Option<i64>,
     pub kind: ProcessKind,
     pub command: String,
     pub pid: u32,
@@ -301,11 +556,38 @@ pub struct ProcessRecord {
     pub exit_code: Option<i32>,
     pub ended_at: Option<String>,
     pub session_harness_metadata: Option<String>,
+    pub session_resume_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatThreadRecord {
+    pub id: i64,
+    pub workspace_id: i64,
+    pub provider: String,
+    pub title: String,
+    pub status: String,
+    pub native_thread_id: Option<String>,
+    pub harness_metadata: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub archived_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatMessageRecord {
+    pub id: i64,
+    pub thread_id: i64,
+    pub role: String,
+    pub content: String,
+    pub source: String,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalChatHistorySummary {
     pub process_id: i64,
+    pub chat_thread_id: Option<i64>,
     pub repository_name: String,
     pub workspace_name: String,
     pub workspace_path: PathBuf,
@@ -316,6 +598,21 @@ pub struct LocalChatHistorySummary {
     pub message_count: usize,
     pub preview: String,
     pub harness: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalChatThreadSummary {
+    pub thread_id: i64,
+    pub repository_name: String,
+    pub workspace_name: String,
+    pub workspace_path: PathBuf,
+    pub provider: String,
+    pub title: String,
+    pub status: String,
+    pub updated_at: String,
+    pub message_count: usize,
+    pub preview: String,
+    pub native_thread_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -522,6 +819,21 @@ pub struct PullRequestReadiness {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitHubNumberedChoice {
+    pub number: u64,
+    pub state: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequestPanelState {
+    pub pull_request: Option<PullRequest>,
+    pub readiness: Option<PullRequestReadiness>,
+    pub readiness_text: String,
+    pub review_text: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct GitHubDeploymentEntry {
     id: i64,
     environment: String,
@@ -622,6 +934,39 @@ struct LocalChatHistoryRow {
     workspace_path: PathBuf,
 }
 
+struct LocalChatThreadRow {
+    thread: ChatThreadRecord,
+    repository_name: String,
+    workspace_name: String,
+    workspace_path: PathBuf,
+}
+
+struct ProcessSessionMetadata<'a> {
+    harness_metadata: Option<&'a str>,
+    resume_id: Option<&'a str>,
+}
+
+struct RecordProcessInput<'a> {
+    kind: ProcessKind,
+    workspace: &'a Workspace,
+    chat_thread_id: Option<i64>,
+    command: &'a str,
+    pid: u32,
+    file_prefix: &'a str,
+    session: ProcessSessionMetadata<'a>,
+}
+
+struct StartProcessInput<'a> {
+    kind: ProcessKind,
+    script: &'a str,
+    settings: &'a crate::settings::RepositorySettings,
+    repository: &'a RepositoryRecord,
+    workspace: &'a Workspace,
+    chat_thread_id: Option<i64>,
+    extra_env: &'a [(String, OsString)],
+    session: ProcessSessionMetadata<'a>,
+}
+
 pub struct WorkspaceStore {
     conn: Connection,
     db_path: PathBuf,
@@ -657,9 +1002,11 @@ impl WorkspaceStore {
     }
 
     pub fn create(&self, input: CreateWorkspace) -> Result<Workspace> {
-        validate_workspace_name(&input.name)?;
         let repository = self.load_repository(&input.repository_name)?;
         let settings = load_repository_settings(&repository.root_path)?;
+        let name = self.resolve_workspace_name(&repository, &settings, &input.name)?;
+        validate_workspace_name(&name)?;
+        let branch = self.resolve_workspace_branch(&settings, &input.branch, &name);
         let base_ref = input.base_ref.unwrap_or_else(|| {
             if let Some(base_branch) = settings
                 .customization
@@ -681,7 +1028,7 @@ impl WorkspaceStore {
             )?;
         }
 
-        let path = repository.workspace_parent_path.join(&input.name);
+        let path = repository.workspace_parent_path.join(&name);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create workspace parent {}", parent.display()))?;
@@ -693,7 +1040,7 @@ impl WorkspaceStore {
                 "worktree",
                 "add",
                 "-b",
-                input.branch.as_str(),
+                branch.as_str(),
                 path.to_string_lossy().as_ref(),
                 base_ref.as_str(),
             ],
@@ -709,7 +1056,11 @@ impl WorkspaceStore {
             .port_block_size
             .unwrap_or(10);
         let port_base = self.next_port_base(port_block_size)?;
-        run_setup_script(&settings, &repository, &path, &input.name, port_base)?;
+        let auto_setup = settings
+            .customization
+            .automation
+            .auto_setup
+            .unwrap_or(false);
         let now = timestamp();
         self.conn.execute(
             "INSERT INTO workspaces (
@@ -717,17 +1068,20 @@ impl WorkspaceStore {
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', NULL, ?7, ?8)",
             params![
                 repository.id,
-                input.name,
+                name,
                 path.to_string_lossy().to_string(),
-                input.branch,
+                branch,
                 base_ref,
                 i64::from(port_base),
                 now,
                 now,
             ],
         )?;
-
-        self.get_by_path(&path)
+        let workspace = self.get_by_path(&path)?;
+        if auto_setup {
+            self.setup_workspace(&workspace.name)?;
+        }
+        Ok(workspace)
     }
 
     pub fn list(&self) -> Result<Vec<Workspace>> {
@@ -953,14 +1307,19 @@ impl WorkspaceStore {
             }
         }
 
-        self.start_process(
-            ProcessKind::Run,
-            run,
-            &settings,
-            &repository,
-            &workspace,
-            None,
-        )
+        self.start_process(StartProcessInput {
+            kind: ProcessKind::Run,
+            script: run,
+            settings: &settings,
+            repository: &repository,
+            workspace: &workspace,
+            chat_thread_id: None,
+            extra_env: &[],
+            session: ProcessSessionMetadata {
+                harness_metadata: None,
+                resume_id: None,
+            },
+        })
     }
 
     pub fn setup_workspace(&self, name: &str) -> Result<ProcessRecord> {
@@ -971,14 +1330,19 @@ impl WorkspaceStore {
             anyhow::bail!("workspace {name} has no scripts.setup configured");
         };
 
-        self.start_process(
-            ProcessKind::Setup,
-            setup,
-            &settings,
-            &repository,
-            &workspace,
-            None,
-        )
+        self.start_process(StartProcessInput {
+            kind: ProcessKind::Setup,
+            script: setup,
+            settings: &settings,
+            repository: &repository,
+            workspace: &workspace,
+            chat_thread_id: None,
+            extra_env: &[],
+            session: ProcessSessionMetadata {
+                harness_metadata: None,
+                resume_id: None,
+            },
+        })
     }
 
     pub fn stop_workspace(&self, name: &str) -> Result<ProcessRecord> {
@@ -1108,12 +1472,18 @@ impl WorkspaceStore {
             .open(&process.log_path)
             .with_context(|| format!("open log {}", process.log_path.display()))?
             .write_all(output.as_bytes())
-            .with_context(|| format!("write log {}", process.log_path.display()))
+            .with_context(|| format!("write log {}", process.log_path.display()))?;
+        if let Some(thread_id) = process.chat_thread_id {
+            for screen in extract_codex_screen_snapshots(output) {
+                self.merge_chat_thread_codex_screen(thread_id, &screen)?;
+            }
+        }
+        Ok(())
     }
 
     pub fn reconcile_session_processes(&self) -> Result<Vec<ProcessRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, workspace_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata
+            "SELECT id, workspace_id, chat_thread_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata, session_resume_id
              FROM processes
              WHERE kind = ?1 AND status = 'running'
              ORDER BY id",
@@ -1149,25 +1519,30 @@ impl WorkspaceStore {
         let command = command.trim();
         anyhow::ensure!(!command.is_empty(), "terminal command is required");
         let workspace = self.get_by_name(name)?;
-        self.record_process(
-            ProcessKind::Terminal,
-            &workspace,
+        self.record_process(RecordProcessInput {
+            kind: ProcessKind::Terminal,
+            workspace: &workspace,
+            chat_thread_id: None,
             command,
             pid,
-            "terminal",
-            None,
-        )
+            file_prefix: "terminal",
+            session: ProcessSessionMetadata {
+                harness_metadata: None,
+                resume_id: None,
+            },
+        })
     }
 
-    fn record_process(
-        &self,
-        kind: ProcessKind,
-        workspace: &Workspace,
-        command: &str,
-        pid: u32,
-        file_prefix: &str,
-        session_harness_metadata: Option<&str>,
-    ) -> Result<ProcessRecord> {
+    fn record_process(&self, input: RecordProcessInput<'_>) -> Result<ProcessRecord> {
+        let RecordProcessInput {
+            kind,
+            workspace,
+            chat_thread_id,
+            command,
+            pid,
+            file_prefix,
+            session,
+        } = input;
         let command = command.trim();
         anyhow::ensure!(!command.is_empty(), "process command is required");
         let now = timestamp();
@@ -1188,17 +1563,19 @@ impl WorkspaceStore {
 
         self.conn.execute(
             "INSERT INTO processes (
-                workspace_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8)",
+                workspace_id, chat_thread_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata, session_resume_id
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, NULL, ?9, ?10)",
             params![
                 workspace.id,
+                chat_thread_id,
                 kind.as_str(),
                 command,
                 i64::from(pid),
                 log_path.to_string_lossy().to_string(),
                 ProcessStatus::Running.as_str(),
                 now,
-                session_harness_metadata,
+                session.harness_metadata,
+                session.resume_id,
             ],
         )?;
         self.get_process(self.conn.last_insert_rowid())
@@ -1385,7 +1762,7 @@ impl WorkspaceStore {
 
     pub fn reconcile_terminal_processes(&self) -> Result<Vec<ProcessRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, workspace_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata
+            "SELECT id, workspace_id, chat_thread_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata, session_resume_id
              FROM processes
              WHERE kind = ?1 AND status = 'running'
              ORDER BY id",
@@ -1773,6 +2150,23 @@ impl WorkspaceStore {
         Ok(summaries)
     }
 
+    pub fn untracked_files(&self, name: &str) -> Result<Vec<String>> {
+        let workspace = self.get_by_name(name)?;
+        let status = git_output(
+            &workspace.path,
+            ["status", "--porcelain", "--untracked-files=all"],
+        )?;
+        Ok(parse_untracked_status_paths(&status))
+    }
+
+    pub fn git_show_commit(&self, name: &str, commit: &str) -> Result<String> {
+        let workspace = self.get_by_name(name)?;
+        git_output_dynamic(
+            &workspace.path,
+            &["show", "--stat", "--patch", "--format=medium", commit],
+        )
+    }
+
     pub fn push_branch(&self, name: &str) -> Result<String> {
         let workspace = self.get_by_name(name)?;
         git_output_dynamic(
@@ -1909,7 +2303,7 @@ impl WorkspaceStore {
             .as_deref()
             .unwrap_or("lc");
         let slug = slugify(&title);
-        let remote_ref = format!("refs/linux-conductor/pull-requests/{pr_number}");
+        let remote_ref = format!("refs/linux-archductor/pull-requests/{pr_number}");
         let fetch_refspec = format!("pull/{pr_number}/head:{remote_ref}");
         git_dynamic(
             &repository.root_path,
@@ -2297,6 +2691,28 @@ mutation($threadId: ID!) {{
         self.pull_request_by_workspace_id(workspace.id)
     }
 
+    pub fn pull_request_panel_state(&self, name: &str) -> Result<PullRequestPanelState> {
+        let pull_request = self.pull_request(name)?;
+        let readiness = match pull_request.as_ref() {
+            Some(_) => Some(self.pull_request_readiness(name)?),
+            None => None,
+        };
+        let readiness_text = readiness
+            .as_ref()
+            .map(|readiness| format_pull_request_readiness(name, readiness))
+            .unwrap_or_else(|| "No pull request yet.".to_owned());
+        let review_text = match pull_request.as_ref() {
+            Some(_) => Some(self.pull_request_review_state(name)?),
+            None => None,
+        };
+        Ok(PullRequestPanelState {
+            pull_request,
+            readiness,
+            readiness_text,
+            review_text,
+        })
+    }
+
     pub fn refresh_pull_request_state(&self, name: &str) -> Result<Option<PullRequest>> {
         let workspace = self.get_by_name(name)?;
         if self.pull_request_by_workspace_id(workspace.id)?.is_none() {
@@ -2476,7 +2892,7 @@ mutation($threadId: ID!) {{
         anyhow::ensure!(!message.is_empty(), "checkpoint message is required");
         let workspace = self.get_by_name(name)?;
         let now = timestamp();
-        let git_ref = format!("refs/linux-conductor/checkpoints/{}/{now}", workspace.id);
+        let git_ref = format!("refs/linux-archductor/checkpoints/{}/{now}", workspace.id);
         // Create the ref pointing at the current HEAD of the workspace branch
         let head = git_output_dynamic(&workspace.path, &["rev-parse", "HEAD"])?;
         let head = head.trim();
@@ -2553,7 +2969,7 @@ mutation($threadId: ID!) {{
     fn spotlight_checkpoint(&self, workspace: &Workspace, patch: &str) -> Result<Checkpoint> {
         let now = timestamp_nanos();
         let git_ref = format!(
-            "refs/linux-conductor/checkpoints/{}/spotlight-{now}",
+            "refs/linux-archductor/checkpoints/{}/spotlight-{now}",
             workspace.id
         );
         let message = "Spotlight checkpoint";
@@ -2783,7 +3199,7 @@ mutation($threadId: ID!) {{
         kind: ProcessKind,
     ) -> Result<Option<ProcessRecord>> {
         let result = self.conn.query_row(
-            "SELECT id, workspace_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata
+            "SELECT id, workspace_id, chat_thread_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata, session_resume_id
              FROM processes
              WHERE workspace_id = ?1 AND kind = ?2 AND status = 'running'
              ORDER BY id DESC LIMIT 1",
@@ -2940,6 +3356,7 @@ mutation($threadId: ID!) {{
             cwd,
             env,
             harness_metadata: None,
+            session_resume_id: None,
         })
     }
 
@@ -2953,14 +3370,34 @@ mutation($threadId: ID!) {{
         kind: SessionKind,
         harness: SessionHarnessOptions,
     ) -> Result<SessionLaunch> {
+        self.build_session_launch(name, kind, harness, None, false)
+    }
+
+    pub fn session_launch_with_options_and_resume(
+        &self,
+        name: &str,
+        kind: SessionKind,
+        harness: SessionHarnessOptions,
+        session_resume_id: Option<&str>,
+    ) -> Result<SessionLaunch> {
+        self.build_session_launch(name, kind, harness, session_resume_id, true)
+    }
+
+    fn build_session_launch(
+        &self,
+        name: &str,
+        kind: SessionKind,
+        harness: SessionHarnessOptions,
+        session_resume_id: Option<&str>,
+        prefer_resume: bool,
+    ) -> Result<SessionLaunch> {
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
         let settings = load_repository_settings(&repository.root_path)?;
         let cwd = workspace_working_directory(&settings, &workspace)?;
         let mut env = conductor_environment(&settings, &repository, &workspace);
         env.extend(self.linked_directory_env(&workspace)?);
-        harness.apply_to_env(&mut env);
-        let (program, args) = match kind {
+        let (program, mut args) = match kind {
             SessionKind::Shell => (
                 std::env::var_os("SHELL")
                     .filter(|shell| !shell.is_empty())
@@ -2986,11 +3423,20 @@ mutation($threadId: ID!) {{
                     .unwrap_or_else(|| PathBuf::from("claude")),
                 Vec::new(),
             ),
-            SessionKind::Cursor => (
-                PathBuf::from("cursor"),
-                vec![cwd.to_string_lossy().to_string()],
-            ),
         };
+        let harness::SessionHarnessLaunchPlan {
+            args: harness_args,
+            env: harness_env,
+            harness_metadata,
+            session_resume_id: launch_session_resume_id,
+            ..
+        } = if prefer_resume {
+            harness::build_session_resume_launch_plan(kind, &cwd, &harness, session_resume_id)
+        } else {
+            harness::build_session_harness_launch_plan(kind, &cwd, &harness)
+        };
+        env.extend(harness_env);
+        args.extend(harness_args);
 
         Ok(SessionLaunch {
             kind,
@@ -2998,12 +3444,21 @@ mutation($threadId: ID!) {{
             args,
             cwd,
             env,
-            harness_metadata: harness.metadata(),
+            harness_metadata,
+            session_resume_id: launch_session_resume_id,
         })
     }
 
     pub fn list_sessions(&self, name: &str) -> Result<Vec<ProcessRecord>> {
         self.list_processes(name, ProcessKind::Session)
+    }
+
+    pub fn get_process_record(&self, id: i64) -> Result<ProcessRecord> {
+        self.get_process(id)
+    }
+
+    pub fn get_workspace_record(&self, id: i64) -> Result<Workspace> {
+        self.get_by_id(id)
     }
 
     pub fn list_local_chat_history(
@@ -3025,6 +3480,7 @@ mutation($threadId: ID!) {{
                     .unwrap_or_else(|| terminal_log_preview(&transcript));
                 Ok(LocalChatHistorySummary {
                     process_id: row.process.id,
+                    chat_thread_id: row.process.chat_thread_id,
                     repository_name: row.repository_name,
                     workspace_name: row.workspace_name,
                     workspace_path: row.workspace_path,
@@ -3056,6 +3512,57 @@ mutation($threadId: ID!) {{
         let transcript = fs::read_to_string(&process.log_path)
             .with_context(|| format!("read log {}", process.log_path.display()))?;
         Ok(parse_local_chat_transcript(&transcript))
+    }
+
+    pub fn list_local_chat_threads(
+        &self,
+        workspace_path: Option<&Path>,
+    ) -> Result<Vec<LocalChatThreadSummary>> {
+        let rows = self.local_chat_thread_rows(workspace_path)?;
+        rows.into_iter()
+            .map(|row| {
+                let messages = self.list_chat_messages(row.thread.id)?;
+                let preview = messages
+                    .iter()
+                    .rev()
+                    .find_map(|message| {
+                        let trimmed = message.content.trim();
+                        (!trimmed.is_empty()).then(|| truncate_chars(trimmed, 160))
+                    })
+                    .unwrap_or_else(|| row.thread.title.clone());
+                let status = self
+                    .latest_thread_process(row.thread.id)?
+                    .map(|process| process.status.as_str().to_owned())
+                    .unwrap_or_else(|| row.thread.status.clone());
+                Ok(LocalChatThreadSummary {
+                    thread_id: row.thread.id,
+                    repository_name: row.repository_name,
+                    workspace_name: row.workspace_name,
+                    workspace_path: row.workspace_path,
+                    provider: row.thread.provider,
+                    title: row.thread.title,
+                    status,
+                    updated_at: row.thread.updated_at,
+                    message_count: messages.len(),
+                    preview,
+                    native_thread_id: row.thread.native_thread_id,
+                })
+            })
+            .collect()
+    }
+
+    pub fn local_chat_thread_messages(
+        &self,
+        thread_id: i64,
+    ) -> Result<Vec<LocalChatHistoryMessage>> {
+        Ok(self
+            .list_chat_messages(thread_id)?
+            .into_iter()
+            .map(|message| LocalChatHistoryMessage {
+                role: message.role,
+                content: message.content,
+            })
+            .collect())
     }
 
     pub fn link_workspace_directory(
@@ -3169,13 +3676,13 @@ mutation($threadId: ID!) {{
             .collect::<Vec<_>>()
             .join("\n");
         env.push((
-            "CONDUCTOR_LINKED_DIRECTORIES".to_owned(),
+            "ARCHDUCTOR_LINKED_DIRECTORIES".to_owned(),
             OsString::from(manifest),
         ));
         for link in links {
             env.push((
                 format!(
-                    "CONDUCTOR_LINKED_DIRECTORY_{}",
+                    "ARCHDUCTOR_LINKED_DIRECTORY_{}",
                     env_key_fragment(&link.target_workspace_name)
                 ),
                 link.target_workspace_path.as_os_str().to_owned(),
@@ -3189,8 +3696,8 @@ mutation($threadId: ID!) {{
         workspace_path: Option<&Path>,
     ) -> Result<Vec<LocalChatHistoryRow>> {
         let mut sql = String::from(
-            "SELECT p.id, p.workspace_id, p.kind, p.command, p.pid, p.log_path, p.status,
-                    p.started_at, p.exit_code, p.ended_at, p.session_harness_metadata,
+            "SELECT p.id, p.workspace_id, p.chat_thread_id, p.kind, p.command, p.pid, p.log_path, p.status,
+                    p.started_at, p.exit_code, p.ended_at, p.session_harness_metadata, p.session_resume_id,
                     r.name, w.name, w.path
              FROM processes p
              JOIN workspaces w ON w.id = p.workspace_id
@@ -3219,6 +3726,37 @@ mutation($threadId: ID!) {{
         Ok(rows)
     }
 
+    fn local_chat_thread_rows(
+        &self,
+        workspace_path: Option<&Path>,
+    ) -> Result<Vec<LocalChatThreadRow>> {
+        let mut sql = String::from(
+            "SELECT t.id, t.workspace_id, t.provider, t.title, t.status, t.native_thread_id,
+                    t.harness_metadata, t.created_at, t.updated_at, t.archived_at,
+                    r.name, w.name, w.path
+             FROM chat_threads t
+             JOIN workspaces w ON w.id = t.workspace_id
+             JOIN repositories r ON r.id = w.repository_id",
+        );
+        if workspace_path.is_some() {
+            sql.push_str(" WHERE w.path = ?1");
+        }
+        sql.push_str(" ORDER BY t.updated_at DESC, t.id DESC LIMIT 200");
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = if let Some(path) = workspace_path {
+            stmt.query_map(
+                [path.to_string_lossy().to_string()],
+                row_to_local_chat_thread_row,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        } else {
+            stmt.query_map([], row_to_local_chat_thread_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        Ok(rows)
+    }
+
     pub fn list_terminals(&self, name: &str) -> Result<Vec<ProcessRecord>> {
         self.list_processes(name, ProcessKind::Terminal)
     }
@@ -3234,7 +3772,7 @@ mutation($threadId: ID!) {{
     fn list_processes(&self, name: &str, kind: ProcessKind) -> Result<Vec<ProcessRecord>> {
         let workspace = self.get_by_name(name)?;
         let mut stmt = self.conn.prepare(
-            "SELECT id, workspace_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata
+            "SELECT id, workspace_id, chat_thread_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata, session_resume_id
              FROM processes WHERE workspace_id = ?1 AND kind = ?2
              ORDER BY id DESC",
         )?;
@@ -3255,18 +3793,57 @@ mutation($threadId: ID!) {{
         harness: SessionHarnessOptions,
     ) -> Result<ProcessRecord> {
         let launch = self.session_launch_with_options(name, kind, harness)?;
+        if matches!(kind, SessionKind::Codex) {
+            return self.start_codex_pty_session(name, &launch);
+        }
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
         let settings = load_repository_settings(&repository.root_path)?;
         let command = shell_words(&launch.program, &launch.args);
-        self.start_process(
-            ProcessKind::Session,
-            &command,
-            &settings,
-            &repository,
-            &workspace,
-            launch.harness_metadata.as_deref(),
+        self.start_process(StartProcessInput {
+            kind: ProcessKind::Session,
+            script: &command,
+            settings: &settings,
+            repository: &repository,
+            workspace: &workspace,
+            chat_thread_id: None,
+            extra_env: &launch.env,
+            session: ProcessSessionMetadata {
+                harness_metadata: launch.harness_metadata.as_deref(),
+                resume_id: launch.session_resume_id.as_deref(),
+            },
+        })
+    }
+
+    fn start_codex_pty_session(&self, name: &str, launch: &SessionLaunch) -> Result<ProcessRecord> {
+        let workspace = self.get_by_name(name)?;
+        let pty = PtySession::spawn(
+            launch.program.clone(),
+            launch.args.clone(),
+            &launch.cwd,
+            launch.env.clone(),
+            CODEX_PTY_ROWS,
+            CODEX_PTY_COLS,
         )
+        .with_context(|| format!("spawn codex pty in {}", launch.cwd.display()))?;
+        let pid = pty
+            .process_id()
+            .context("codex pty did not report a process id")?;
+        let command = shell_words(&launch.program, &launch.args);
+        let process = self.record_process(RecordProcessInput {
+            kind: ProcessKind::Session,
+            workspace: &workspace,
+            chat_thread_id: None,
+            command: &command,
+            pid,
+            file_prefix: "session",
+            session: ProcessSessionMetadata {
+                harness_metadata: launch.harness_metadata.as_deref(),
+                resume_id: launch.session_resume_id.as_deref(),
+            },
+        })?;
+        spawn_codex_session_monitor(self.db_path.clone(), process.id, pty);
+        Ok(process)
     }
 
     pub fn record_session_process(
@@ -3278,14 +3855,18 @@ mutation($threadId: ID!) {{
         anyhow::ensure!(pid > 0, "session process id is required");
         let workspace = self.get_by_name(name)?;
         let command = shell_words(&launch.program, &launch.args);
-        self.record_process(
-            ProcessKind::Session,
-            &workspace,
-            &command,
+        self.record_process(RecordProcessInput {
+            kind: ProcessKind::Session,
+            workspace: &workspace,
+            chat_thread_id: None,
+            command: &command,
             pid,
-            "session",
-            launch.harness_metadata.as_deref(),
-        )
+            file_prefix: "session",
+            session: ProcessSessionMetadata {
+                harness_metadata: launch.harness_metadata.as_deref(),
+                resume_id: launch.session_resume_id.as_deref(),
+            },
+        })
     }
 
     fn get_by_path(&self, path: &Path) -> Result<Workspace> {
@@ -3339,6 +3920,284 @@ mutation($threadId: ID!) {{
         load_repository_settings(&repository.root_path)
     }
 
+    pub fn create_chat_thread(
+        &self,
+        workspace_name: &str,
+        provider: &str,
+        title: &str,
+        harness_metadata: Option<&str>,
+    ) -> Result<ChatThreadRecord> {
+        let workspace = self.get_by_name(workspace_name)?;
+        let now = timestamp();
+        self.conn.execute(
+            "INSERT INTO chat_threads (
+                workspace_id, provider, title, status, native_thread_id, harness_metadata, created_at, updated_at, archived_at
+             ) VALUES (?1, ?2, ?3, 'active', NULL, ?4, ?5, ?5, NULL)",
+            params![workspace.id, provider, title, harness_metadata, now],
+        )?;
+        self.get_chat_thread(self.conn.last_insert_rowid())
+    }
+
+    pub fn list_chat_threads(&self, workspace_name: &str) -> Result<Vec<ChatThreadRecord>> {
+        let workspace = self.get_by_name(workspace_name)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, workspace_id, provider, title, status, native_thread_id, harness_metadata, created_at, updated_at, archived_at
+             FROM chat_threads
+             WHERE workspace_id = ?1
+             ORDER BY updated_at DESC, id DESC",
+        )?;
+        let threads = stmt
+            .query_map([workspace.id], row_to_chat_thread)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(threads)
+    }
+
+    pub fn get_chat_thread_record(&self, thread_id: i64) -> Result<ChatThreadRecord> {
+        self.get_chat_thread(thread_id)
+    }
+
+    pub fn append_chat_message(
+        &self,
+        thread_id: i64,
+        role: &str,
+        content: &str,
+        source: &str,
+    ) -> Result<ChatMessageRecord> {
+        let now = timestamp();
+        self.conn.execute(
+            "INSERT INTO chat_messages (thread_id, role, content, source, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+            params![thread_id, role, content, source, now],
+        )?;
+        self.touch_chat_thread(thread_id, &now)?;
+        self.get_chat_message(self.conn.last_insert_rowid())
+    }
+
+    pub fn update_chat_thread_title(&self, thread_id: i64, title: &str) -> Result<()> {
+        let title = title.trim();
+        anyhow::ensure!(!title.is_empty(), "chat thread title is required");
+        let now = timestamp();
+        self.conn.execute(
+            "UPDATE chat_threads
+             SET title = ?1, updated_at = ?2
+             WHERE id = ?3",
+            params![title, now, thread_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_chat_messages(&self, thread_id: i64) -> Result<Vec<ChatMessageRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, thread_id, role, content, source, created_at, updated_at
+             FROM chat_messages
+             WHERE thread_id = ?1
+             ORDER BY id ASC",
+        )?;
+        let messages = stmt
+            .query_map([thread_id], row_to_chat_message)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(messages)
+    }
+
+    pub fn update_chat_thread_native_id(
+        &self,
+        thread_id: i64,
+        native_thread_id: &str,
+    ) -> Result<ChatThreadRecord> {
+        let native_thread_id = native_thread_id.trim();
+        anyhow::ensure!(!native_thread_id.is_empty(), "native thread id is required");
+        let now = timestamp();
+        self.conn.execute(
+            "UPDATE chat_threads
+             SET native_thread_id = ?1, updated_at = ?2
+             WHERE id = ?3",
+            params![native_thread_id, now, thread_id],
+        )?;
+        self.get_chat_thread(thread_id)
+    }
+
+    pub fn record_session_process_for_thread(
+        &self,
+        name: &str,
+        thread_id: i64,
+        launch: &SessionLaunch,
+        pid: u32,
+    ) -> Result<ProcessRecord> {
+        anyhow::ensure!(pid > 0, "session process id is required");
+        let workspace = self.get_by_name(name)?;
+        let thread = self.get_chat_thread(thread_id)?;
+        anyhow::ensure!(
+            thread.workspace_id == workspace.id,
+            "chat thread {thread_id} does not belong to workspace {name}"
+        );
+        let command = shell_words(&launch.program, &launch.args);
+        let resume_id = match launch.kind {
+            SessionKind::Codex => thread.native_thread_id.as_deref(),
+            _ => launch.session_resume_id.as_deref(),
+        };
+        self.record_process(RecordProcessInput {
+            kind: ProcessKind::Session,
+            workspace: &workspace,
+            chat_thread_id: Some(thread_id),
+            command: &command,
+            pid,
+            file_prefix: "session",
+            session: ProcessSessionMetadata {
+                harness_metadata: launch.harness_metadata.as_deref(),
+                resume_id,
+            },
+        })
+    }
+
+    pub fn list_thread_processes(&self, thread_id: i64) -> Result<Vec<ProcessRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, workspace_id, chat_thread_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata, session_resume_id
+             FROM processes
+             WHERE chat_thread_id = ?1
+             ORDER BY id DESC",
+        )?;
+        let processes = stmt
+            .query_map([thread_id], row_to_process)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(processes)
+    }
+
+    pub fn latest_thread_process(&self, thread_id: i64) -> Result<Option<ProcessRecord>> {
+        let result = self.conn.query_row(
+            "SELECT id, workspace_id, chat_thread_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata, session_resume_id
+             FROM processes
+             WHERE chat_thread_id = ?1
+             ORDER BY id DESC LIMIT 1",
+            [thread_id],
+            row_to_process,
+        );
+        match result {
+            Ok(process) => Ok(Some(process)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    pub fn resolve_codex_native_thread_id_for_process(
+        &self,
+        process_id: i64,
+    ) -> Result<Option<String>> {
+        let process = self.get_process(process_id)?;
+        anyhow::ensure!(
+            process.kind == ProcessKind::Session,
+            "process {process_id} is not a session process"
+        );
+        let Some(thread_id) = process.chat_thread_id else {
+            return Ok(None);
+        };
+        let thread = self.get_chat_thread(thread_id)?;
+        if let Some(native_thread_id) = thread.native_thread_id {
+            return Ok(Some(native_thread_id));
+        }
+        let cwd = self.get_by_id(process.workspace_id)?.path;
+        let Some(native_thread_id) = find_codex_rollout_session_id(&cwd, &process.started_at)?
+        else {
+            return Ok(None);
+        };
+        self.update_chat_thread_native_id(thread_id, &native_thread_id)?;
+        self.conn.execute(
+            "UPDATE processes
+             SET session_resume_id = ?1
+             WHERE id = ?2",
+            params![native_thread_id, process_id],
+        )?;
+        Ok(Some(native_thread_id))
+    }
+
+    fn touch_chat_thread(&self, thread_id: i64, now: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE chat_threads SET updated_at = ?1 WHERE id = ?2",
+            params![now, thread_id],
+        )?;
+        Ok(())
+    }
+
+    fn update_chat_message_content(&self, message_id: i64, content: &str) -> Result<()> {
+        let now = timestamp();
+        self.conn.execute(
+            "UPDATE chat_messages
+             SET content = ?1, updated_at = ?2
+             WHERE id = ?3",
+            params![content, now, message_id],
+        )?;
+        let thread_id = self
+            .conn
+            .query_row(
+                "SELECT thread_id FROM chat_messages WHERE id = ?1",
+                [message_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .with_context(|| format!("load chat message thread {message_id}"))?;
+        self.touch_chat_thread(thread_id, &now)?;
+        Ok(())
+    }
+
+    fn merge_chat_thread_codex_screen(&self, thread_id: i64, screen: &str) -> Result<()> {
+        let parsed = parse_codex_screen_messages(screen);
+        if parsed.is_empty() {
+            return Ok(());
+        }
+        let existing = self.list_chat_messages(thread_id)?;
+        let timeline = existing
+            .iter()
+            .filter_map(chat_message_to_screen_message)
+            .collect::<Vec<_>>();
+        let mut merged = timeline.clone();
+        merge_screen_messages(&mut merged, &parsed);
+        self.persist_merged_screen_messages(thread_id, &existing, &timeline, &merged)
+    }
+
+    fn persist_merged_screen_messages(
+        &self,
+        thread_id: i64,
+        existing: &[ChatMessageRecord],
+        existing_timeline: &[ScreenMessage],
+        merged: &[ScreenMessage],
+    ) -> Result<()> {
+        if merged.len() < existing_timeline.len() {
+            return Ok(());
+        }
+        let persisted = existing
+            .iter()
+            .filter(|message| matches!(message.role.as_str(), "user" | "agent"))
+            .collect::<Vec<_>>();
+        if persisted.len() < existing_timeline.len() {
+            return Ok(());
+        }
+        for (index, message) in merged.iter().enumerate() {
+            let role = screen_role_name(message.role);
+            if index < existing_timeline.len() {
+                let existing_row = persisted[index];
+                if existing_row.role != role {
+                    continue;
+                }
+                if existing_row.content == message.content {
+                    continue;
+                }
+                if existing_row.source == "agent_screen_parse"
+                    && message.content.starts_with(&existing_row.content)
+                {
+                    self.update_chat_message_content(existing_row.id, &message.content)?;
+                }
+                continue;
+            }
+            if role == "agent" {
+                self.append_chat_message(
+                    thread_id,
+                    "agent",
+                    &message.content,
+                    "agent_screen_parse",
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     fn get_by_name(&self, name: &str) -> Result<Workspace> {
         self.conn
             .query_row(
@@ -3354,11 +4213,33 @@ mutation($threadId: ID!) {{
         self.conn
             .query_row(
                 "SELECT id, repository_id, name, path, branch, base_ref, port_base, status, archived_at, created_at, updated_at
-                 FROM workspaces WHERE id = ?1",
+                FROM workspaces WHERE id = ?1",
                 [id],
                 row_to_workspace,
             )
             .with_context(|| format!("load workspace {id}"))
+    }
+
+    fn get_chat_thread(&self, id: i64) -> Result<ChatThreadRecord> {
+        self.conn
+            .query_row(
+                "SELECT id, workspace_id, provider, title, status, native_thread_id, harness_metadata, created_at, updated_at, archived_at
+                 FROM chat_threads WHERE id = ?1",
+                [id],
+                row_to_chat_thread,
+            )
+            .with_context(|| format!("load chat thread {id}"))
+    }
+
+    fn get_chat_message(&self, id: i64) -> Result<ChatMessageRecord> {
+        self.conn
+            .query_row(
+                "SELECT id, thread_id, role, content, source, created_at, updated_at
+                 FROM chat_messages WHERE id = ?1",
+                [id],
+                row_to_chat_message,
+            )
+            .with_context(|| format!("load chat message {id}"))
     }
 
     fn load_repository_by_id(&self, id: i64) -> Result<RepositoryRecord> {
@@ -3414,15 +4295,115 @@ mutation($threadId: ID!) {{
         u16::try_from(next).context("workspace port base exceeded u16 range")
     }
 
-    fn start_process(
+    fn resolve_workspace_name(
         &self,
-        kind: ProcessKind,
-        script: &str,
-        settings: &crate::settings::RepositorySettings,
         repository: &RepositoryRecord,
-        workspace: &Workspace,
-        session_harness_metadata: Option<&str>,
-    ) -> Result<ProcessRecord> {
+        settings: &crate::settings::RepositorySettings,
+        requested_name: &str,
+    ) -> Result<String> {
+        let requested_name = requested_name.trim();
+        if !requested_name.is_empty() {
+            anyhow::ensure!(
+                self.workspace_name_available(repository, requested_name)?,
+                "workspace {requested_name} already exists"
+            );
+            return Ok(requested_name.to_owned());
+        }
+
+        let city_mode = settings
+            .customization
+            .naming
+            .workspace_name_style
+            .as_deref()
+            .unwrap_or("city")
+            == "city";
+        let bases = if city_mode {
+            WORKSPACE_CITY_NAMES.as_slice()
+        } else {
+            &["workspace"]
+        };
+        let active_names = self.active_workspace_names()?;
+        let available = bases
+            .iter()
+            .copied()
+            .filter(|candidate| !active_names.contains(*candidate))
+            .filter(|candidate| {
+                self.workspace_name_available(repository, candidate)
+                    .unwrap_or(false)
+            })
+            .collect::<Vec<_>>();
+
+        if !available.is_empty() {
+            let index = random_index(available.len());
+            return Ok(available[index].to_owned());
+        }
+
+        for suffix in 0.. {
+            for base in bases {
+                let candidate = if suffix == 0 {
+                    (*base).to_owned()
+                } else {
+                    format!("{base}-{suffix}")
+                };
+                if self.workspace_name_available(repository, &candidate)? {
+                    return Ok(candidate);
+                }
+            }
+        }
+
+        unreachable!("workspace name generation should always return")
+    }
+
+    fn workspace_name_available(&self, repository: &RepositoryRecord, name: &str) -> Result<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM workspaces WHERE name = ?1",
+            params![name],
+            |row| row.get(0),
+        )?;
+        Ok(count == 0 && !repository.workspace_parent_path.join(name).exists())
+    }
+
+    fn active_workspace_names(&self) -> Result<HashSet<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT name FROM workspaces WHERE status = 'active' ORDER BY id")?;
+        let names = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(names.into_iter().collect())
+    }
+
+    fn resolve_workspace_branch(
+        &self,
+        settings: &crate::settings::RepositorySettings,
+        requested_branch: &str,
+        workspace_name: &str,
+    ) -> String {
+        let requested_branch = requested_branch.trim();
+        if !requested_branch.is_empty() {
+            return requested_branch.to_owned();
+        }
+
+        let prefix = settings
+            .customization
+            .workspace_defaults
+            .branch_prefix
+            .as_deref()
+            .unwrap_or("lc");
+        format!("{prefix}/{}", slugify(workspace_name))
+    }
+
+    fn start_process(&self, input: StartProcessInput<'_>) -> Result<ProcessRecord> {
+        let StartProcessInput {
+            kind,
+            script,
+            settings,
+            repository,
+            workspace,
+            chat_thread_id,
+            extra_env,
+            session,
+        } = input;
         let now = timestamp();
         let log_path = self
             .logs_dir
@@ -3443,6 +4424,7 @@ mutation($threadId: ID!) {{
         let cwd = workspace_working_directory(settings, workspace)?;
         let mut env = conductor_environment(settings, repository, workspace);
         env.extend(self.linked_directory_env(workspace)?);
+        env.extend(extra_env.iter().cloned());
 
         let mut command = Command::new("sh");
         command
@@ -3463,17 +4445,19 @@ mutation($threadId: ID!) {{
 
         self.conn.execute(
             "INSERT INTO processes (
-                workspace_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8)",
+                workspace_id, chat_thread_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata, session_resume_id
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, NULL, ?9, ?10)",
             params![
                 workspace.id,
+                chat_thread_id,
                 kind.as_str(),
                 script,
                 i64::from(child.id()),
                 log_path.to_string_lossy().to_string(),
                 ProcessStatus::Running.as_str(),
                 now,
-                session_harness_metadata,
+                session.harness_metadata,
+                session.resume_id,
             ],
         )?;
 
@@ -3494,7 +4478,7 @@ mutation($threadId: ID!) {{
     fn latest_process(&self, workspace_id: i64, kind: ProcessKind) -> Result<ProcessRecord> {
         self.conn
             .query_row(
-                "SELECT id, workspace_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata
+                "SELECT id, workspace_id, chat_thread_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata, session_resume_id
                  FROM processes
                  WHERE workspace_id = ?1 AND kind = ?2
                  ORDER BY id DESC LIMIT 1",
@@ -3507,7 +4491,7 @@ mutation($threadId: ID!) {{
     fn get_process(&self, id: i64) -> Result<ProcessRecord> {
         self.conn
             .query_row(
-                "SELECT id, workspace_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata
+                "SELECT id, workspace_id, chat_thread_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata, session_resume_id
                  FROM processes WHERE id = ?1",
                 [id],
                 row_to_process,
@@ -3589,6 +4573,7 @@ mutation($threadId: ID!) {{
             CREATE TABLE IF NOT EXISTS processes (
               id INTEGER PRIMARY KEY,
               workspace_id INTEGER NOT NULL REFERENCES workspaces(id),
+              chat_thread_id INTEGER REFERENCES chat_threads(id),
               kind TEXT NOT NULL,
               command TEXT NOT NULL,
               pid INTEGER NOT NULL,
@@ -3596,7 +4581,8 @@ mutation($threadId: ID!) {{
               status TEXT NOT NULL,
               started_at TEXT NOT NULL,
               ended_at TEXT,
-              session_harness_metadata TEXT
+              session_harness_metadata TEXT,
+              session_resume_id TEXT
             );
 
             CREATE TABLE IF NOT EXISTS pull_requests (
@@ -3659,6 +4645,29 @@ mutation($threadId: ID!) {{
               created_at TEXT NOT NULL,
               UNIQUE(workspace_id, target_workspace_id)
             );
+
+            CREATE TABLE IF NOT EXISTS chat_threads (
+              id INTEGER PRIMARY KEY,
+              workspace_id INTEGER NOT NULL REFERENCES workspaces(id),
+              provider TEXT NOT NULL,
+              title TEXT NOT NULL,
+              status TEXT NOT NULL,
+              native_thread_id TEXT,
+              harness_metadata TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              archived_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS chat_messages (
+              id INTEGER PRIMARY KEY,
+              thread_id INTEGER NOT NULL REFERENCES chat_threads(id),
+              role TEXT NOT NULL,
+              content TEXT NOT NULL,
+              source TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
             ",
         )?;
         ensure_column(
@@ -3672,6 +4681,18 @@ mutation($threadId: ID!) {{
             "processes",
             "session_harness_metadata",
             "ALTER TABLE processes ADD COLUMN session_harness_metadata TEXT",
+        )?;
+        ensure_column(
+            &self.conn,
+            "processes",
+            "session_resume_id",
+            "ALTER TABLE processes ADD COLUMN session_resume_id TEXT",
+        )?;
+        ensure_column(
+            &self.conn,
+            "processes",
+            "chat_thread_id",
+            "ALTER TABLE processes ADD COLUMN chat_thread_id INTEGER REFERENCES chat_threads(id)",
         )?;
         Ok(())
     }
@@ -3711,6 +4732,200 @@ fn spawn_process_monitor(db_path: PathBuf, process_id: i64, mut child: Child) {
     });
 }
 
+fn spawn_codex_session_monitor(db_path: PathBuf, process_id: i64, mut pty: PtySession) {
+    thread::spawn(move || {
+        let mut trust_answered = false;
+        let mut last_screen = String::new();
+        let mut native_thread_id_resolved = false;
+
+        loop {
+            let raw = pty.read_available();
+            if !raw.is_empty() {
+                if let Ok(store) = WorkspaceStore::open(&db_path) {
+                    let _ = store
+                        .append_session_process_output(process_id, &format_codex_raw_output(&raw));
+                }
+            }
+            let screen = pty.visible_screen_text();
+            if !screen.is_empty() && screen != last_screen {
+                if !trust_answered && detect_directory_trust_prompt(&screen) {
+                    let _ = pty.send_line("1");
+                    trust_answered = true;
+                }
+
+                if let Ok(store) = WorkspaceStore::open(&db_path) {
+                    let _ = store.append_session_process_output(
+                        process_id,
+                        &format_codex_screen_snapshot(&screen),
+                    );
+                }
+                last_screen = screen;
+            }
+
+            if !native_thread_id_resolved {
+                if let Ok(store) = WorkspaceStore::open(&db_path) {
+                    native_thread_id_resolved = store
+                        .resolve_codex_native_thread_id_for_process(process_id)
+                        .ok()
+                        .flatten()
+                        .is_some();
+                }
+            }
+
+            match pty.has_exited() {
+                Ok(true) => {
+                    if let Ok(conn) = Connection::open(&db_path) {
+                        let _ = conn.execute(
+                            "UPDATE processes
+                             SET status = ?1, ended_at = ?2, exit_code = ?3
+                             WHERE id = ?4 AND status = 'running'",
+                            params![
+                                ProcessStatus::Exited.as_str(),
+                                timestamp(),
+                                Option::<i32>::None,
+                                process_id
+                            ],
+                        );
+                    }
+                    break;
+                }
+                Ok(false) => {}
+                Err(_) => break,
+            }
+
+            thread::sleep(Duration::from_millis(CODEX_PTY_POLL_INTERVAL_MS));
+        }
+    });
+}
+
+pub fn format_codex_raw_output(raw: &str) -> String {
+    format!("[codex raw]\n{raw}\n[/codex raw]\n")
+}
+
+pub fn format_codex_screen_snapshot(screen: &str) -> String {
+    format!(
+        "[codex screen]\n{}\n[/codex screen]\n",
+        screen.trim_end_matches('\n')
+    )
+}
+
+fn extract_codex_screen_snapshots(output: &str) -> Vec<String> {
+    let mut screens = Vec::new();
+    let mut remaining = output;
+    while let Some(start) = remaining.find("[codex screen]\n") {
+        let after_start = &remaining[start + "[codex screen]\n".len()..];
+        let Some(end) = after_start.find("\n[/codex screen]") else {
+            break;
+        };
+        screens.push(after_start[..end].to_owned());
+        remaining = &after_start[end + "\n[/codex screen]".len()..];
+    }
+    screens
+}
+
+fn chat_message_to_screen_message(message: &ChatMessageRecord) -> Option<ScreenMessage> {
+    match message.role.as_str() {
+        "user" => Some(ScreenMessage {
+            role: crate::codex_tui::ScreenMessageRole::User,
+            content: message.content.clone(),
+        }),
+        "agent" => Some(ScreenMessage {
+            role: crate::codex_tui::ScreenMessageRole::Agent,
+            content: message.content.clone(),
+        }),
+        _ => None,
+    }
+}
+
+fn screen_role_name(role: crate::codex_tui::ScreenMessageRole) -> &'static str {
+    match role {
+        crate::codex_tui::ScreenMessageRole::User => "user",
+        crate::codex_tui::ScreenMessageRole::Agent => "agent",
+    }
+}
+
+fn find_codex_rollout_session_id(cwd: &Path, started_at: &str) -> Result<Option<String>> {
+    let Some(home) = std::env::var_os("HOME") else {
+        return Ok(None);
+    };
+    let root = PathBuf::from(home).join(".codex/sessions");
+    if !root.exists() {
+        return Ok(None);
+    }
+    let started_at = started_at.parse::<u64>().unwrap_or(0);
+    let min_started_at = started_at.saturating_sub(5);
+    let max_started_at = started_at.saturating_add(600);
+    let mut candidates = Vec::new();
+    for entry in WalkDir::new(&root)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let file_name = entry.file_name().to_string_lossy();
+        if !file_name.starts_with("rollout-") || !file_name.ends_with(".jsonl") {
+            continue;
+        }
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+        let modified_at = match metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs())
+        {
+            Some(value) if value >= min_started_at && value <= max_started_at => value,
+            _ => continue,
+        };
+        let Some(meta) = read_codex_rollout_session_meta(entry.path())? else {
+            continue;
+        };
+        if meta.cwd != cwd {
+            continue;
+        }
+        candidates.push((modified_at, meta.session_id));
+    }
+    candidates.sort_by_key(|candidate| candidate.0);
+    Ok(candidates.into_iter().next().map(|candidate| candidate.1))
+}
+
+struct CodexRolloutMeta {
+    cwd: PathBuf,
+    session_id: String,
+}
+
+fn read_codex_rollout_session_meta(path: &Path) -> Result<Option<CodexRolloutMeta>> {
+    let Some(line) = fs::read_to_string(path)
+        .with_context(|| format!("read codex rollout {}", path.display()))?
+        .lines()
+        .next()
+        .map(str::to_owned)
+    else {
+        return Ok(None);
+    };
+    let value: Value = serde_json::from_str(&line)
+        .with_context(|| format!("parse codex rollout {}", path.display()))?;
+    if value.get("type").and_then(Value::as_str) != Some("session_meta") {
+        return Ok(None);
+    }
+    let Some(payload) = value.get("payload") else {
+        return Ok(None);
+    };
+    let Some(session_id) = payload.get("session_id").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let Some(cwd) = payload.get("cwd").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    Ok(Some(CodexRolloutMeta {
+        cwd: PathBuf::from(cwd),
+        session_id: session_id.to_owned(),
+    }))
+}
+
 fn row_to_workspace(row: &rusqlite::Row<'_>) -> rusqlite::Result<Workspace> {
     let port_base = row.get::<_, i64>(6)?;
     Ok(Workspace {
@@ -3735,45 +4950,88 @@ fn row_to_workspace(row: &rusqlite::Row<'_>) -> rusqlite::Result<Workspace> {
 }
 
 fn row_to_process(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProcessRecord> {
-    let kind = match row.get::<_, String>(2)?.as_str() {
+    let kind = match row.get::<_, String>(3)?.as_str() {
         "setup" => ProcessKind::Setup,
         "run" => ProcessKind::Run,
         "session" => ProcessKind::Session,
         "terminal" => ProcessKind::Terminal,
         _ => return Err(rusqlite::Error::InvalidQuery),
     };
-    let pid = row.get::<_, i64>(4)?;
+    let pid = row.get::<_, i64>(5)?;
+    let chat_thread_id = row.get::<_, Option<i64>>("chat_thread_id").ok().flatten();
     let session_harness_metadata = row
         .get::<_, Option<String>>("session_harness_metadata")
+        .ok()
+        .flatten();
+    let session_resume_id = row
+        .get::<_, Option<String>>("session_resume_id")
         .ok()
         .flatten();
     Ok(ProcessRecord {
         id: row.get(0)?,
         workspace_id: row.get(1)?,
+        chat_thread_id,
         kind,
-        command: row.get(3)?,
+        command: row.get(4)?,
         pid: u32::try_from(pid).map_err(|err| {
             rusqlite::Error::FromSqlConversionFailure(
-                4,
+                5,
                 rusqlite::types::Type::Integer,
                 Box::new(err),
             )
         })?,
-        log_path: PathBuf::from(row.get::<_, String>(5)?),
-        status: ProcessStatus::from_str(&row.get::<_, String>(6)?)?,
-        started_at: row.get(7)?,
-        exit_code: row.get(8)?,
-        ended_at: row.get(9)?,
+        log_path: PathBuf::from(row.get::<_, String>(6)?),
+        status: ProcessStatus::from_str(&row.get::<_, String>(7)?)?,
+        started_at: row.get(8)?,
+        exit_code: row.get(9)?,
+        ended_at: row.get(10)?,
         session_harness_metadata,
+        session_resume_id,
     })
 }
 
 fn row_to_local_chat_history_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LocalChatHistoryRow> {
     Ok(LocalChatHistoryRow {
         process: row_to_process(row)?,
-        repository_name: row.get(11)?,
-        workspace_name: row.get(12)?,
-        workspace_path: PathBuf::from(row.get::<_, String>(13)?),
+        repository_name: row.get(13)?,
+        workspace_name: row.get(14)?,
+        workspace_path: PathBuf::from(row.get::<_, String>(15)?),
+    })
+}
+
+fn row_to_local_chat_thread_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LocalChatThreadRow> {
+    Ok(LocalChatThreadRow {
+        thread: row_to_chat_thread(row)?,
+        repository_name: row.get(10)?,
+        workspace_name: row.get(11)?,
+        workspace_path: PathBuf::from(row.get::<_, String>(12)?),
+    })
+}
+
+fn row_to_chat_thread(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatThreadRecord> {
+    Ok(ChatThreadRecord {
+        id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        provider: row.get(2)?,
+        title: row.get(3)?,
+        status: row.get(4)?,
+        native_thread_id: row.get(5)?,
+        harness_metadata: row.get(6)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
+        archived_at: row.get(9)?,
+    })
+}
+
+fn row_to_chat_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessageRecord> {
+    Ok(ChatMessageRecord {
+        id: row.get(0)?,
+        thread_id: row.get(1)?,
+        role: row.get(2)?,
+        content: row.get(3)?,
+        source: row.get(4)?,
+        created_at: row.get(5)?,
+        updated_at: row.get(6)?,
     })
 }
 
@@ -3884,6 +5142,22 @@ fn parse_pull_request_number(url: &str) -> Option<i64> {
         .rsplit('/')
         .next()
         .and_then(|segment| segment.parse::<i64>().ok())
+}
+
+pub fn parse_github_numbered_stateful_choices(raw: &str) -> Vec<GitHubNumberedChoice> {
+    raw.lines()
+        .filter_map(|line| {
+            let mut parts = line.splitn(3, '\t');
+            let number = parts.next()?.trim().parse().ok()?;
+            let state = parts.next()?.trim().to_owned();
+            let title = parts.next()?.trim().to_owned();
+            Some(GitHubNumberedChoice {
+                number,
+                state,
+                title,
+            })
+        })
+        .collect()
 }
 
 fn parse_pull_request_check_runs(output: &str) -> Vec<PullRequestCheckRun> {
@@ -4324,6 +5598,7 @@ fn create_directory_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
 fn parse_local_chat_transcript(transcript: &str) -> Vec<LocalChatHistoryMessage> {
     let lines = transcript.lines().collect::<Vec<_>>();
     let mut messages = Vec::new();
+    let mut codex_messages = Vec::<ScreenMessage>::new();
     let mut index = 0usize;
 
     while index < lines.len() {
@@ -4333,8 +5608,22 @@ fn parse_local_chat_transcript(transcript: &str) -> Vec<LocalChatHistoryMessage>
             continue;
         }
 
+        if line == "[codex screen]" {
+            let (screen, next) = collect_codex_screen_block(&lines, index + 1);
+            let parsed = parse_codex_screen_messages(&screen);
+            merge_screen_messages(&mut codex_messages, &parsed);
+            index = next;
+            continue;
+        }
+
+        if line == "[codex raw]" {
+            let (_, next) = collect_codex_raw_block(&lines, index + 1);
+            index = next;
+            continue;
+        }
+
         if is_local_user_marker(line) {
-            let (content, next) = collect_until_local_marker(&lines, index + 1);
+            let (content, next) = collect_local_user_input(&lines, index + 1);
             push_local_chat_message(&mut messages, "user", content);
             index = next;
             continue;
@@ -4358,6 +5647,9 @@ fn parse_local_chat_transcript(transcript: &str) -> Vec<LocalChatHistoryMessage>
         index = next;
     }
 
+    for message in codex_messages {
+        push_local_chat_message(&mut messages, message.role.as_str(), message.content);
+    }
     messages
 }
 
@@ -4388,6 +5680,22 @@ fn collect_until_local_marker(lines: &[&str], mut index: usize) -> (String, usiz
     (content.join("\n"), index)
 }
 
+fn collect_local_user_input(lines: &[&str], mut index: usize) -> (String, usize) {
+    let mut content = Vec::new();
+    while index < lines.len() {
+        let line = lines[index].trim_end();
+        if line == "[/user input]" {
+            return (content.join("\n"), index + 1);
+        }
+        if content.is_empty() && is_local_chat_marker(line) {
+            return (String::new(), index);
+        }
+        content.push(lines[index]);
+        index += 1;
+    }
+    (content.join("\n"), index)
+}
+
 fn collect_staged_review_prompt(lines: &[&str], mut index: usize) -> (String, usize) {
     let mut content = Vec::new();
     while index < lines.len() {
@@ -4401,8 +5709,41 @@ fn collect_staged_review_prompt(lines: &[&str], mut index: usize) -> (String, us
     (content.join("\n"), index)
 }
 
+fn collect_codex_screen_block(lines: &[&str], mut index: usize) -> (String, usize) {
+    let mut content = Vec::new();
+    while index < lines.len() {
+        let line = lines[index].trim_end();
+        if line == "[/codex screen]" {
+            return (content.join("\n"), index + 1);
+        }
+        content.push(lines[index]);
+        index += 1;
+    }
+    (content.join("\n"), index)
+}
+
+fn collect_codex_raw_block(lines: &[&str], mut index: usize) -> (String, usize) {
+    let mut content = Vec::new();
+    while index < lines.len() {
+        let line = lines[index].trim_end();
+        if line == "[/codex raw]" {
+            return (content.join("\n"), index + 1);
+        }
+        content.push(lines[index]);
+        index += 1;
+    }
+    (content.join("\n"), index)
+}
+
 fn is_local_chat_marker(line: &str) -> bool {
-    is_local_user_marker(line) || line == "[staged review prompt]" || is_local_system_marker(line)
+    is_local_user_marker(line)
+        || line == "[/user input]"
+        || line == "[staged review prompt]"
+        || line == "[codex raw]"
+        || line == "[/codex raw]"
+        || line == "[codex screen]"
+        || line == "[/codex screen]"
+        || is_local_system_marker(line)
 }
 
 fn is_local_user_marker(line: &str) -> bool {
@@ -4414,6 +5755,9 @@ fn is_local_system_marker(line: &str) -> bool {
         || line.starts_with("[provider ")
         || line.starts_with("[mcp ")
         || line.starts_with("[harness ")
+        || line.starts_with("[tool ")
+        || line.starts_with("[skill ")
+        || line.starts_with("[archductor bootstrap")
 }
 
 fn local_chat_agent_type(command: &str) -> String {
@@ -5088,7 +6432,7 @@ fn ensure_root_matches_spotlight_patch(root_path: &Path, expected_patch: &str) -
 
 fn root_tracked_patch(root_path: &Path) -> Result<String> {
     let index_path =
-        std::env::temp_dir().join(format!("linux-conductor-root-index-{}", timestamp_nanos()));
+        std::env::temp_dir().join(format!("linux-archductor-root-index-{}", timestamp_nanos()));
     git_with_index(root_path, &index_path, &["read-tree", "HEAD"])?;
     git_with_index(root_path, &index_path, &["add", "-A"])?;
     let current_patch = git_with_index_output(
@@ -5244,9 +6588,9 @@ fn git_commit_tree(cwd: &Path, tree: &str, parent: &str, message: &str) -> Resul
         .arg(cwd)
         .args([
             "-c",
-            "user.name=Linux Conductor",
+            "user.name=Linux Archductor",
             "-c",
-            "user.email=linux-conductor@example.test",
+            "user.email=linux-archductor@example.test",
             "-c",
             "commit.gpgsign=false",
             "commit-tree",
@@ -5420,16 +6764,40 @@ fn process_alive(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
-fn stop_process(pid: u32) -> Result<()> {
-    // Try SIGTERM to process group first, then to process directly.
-    let group_ok = Command::new("kill")
-        .arg("-TERM")
-        .arg(format!("-{pid}"))
-        .stdout(Stdio::null())
+#[cfg(unix)]
+fn process_group_matches_pid(pid: u32) -> bool {
+    Command::new("ps")
+        .args(["-o", "pgid=", "-p", &pid.to_string()])
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .status()
-        .context("run kill")?
-        .success();
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .and_then(|stdout| stdout.trim().parse::<u32>().ok())
+        .map(|pgid| pgid == pid)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn process_group_matches_pid(_pid: u32) -> bool {
+    false
+}
+
+fn stop_process(pid: u32) -> Result<()> {
+    // Try SIGTERM to the process group only when the child owns a distinct group.
+    let group_ok = if process_group_matches_pid(pid) {
+        Command::new("kill")
+            .arg("-TERM")
+            .arg(format!("-{pid}"))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .context("run kill")?
+            .success()
+    } else {
+        false
+    };
     if !group_ok {
         let _ = Command::new("kill")
             .arg("-TERM")
@@ -5450,12 +6818,14 @@ fn stop_process(pid: u32) -> Result<()> {
 
     // Still alive — send SIGKILL to process group, then process.
     if process_alive(pid) {
-        let _ = Command::new("kill")
-            .arg("-KILL")
-            .arg(format!("-{pid}"))
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        if process_group_matches_pid(pid) {
+            let _ = Command::new("kill")
+                .arg("-KILL")
+                .arg(format!("-{pid}"))
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
         std::thread::sleep(Duration::from_millis(200));
         let _ = Command::new("kill")
             .arg("-KILL")
@@ -5484,31 +6854,10 @@ fn quote_shell_word(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
-fn run_setup_script(
-    settings: &crate::settings::RepositorySettings,
-    repository: &RepositoryRecord,
-    workspace_path: &Path,
-    workspace_name: &str,
-    port_base: u16,
-) -> Result<()> {
-    let Some(setup) = &settings.scripts.setup else {
-        return Ok(());
-    };
-
-    let workspace = Workspace {
-        id: 0,
-        repository_id: repository.id,
-        name: workspace_name.to_owned(),
-        path: workspace_path.to_path_buf(),
-        branch: String::new(),
-        base_ref: repository.default_branch.clone(),
-        port_base,
-        status: "active".to_owned(),
-        archived_at: None,
-        created_at: String::new(),
-        updated_at: String::new(),
-    };
-    run_shell_script(setup, settings, repository, &workspace, &[])
+fn random_index(len: usize) -> usize {
+    debug_assert!(len > 0);
+    let value = u128::from_le_bytes(*Uuid::new_v4().as_bytes());
+    (value % len as u128) as usize
 }
 
 fn run_shell_script(
@@ -5547,30 +6896,30 @@ fn conductor_environment(
         workspace_working_directory(settings, workspace).unwrap_or_else(|_| workspace.path.clone());
     let mut env = vec![
         (
-            "CONDUCTOR_WORKSPACE_NAME".to_owned(),
+            "ARCHDUCTOR_WORKSPACE_NAME".to_owned(),
             OsString::from(&workspace.name),
         ),
         (
-            "CONDUCTOR_WORKSPACE_PATH".to_owned(),
+            "ARCHDUCTOR_WORKSPACE_PATH".to_owned(),
             workspace.path.as_os_str().to_owned(),
         ),
         (
-            "CONDUCTOR_WORKING_DIRECTORY".to_owned(),
+            "ARCHDUCTOR_WORKING_DIRECTORY".to_owned(),
             working_directory.as_os_str().to_owned(),
         ),
         (
-            "CONDUCTOR_ROOT_PATH".to_owned(),
+            "ARCHDUCTOR_ROOT_PATH".to_owned(),
             repository.root_path.as_os_str().to_owned(),
         ),
         (
-            "CONDUCTOR_DEFAULT_BRANCH".to_owned(),
+            "ARCHDUCTOR_DEFAULT_BRANCH".to_owned(),
             OsString::from(&repository.default_branch),
         ),
         (
-            "CONDUCTOR_PORT".to_owned(),
+            "ARCHDUCTOR_PORT".to_owned(),
             OsString::from(workspace.port_base.to_string()),
         ),
-        ("CONDUCTOR_IS_LOCAL".to_owned(), OsString::from("1")),
+        ("ARCHDUCTOR_IS_LOCAL".to_owned(), OsString::from("1")),
     ];
     env.extend(
         settings
@@ -5750,9 +7099,9 @@ mod tests {
     fn create_from_prompt_uses_configured_branch_prefix() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
-        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
         fs::write(
-            repo_path.join(".conductor/settings.toml"),
+            repo_path.join(".archductor/settings.toml"),
             r#"
 [customization.workspace_defaults]
 branch_prefix = "team"
@@ -5762,13 +7111,13 @@ branch_prefix = "team"
         Command::new("git")
             .arg("-C")
             .arg(&repo_path)
-            .args(["add", ".conductor/settings.toml"])
+            .args(["add", ".archductor/settings.toml"])
             .status()
             .unwrap();
         Command::new("git")
             .arg("-C")
             .arg(&repo_path)
-            .args(["commit", "-m", "add conductor settings"])
+            .args(["commit", "-m", "add archductor settings"])
             .status()
             .unwrap();
         let db_path = temp.path().join("state.db");
@@ -5837,9 +7186,9 @@ exit 1
         let _guard = env_lock().lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
-        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
         fs::write(
-            repo_path.join(".conductor/settings.toml"),
+            repo_path.join(".archductor/settings.toml"),
             r#"
 [customization.workspace_defaults]
 branch_prefix = "team"
@@ -5849,13 +7198,13 @@ branch_prefix = "team"
         Command::new("git")
             .arg("-C")
             .arg(&repo_path)
-            .args(["add", ".conductor/settings.toml"])
+            .args(["add", ".archductor/settings.toml"])
             .status()
             .unwrap();
         Command::new("git")
             .arg("-C")
             .arg(&repo_path)
-            .args(["commit", "-m", "add conductor settings"])
+            .args(["commit", "-m", "add archductor settings"])
             .status()
             .unwrap();
         let old_path = install_fake_gh(
@@ -5931,9 +7280,9 @@ exit 1
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Conductor",
+                "user.name=Linux Archductor",
                 "-c",
-                "user.email=linux-conductor@example.test",
+                "user.email=linux-archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -6046,9 +7395,9 @@ fi\n\
     fn session_launch_uses_configured_provider_executables() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
-        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
         fs::write(
-            repo_path.join(".conductor/settings.toml"),
+            repo_path.join(".archductor/settings.toml"),
             r#"
 codex_executable_path = "/opt/bin/codex-custom"
 claude_code_executable_path = "/opt/bin/claude-custom"
@@ -6058,13 +7407,13 @@ claude_code_executable_path = "/opt/bin/claude-custom"
         Command::new("git")
             .arg("-C")
             .arg(&repo_path)
-            .args(["add", ".conductor/settings.toml"])
+            .args(["add", ".archductor/settings.toml"])
             .status()
             .unwrap();
         Command::new("git")
             .arg("-C")
             .arg(&repo_path)
-            .args(["commit", "-m", "add conductor settings"])
+            .args(["commit", "-m", "add archductor settings"])
             .status()
             .unwrap();
         let db_path = temp.path().join("state.db");
@@ -6193,9 +7542,9 @@ claude_code_executable_path = "/opt/bin/claude-custom"
             .args(["checkout", "-b", "develop"])
             .status()
             .unwrap();
-        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
         fs::write(
-            repo_path.join(".conductor/settings.toml"),
+            repo_path.join(".archductor/settings.toml"),
             r#"
 [customization.workspace_defaults]
 base_branch = "develop"
@@ -6205,13 +7554,13 @@ base_branch = "develop"
         Command::new("git")
             .arg("-C")
             .arg(&repo_path)
-            .args(["add", ".conductor/settings.toml"])
+            .args(["add", ".archductor/settings.toml"])
             .status()
             .unwrap();
         Command::new("git")
             .arg("-C")
             .arg(&repo_path)
-            .args(["commit", "-m", "add conductor settings"])
+            .args(["commit", "-m", "add archductor settings"])
             .status()
             .unwrap();
         let db_path = temp.path().join("state.db");
@@ -6244,9 +7593,9 @@ base_branch = "develop"
     fn create_workspace_uses_configured_port_block_size() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
-        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
         fs::write(
-            repo_path.join(".conductor/settings.toml"),
+            repo_path.join(".archductor/settings.toml"),
             r#"
 [customization.workspace_defaults]
 port_block_size = 25
@@ -6256,13 +7605,13 @@ port_block_size = 25
         Command::new("git")
             .arg("-C")
             .arg(&repo_path)
-            .args(["add", ".conductor/settings.toml"])
+            .args(["add", ".archductor/settings.toml"])
             .status()
             .unwrap();
         Command::new("git")
             .arg("-C")
             .arg(&repo_path)
-            .args(["commit", "-m", "add conductor settings"])
+            .args(["commit", "-m", "add archductor settings"])
             .status()
             .unwrap();
         let db_path = temp.path().join("state.db");
@@ -6301,6 +7650,188 @@ port_block_size = 25
     }
 
     #[test]
+    fn create_workspace_generates_city_name_and_branch_when_empty() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
+        fs::write(
+            repo_path.join(".archductor/settings.toml"),
+            r#"
+[customization.naming]
+workspace_name_style = "city"
+
+[customization.workspace_defaults]
+branch_prefix = "team"
+"#,
+        )
+        .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", ".archductor/settings.toml"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["commit", "-m", "add archductor settings"])
+            .status()
+            .unwrap();
+        let db_path = temp.path().join("state.db");
+        let workspace_parent = temp.path().join("workspaces/demo");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(workspace_parent.clone()),
+            })
+            .unwrap();
+
+        let workspace = WorkspaceStore::open(&db_path)
+            .unwrap()
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: String::new(),
+                branch: String::new(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        assert!(WORKSPACE_CITY_NAMES.contains(&workspace.name.as_str()));
+        assert_eq!(
+            workspace.branch,
+            format!("team/{}", slugify(&workspace.name))
+        );
+        assert_eq!(workspace.path, workspace_parent.join(&workspace.name));
+    }
+
+    #[test]
+    fn create_workspace_uses_global_active_city_pool_across_repositories() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_one_path = init_repo(temp.path().join("demo-one"));
+        let repo_two_path = init_repo(temp.path().join("demo-two"));
+        let db_path = temp.path().join("state.db");
+
+        let repo_store = RepositoryStore::open(&db_path).unwrap();
+        repo_store
+            .add(AddRepository {
+                name: Some("demo-one".to_owned()),
+                root_path: repo_one_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo-one")),
+            })
+            .unwrap();
+        repo_store
+            .add(AddRepository {
+                name: Some("demo-two".to_owned()),
+                root_path: repo_two_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo-two")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo-one".to_owned(),
+                name: WORKSPACE_CITY_NAMES[0].to_owned(),
+                branch: format!("lc/{}", WORKSPACE_CITY_NAMES[0]),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        for city in &WORKSPACE_CITY_NAMES[1..WORKSPACE_CITY_NAMES.len() - 1] {
+            store
+                .create(CreateWorkspace {
+                    repository_name: "demo-two".to_owned(),
+                    name: (*city).to_owned(),
+                    branch: format!("lc/{city}"),
+                    base_ref: Some("main".to_owned()),
+                })
+                .unwrap();
+        }
+
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo-one".to_owned(),
+                name: String::new(),
+                branch: String::new(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        assert_eq!(
+            workspace.name,
+            WORKSPACE_CITY_NAMES[WORKSPACE_CITY_NAMES.len() - 1]
+        );
+        assert_eq!(
+            workspace.branch,
+            format!(
+                "lc/{}",
+                WORKSPACE_CITY_NAMES[WORKSPACE_CITY_NAMES.len() - 1]
+            )
+        );
+    }
+
+    #[test]
+    fn create_workspace_does_not_treat_repository_name_as_selected_city() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_one_path = init_repo(temp.path().join("repo-berlin"));
+        let repo_two_path = init_repo(temp.path().join("repo-two"));
+        let db_path = temp.path().join("state.db");
+
+        let repo_store = RepositoryStore::open(&db_path).unwrap();
+        repo_store
+            .add(AddRepository {
+                name: Some("berlin".to_owned()),
+                root_path: repo_one_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/berlin")),
+            })
+            .unwrap();
+        repo_store
+            .add(AddRepository {
+                name: Some("demo-two".to_owned()),
+                root_path: repo_two_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo-two")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        for city in &WORKSPACE_CITY_NAMES[1..] {
+            store
+                .create(CreateWorkspace {
+                    repository_name: "demo-two".to_owned(),
+                    name: (*city).to_owned(),
+                    branch: format!("lc/{city}"),
+                    base_ref: Some("main".to_owned()),
+                })
+                .unwrap();
+        }
+
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "berlin".to_owned(),
+                name: String::new(),
+                branch: String::new(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        assert_eq!(workspace.name, "berlin");
+        assert_eq!(workspace.branch, "lc/berlin");
+    }
+
+    #[test]
     fn create_workspace_copies_only_included_ignored_files() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
@@ -6310,9 +7841,9 @@ port_block_size = 25
             ".env.local\nREADME.md\n",
         )
         .unwrap();
-        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
         fs::write(
-            repo_path.join(".conductor/settings.toml"),
+            repo_path.join(".archductor/settings.toml"),
             r#"
 file_include_globs = """
 config/*.local.json
@@ -6332,7 +7863,7 @@ notes.local
                 "add",
                 ".gitignore",
                 ".worktreeinclude",
-                ".conductor/settings.toml",
+                ".archductor/settings.toml",
             ])
             .status()
             .unwrap();
@@ -6341,14 +7872,14 @@ notes.local
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Conductor",
+                "user.name=Linux Archductor",
                 "-c",
-                "user.email=linux-conductor@example.test",
+                "user.email=linux-archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
                 "-m",
-                "add conductor settings",
+                "add archductor settings",
             ])
             .status()
             .unwrap();
@@ -6387,15 +7918,79 @@ notes.local
     }
 
     #[test]
-    fn create_workspace_runs_setup_script_with_conductor_environment() {
+    fn create_workspace_does_not_run_setup_script_by_default() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
-        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
         fs::write(
-            repo_path.join(".conductor/settings.toml"),
+            repo_path.join(".archductor/settings.toml"),
             r#"
 [scripts]
-setup = "printf '%s\n' \"$CONDUCTOR_WORKSPACE_NAME\" \"$CONDUCTOR_WORKSPACE_PATH\" \"$CONDUCTOR_ROOT_PATH\" \"$CONDUCTOR_DEFAULT_BRANCH\" \"$CONDUCTOR_PORT\" \"$CONDUCTOR_IS_LOCAL\" \"$CUSTOM_VALUE\" > .context/setup-env"
+setup = "printf 'setup-ran\n' > .context/setup-env"
+"#,
+        )
+        .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", ".archductor/settings.toml"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args([
+                "-c",
+                "user.name=Linux Archductor",
+                "-c",
+                "user.email=linux-archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "add setup script",
+            ])
+            .status()
+            .unwrap();
+
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let workspace = WorkspaceStore::open(&db_path)
+            .unwrap()
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        assert!(!workspace.path.join(".context/setup-env").exists());
+    }
+
+    #[test]
+    fn create_workspace_auto_setup_starts_background_setup_process_with_conductor_environment() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
+        fs::write(
+            repo_path.join(".archductor/settings.toml"),
+            r#"
+[scripts]
+setup = "printf '%s\n' \"$ARCHDUCTOR_WORKSPACE_NAME\" \"$ARCHDUCTOR_WORKSPACE_PATH\" \"$ARCHDUCTOR_ROOT_PATH\" \"$ARCHDUCTOR_DEFAULT_BRANCH\" \"$ARCHDUCTOR_PORT\" \"$ARCHDUCTOR_IS_LOCAL\" \"$CUSTOM_VALUE\" > .context/setup-env"
+
+[customization.automation]
+auto_setup = true
 
 [environment_variables]
 CUSTOM_VALUE = "from-settings"
@@ -6405,7 +8000,7 @@ CUSTOM_VALUE = "from-settings"
         Command::new("git")
             .arg("-C")
             .arg(&repo_path)
-            .args(["add", ".conductor/settings.toml"])
+            .args(["add", ".archductor/settings.toml"])
             .status()
             .unwrap();
         Command::new("git")
@@ -6413,9 +8008,9 @@ CUSTOM_VALUE = "from-settings"
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Conductor",
+                "user.name=Linux Archductor",
                 "-c",
-                "user.email=linux-conductor@example.test",
+                "user.email=linux-archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -6437,8 +8032,8 @@ CUSTOM_VALUE = "from-settings"
             })
             .unwrap();
 
-        let workspace = WorkspaceStore::open(&db_path)
-            .unwrap()
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        let workspace = store
             .create(CreateWorkspace {
                 repository_name: "demo".to_owned(),
                 name: "berlin".to_owned(),
@@ -6447,6 +8042,9 @@ CUSTOM_VALUE = "from-settings"
             })
             .unwrap();
 
+        let setups = store.list_setups("berlin").unwrap();
+        assert_eq!(setups.len(), 1);
+        wait_for_path(&workspace.path.join(".context/setup-env"));
         let setup_env = fs::read_to_string(workspace.path.join(".context/setup-env")).unwrap();
         let lines = setup_env.lines().collect::<Vec<_>>();
         assert_eq!(
@@ -6501,9 +8099,9 @@ CUSTOM_VALUE = "from-settings"
     fn archive_stops_running_processes_and_removes_worktree() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
-        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
         fs::write(
-            repo_path.join(".conductor/settings.toml"),
+            repo_path.join(".archductor/settings.toml"),
             r#"
 [scripts]
 run = "printf 'started\n'; while true; do sleep 1; done"
@@ -6513,7 +8111,7 @@ run = "printf 'started\n'; while true; do sleep 1; done"
         Command::new("git")
             .arg("-C")
             .arg(&repo_path)
-            .args(["add", ".conductor/settings.toml"])
+            .args(["add", ".archductor/settings.toml"])
             .status()
             .unwrap();
         Command::new("git")
@@ -6521,9 +8119,9 @@ run = "printf 'started\n'; while true; do sleep 1; done"
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Conductor",
+                "user.name=Linux Archductor",
                 "-c",
-                "user.email=linux-conductor@example.test",
+                "user.email=linux-archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -6570,12 +8168,12 @@ run = "printf 'started\n'; while true; do sleep 1; done"
     fn run_workspace_executes_run_script_with_conductor_environment() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
-        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
         fs::write(
-            repo_path.join(".conductor/settings.toml"),
+            repo_path.join(".archductor/settings.toml"),
             r#"
 [scripts]
-run = "printf '%s\n' \"$CONDUCTOR_WORKSPACE_NAME\" \"$CONDUCTOR_WORKSPACE_PATH\" \"$CONDUCTOR_ROOT_PATH\" \"$CONDUCTOR_DEFAULT_BRANCH\" \"$CONDUCTOR_PORT\" \"$CONDUCTOR_IS_LOCAL\" \"$CUSTOM_VALUE\" > .context/run-env"
+run = "printf '%s\n' \"$ARCHDUCTOR_WORKSPACE_NAME\" \"$ARCHDUCTOR_WORKSPACE_PATH\" \"$ARCHDUCTOR_ROOT_PATH\" \"$ARCHDUCTOR_DEFAULT_BRANCH\" \"$ARCHDUCTOR_PORT\" \"$ARCHDUCTOR_IS_LOCAL\" \"$CUSTOM_VALUE\" > .context/run-env"
 
 [environment_variables]
 CUSTOM_VALUE = "from-settings"
@@ -6585,7 +8183,7 @@ CUSTOM_VALUE = "from-settings"
         Command::new("git")
             .arg("-C")
             .arg(&repo_path)
-            .args(["add", ".conductor/settings.toml"])
+            .args(["add", ".archductor/settings.toml"])
             .status()
             .unwrap();
         Command::new("git")
@@ -6593,9 +8191,9 @@ CUSTOM_VALUE = "from-settings"
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Conductor",
+                "user.name=Linux Archductor",
                 "-c",
-                "user.email=linux-conductor@example.test",
+                "user.email=linux-archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -6654,9 +8252,9 @@ CUSTOM_VALUE = "from-settings"
     fn run_workspace_captures_logs_and_stop_marks_process_stopped() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
-        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
         fs::write(
-            repo_path.join(".conductor/settings.toml"),
+            repo_path.join(".archductor/settings.toml"),
             r#"
 [scripts]
 run = "printf 'started\n'; while true; do sleep 1; done"
@@ -6666,7 +8264,7 @@ run = "printf 'started\n'; while true; do sleep 1; done"
         Command::new("git")
             .arg("-C")
             .arg(&repo_path)
-            .args(["add", ".conductor/settings.toml"])
+            .args(["add", ".archductor/settings.toml"])
             .status()
             .unwrap();
         Command::new("git")
@@ -6674,9 +8272,9 @@ run = "printf 'started\n'; while true; do sleep 1; done"
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Conductor",
+                "user.name=Linux Archductor",
                 "-c",
-                "user.email=linux-conductor@example.test",
+                "user.email=linux-archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -6727,9 +8325,9 @@ run = "printf 'started\n'; while true; do sleep 1; done"
     fn run_workspace_records_exit_status_when_process_finishes() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
-        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
         fs::write(
-            repo_path.join(".conductor/settings.toml"),
+            repo_path.join(".archductor/settings.toml"),
             r#"
 [scripts]
 run = "printf 'done\n'; exit 3"
@@ -6739,7 +8337,7 @@ run = "printf 'done\n'; exit 3"
         Command::new("git")
             .arg("-C")
             .arg(&repo_path)
-            .args(["add", ".conductor/settings.toml"])
+            .args(["add", ".archductor/settings.toml"])
             .status()
             .unwrap();
         Command::new("git")
@@ -6747,9 +8345,9 @@ run = "printf 'done\n'; exit 3"
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Conductor",
+                "user.name=Linux Archductor",
                 "-c",
-                "user.email=linux-conductor@example.test",
+                "user.email=linux-archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -6795,9 +8393,9 @@ run = "printf 'done\n'; exit 3"
     fn terminal_command_runs_in_workspace_with_conductor_environment_and_captures_output() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
-        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
         fs::write(
-            repo_path.join(".conductor/settings.toml"),
+            repo_path.join(".archductor/settings.toml"),
             r#"
 [environment_variables]
 CUSTOM_VALUE = "from-settings"
@@ -6807,7 +8405,7 @@ CUSTOM_VALUE = "from-settings"
         Command::new("git")
             .arg("-C")
             .arg(&repo_path)
-            .args(["add", ".conductor/settings.toml"])
+            .args(["add", ".archductor/settings.toml"])
             .status()
             .unwrap();
         Command::new("git")
@@ -6815,9 +8413,9 @@ CUSTOM_VALUE = "from-settings"
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Conductor",
+                "user.name=Linux Archductor",
                 "-c",
-                "user.email=linux-conductor@example.test",
+                "user.email=linux-archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -6852,11 +8450,11 @@ CUSTOM_VALUE = "from-settings"
         let result = store
             .terminal_command(
                 "berlin",
-                "pwd; printf '%s:%s:%s\\n' \"$CONDUCTOR_WORKSPACE_NAME\" \"$CONDUCTOR_PORT\" \"$CUSTOM_VALUE\"; printf 'warn\\n' >&2; exit 7",
+                "pwd; printf '%s:%s:%s\\n' \"$ARCHDUCTOR_WORKSPACE_NAME\" \"$ARCHDUCTOR_PORT\" \"$CUSTOM_VALUE\"; printf 'warn\\n' >&2; exit 7",
             )
             .unwrap();
 
-        assert_eq!(result.command, "pwd; printf '%s:%s:%s\\n' \"$CONDUCTOR_WORKSPACE_NAME\" \"$CONDUCTOR_PORT\" \"$CUSTOM_VALUE\"; printf 'warn\\n' >&2; exit 7");
+        assert_eq!(result.command, "pwd; printf '%s:%s:%s\\n' \"$ARCHDUCTOR_WORKSPACE_NAME\" \"$ARCHDUCTOR_PORT\" \"$CUSTOM_VALUE\"; printf 'warn\\n' >&2; exit 7");
         assert_eq!(result.cwd, workspace.path);
         assert_eq!(result.exit_code, Some(7));
         assert!(result.stdout.contains("berlin:3000:from-settings"));
@@ -6872,9 +8470,9 @@ CUSTOM_VALUE = "from-settings"
         let repo_path = init_repo(temp.path().join("demo"));
         fs::create_dir_all(repo_path.join("apps/web")).unwrap();
         fs::write(repo_path.join("apps/web/package.json"), "{}\n").unwrap();
-        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
         fs::write(
-            repo_path.join(".conductor/settings.toml"),
+            repo_path.join(".archductor/settings.toml"),
             r#"
 [customization.workspace_defaults]
 working_directory = "apps/web"
@@ -6892,9 +8490,9 @@ working_directory = "apps/web"
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Conductor",
+                "user.name=Linux Archductor",
                 "-c",
-                "user.email=linux-conductor@example.test",
+                "user.email=linux-archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -6929,7 +8527,7 @@ working_directory = "apps/web"
         let result = store
             .terminal_command(
                 "berlin",
-                "pwd; printf 'root=%s\\nwork=%s\\n' \"$CONDUCTOR_WORKSPACE_PATH\" \"$CONDUCTOR_WORKING_DIRECTORY\"",
+                "pwd; printf 'root=%s\\nwork=%s\\n' \"$ARCHDUCTOR_WORKSPACE_PATH\" \"$ARCHDUCTOR_WORKING_DIRECTORY\"",
             )
             .unwrap();
 
@@ -7626,6 +9224,7 @@ working_directory = "apps/web"
                     cwd: temp.path().join("workspaces/demo/berlin"),
                     env: Vec::new(),
                     harness_metadata: Some("plan=true".to_owned()),
+                    session_resume_id: None,
                 },
                 exited_child_pid(),
             )
@@ -7640,6 +9239,7 @@ working_directory = "apps/web"
                     cwd: temp.path().join("workspaces/demo/zurich"),
                     env: Vec::new(),
                     harness_metadata: None,
+                    session_resume_id: None,
                 },
                 exited_child_pid(),
             )
@@ -7697,16 +9297,13 @@ working_directory = "apps/web"
             .record_session_process(
                 "berlin",
                 &SessionLaunch {
-                    kind: SessionKind::Cursor,
-                    program: PathBuf::from("cursor"),
-                    args: vec![temp
-                        .path()
-                        .join("workspaces/demo/berlin")
-                        .display()
-                        .to_string()],
+                    kind: SessionKind::Shell,
+                    program: PathBuf::from("/bin/sh"),
+                    args: Vec::new(),
                     cwd: temp.path().join("workspaces/demo/berlin"),
                     env: Vec::new(),
                     harness_metadata: Some("fast=true".to_owned()),
+                    session_resume_id: None,
                 },
                 exited_child_pid(),
             )
@@ -7714,7 +9311,7 @@ working_directory = "apps/web"
         store
             .append_session_process_output(
                 session.id,
-                "[session started] #1 kind=Cursor pid=123\nagent preface\n[user input berlin#1]\nrun tests\n[session finished] #1\nagent reply\n",
+                "[session started] #1 kind=Shell pid=123\nagent preface\n[user input berlin#1]\nrun tests\n[/user input]\n[session finished] #1\nagent reply\n",
             )
             .unwrap();
 
@@ -7722,7 +9319,7 @@ working_directory = "apps/web"
 
         assert_eq!(messages.len(), 5);
         assert_eq!(messages[0].role, "system");
-        assert!(messages[0].content.contains("kind=Cursor"));
+        assert!(messages[0].content.contains("kind=Shell"));
         assert_eq!(messages[1].role, "agent");
         assert_eq!(messages[1].content, "agent preface");
         assert_eq!(messages[2].role, "user");
@@ -7730,6 +9327,62 @@ working_directory = "apps/web"
         assert_eq!(messages[3].role, "system");
         assert_eq!(messages[4].role, "agent");
         assert_eq!(messages[4].content, "agent reply");
+    }
+
+    #[test]
+    fn local_chat_history_messages_parse_codex_screen_snapshots() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let session = store
+            .record_session_process(
+                "berlin",
+                &SessionLaunch {
+                    kind: SessionKind::Codex,
+                    program: PathBuf::from("codex"),
+                    args: Vec::new(),
+                    cwd: temp.path().join("workspaces/demo/berlin"),
+                    env: Vec::new(),
+                    harness_metadata: None,
+                    session_resume_id: None,
+                },
+                exited_child_pid(),
+            )
+            .unwrap();
+        store
+            .append_session_process_output(
+                session.id,
+                "[codex raw]\nwrapper:codex\narg:--no-alt-screen\n[/codex raw]\n[codex screen]\n╭─ You ─╮\n│ run tests\n╰────\n╭─ Codex ─╮\n│ Running now.\n╰────\n[/codex screen]\n[codex raw]\narg:-C\n[/codex raw]\n[codex screen]\n╭─ You ─╮\n│ run tests\n╰────\n╭─ Codex ─╮\n│ Running now.\n│ Tests passed.\n╰────\n[/codex screen]\n",
+            )
+            .unwrap();
+
+        let messages = store.local_chat_history_messages(session.id).unwrap();
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[0].content, "run tests");
+        assert_eq!(messages[1].role, "agent");
+        assert_eq!(messages[1].content, "Running now.\nTests passed.");
     }
 
     #[test]
@@ -7828,11 +9481,11 @@ working_directory = "apps/web"
             .unwrap();
 
         assert_eq!(
-            launch.env_value("CONDUCTOR_LINKED_DIRECTORIES"),
+            launch.env_value("ARCHDUCTOR_LINKED_DIRECTORIES"),
             Some(format!("backend={}", backend.path.display()).as_str())
         );
         assert_eq!(
-            launch.env_value("CONDUCTOR_LINKED_DIRECTORY_BACKEND"),
+            launch.env_value("ARCHDUCTOR_LINKED_DIRECTORY_BACKEND"),
             Some(backend.path.to_str().unwrap())
         );
     }
@@ -7841,9 +9494,9 @@ working_directory = "apps/web"
     fn workspace_view_defaults_read_repository_customization() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
-        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
         fs::write(
-            repo_path.join(".conductor/settings.toml"),
+            repo_path.join(".archductor/settings.toml"),
             r#"
 [customization.workspace_defaults]
 default_visible_tab = "checks"
@@ -7859,14 +9512,14 @@ command_palette_presets = ["test", "Preview=pnpm dev"]
 "#,
         )
         .unwrap();
-        git(&repo_path, ["add", ".conductor/settings.toml"]).unwrap();
+        git(&repo_path, ["add", ".archductor/settings.toml"]).unwrap();
         git(
             &repo_path,
             [
                 "-c",
-                "user.name=Linux Conductor",
+                "user.name=Linux Archductor",
                 "-c",
-                "user.email=linux-conductor@example.test",
+                "user.email=linux-archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -7918,19 +9571,19 @@ command_palette_presets = ["test", "Preview=pnpm dev"]
     fn setup_workspace_executes_setup_script_and_captures_logs() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
-        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
         fs::write(
-            repo_path.join(".conductor/settings.toml"),
+            repo_path.join(".archductor/settings.toml"),
             r#"
 [scripts]
-setup = "printf 'setup:%s:%s\n' \"$CONDUCTOR_WORKSPACE_NAME\" \"$CONDUCTOR_PORT\""
+setup = "printf 'setup:%s:%s\n' \"$ARCHDUCTOR_WORKSPACE_NAME\" \"$ARCHDUCTOR_PORT\""
 "#,
         )
         .unwrap();
         Command::new("git")
             .arg("-C")
             .arg(&repo_path)
-            .args(["add", ".conductor/settings.toml"])
+            .args(["add", ".archductor/settings.toml"])
             .status()
             .unwrap();
         Command::new("git")
@@ -7938,9 +9591,9 @@ setup = "printf 'setup:%s:%s\n' \"$CONDUCTOR_WORKSPACE_NAME\" \"$CONDUCTOR_PORT\
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Conductor",
+                "user.name=Linux Archductor",
                 "-c",
-                "user.email=linux-conductor@example.test",
+                "user.email=linux-archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -7989,12 +9642,12 @@ setup = "printf 'setup:%s:%s\n' \"$CONDUCTOR_WORKSPACE_NAME\" \"$CONDUCTOR_PORT\
         let repo_path = init_repo(temp.path().join("demo"));
         fs::create_dir_all(repo_path.join("apps/api")).unwrap();
         fs::write(repo_path.join("apps/api/Cargo.toml"), "[package]\n").unwrap();
-        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
         fs::write(
-            repo_path.join(".conductor/settings.toml"),
+            repo_path.join(".archductor/settings.toml"),
             r#"
 [scripts]
-setup = "pwd; printf 'work=%s\n' \"$CONDUCTOR_WORKING_DIRECTORY\""
+setup = "pwd; printf 'work=%s\n' \"$ARCHDUCTOR_WORKING_DIRECTORY\""
 
 [customization.workspace_defaults]
 working_directory = "apps/api"
@@ -8012,9 +9665,9 @@ working_directory = "apps/api"
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Conductor",
+                "user.name=Linux Archductor",
                 "-c",
-                "user.email=linux-conductor@example.test",
+                "user.email=linux-archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -8060,9 +9713,9 @@ working_directory = "apps/api"
     fn spotlight_start_applies_workspace_tracked_changes_and_stop_restores_root() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
-        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
         fs::write(
-            repo_path.join(".conductor/settings.toml"),
+            repo_path.join(".archductor/settings.toml"),
             r#"
 spotlight_testing = true
 "#,
@@ -8071,7 +9724,7 @@ spotlight_testing = true
         Command::new("git")
             .arg("-C")
             .arg(&repo_path)
-            .args(["add", ".conductor/settings.toml"])
+            .args(["add", ".archductor/settings.toml"])
             .status()
             .unwrap();
         Command::new("git")
@@ -8079,9 +9732,9 @@ spotlight_testing = true
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Conductor",
+                "user.name=Linux Archductor",
                 "-c",
-                "user.email=linux-conductor@example.test",
+                "user.email=linux-archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -8170,9 +9823,9 @@ spotlight_testing = true
     fn spotlight_start_switches_active_workspace() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
-        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
         fs::write(
-            repo_path.join(".conductor/settings.toml"),
+            repo_path.join(".archductor/settings.toml"),
             r#"
 spotlight_testing = true
 "#,
@@ -8181,7 +9834,7 @@ spotlight_testing = true
         Command::new("git")
             .arg("-C")
             .arg(&repo_path)
-            .args(["add", ".conductor/settings.toml"])
+            .args(["add", ".archductor/settings.toml"])
             .status()
             .unwrap();
         Command::new("git")
@@ -8189,9 +9842,9 @@ spotlight_testing = true
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Conductor",
+                "user.name=Linux Archductor",
                 "-c",
-                "user.email=linux-conductor@example.test",
+                "user.email=linux-archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -8274,9 +9927,9 @@ spotlight_testing = true
     fn spotlight_start_updates_same_active_workspace_when_tracked_changes_appear() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
-        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
         fs::write(
-            repo_path.join(".conductor/settings.toml"),
+            repo_path.join(".archductor/settings.toml"),
             r#"
 spotlight_testing = true
 "#,
@@ -8285,7 +9938,7 @@ spotlight_testing = true
         Command::new("git")
             .arg("-C")
             .arg(&repo_path)
-            .args(["add", ".conductor/settings.toml"])
+            .args(["add", ".archductor/settings.toml"])
             .status()
             .unwrap();
         Command::new("git")
@@ -8293,9 +9946,9 @@ spotlight_testing = true
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Conductor",
+                "user.name=Linux Archductor",
                 "-c",
-                "user.email=linux-conductor@example.test",
+                "user.email=linux-archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -8358,9 +10011,9 @@ spotlight_testing = true
     fn spotlight_sync_updates_active_workspace_patch() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
-        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
         fs::write(
-            repo_path.join(".conductor/settings.toml"),
+            repo_path.join(".archductor/settings.toml"),
             r#"
 spotlight_testing = true
 "#,
@@ -8369,7 +10022,7 @@ spotlight_testing = true
         Command::new("git")
             .arg("-C")
             .arg(&repo_path)
-            .args(["add", ".conductor/settings.toml"])
+            .args(["add", ".archductor/settings.toml"])
             .status()
             .unwrap();
         Command::new("git")
@@ -8377,9 +10030,9 @@ spotlight_testing = true
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Conductor",
+                "user.name=Linux Archductor",
                 "-c",
-                "user.email=linux-conductor@example.test",
+                "user.email=linux-archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -8456,9 +10109,9 @@ spotlight_testing = true
     fn spotlight_sync_updates_root_to_empty_when_workspace_changes_are_removed() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
-        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
         fs::write(
-            repo_path.join(".conductor/settings.toml"),
+            repo_path.join(".archductor/settings.toml"),
             r#"
 spotlight_testing = true
 "#,
@@ -8467,7 +10120,7 @@ spotlight_testing = true
         Command::new("git")
             .arg("-C")
             .arg(&repo_path)
-            .args(["add", ".conductor/settings.toml"])
+            .args(["add", ".archductor/settings.toml"])
             .status()
             .unwrap();
         Command::new("git")
@@ -8475,9 +10128,9 @@ spotlight_testing = true
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Conductor",
+                "user.name=Linux Archductor",
                 "-c",
-                "user.email=linux-conductor@example.test",
+                "user.email=linux-archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -8543,9 +10196,9 @@ spotlight_testing = true
     fn spotlight_sync_if_changed_skips_unchanged_patch_and_syncs_new_patch() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
-        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
         fs::write(
-            repo_path.join(".conductor/settings.toml"),
+            repo_path.join(".archductor/settings.toml"),
             r#"
 spotlight_testing = true
 "#,
@@ -8554,7 +10207,7 @@ spotlight_testing = true
         Command::new("git")
             .arg("-C")
             .arg(&repo_path)
-            .args(["add", ".conductor/settings.toml"])
+            .args(["add", ".archductor/settings.toml"])
             .status()
             .unwrap();
         Command::new("git")
@@ -8562,9 +10215,9 @@ spotlight_testing = true
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Conductor",
+                "user.name=Linux Archductor",
                 "-c",
-                "user.email=linux-conductor@example.test",
+                "user.email=linux-archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -8632,9 +10285,9 @@ spotlight_testing = true
     fn spotlight_sync_active_sessions_syncs_changed_active_workspaces() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
-        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
         fs::write(
-            repo_path.join(".conductor/settings.toml"),
+            repo_path.join(".archductor/settings.toml"),
             r#"
 spotlight_testing = true
 "#,
@@ -8643,7 +10296,7 @@ spotlight_testing = true
         Command::new("git")
             .arg("-C")
             .arg(&repo_path)
-            .args(["add", ".conductor/settings.toml"])
+            .args(["add", ".archductor/settings.toml"])
             .status()
             .unwrap();
         Command::new("git")
@@ -8651,9 +10304,9 @@ spotlight_testing = true
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Conductor",
+                "user.name=Linux Archductor",
                 "-c",
-                "user.email=linux-conductor@example.test",
+                "user.email=linux-archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -8718,9 +10371,9 @@ spotlight_testing = true
     fn spotlight_watch_targets_return_active_workspace_paths() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
-        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
         fs::write(
-            repo_path.join(".conductor/settings.toml"),
+            repo_path.join(".archductor/settings.toml"),
             r#"
 spotlight_testing = true
 "#,
@@ -8729,7 +10382,7 @@ spotlight_testing = true
         Command::new("git")
             .arg("-C")
             .arg(&repo_path)
-            .args(["add", ".conductor/settings.toml"])
+            .args(["add", ".archductor/settings.toml"])
             .status()
             .unwrap();
         Command::new("git")
@@ -8737,9 +10390,9 @@ spotlight_testing = true
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Conductor",
+                "user.name=Linux Archductor",
                 "-c",
-                "user.email=linux-conductor@example.test",
+                "user.email=linux-archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -8791,9 +10444,9 @@ spotlight_testing = true
     fn spotlight_stop_refuses_when_root_has_extra_changes() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
-        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
         fs::write(
-            repo_path.join(".conductor/settings.toml"),
+            repo_path.join(".archductor/settings.toml"),
             r#"
 spotlight_testing = true
 "#,
@@ -8802,7 +10455,7 @@ spotlight_testing = true
         Command::new("git")
             .arg("-C")
             .arg(&repo_path)
-            .args(["add", ".conductor/settings.toml"])
+            .args(["add", ".archductor/settings.toml"])
             .status()
             .unwrap();
         Command::new("git")
@@ -8810,9 +10463,9 @@ spotlight_testing = true
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Conductor",
+                "user.name=Linux Archductor",
                 "-c",
-                "user.email=linux-conductor@example.test",
+                "user.email=linux-archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -8874,9 +10527,9 @@ spotlight_testing = true
     fn spotlight_root_conflict_paths_reports_extra_root_edits_without_stopping_session() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
-        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
         fs::write(
-            repo_path.join(".conductor/settings.toml"),
+            repo_path.join(".archductor/settings.toml"),
             r#"
 spotlight_testing = true
 "#,
@@ -8885,7 +10538,7 @@ spotlight_testing = true
         Command::new("git")
             .arg("-C")
             .arg(&repo_path)
-            .args(["add", ".conductor/settings.toml"])
+            .args(["add", ".archductor/settings.toml"])
             .status()
             .unwrap();
         Command::new("git")
@@ -8893,9 +10546,9 @@ spotlight_testing = true
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Conductor",
+                "user.name=Linux Archductor",
                 "-c",
-                "user.email=linux-conductor@example.test",
+                "user.email=linux-archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -8985,9 +10638,9 @@ index 0000000..3333333
     fn spotlight_repair_root_discards_root_only_edits_and_reapplies_active_patch() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
-        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
         fs::write(
-            repo_path.join(".conductor/settings.toml"),
+            repo_path.join(".archductor/settings.toml"),
             r#"
 spotlight_testing = true
 "#,
@@ -8996,7 +10649,7 @@ spotlight_testing = true
         Command::new("git")
             .arg("-C")
             .arg(&repo_path)
-            .args(["add", ".conductor/settings.toml"])
+            .args(["add", ".archductor/settings.toml"])
             .status()
             .unwrap();
         Command::new("git")
@@ -9004,9 +10657,9 @@ spotlight_testing = true
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Conductor",
+                "user.name=Linux Archductor",
                 "-c",
-                "user.email=linux-conductor@example.test",
+                "user.email=linux-archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -9098,10 +10751,13 @@ spotlight_testing = true
         assert_eq!(launch.cwd, workspace.path);
         assert!(!launch.program.as_os_str().is_empty());
         assert_eq!(launch.args, Vec::<String>::new());
-        assert_eq!(launch.env_value("CONDUCTOR_WORKSPACE_NAME"), Some("berlin"));
-        assert_eq!(launch.env_value("CONDUCTOR_PORT"), Some("3000"));
         assert_eq!(
-            launch.env_value("CONDUCTOR_ROOT_PATH"),
+            launch.env_value("ARCHDUCTOR_WORKSPACE_NAME"),
+            Some("berlin")
+        );
+        assert_eq!(launch.env_value("ARCHDUCTOR_PORT"), Some("3000"));
+        assert_eq!(
+            launch.env_value("ARCHDUCTOR_ROOT_PATH"),
             repo_path.canonicalize().unwrap().to_str()
         );
     }
@@ -9112,9 +10768,9 @@ spotlight_testing = true
         let repo_path = init_repo(temp.path().join("demo"));
         fs::create_dir_all(repo_path.join("apps/worker")).unwrap();
         fs::write(repo_path.join("apps/worker/main.rs"), "fn main() {}\n").unwrap();
-        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
         fs::write(
-            repo_path.join(".conductor/settings.toml"),
+            repo_path.join(".archductor/settings.toml"),
             r#"
 [customization.workspace_defaults]
 working_directory = "apps/worker"
@@ -9132,9 +10788,9 @@ working_directory = "apps/worker"
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Conductor",
+                "user.name=Linux Archductor",
                 "-c",
-                "user.email=linux-conductor@example.test",
+                "user.email=linux-archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -9170,20 +10826,374 @@ working_directory = "apps/worker"
 
         assert_eq!(launch.cwd, workspace.path.join("apps/worker"));
         assert_eq!(
-            launch.env_value("CONDUCTOR_WORKSPACE_PATH"),
+            launch.env_value("ARCHDUCTOR_WORKSPACE_PATH"),
             workspace.path.to_str()
         );
         assert_eq!(
-            launch.env_value("CONDUCTOR_WORKING_DIRECTORY"),
+            launch.env_value("ARCHDUCTOR_WORKING_DIRECTORY"),
             workspace.path.join("apps/worker").to_str()
         );
     }
 
     #[test]
-    fn session_launch_for_cursor_opens_workspace_path() {
+    fn session_launch_for_codex_uses_documented_flags_without_bootstrap_payload() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
         let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        let launch = store
+            .session_launch_with_options(
+                "berlin",
+                SessionKind::Codex,
+                SessionHarnessOptions {
+                    plan_mode: true,
+                    fast_mode: true,
+                    approval_mode: Some("ask".to_owned()),
+                    reasoning_mode: Some("high".to_owned()),
+                    effort_mode: Some("medium".to_owned()),
+                    codex_personality: Some("pragmatic".to_owned()),
+                    codex_goals: Some("ship the fix".to_owned()),
+                    codex_skills: Some("tests".to_owned()),
+                },
+            )
+            .unwrap();
+
+        let codex_cwd = launch.cwd.to_str().unwrap().to_owned();
+        let codex_trust_arg = format!(r#"projects."{codex_cwd}".trust_level="trusted""#);
+        assert_eq!(&launch.program, &PathBuf::from("codex"));
+        assert_eq!(
+            &launch.args,
+            &vec![
+                "--no-alt-screen",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "-c",
+                "check_for_update_on_startup=false",
+                "-c",
+                codex_trust_arg.as_str(),
+                "-C",
+                codex_cwd.as_str(),
+                "-c",
+                r#"model_reasoning_effort="high""#,
+                "-c",
+                r#"personality="pragmatic""#,
+                "-c",
+                r#"service_tier="fast""#,
+                "--ask-for-approval",
+                "on-request",
+                "--enable",
+                "goals",
+                "ship the fix",
+            ]
+        );
+        assert_eq!(
+            launch.harness_metadata.as_deref(),
+            Some(
+                "harness=codex;plan=true;fast=true;approval=ask;reasoning=high;effort=medium;personality=pragmatic;goals=ship the fix;skills=tests"
+            )
+        );
+        assert!(launch.session_resume_id.is_none());
+        assert!(launch.env_value("ARCHDUCTOR_SESSION_BOOTSTRAP").is_none());
+    }
+
+    #[test]
+    fn session_launch_for_claude_uses_documented_flags_and_bootstrap() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        let launch = store
+            .session_launch_with_options(
+                "berlin",
+                SessionKind::Claude,
+                SessionHarnessOptions {
+                    plan_mode: true,
+                    fast_mode: true,
+                    approval_mode: Some("never".to_owned()),
+                    reasoning_mode: Some("low".to_owned()),
+                    effort_mode: Some("high".to_owned()),
+                    codex_personality: Some("friendly".to_owned()),
+                    codex_goals: Some("stabilize the fix".to_owned()),
+                    codex_skills: Some("rust, tests".to_owned()),
+                },
+            )
+            .unwrap();
+
+        let claude_bootstrap = launch
+            .env_value("ARCHDUCTOR_SESSION_BOOTSTRAP")
+            .unwrap()
+            .to_owned();
+        assert_eq!(&launch.program, &PathBuf::from("claude"));
+        assert_eq!(
+            &launch.args,
+            &vec![
+                "--permission-mode",
+                "plan",
+                "--effort",
+                "high",
+                "--session-id",
+                launch.session_resume_id.as_deref().unwrap(),
+                "--append-system-prompt",
+                claude_bootstrap.as_str(),
+            ]
+        );
+        assert_eq!(
+            launch.harness_metadata.as_deref(),
+            Some(
+                "harness=claude;plan=true;fast=true;approval=never;reasoning=low;effort=high;personality=friendly;goals=stabilize the fix;skills=rust, tests"
+            )
+        );
+        assert!(launch.session_resume_id.is_some());
+    }
+
+    #[test]
+    fn session_resume_launch_uses_resume_subcommand_and_session_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        let launch = store
+            .session_launch_with_options_and_resume(
+                "berlin",
+                SessionKind::Claude,
+                SessionHarnessOptions::default(),
+                Some("019ef6b1-8a1b-78f0-ae17-0db46572decf"),
+            )
+            .unwrap();
+
+        assert_eq!(
+            launch.args,
+            vec![
+                "--resume".to_owned(),
+                "019ef6b1-8a1b-78f0-ae17-0db46572decf".to_owned()
+            ]
+        );
+        assert_eq!(
+            launch.session_resume_id.as_deref(),
+            Some("019ef6b1-8a1b-78f0-ae17-0db46572decf")
+        );
+    }
+
+    #[test]
+    fn codex_resume_launch_without_id_uses_last_and_preserves_harness() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        let launch = store
+            .session_launch_with_options_and_resume(
+                "berlin",
+                SessionKind::Codex,
+                SessionHarnessOptions {
+                    fast_mode: true,
+                    approval_mode: Some("ask".to_owned()),
+                    reasoning_mode: Some("high".to_owned()),
+                    codex_personality: Some("pragmatic".to_owned()),
+                    codex_goals: Some("ship the fix".to_owned()),
+                    ..SessionHarnessOptions::default()
+                },
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(
+            launch.args,
+            vec![
+                "--no-alt-screen".to_owned(),
+                "--dangerously-bypass-approvals-and-sandbox".to_owned(),
+                "-c".to_owned(),
+                "check_for_update_on_startup=false".to_owned(),
+                "-c".to_owned(),
+                format!(
+                    r#"projects."{}".trust_level="trusted""#,
+                    launch.cwd.to_string_lossy()
+                ),
+                "-C".to_owned(),
+                launch.cwd.to_string_lossy().to_string(),
+                "-c".to_owned(),
+                r#"model_reasoning_effort="high""#.to_owned(),
+                "-c".to_owned(),
+                r#"personality="pragmatic""#.to_owned(),
+                "-c".to_owned(),
+                r#"service_tier="fast""#.to_owned(),
+                "--ask-for-approval".to_owned(),
+                "on-request".to_owned(),
+                "--enable".to_owned(),
+                "goals".to_owned(),
+                "ship the fix".to_owned(),
+                "resume".to_owned(),
+                "--last".to_owned(),
+            ]
+        );
+        assert_eq!(
+            launch.harness_metadata.as_deref(),
+            Some(
+                "harness=codex;fast=true;approval=ask;reasoning=high;personality=pragmatic;goals=ship the fix"
+            )
+        );
+        assert!(launch.session_resume_id.is_none());
+    }
+
+    #[test]
+    fn start_session_with_options_uses_real_codex_flags_without_bootstrap_env() {
+        let temp = tempfile::tempdir().unwrap();
+        let fake_bin = temp.path().join("bin");
+        fs::create_dir(&fake_bin).unwrap();
+        let fake_codex = fake_bin.join("codex");
+        fs::write(
+            &fake_codex,
+            "#!/bin/sh\nenv | grep '^ARCHDUCTOR_SESSION_BOOTSTRAP=' || true\nprintf 'args:%s\\n' \"$*\"\nwhile true; do sleep 1; done\n",
+        )
+        .unwrap();
+        Command::new("chmod")
+            .arg("+x")
+            .arg(&fake_codex)
+            .status()
+            .unwrap();
+
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        temp_path_var(&fake_bin, || {
+            let process = store
+                .start_session_with_options(
+                    "berlin",
+                    SessionKind::Codex,
+                    SessionHarnessOptions {
+                        plan_mode: true,
+                        codex_goals: Some("ship the fix".to_owned()),
+                        ..SessionHarnessOptions::default()
+                    },
+                )
+                .unwrap();
+
+            wait_for_log(
+                &process.log_path,
+                "args:--no-alt-screen --dangerously-bypass-approvals-and-sandbox",
+            );
+            let log = fs::read_to_string(&process.log_path).unwrap();
+            assert!(log.contains("[codex screen]"));
+            assert!(!log.contains("ARCHDUCTOR_SESSION_BOOTSTRAP="));
+
+            let stopped = store.stop_session("berlin").unwrap();
+            assert_eq!(stopped.id, process.id);
+        });
+    }
+
+    #[test]
+    fn record_session_process_does_not_guess_codex_resume_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        let fake_home = temp.path().join("home");
+        fs::create_dir_all(fake_home.join(".codex")).unwrap();
+        fs::write(
+            fake_home.join(".codex/session_index.jsonl"),
+            "{\"id\":\"guessed-session-id\"}\n",
+        )
+        .unwrap();
 
         RepositoryStore::open(&db_path)
             .unwrap()
@@ -9195,8 +11205,7 @@ working_directory = "apps/worker"
                 workspace_parent_path: Some(temp.path().join("workspaces/demo")),
             })
             .unwrap();
-
-        let store = WorkspaceStore::open(&db_path).unwrap();
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
         let workspace = store
             .create(CreateWorkspace {
                 repository_name: "demo".to_owned(),
@@ -9206,15 +11215,25 @@ working_directory = "apps/worker"
             })
             .unwrap();
 
-        let launch = store.session_launch("berlin", SessionKind::Cursor).unwrap();
+        temp_env_var("HOME", &fake_home, || {
+            let process = store
+                .record_session_process(
+                    "berlin",
+                    &SessionLaunch {
+                        kind: SessionKind::Codex,
+                        program: PathBuf::from("codex"),
+                        args: vec!["resume".to_owned(), "--last".to_owned()],
+                        cwd: workspace.path.clone(),
+                        env: Vec::new(),
+                        harness_metadata: Some("harness=codex".to_owned()),
+                        session_resume_id: None,
+                    },
+                    exited_child_pid(),
+                )
+                .unwrap();
 
-        assert_eq!(launch.program, PathBuf::from("cursor"));
-        assert_eq!(
-            launch.args,
-            vec![workspace.path.to_string_lossy().to_string()]
-        );
-        assert_eq!(launch.cwd, workspace.path);
-        assert_eq!(launch.env_value("CONDUCTOR_WORKSPACE_NAME"), Some("berlin"));
+            assert_eq!(process.session_resume_id, None);
+        });
     }
 
     #[test]
@@ -9259,7 +11278,7 @@ working_directory = "apps/worker"
         let fake_shell = temp.path().join("fake-shell");
         fs::write(
             &fake_shell,
-            "#!/bin/sh\nprintf 'session:%s:%s\\n' \"$CONDUCTOR_WORKSPACE_NAME\" \"$CONDUCTOR_PORT\"\nwhile true; do sleep 1; done\n",
+            "#!/bin/sh\nprintf 'session:%s:%s\\n' \"$ARCHDUCTOR_WORKSPACE_NAME\" \"$ARCHDUCTOR_PORT\"\nwhile true; do sleep 1; done\n",
         )
         .unwrap();
         Command::new("chmod")
@@ -9311,7 +11330,7 @@ working_directory = "apps/worker"
         let fake_shell = temp.path().join("fake-shell");
         fs::write(
             &fake_shell,
-            "#!/bin/sh\nprintf 'session:%s:%s\\n' \"$CONDUCTOR_WORKSPACE_NAME\" \"$CONDUCTOR_PORT\"\nwhile true; do sleep 1; done\n",
+            "#!/bin/sh\nprintf 'session:%s:%s\\n' \"$ARCHDUCTOR_WORKSPACE_NAME\" \"$ARCHDUCTOR_PORT\"\nwhile true; do sleep 1; done\n",
         )
         .unwrap();
         Command::new("chmod")
@@ -10146,6 +12165,90 @@ exit 1
     }
 
     #[test]
+    fn pull_request_panel_state_collects_pr_readiness_and_review_text() {
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        let old_path = install_fake_gh(
+            temp.path(),
+            r#"#!/bin/sh
+if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "42" ] && [ "$4" = "--json" ]; then
+  printf '{"id":"PR_fake","reviewDecision":"APPROVED","latestReviews":[],"comments":[],"statusCheckRollup":[]}\n'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "42" ] && [ "$4" = "--comments" ]; then
+  printf 'alice: looks good\n'
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then
+  printf '{"data":{"node":{"reviewThreads":{"nodes":[]}}}}\n'
+  exit 0
+fi
+echo "unexpected gh args: $*" >&2
+exit 1
+"#,
+        );
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        store
+            .record_pull_request(workspace.id, "https://github.com/example/demo/pull/42")
+            .unwrap();
+
+        let panel = store.pull_request_panel_state("berlin").unwrap();
+
+        assert_eq!(panel.pull_request.unwrap().number, 42);
+        assert_eq!(
+            panel
+                .readiness
+                .as_ref()
+                .and_then(|state| state.review_decision.as_deref()),
+            Some("APPROVED")
+        );
+        assert!(panel
+            .readiness_text
+            .contains("PR readiness for workspace berlin."));
+        assert_eq!(panel.review_text.as_deref(), Some("alice: looks good\n"));
+
+        restore_path(old_path);
+    }
+
+    #[test]
+    fn github_source_choices_parse_number_title_and_state() {
+        let raw = "\
+12\tOPEN\tFix auth loop\n\
+18\tDRAFT\tShip checks ui\n";
+
+        let choices = parse_github_numbered_stateful_choices(raw);
+
+        assert_eq!(choices.len(), 2);
+        assert_eq!(choices[0].number, 12);
+        assert_eq!(choices[0].state, "OPEN");
+        assert_eq!(choices[0].title, "Fix auth loop");
+        assert_eq!(choices[1].number, 18);
+        assert_eq!(choices[1].state, "DRAFT");
+        assert_eq!(choices[1].title, "Ship checks ui");
+    }
+
+    #[test]
     fn pull_request_readiness_fetches_head_deployments_from_github_api() {
         let _guard = env_lock().lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
@@ -10446,9 +12549,9 @@ exit 1
         let _guard = env_lock().lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
-        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
         fs::write(
-            repo_path.join(".conductor/settings.toml"),
+            repo_path.join(".archductor/settings.toml"),
             r#"
 [customization.merge_rules]
 block_on_open_todos = false
@@ -10508,9 +12611,9 @@ exit 1
         let _guard = env_lock().lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
-        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
         fs::write(
-            repo_path.join(".conductor/settings.toml"),
+            repo_path.join(".archductor/settings.toml"),
             r#"
 [customization.merge_rules]
 block_on_failed_checks = true
@@ -10572,9 +12675,9 @@ exit 1
         let _guard = env_lock().lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
-        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
         fs::write(
-            repo_path.join(".conductor/settings.toml"),
+            repo_path.join(".archductor/settings.toml"),
             r#"
 [customization.merge_rules]
 block_on_pending_checks = true
@@ -10636,9 +12739,9 @@ exit 1
         let _guard = env_lock().lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
-        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
         fs::write(
-            repo_path.join(".conductor/settings.toml"),
+            repo_path.join(".archductor/settings.toml"),
             r#"
 [customization.naming]
 default_merge_method = "rebase"
@@ -10693,9 +12796,9 @@ exit 1
         let _guard = env_lock().lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
-        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
         fs::write(
-            repo_path.join(".conductor/settings.toml"),
+            repo_path.join(".archductor/settings.toml"),
             "[git]\narchive_on_merge = true\n",
         )
         .unwrap();
@@ -11010,9 +13113,9 @@ exit 1
     fn spotlight_rename_updates_watch_and_sync_works_with_stale_session_name() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
-        fs::create_dir(repo_path.join(".conductor")).unwrap();
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
         fs::write(
-            repo_path.join(".conductor/settings.toml"),
+            repo_path.join(".archductor/settings.toml"),
             r#"
 spotlight_testing = true
 "#,
@@ -11021,7 +13124,7 @@ spotlight_testing = true
         Command::new("git")
             .arg("-C")
             .arg(&repo_path)
-            .args(["add", ".conductor/settings.toml"])
+            .args(["add", ".archductor/settings.toml"])
             .status()
             .unwrap();
         Command::new("git")
@@ -11029,9 +13132,9 @@ spotlight_testing = true
             .arg(&repo_path)
             .args([
                 "-c",
-                "user.name=Linux Conductor",
+                "user.name=Linux Archductor",
                 "-c",
-                "user.email=linux-conductor@example.test",
+                "user.email=linux-archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -11133,7 +13236,7 @@ spotlight_testing = true
             .checkpoint_create("berlin", "before refactor", None)
             .unwrap();
         assert_eq!(cp.message, "before refactor");
-        assert!(cp.git_ref.starts_with("refs/linux-conductor/checkpoints/"));
+        assert!(cp.git_ref.starts_with("refs/linux-archductor/checkpoints/"));
         assert!(cp.session_id.is_none());
 
         let list = store.checkpoint_list("berlin").unwrap();
@@ -11219,9 +13322,9 @@ spotlight_testing = true
             .arg(&workspace.path)
             .args([
                 "-c",
-                "user.name=Linux Conductor",
+                "user.name=Linux Archductor",
                 "-c",
-                "user.email=linux-conductor@example.test",
+                "user.email=linux-archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -11293,12 +13396,276 @@ spotlight_testing = true
     }
 
     #[test]
+    fn chat_thread_crud_persists_multiple_threads_per_workspace_and_provider() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        let first = store
+            .create_chat_thread("berlin", "codex", "Bugfix A", None)
+            .unwrap();
+        let second = store
+            .create_chat_thread("berlin", "codex", "Bugfix B", None)
+            .unwrap();
+        let third = store
+            .create_chat_thread("berlin", "claude", "Review", None)
+            .unwrap();
+
+        let threads = store.list_chat_threads("berlin").unwrap();
+        assert_eq!(threads.len(), 3);
+        assert_eq!(threads[0].id, third.id);
+        assert_eq!(threads[1].id, second.id);
+        assert_eq!(threads[2].id, first.id);
+    }
+
+    #[test]
+    fn chat_messages_persist_user_control_and_agent_rows() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Bugfix A", None)
+            .unwrap();
+
+        store
+            .append_chat_message(thread.id, "user", "run tests", "user_send")
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "system", "/model gpt-5", "control_command")
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "agent", "Running now.", "agent_screen_parse")
+            .unwrap();
+
+        let messages = store.list_chat_messages(thread.id).unwrap();
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[1].source, "control_command");
+        assert_eq!(messages[2].role, "agent");
+    }
+
+    #[test]
+    fn chat_thread_title_updates_without_creating_extra_rows() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+
+        store
+            .update_chat_thread_title(thread.id, "Fix parser failure")
+            .unwrap();
+
+        let updated = store.get_chat_thread_record(thread.id).unwrap();
+        assert_eq!(updated.title, "Fix parser failure");
+        assert!(store.list_chat_messages(thread.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn session_screen_snapshots_persist_structured_agent_messages_for_threads() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Bugfix A", None)
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "Fix the failing test", "user_send")
+            .unwrap();
+        let process = store
+            .record_session_process_for_thread(
+                "berlin",
+                thread.id,
+                &SessionLaunch {
+                    kind: SessionKind::Codex,
+                    program: PathBuf::from("codex"),
+                    args: vec!["--no-alt-screen".to_owned()],
+                    cwd: PathBuf::from("/tmp/berlin"),
+                    env: Vec::new(),
+                    harness_metadata: Some("harness=codex".to_owned()),
+                    session_resume_id: None,
+                },
+                exited_child_pid(),
+            )
+            .unwrap();
+
+        store
+            .append_session_process_output(
+                process.id,
+                &format_codex_screen_snapshot(
+                    "╭─ You\n│ Fix the failing test\n╰─\n╭─ Codex\n│ Running the test suite now.\n╰─",
+                ),
+            )
+            .unwrap();
+        store
+            .append_session_process_output(
+                process.id,
+                &format_codex_screen_snapshot(
+                    "╭─ You\n│ Fix the failing test\n╰─\n╭─ Codex\n│ Running the test suite now.\n│ The failure is in parser.rs.\n╰─",
+                ),
+            )
+            .unwrap();
+
+        let messages = store.list_chat_messages(thread.id).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[1].role, "agent");
+        assert_eq!(
+            messages[1].content,
+            "Running the test suite now.\nThe failure is in parser.rs."
+        );
+        assert_eq!(messages[1].source, "agent_screen_parse");
+    }
+
+    #[test]
+    fn resolve_codex_native_thread_id_uses_rollout_session_meta() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        let fake_home = temp.path().join("home");
+        let rollout_dir = fake_home.join(".codex/sessions/2026/06/27");
+        fs::create_dir_all(&rollout_dir).unwrap();
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Bugfix A", None)
+            .unwrap();
+        let process = store
+            .record_session_process_for_thread(
+                "berlin",
+                thread.id,
+                &SessionLaunch {
+                    kind: SessionKind::Codex,
+                    program: PathBuf::from("codex"),
+                    args: vec!["--no-alt-screen".to_owned()],
+                    cwd: workspace.path.clone(),
+                    env: Vec::new(),
+                    harness_metadata: Some("harness=codex".to_owned()),
+                    session_resume_id: None,
+                },
+                exited_child_pid(),
+            )
+            .unwrap();
+
+        fs::write(
+            rollout_dir.join("rollout-test.jsonl"),
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"session_id\":\"native-codex-session\",\"cwd\":\"{}\"}}}}\n",
+                workspace.path.display()
+            ),
+        )
+        .unwrap();
+
+        temp_env_var("HOME", &fake_home, || {
+            let native_thread_id = store
+                .resolve_codex_native_thread_id_for_process(process.id)
+                .unwrap();
+            assert_eq!(native_thread_id.as_deref(), Some("native-codex-session"));
+        });
+
+        let updated_thread = store.get_chat_thread_record(thread.id).unwrap();
+        assert_eq!(
+            updated_thread.native_thread_id.as_deref(),
+            Some("native-codex-session")
+        );
+        let updated_process = store.get_process(process.id).unwrap();
+        assert_eq!(
+            updated_process.session_resume_id.as_deref(),
+            Some("native-codex-session")
+        );
+    }
+
+    #[test]
+    fn local_chat_threads_prefer_structured_thread_summaries() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Bugfix A", None)
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "run tests", "user_send")
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "agent", "tests failed", "agent_screen_parse")
+            .unwrap();
+
+        let summaries = store.list_local_chat_threads(None).unwrap();
+        let messages = store.local_chat_thread_messages(thread.id).unwrap();
+
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].thread_id, thread.id);
+        assert_eq!(summaries[0].provider, "codex");
+        assert_eq!(summaries[0].title, "Bugfix A");
+        assert_eq!(summaries[0].message_count, 2);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[1].content, "tests failed");
+    }
+
+    #[test]
     fn slugify_converts_to_kebab_case() {
         assert_eq!(slugify("Add search feature"), "add-search-feature");
         assert_eq!(slugify("Fix: weird  spaces"), "fix-weird-spaces");
         assert_eq!(slugify("feat/cool-thing"), "feat-cool-thing");
         let long = "a".repeat(50);
         assert!(slugify(&long).len() <= 40);
+    }
+
+    fn test_workspace_store() -> (tempfile::TempDir, WorkspaceStore) {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        (temp, store)
     }
 
     fn init_repo(path: PathBuf) -> PathBuf {
@@ -11320,9 +13687,9 @@ spotlight_testing = true
             .arg(&path)
             .args([
                 "-c",
-                "user.name=Linux Conductor",
+                "user.name=Linux Archductor",
                 "-c",
-                "user.email=linux-conductor@example.test",
+                "user.email=linux-archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -11401,5 +13768,33 @@ spotlight_testing = true
         } else {
             std::env::remove_var(key);
         }
+    }
+
+    fn temp_path_var(path: &Path, run: impl FnOnce()) {
+        let previous = std::env::var_os("PATH");
+        let mut paths = vec![path.to_path_buf()];
+        if let Some(existing) = previous.as_ref() {
+            paths.extend(std::env::split_paths(existing));
+        }
+        let joined = std::env::join_paths(paths).unwrap();
+        std::env::set_var("PATH", &joined);
+        run();
+        if let Some(previous) = previous {
+            std::env::set_var("PATH", previous);
+        } else {
+            std::env::remove_var("PATH");
+        }
+    }
+
+    #[test]
+    fn codex_log_formatters_emit_canonical_markers() {
+        assert_eq!(
+            format_codex_raw_output("hello"),
+            "[codex raw]\nhello\n[/codex raw]\n"
+        );
+        assert_eq!(
+            format_codex_screen_snapshot("hello\n"),
+            "[codex screen]\nhello\n[/codex screen]\n"
+        );
     }
 }

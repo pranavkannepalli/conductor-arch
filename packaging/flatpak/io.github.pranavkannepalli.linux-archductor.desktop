@@ -1,9 +1,9 @@
 [Desktop Entry]
-Name=Linux Conductor
+Name=Linux Archductor
 GenericName=Coding Agent Workflow
 Comment=Linux-native parallel coding-agent workflow tool built around Git worktrees
-Exec=linux-conductor-gtk
-Icon=io.github.pranavkannepalli.linux-conductor
+Exec=linux-archductor-gtk
+Icon=io.github.pranavkannepalli.linux-archductor
 Terminal=false
 Type=Application
 Categories=Development;

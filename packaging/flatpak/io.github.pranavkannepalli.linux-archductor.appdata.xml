@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>io.github.pranavkannepalli.linux-conductor</id>
+  <id>io.github.pranavkannepalli.linux-archductor</id>
   <metadata_license>MIT</metadata_license>
   <project_license>MIT</project_license>
-  <name>Linux Conductor</name>
+  <name>Linux Archductor</name>
   <summary>Linux-native parallel coding-agent workflow tool built around Git worktrees</summary>
   <description>
     <p>
-      Linux Conductor gives you the Conductor workflow model on Linux. Each coding
+      Linux Archductor gives you the Archductor workflow model on Linux. Each coding
       task gets its own isolated Git worktree, branch, terminal, agent session,
       diff viewer, checks panel, and pull request path.
     </p>
@@ -20,7 +20,7 @@
     <ul>
       <li>Create and manage Git worktree workspaces</li>
       <li>Launch Codex, Claude Code, or shell sessions per workspace</li>
-      <li>Run setup and dev scripts with Conductor-compatible environment variables</li>
+      <li>Run setup and dev scripts with Archductor environment variables</li>
       <li>Show changed files and unified diffs</li>
       <li>Push branches and create GitHub pull requests via gh</li>
       <li>Track local todos, review comments, and checkpoints</li>
@@ -42,8 +42,8 @@
     <keyword>workflow</keyword>
   </keywords>
   <provides>
-    <binary>linux-conductor</binary>
-    <binary>linux-conductor-gtk</binary>
+    <binary>linux-archductor</binary>
+    <binary>linux-archductor-gtk</binary>
   </provides>
   <releases>
     <release version="0.1.0" date="2026-06-16">

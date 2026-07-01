@@ -1,122 +1,197 @@
+use adw::ApplicationWindow;
 use gtk::prelude::*;
 use gtk::{
-    Box as GBox, Button, Entry, Label, ListBox, ListBoxRow, Orientation, PolicyType,
-    ScrolledWindow, Separator, Stack,
+    Box as GBox, Button, Entry, Image, Label, ListBox, ListBoxRow, Orientation, PolicyType,
+    ScrolledWindow, Stack,
 };
-use linux_conductor_core::workspace::WorkspaceStore;
+use linux_archductor_core::archcar::protocol::ArchcarRequest;
+use linux_archductor_core::repository::RepositoryStore;
+use linux_archductor_core::workspace::{CreateWorkspace, SessionKind, WorkspaceStore};
 use std::cell::RefCell;
+use std::collections::HashMap;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::rc::Rc;
+use std::sync::mpsc;
+use std::time::Duration;
+use tracing::error;
 
+use crate::archcar_async::spawn_archcar_request;
+use crate::buttons::{icon_button, text_button};
+use crate::projects::show_repository_quick_add_dialog;
 use crate::refresh::{RefreshHub, RefreshScope};
 use crate::state::{AppPage, AppState, WorkspaceTab};
+use crate::title_case_workspace;
+use crate::workspace_command_center::workspace_pull_request_status_summary;
 
 pub(crate) fn build_app_sidebar(
     app_state: &AppState,
     refresh_hub: RefreshHub,
     stack: Stack,
+    window: ApplicationWindow,
+    split: adw::OverlaySplitView,
     refresh_workspace: impl Fn() + Clone + 'static,
     refresh_view_preferences: Rc<dyn Fn()>,
 ) -> (GBox, impl Fn() + Clone + 'static) {
+    let app_state = app_state.clone();
     let sidebar_box = GBox::new(Orientation::Vertical, 0);
     sidebar_box.add_css_class("sidebar");
-    sidebar_box.set_width_request(240);
 
-    let nav_group = GBox::new(Orientation::Vertical, 4);
-    nav_group.add_css_class("sidebar-nav-group");
+    let chrome_row = GBox::new(Orientation::Horizontal, 4);
+    chrome_row.add_css_class("sidebar-chrome");
 
-    let dashboard_btn = Button::with_label("Dashboard");
-    dashboard_btn.add_css_class("nav-button");
-    let history_btn = Button::with_label("History");
-    history_btn.add_css_class("nav-button");
-    let projects_btn = Button::with_label("Projects");
-    projects_btn.add_css_class("nav-button");
+    let chrome_left = GBox::new(Orientation::Horizontal, 4);
+    chrome_left.set_hexpand(true);
+    let chrome_right = GBox::new(Orientation::Horizontal, 4);
 
-    let sync_nav_state: Rc<dyn Fn()> = {
-        let state = app_state.clone();
-        let dashboard_btn = dashboard_btn.clone();
-        let history_btn = history_btn.clone();
-        let projects_btn = projects_btn.clone();
-        Rc::new(move || {
-            let active_page = state.snapshot().active_page;
-            for (button, page) in [
-                (&dashboard_btn, AppPage::Dashboard),
-                (&history_btn, AppPage::History),
-                (&projects_btn, AppPage::Projects),
-            ] {
-                button.remove_css_class("nav-button");
-                button.remove_css_class("nav-button-active");
-                button.add_css_class(if active_page == page {
-                    "nav-button-active"
-                } else {
-                    "nav-button"
-                });
+    let close_btn = sidebar_window_button("window-close-symbolic", "Close window");
+    {
+        let window = window.clone();
+        close_btn.connect_clicked(move |_| window.close());
+    }
+    chrome_left.append(&close_btn);
+
+    let minimize_btn = sidebar_window_button("window-minimize-symbolic", "Minimize window");
+    {
+        let window = window.clone();
+        minimize_btn.connect_clicked(move |_| {
+            window.minimize();
+        });
+    }
+    chrome_left.append(&minimize_btn);
+
+    let expand_btn =
+        sidebar_window_button("window-maximize-symbolic", "Maximize or restore window");
+    {
+        let window = window.clone();
+        expand_btn.connect_clicked(move |_| {
+            if window.is_maximized() {
+                window.unmaximize();
+            } else {
+                window.maximize();
             }
+        });
+    }
+    chrome_left.append(&expand_btn);
+
+    let sidebar_toggle_btn = sidebar_icon_button("sidebar-show-symbolic", "Hide sidebar");
+    {
+        let split = split.clone();
+        sidebar_toggle_btn.connect_clicked(move |_| {
+            split.set_collapsed(true);
+        });
+    }
+    chrome_right.append(&sidebar_toggle_btn);
+
+    let back_btn = sidebar_arrow_button("go-previous-symbolic", "Back");
+    let forward_btn = sidebar_arrow_button("go-next-symbolic", "Forward");
+    chrome_right.append(&back_btn);
+    chrome_right.append(&forward_btn);
+    chrome_row.append(&chrome_left);
+    chrome_row.append(&chrome_right);
+    sidebar_box.append(&chrome_row);
+
+    let sync_nav_buttons = {
+        let app_state = app_state.clone();
+        let back_btn = back_btn.clone();
+        let forward_btn = forward_btn.clone();
+        Rc::new(move || {
+            back_btn.set_sensitive(app_state.can_navigate_back());
+            forward_btn.set_sensitive(app_state.can_navigate_forward());
         })
     };
+    sync_nav_buttons();
 
-    let stack_dashboard = stack.clone();
-    let state_dashboard = app_state.clone();
-    let sync_nav_dashboard = sync_nav_state.clone();
-    dashboard_btn.connect_clicked(move |_| {
-        state_dashboard.set_active_page(AppPage::Dashboard);
-        stack_dashboard.set_visible_child_name("dashboard");
-        sync_nav_dashboard();
-    });
-    nav_group.append(&dashboard_btn);
+    let nav_group = GBox::new(Orientation::Vertical, 0);
+    nav_group.add_css_class("sidebar-nav-group");
 
-    let stack_history = stack.clone();
-    let state_history = app_state.clone();
-    let sync_nav_history = sync_nav_state.clone();
-    history_btn.connect_clicked(move |_| {
-        state_history.set_active_page(AppPage::History);
-        stack_history.set_visible_child_name("history");
-        sync_nav_history();
-    });
-    nav_group.append(&history_btn);
+    // Dashboard nav item
+    let dashboard_nav_btn = sidebar_nav_button("go-home-symbolic", "Dashboard");
+    {
+        let stack_d = stack.clone();
+        let state_d = app_state.clone();
+        let refresh_hub = refresh_hub.clone();
+        let sync_nav_buttons = sync_nav_buttons.clone();
+        dashboard_nav_btn.connect_clicked(move |_| {
+            state_d.navigate_to_page(AppPage::Dashboard);
+            stack_d.set_visible_child_name("dashboard");
+            refresh_hub.refresh(RefreshScope::Sidebar);
+            sync_nav_buttons();
+        });
+    }
+    nav_group.append(&dashboard_nav_btn);
 
-    let stack_projects = stack.clone();
-    let state_projects = app_state.clone();
-    let sync_nav_projects = sync_nav_state.clone();
-    projects_btn.connect_clicked(move |_| {
-        state_projects.set_active_page(AppPage::Projects);
-        stack_projects.set_visible_child_name("projects");
-        sync_nav_projects();
-    });
-    nav_group.append(&projects_btn);
+    // History nav item
+    let history_nav_btn = sidebar_nav_button("view-list-symbolic", "History");
+    {
+        let stack_h = stack.clone();
+        let state_h = app_state.clone();
+        let refresh_hub = refresh_hub.clone();
+        let sync_nav_buttons = sync_nav_buttons.clone();
+        history_nav_btn.connect_clicked(move |_| {
+            state_h.navigate_to_page(AppPage::History);
+            stack_h.set_visible_child_name("history");
+            refresh_hub.refresh(RefreshScope::Sidebar);
+            sync_nav_buttons();
+        });
+    }
+    nav_group.append(&history_nav_btn);
     sidebar_box.append(&nav_group);
-    sync_nav_state();
 
-    let divider = Separator::new(Orientation::Horizontal);
-    sidebar_box.append(&divider);
+    sidebar_box.append(&gtk::Separator::new(Orientation::Horizontal));
 
+    // Workspaces header with filter + add buttons
     let projects_header = GBox::new(Orientation::Horizontal, 8);
     projects_header.add_css_class("projects-header");
-    let header = Label::new(Some("Workspaces"));
-    header.add_css_class("sidebar-header");
-    header.set_xalign(0.0);
-    header.set_hexpand(true);
-    projects_header.append(&header);
-    let add_workspace_btn = Button::from_icon_name("list-add-symbolic");
-    add_workspace_btn.add_css_class("mini-action-button");
-    add_workspace_btn.set_tooltip_text(Some("Create workspace"));
-    let stack_add_workspace = stack.clone();
-    let state_add_workspace = app_state.clone();
-    let sync_nav_add_workspace = sync_nav_state.clone();
-    add_workspace_btn.connect_clicked(move |_| {
-        state_add_workspace.set_active_page(AppPage::Projects);
-        stack_add_workspace.set_visible_child_name("projects");
-        sync_nav_add_workspace();
-    });
+    let header_lbl = Label::new(Some("Projects"));
+    header_lbl.add_css_class("sidebar-header");
+    header_lbl.set_xalign(0.0);
+    header_lbl.set_hexpand(true);
+    projects_header.append(&header_lbl);
+    let add_workspace_btn =
+        sidebar_icon_button("folder-new-symbolic", "Add repository or workspace");
+    {
+        let db_path_hdr = app_state.workspace_database_path();
+        let hub_hdr = refresh_hub.clone();
+        let rw_hdr = refresh_workspace.clone();
+        let rvp_hdr = refresh_view_preferences.clone();
+        add_workspace_btn.connect_clicked(move |_| {
+            show_repository_quick_add_dialog(
+                db_path_hdr.clone(),
+                Rc::new({
+                    let hub_hdr = hub_hdr.clone();
+                    let rw_hdr = rw_hdr.clone();
+                    let rvp_hdr = rvp_hdr.clone();
+                    move || {
+                        hub_hdr.refresh(RefreshScope::Projects);
+                        hub_hdr.refresh(RefreshScope::Sidebar);
+                        rw_hdr();
+                        rvp_hdr();
+                    }
+                }),
+                Some("folder"),
+            );
+        });
+    }
     projects_header.append(&add_workspace_btn);
     sidebar_box.append(&projects_header);
 
+    // Minimal search bar
     let search_entry = Entry::new();
     search_entry.set_placeholder_text(Some("Filter workspaces..."));
-    search_entry.add_css_class("sidebar-search");
-    search_entry.set_margin_start(12);
-    search_entry.set_margin_end(12);
-    search_entry.set_margin_bottom(8);
+    search_entry.add_css_class("sidebar-search-minimal");
+    search_entry.set_margin_start(0);
+    search_entry.set_margin_end(0);
+    search_entry.set_margin_bottom(0);
     sidebar_box.append(&search_entry);
+
+    let filter_btn = sidebar_icon_button("view-filter-symbolic", "Filter workspaces");
+    {
+        let search_entry = search_entry.clone();
+        filter_btn.connect_clicked(move |_| {
+            search_entry.grab_focus();
+        });
+    }
+    projects_header.insert_child_after(&filter_btn, Some(&header_lbl));
 
     let scroll = ScrolledWindow::new();
     scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
@@ -125,8 +200,7 @@ pub(crate) fn build_app_sidebar(
     let list = ListBox::new();
     list.add_css_class("workspace-list");
     list.set_selection_mode(gtk::SelectionMode::Single);
-    let names: Rc<RefCell<std::collections::HashMap<i32, String>>> =
-        Rc::new(RefCell::new(std::collections::HashMap::new()));
+    let names: Rc<RefCell<HashMap<i32, String>>> = Rc::new(RefCell::new(HashMap::new()));
     let db_path = app_state.workspace_database_path();
     let db_path_populate = db_path.clone();
 
@@ -134,9 +208,16 @@ pub(crate) fn build_app_sidebar(
         let list = list.clone();
         let names = Rc::clone(&names);
         let state = app_state.clone();
+        let app_state = app_state.clone();
         let search_entry = search_entry.clone();
+        let refresh_hub = refresh_hub.clone();
+        let refresh_workspace = refresh_workspace.clone();
+        let refresh_view_preferences = refresh_view_preferences.clone();
+        let stack = stack.clone();
+        let sync_nav_buttons = sync_nav_buttons.clone();
         let db_path_populate = db_path_populate.clone();
         move || {
+            sync_nav_buttons();
             while let Some(child) = list.first_child() {
                 list.remove(&child);
             }
@@ -145,44 +226,141 @@ pub(crate) fn build_app_sidebar(
             let prev_selected = state.selected_workspace();
             let mut row_idx = 0;
 
-            if let Ok(store) = WorkspaceStore::open(db_path_populate.clone()) {
-                if let Ok(statuses) = store.list_status() {
-                    let mut current_repo = String::new();
-                    for line in statuses {
+            if let (Ok(repo_store), Ok(workspace_store)) = (
+                RepositoryStore::open(db_path_populate.clone()),
+                WorkspaceStore::open(db_path_populate.clone()),
+            ) {
+                let repositories = repo_store.list().unwrap_or_default();
+                let statuses = workspace_store.list_status().unwrap_or_default();
+                let mut grouped: HashMap<String, Vec<_>> = HashMap::new();
+
+                for line in statuses {
+                    if line.workspace.status == "archived" {
+                        continue;
+                    }
+                    grouped
+                        .entry(line.repository_name.clone())
+                        .or_default()
+                        .push(line);
+                }
+
+                for repo in repositories {
+                    let repo_name = repo.name;
+                    let repo_matches =
+                        filter.is_empty() || repo_name.to_lowercase().contains(&filter);
+                    let mut lines = grouped.remove(&repo_name).unwrap_or_default();
+                    lines.retain(|line| {
                         let ws = &line.workspace;
-                        if !filter.is_empty()
-                            && !ws.name.to_lowercase().contains(&filter)
-                            && !ws.branch.to_lowercase().contains(&filter)
-                            && !line.repository_name.to_lowercase().contains(&filter)
-                        {
-                            continue;
-                        }
+                        filter.is_empty()
+                            || repo_matches
+                            || ws.name.to_lowercase().contains(&filter)
+                            || ws.branch.to_lowercase().contains(&filter)
+                    });
 
-                        if line.repository_name != current_repo {
-                            current_repo = line.repository_name.clone();
-                            let repo_lbl = Label::new(Some(&current_repo));
-                            repo_lbl.add_css_class("repo-section-header");
-                            repo_lbl.set_xalign(0.0);
-                            repo_lbl.set_margin_start(8);
-                            repo_lbl.set_margin_top(8);
-                            repo_lbl.set_margin_bottom(2);
-                            let header_row = ListBoxRow::builder().child(&repo_lbl).build();
-                            header_row.set_selectable(false);
-                            header_row.set_activatable(false);
-                            list.append(&header_row);
-                            row_idx += 1;
-                        }
+                    if !repo_matches && lines.is_empty() {
+                        continue;
+                    }
 
+                    let header_row = section_header_row(&repo_name, lines.len(), {
+                        let db_path = db_path_populate.clone();
+                        let refresh_hub = refresh_hub.clone();
+                        let refresh_workspace = refresh_workspace.clone();
+                        let refresh_view_preferences = refresh_view_preferences.clone();
+                        let app_state = app_state.clone();
+                        let stack = stack.clone();
+                        let repo_name = repo_name.clone();
+                        move |add_btn: Button| {
+                            add_btn.set_sensitive(false);
+                            add_btn.set_tooltip_text(Some("Creating workspace..."));
+                            let rx = spawn_background_job({
+                                let db_path = db_path.clone();
+                                let repo_name = repo_name.clone();
+                                move || {
+                                    WorkspaceStore::open(db_path).and_then(|store| {
+                                        store.create(CreateWorkspace {
+                                            repository_name: repo_name,
+                                            name: String::new(),
+                                            branch: String::new(),
+                                            base_ref: None,
+                                        })
+                                    })
+                                }
+                            });
+                            let refresh_hub = refresh_hub.clone();
+                            let refresh_workspace = refresh_workspace.clone();
+                            let refresh_view_preferences = refresh_view_preferences.clone();
+                            let app_state = app_state.clone();
+                            let stack = stack.clone();
+                            glib::timeout_add_local(Duration::from_millis(100), move || {
+                                match rx.try_recv() {
+                                    Ok(result) => {
+                                        add_btn.set_sensitive(true);
+                                        add_btn.set_tooltip_text(Some("Create workspace"));
+                                        if let Ok(workspace) = result {
+                                            let default_tab = WorkspaceStore::open(
+                                                app_state.workspace_database_path(),
+                                            )
+                                            .and_then(|store| {
+                                                store.workspace_view_defaults(&workspace.name)
+                                            })
+                                            .ok()
+                                            .and_then(|defaults| defaults.default_visible_tab)
+                                            .and_then(|tab| WorkspaceTab::from_config(&tab));
+                                            app_state.navigate_to_workspace_with_default_tab(
+                                                Some(workspace.name),
+                                                default_tab,
+                                            );
+                                            stack.set_visible_child_name("workspace");
+                                            refresh_hub.refresh(RefreshScope::Projects);
+                                            refresh_hub.refresh(RefreshScope::Sidebar);
+                                            refresh_hub.refresh(RefreshScope::Dashboard);
+                                            refresh_workspace();
+                                            refresh_view_preferences();
+                                        }
+                                        glib::ControlFlow::Break
+                                    }
+                                    Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                                    Err(mpsc::TryRecvError::Disconnected) => {
+                                        add_btn.set_sensitive(true);
+                                        add_btn.set_tooltip_text(Some("Create workspace"));
+                                        glib::ControlFlow::Break
+                                    }
+                                }
+                            });
+                        }
+                    });
+                    list.append(&header_row);
+                    row_idx += 1;
+
+                    if lines.is_empty() {
+                        let empty_row = empty_repo_row();
+                        list.append(&empty_row);
+                        row_idx += 1;
+                        continue;
+                    }
+
+                    for line in lines {
+                        let ws = &line.workspace;
                         let row = build_workspace_row(
                             &ws.name,
                             &ws.branch,
                             &ws.status,
-                            i64::from(ws.port_base),
-                            line.pull_request.as_ref().map(|p| p.number),
                             line.run_running,
-                            false,
                             line.active_sessions,
                             line.open_todos,
+                            line.pull_request.as_ref().map(|p| p.number),
+                            line.pull_request.as_ref().map(|pr| {
+                                workspace_pull_request_status_summary(
+                                    &workspace_store,
+                                    &ws.name,
+                                    pr,
+                                )
+                            }),
+                            line.branch_push_state
+                                .as_ref()
+                                .map(|s| s.ahead)
+                                .unwrap_or(0),
+                            &ws.updated_at,
                         );
                         list.append(&row);
                         names.borrow_mut().insert(row_idx, ws.name.clone());
@@ -224,84 +402,465 @@ pub(crate) fn build_app_sidebar(
     let refresh_select = refresh_hub.clone();
     let db_path_select = db_path.clone();
     let refresh_view_preferences_select = refresh_view_preferences.clone();
-    let sync_nav_select = sync_nav_state.clone();
+
+    let refresh_workspace_select = refresh_workspace.clone();
+    let archcar_paths = app_state.paths.clone();
     list.connect_row_selected(move |_, row| {
-        let Some(name) = row.and_then(|r| names_select.borrow().get(&r.index()).cloned()) else {
-            return;
-        };
-        let default_tab = WorkspaceStore::open(db_path_select.clone())
-            .and_then(|store| store.workspace_view_defaults(&name))
-            .ok()
-            .and_then(|defaults| defaults.default_visible_tab)
-            .and_then(|tab| WorkspaceTab::from_config(&tab));
-        state_select.set_selected_workspace_with_default_tab(Some(name), default_tab);
-        refresh_view_preferences_select();
-        refresh_workspace();
-        refresh_select.refresh(RefreshScope::Dashboard);
-        stack_select.set_visible_child_name("workspace");
-        sync_nav_select();
+        guarded_gtk_callback((), || {
+            let Some(name) = row.and_then(|r| names_select.borrow().get(&r.index()).cloned())
+            else {
+                return;
+            };
+            spawn_archcar_request(
+                archcar_paths.clone(),
+                ArchcarRequest::EnsureWorkspaceDefaultSession {
+                    workspace: name.clone(),
+                    kind: SessionKind::Codex,
+                    harness: None,
+                },
+            );
+            let default_tab = WorkspaceStore::open(db_path_select.clone())
+                .and_then(|store| store.workspace_view_defaults(&name))
+                .ok()
+                .and_then(|defaults| defaults.default_visible_tab)
+                .and_then(|tab| WorkspaceTab::from_config(&tab));
+            state_select.navigate_to_workspace_with_default_tab(Some(name), default_tab);
+            refresh_view_preferences_select();
+            refresh_workspace_select();
+            refresh_select.refresh(RefreshScope::Dashboard);
+            stack_select.set_visible_child_name("workspace");
+        })
     });
 
     scroll.set_child(Some(&list));
     sidebar_box.append(&scroll);
+
+    // Bottom bar: Add repository + Settings
+    let bottom_bar = GBox::new(Orientation::Horizontal, 4);
+    bottom_bar.add_css_class("sidebar-bottom-bar");
+    let spacer = GBox::new(Orientation::Horizontal, 0);
+    spacer.set_hexpand(true);
+    bottom_bar.append(&spacer);
+
+    let add_repo_btn = sidebar_icon_button("folder-new-symbolic", "Add repository");
+    {
+        let db_path_bar = app_state.workspace_database_path();
+        let hub_bar = refresh_hub.clone();
+        let rw_bar = refresh_workspace.clone();
+        let rvp_bar = refresh_view_preferences.clone();
+        add_repo_btn.connect_clicked(move |_| {
+            show_repository_quick_add_dialog(
+                db_path_bar.clone(),
+                Rc::new({
+                    let hub_bar = hub_bar.clone();
+                    let rw_bar = rw_bar.clone();
+                    let rvp_bar = rvp_bar.clone();
+                    move || {
+                        hub_bar.refresh(RefreshScope::Projects);
+                        hub_bar.refresh(RefreshScope::Sidebar);
+                        rw_bar();
+                        rvp_bar();
+                    }
+                }),
+                Some("folder"),
+            );
+        });
+    }
+    bottom_bar.append(&add_repo_btn);
+
+    let settings_btn = sidebar_icon_button("emblem-system-symbolic", "Settings");
+    {
+        let stack_s = stack.clone();
+        let state_s = app_state.clone();
+        let refresh_hub = refresh_hub.clone();
+        let sync_nav_buttons = sync_nav_buttons.clone();
+        settings_btn.connect_clicked(move |_| {
+            state_s.navigate_to_page(AppPage::Settings);
+            stack_s.set_visible_child_name("settings");
+            refresh_hub.refresh(RefreshScope::Sidebar);
+            sync_nav_buttons();
+        });
+    }
+    bottom_bar.append(&settings_btn);
+
+    sidebar_box.append(&bottom_bar);
+
+    {
+        let state_back = app_state.clone();
+        let stack_back = stack.clone();
+        let refresh_back = refresh_hub.clone();
+        let refresh_workspace_back = refresh_workspace.clone();
+        let sync_nav_buttons = sync_nav_buttons.clone();
+        back_btn.connect_clicked(move |_| {
+            if !state_back.navigate_back() {
+                return;
+            }
+            match state_back.snapshot().active_page {
+                AppPage::Dashboard => stack_back.set_visible_child_name("dashboard"),
+                AppPage::Projects => stack_back.set_visible_child_name("projects"),
+                AppPage::Workspace => {
+                    stack_back.set_visible_child_name("workspace");
+                    refresh_workspace_back();
+                }
+                AppPage::History => stack_back.set_visible_child_name("history"),
+                AppPage::Settings => stack_back.set_visible_child_name("settings"),
+                AppPage::Review => stack_back.set_visible_child_name("workspace"),
+            }
+            refresh_back.refresh(RefreshScope::Sidebar);
+            sync_nav_buttons();
+        });
+    }
+
+    {
+        let state_forward = app_state.clone();
+        let stack_forward = stack.clone();
+        let refresh_forward = refresh_hub.clone();
+        let refresh_workspace_forward = refresh_workspace.clone();
+        let sync_nav_buttons = sync_nav_buttons.clone();
+        forward_btn.connect_clicked(move |_| {
+            if !state_forward.navigate_forward() {
+                return;
+            }
+            match state_forward.snapshot().active_page {
+                AppPage::Dashboard => stack_forward.set_visible_child_name("dashboard"),
+                AppPage::Projects => stack_forward.set_visible_child_name("projects"),
+                AppPage::Workspace => {
+                    stack_forward.set_visible_child_name("workspace");
+                    refresh_workspace_forward();
+                }
+                AppPage::History => stack_forward.set_visible_child_name("history"),
+                AppPage::Settings => stack_forward.set_visible_child_name("settings"),
+                AppPage::Review => stack_forward.set_visible_child_name("workspace"),
+            }
+            refresh_forward.refresh(RefreshScope::Sidebar);
+            sync_nav_buttons();
+        });
+    }
+
     (sidebar_box, populate)
+}
+
+fn sidebar_icon_button(icon: &str, tooltip: &str) -> Button {
+    sidebar_button(icon, tooltip, "sidebar-icon-button")
+}
+
+fn sidebar_arrow_button(icon: &str, tooltip: &str) -> Button {
+    sidebar_button(icon, tooltip, "sidebar-arrow-button")
+}
+
+fn sidebar_window_button(icon: &str, tooltip: &str) -> Button {
+    sidebar_button(icon, tooltip, "sidebar-window-button")
+}
+
+fn sidebar_button(icon: &str, tooltip: &str, class_name: &str) -> Button {
+    let button = icon_button(icon, tooltip);
+    button.add_css_class(class_name);
+    button.set_tooltip_text(Some(tooltip));
+    button
+}
+
+fn sidebar_nav_button(icon: &str, tooltip: &str) -> Button {
+    let button = text_button(tooltip);
+    button.add_css_class("sidebar-nav-button");
+    button.set_tooltip_text(Some(tooltip));
+
+    let row = GBox::new(Orientation::Horizontal, 8);
+    row.set_margin_start(2);
+    row.set_margin_end(2);
+    row.set_margin_top(2);
+    row.set_margin_bottom(2);
+
+    let image = Image::from_icon_name(icon);
+    image.add_css_class("sidebar-nav-icon");
+    row.append(&image);
+
+    let label = Label::new(Some(tooltip));
+    label.add_css_class("sidebar-nav-label");
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    row.append(&label);
+
+    button.set_child(Some(&row));
+    button
+}
+
+fn guarded_gtk_callback<T, F>(fallback: T, callback: F) -> T
+where
+    F: FnOnce() -> T,
+{
+    match catch_unwind(AssertUnwindSafe(callback)) {
+        Ok(value) => value,
+        Err(_) => {
+            error!("recovered panic inside sidebar GTK callback");
+            fallback
+        }
+    }
 }
 
 fn build_workspace_row(
     name: &str,
     branch: &str,
     status: &str,
-    port: i64,
-    pr_number: Option<i64>,
     run_active: bool,
-    has_conflicts: bool,
     active_sessions: usize,
     open_todos: usize,
+    pr_number: Option<i64>,
+    github_badge: Option<crate::workspace_command_center::PullRequestStatusSummary>,
+    ahead: usize,
+    updated_at: &str,
 ) -> ListBoxRow {
     let row_box = GBox::new(Orientation::Horizontal, 10);
     row_box.add_css_class("project-row");
     row_box.add_css_class("workspace-row-shell");
+    let is_active = run_active || active_sessions > 0;
+    if is_active {
+        row_box.add_css_class("workspace-row-active");
+    }
 
-    let icon = Label::new(Some(if run_active { "◐" } else { "◦" }));
-    icon.add_css_class(if run_active {
-        "project-icon-hot"
-    } else {
-        "project-icon"
-    });
+    let branch_icon = Image::from_icon_name("list-drag-handle-symbolic");
+    branch_icon.add_css_class("workspace-row-branch-icon");
+    if is_active {
+        branch_icon.add_css_class("workspace-row-branch-icon-active");
+    }
+    row_box.append(&branch_icon);
 
+    // Text column
     let text_box = GBox::new(Orientation::Vertical, 2);
-    text_box.add_css_class("workspace-row-text");
     text_box.set_hexpand(true);
-    let name_label = Label::new(Some(name));
+
+    // Top row: name + badge
+    let top_row = GBox::new(Orientation::Horizontal, 6);
+    top_row.set_hexpand(true);
+
+    let name_label = Label::new(Some(&title_case_workspace(name)));
     name_label.add_css_class("workspace-name");
     name_label.set_xalign(0.0);
     name_label.set_hexpand(true);
+    name_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    top_row.append(&name_label);
 
-    let mut meta_parts = vec![branch.to_owned()];
-    if let Some(pr) = pr_number {
-        meta_parts.push(format!("PR #{pr}"));
-    } else if active_sessions > 0 {
-        meta_parts.push(format!("{active_sessions} session"));
-    } else if open_todos > 0 {
-        meta_parts.push(format!("{open_todos} todos"));
-    } else if has_conflicts {
-        meta_parts.push("conflict".to_owned());
-    } else {
-        meta_parts.push(format!(":{port}"));
+    // Badge priority: PR > preview > active > ahead commits > todos
+    let badge_text = workspace_badge_text(
+        pr_number,
+        github_badge
+            .as_ref()
+            .and_then(|state| state.attention_label()),
+        run_active,
+        active_sessions,
+        ahead,
+        open_todos,
+    );
+
+    if let Some(badge) = badge_text {
+        let badge_label = Label::new(Some(&badge));
+        badge_label.add_css_class("workspace-badge");
+        if let Some(state) = github_badge.as_ref() {
+            if let Some(css_class) = state.attention_css_class() {
+                badge_label.add_css_class(css_class);
+            }
+        }
+        if !is_active && ahead == 0 && pr_number.is_none() {
+            badge_label.add_css_class("workspace-badge-muted");
+        }
+        badge_label.set_xalign(1.0);
+        top_row.append(&badge_label);
     }
-    if status == "archived" {
-        meta_parts.push("archived".to_owned());
+
+    text_box.append(&top_row);
+
+    // Second row: branch · time ago
+    let mut meta_parts: Vec<String> = Vec::new();
+    if !branch.is_empty() {
+        meta_parts.push(branch.to_string());
+    }
+    let ts = relative_time(updated_at);
+    if !ts.is_empty() {
+        meta_parts.push(ts);
     }
     let meta_text = meta_parts.join(" · ");
     let meta_label = Label::new(Some(&meta_text));
+    meta_label.add_css_class("workspace-row-timestamp");
     meta_label.add_css_class("workspace-meta");
     meta_label.set_xalign(0.0);
     meta_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
-
-    text_box.append(&name_label);
     text_box.append(&meta_label);
-    row_box.append(&icon);
+
+    let _ = status;
     row_box.append(&text_box);
 
     ListBoxRow::builder().child(&row_box).build()
+}
+
+fn workspace_badge_text(
+    pr_number: Option<i64>,
+    pr_attention: Option<&str>,
+    run_active: bool,
+    active_sessions: usize,
+    ahead: usize,
+    open_todos: usize,
+) -> Option<String> {
+    if let Some(attention) = pr_attention.filter(|value| !value.is_empty()) {
+        return Some(attention.to_owned());
+    }
+    if let Some(pr) = pr_number {
+        return Some(format!("PR #{pr}"));
+    }
+    if run_active {
+        return Some("preview".to_owned());
+    }
+    if active_sessions > 0 {
+        return Some("active".to_owned());
+    }
+    if ahead > 0 {
+        return Some(format!("+{ahead}"));
+    }
+    if open_todos > 0 {
+        return Some(format!("{open_todos} todo"));
+    }
+    None
+}
+
+fn section_header_row(
+    name: &str,
+    _workspace_count: usize,
+    on_add_workspace: impl Fn(Button) + 'static,
+) -> ListBoxRow {
+    let shell = GBox::new(Orientation::Horizontal, 6);
+    shell.add_css_class("repo-section-row");
+
+    let repo_icon = Image::from_icon_name("folder-symbolic");
+    repo_icon.add_css_class("repo-section-icon");
+    shell.append(&repo_icon);
+
+    let repo_lbl = Label::new(Some(name));
+    repo_lbl.add_css_class("repo-section-header");
+    repo_lbl.set_xalign(0.0);
+    repo_lbl.set_hexpand(true);
+    repo_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    shell.append(&repo_lbl);
+
+    let add_btn = sidebar_icon_button("list-add-symbolic", "Create workspace");
+    add_btn.add_css_class("repo-header-add");
+    add_btn.set_tooltip_text(Some("Create workspace"));
+    add_btn.connect_clicked({
+        let add_btn = add_btn.clone();
+        move |_| on_add_workspace(add_btn.clone())
+    });
+    shell.append(&add_btn);
+
+    let row = ListBoxRow::builder().child(&shell).build();
+    row.set_selectable(false);
+    row.set_activatable(false);
+    row
+}
+
+fn spawn_background_job<F, T>(job: F) -> mpsc::Receiver<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(job());
+    });
+    rx
+}
+
+fn empty_repo_row() -> ListBoxRow {
+    let empty = Label::new(Some("No workspaces"));
+    empty.add_css_class("workspace-meta");
+    empty.add_css_class("repo-empty-label");
+    empty.set_xalign(0.0);
+    let row = ListBoxRow::builder().child(&empty).build();
+    row.set_selectable(false);
+    row.set_activatable(false);
+    row
+}
+
+fn relative_time(ts: &str) -> String {
+    let ts_clean = ts.replace('T', " ");
+    let parts: Vec<&str> = ts_clean.splitn(2, ' ').collect();
+    if parts.len() < 2 {
+        return String::new();
+    }
+
+    let date_parts: Vec<i64> = parts[0].split('-').filter_map(|p| p.parse().ok()).collect();
+    let time_str = parts[1].split('.').next().unwrap_or(parts[1]);
+    let time_parts: Vec<i64> = time_str.split(':').filter_map(|p| p.parse().ok()).collect();
+
+    if date_parts.len() < 3 || time_parts.len() < 2 {
+        return String::new();
+    }
+
+    let year = date_parts[0];
+    let month = date_parts[1];
+    let day = date_parts[2];
+    let hour = time_parts[0];
+    let min = time_parts[1];
+    let sec = if time_parts.len() > 2 {
+        time_parts[2]
+    } else {
+        0
+    };
+
+    let y = year - 1;
+    let leap_days = y / 4 - y / 100 + y / 400;
+    let days_of_month: [i64; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let month_days: i64 = days_of_month[..((month - 1) as usize)].iter().sum();
+    let is_leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let leap_bonus = if is_leap && month > 2 { 1 } else { 0 };
+    let epoch_days = year * 365 + leap_days - 719_527 + month_days + leap_bonus + day - 1;
+    let ts_secs = epoch_days * 86400 + hour * 3600 + min * 60 + sec;
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(ts_secs);
+
+    let delta = now_secs - ts_secs;
+    if delta < 0 {
+        return "just now".to_string();
+    }
+
+    match delta {
+        0..=59 => "just now".to_string(),
+        60..=3599 => format!("{}m ago", delta / 60),
+        3600..=86399 => format!("{}h ago", delta / 3600),
+        86400..=604799 => format!("{}d ago", delta / 86400),
+        _ => format!("{}w ago", delta / 604800),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{spawn_background_job, workspace_badge_text};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn workspace_badge_prefers_failed_github_state_over_pr_number() {
+        let badge = workspace_badge_text(Some(42), Some("checks failed"), false, 0, 0, 0);
+        assert_eq!(badge.as_deref(), Some("checks failed"));
+    }
+
+    #[test]
+    fn workspace_badge_falls_back_to_pr_number_without_github_state() {
+        let badge = workspace_badge_text(Some(42), None, false, 0, 0, 0);
+        assert_eq!(badge.as_deref(), Some("PR #42"));
+    }
+
+    #[test]
+    fn spawn_background_job_returns_before_work_finishes() {
+        let start = Instant::now();
+        let rx = spawn_background_job(|| {
+            std::thread::sleep(Duration::from_millis(150));
+            42
+        });
+
+        assert!(start.elapsed() < Duration::from_millis(50));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        assert_eq!(rx.recv_timeout(Duration::from_secs(1)).unwrap(), 42);
+    }
 }

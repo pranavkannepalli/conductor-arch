@@ -1,9 +1,11 @@
 use gtk::prelude::*;
 use gtk::{Box as GBox, Label, Orientation, PolicyType, ScrolledWindow};
-use linux_conductor_core::paths::AppPaths;
-use linux_conductor_core::workspace::{WorkspaceStatusLine, WorkspaceStore};
+use linux_archductor_core::paths::AppPaths;
+use linux_archductor_core::workspace::WorkspaceStatusLine;
+use linux_archductor_core::workspace::WorkspaceStore;
 
 use crate::title_case_workspace;
+use crate::workspace_command_center::workspace_pull_request_status_summary;
 
 pub(crate) fn build_dashboard_panel(paths: &AppPaths) -> (GBox, impl Fn() + Clone + 'static) {
     let root = GBox::new(Orientation::Vertical, 0);
@@ -143,6 +145,14 @@ fn append_dashboard_column(
 
     board.append(&column);
 }
+fn dashboard_pr_meta(repository_name: &str, pr_number: i64, pr_attention: Option<&str>) -> String {
+    match pr_attention {
+        Some(attention) if !attention.is_empty() => {
+            format!("{repository_name} · PR #{pr_number} · {attention}")
+        }
+        _ => format!("{repository_name} · PR #{pr_number}"),
+    }
+}
 
 fn build_dashboard_card(line: &WorkspaceStatusLine, store: &WorkspaceStore) -> GBox {
     let ws = &line.workspace;
@@ -177,15 +187,27 @@ fn build_dashboard_card(line: &WorkspaceStatusLine, store: &WorkspaceStore) -> G
     name.set_wrap(true);
     card.append(&name);
 
+    let pr_attention = line
+        .pull_request
+        .as_ref()
+        .map(|pr| workspace_pull_request_status_summary(store, &ws.name, pr));
     let meta = match &line.pull_request {
-        Some(pr) => format!(
-            "{} · PR #{} · {}",
-            line.repository_name, pr.number, pr.state
+        Some(pr) => dashboard_pr_meta(
+            &line.repository_name,
+            pr.number,
+            pr_attention
+                .as_ref()
+                .and_then(|state| state.attention_label()),
         ),
         None => format!("{} · port {}", line.repository_name, ws.port_base),
     };
     let meta_label = Label::new(Some(&meta));
     meta_label.add_css_class("card-meta");
+    if let Some(state) = pr_attention.as_ref() {
+        if let Some(css_class) = state.attention_css_class() {
+            meta_label.add_css_class(css_class);
+        }
+    }
     meta_label.set_xalign(0.0);
     meta_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
     card.append(&meta_label);
@@ -211,4 +233,21 @@ fn build_dashboard_card(line: &WorkspaceStatusLine, store: &WorkspaceStore) -> G
     card.append(&foot);
 
     card
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dashboard_pr_meta;
+
+    #[test]
+    fn dashboard_meta_includes_pr_attention_state() {
+        let meta = dashboard_pr_meta("demo", 42, Some("checks failed"));
+        assert_eq!(meta, "demo · PR #42 · checks failed");
+    }
+
+    #[test]
+    fn dashboard_meta_falls_back_to_pr_state_when_attention_missing() {
+        let meta = dashboard_pr_meta("demo", 42, None);
+        assert_eq!(meta, "demo · PR #42");
+    }
 }

@@ -2,7 +2,7 @@
 
 ## Current State
 
-Linux Conductor now has a usable app-first loop for one repository:
+Linux Archductor now has a usable app-first loop for one repository:
 
 1. Add or clone a repository.
 2. Configure repository settings.
@@ -14,15 +14,15 @@ Linux Conductor now has a usable app-first loop for one repository:
 7. Stage review/check/comment context into a selected agent session.
 8. Create, refresh, merge, and optionally archive GitHub PRs through local
    `gh` auth.
-9. Restore archived workspaces and inspect older imported Conductor chats.
+9. Restore archived workspaces and inspect older imported upstream Conductor chats.
 
 The GTK app is usable but still rough. Agent sessions run PTY-backed harnesses
 and render structured app-native transcript events, terminal rendering is not a
 full emulator, and several app controls remain unfinished.
 
 Latest verification on 2026-06-20: `cargo fmt --all -- --check`,
-`cargo test -p linux-conductor-core --lib` (96 tests), and
-`cargo test -p linux-conductor-gtk` (92 tests) passed for PTY session input,
+`cargo test -p linux-archductor-core --lib` (96 tests), and
+`cargo test -p linux-archductor-gtk` (92 tests) passed for PTY session input,
 structured PR readiness summaries, recorded-PR-number fallback,
 review-thread resolve/reopen mutations, PR readiness aggregate/attention
 rollups, flat and connection-wrapped status rollup parsing, PR-head deployment
@@ -31,10 +31,10 @@ PR summary feedback, GTK command palette command mapping, and terminal
 transcript cursor handling. GTK terminal transcript rendering now restores the
 normal screen after common alternate-screen TUI sequences and handles
 additional CSI cursor-position variants used by shells/TUIs.
-`linux-conductor workspace source-preflight` reports GitHub ready and Linear
+`linux-archductor workspace source-preflight` reports GitHub ready and Linear
 blocked by missing `LINEAR_API_KEY`. Live smoke proved authenticated GitHub
 issue workspace creation from temporary issue #11, authenticated GitHub PR
-workspace creation from PR #10, and `linux-conductor pr summary` on that
+workspace creation from PR #10, and `linux-archductor pr summary` on that
 generated PR workspace, including status-check aggregation.
 Live smoke also proved review-thread summary, resolve, and reopen against
 temporary PR #12 with a real GitHub review thread, and PR-head deployment
@@ -45,7 +45,7 @@ failure, pending, and inactive deployments; cleanup closed the PR and deleted
 the temporary branch/deployments. A follow-up temporary PR #21 proved the
 rollup/head-status de-duplication path and was also cleaned up. Temporary PR
 #28 proved real provider rollup handling for cancelled and skipped check runs
-through `linux-conductor pr summary issue19-proof`; cancelled checks were
+through `linux-archductor pr summary issue19-proof`; cancelled checks were
 promoted to attention and the skipped check stayed visible in the raw check
 list. GTK launched and stayed running on the available display, but
 source-creation click-through is not yet automated, though the GTK source form
@@ -62,7 +62,7 @@ agent output are labeled as separate app-native transcript events instead of
 raw log text, including live appends while a selected session is running.
 Multi-line composer input and fenced multi-line review prompts are preserved as
 single labeled transcript events. Focused verification:
-`cargo test -p linux-conductor-gtk session_surface::tests -- --nocapture`;
+`cargo test -p linux-archductor-gtk session_surface::tests -- --nocapture`;
 workspace verification: `cargo test --workspace`.
 
 Phase 9 has a substantial customization/settings slice in progress:
@@ -75,61 +75,61 @@ sections instead of dropping them. Workspace creation now consumes
 `customization.workspace_defaults.base_branch`, `branch_prefix`, and
 `port_block_size` when the create request does not provide explicit base or
 branch values. Focused verification:
-`cargo test -p linux-conductor-core settings::tests -- --nocapture`,
-`cargo test -p linux-conductor-core workspace::tests::create_workspace_uses_configured -- --nocapture`,
-`cargo test -p linux-conductor-core workspace::tests::create_from_ -- --nocapture`,
-and `cargo test -p linux-conductor-gtk projects::tests -- --nocapture`.
+`cargo test -p linux-archductor-core settings::tests -- --nocapture`,
+`cargo test -p linux-archductor-core workspace::tests::create_workspace_uses_configured -- --nocapture`,
+`cargo test -p linux-archductor-core workspace::tests::create_from_ -- --nocapture`,
+and `cargo test -p linux-archductor-gtk projects::tests -- --nocapture`.
 
 Phase 9 also has the first monorepo working-directory slice: repository
 settings accept `customization.workspace_defaults.working_directory` as a safe
 relative path inside the worktree. Runtime setup/run/archive scripts, one-shot
 terminal commands, editor/session launches, and Shell/Codex/Claude/Cursor
 session cwd selection use that subdirectory when configured. The environment
-keeps `CONDUCTOR_WORKSPACE_PATH` as the worktree root and adds
-`CONDUCTOR_WORKING_DIRECTORY` for the selected process cwd. Focused
-verification: `cargo test -p linux-conductor-core monorepo -- --nocapture` and
-`cargo test -p linux-conductor-core settings::tests::rejects_unsafe_workspace_working_directory_settings -- --nocapture`.
+keeps `ARCHDUCTOR_WORKSPACE_PATH` as the worktree root and adds
+`ARCHDUCTOR_WORKING_DIRECTORY` for the selected process cwd. Focused
+verification: `cargo test -p linux-archductor-core monorepo -- --nocapture` and
+`cargo test -p linux-archductor-core settings::tests::rejects_unsafe_workspace_working_directory_settings -- --nocapture`.
 
 Phase 9 now consumes merge customization instead of only preserving it: PR merge
 uses `customization.naming.default_merge_method` when no explicit method is
 provided, preserves the existing open-todo/open-local-comment blockers by
 default, lets repositories disable those local blockers, and can block merges
 on failed or pending PR checks through `customization.merge_rules`. Focused
-verification: `cargo test -p linux-conductor-core merge_pull_request -- --nocapture`
-and `cargo test -p linux-conductor-core settings::tests -- --nocapture`.
+verification: `cargo test -p linux-archductor-core merge_pull_request -- --nocapture`
+and `cargo test -p linux-archductor-core settings::tests -- --nocapture`.
 
 Phase 9 now has unified local chat history for new Linux sessions: saved
 PTY-backed Shell/Codex/Claude/Cursor session process logs are exposed through a
 core history API, the GTK History page merges those local sessions with
 imported macOS Conductor chats, workspace chat panels show local saved
-sessions for the selected worktree, and the CLI has `linux-conductor history
-list [--workspace <name>]` plus `linux-conductor history show <process-id>`.
-Focused verification: `cargo test -p linux-conductor-core local_chat_history -- --nocapture`,
-`cargo test -p linux-conductor-gtk history -- --nocapture`, and
-`cargo test -p linux-conductor history -- --nocapture`.
+sessions for the selected worktree, and the CLI has `linux-archductor history
+list [--workspace <name>]` plus `linux-archductor history show <process-id>`.
+Focused verification: `cargo test -p linux-archductor-core local_chat_history -- --nocapture`,
+`cargo test -p linux-archductor-gtk history -- --nocapture`, and
+`cargo test -p linux-archductor history -- --nocapture`.
 
 Phase 9 now has linked-directory workflows for multi-repository or
 multi-workspace agent tasks: a source workspace can link another active
 workspace, the link is persisted in SQLite, materialized as
 `.context/linked-directories/<target-workspace>`, and exposed to scripts,
 terminal commands, editor launches, and Shell/Codex/Claude/Cursor sessions via
-`CONDUCTOR_LINKED_DIRECTORIES` and `CONDUCTOR_LINKED_DIRECTORY_<NAME>`.
+`ARCHDUCTOR_LINKED_DIRECTORIES` and `ARCHDUCTOR_LINKED_DIRECTORY_<NAME>`.
 The CLI has `workspace link-dir`, `workspace linked-dirs`, and
 `workspace unlink-dir`; the GTK workspace chat column has a Linked Directories
 panel for the same workflow. Focused verification:
-`cargo test -p linux-conductor-core linked_directory -- --nocapture`,
-`cargo test -p linux-conductor linked -- --nocapture`, and
-`cargo test -p linux-conductor-gtk workspace_command_center::tests -- --nocapture`.
+`cargo test -p linux-archductor-core linked_directory -- --nocapture`,
+`cargo test -p linux-archductor linked -- --nocapture`, and
+`cargo test -p linux-archductor-gtk workspace_command_center::tests -- --nocapture`.
 
 Phase 9 now has first-class GTK launch targets and deep links: startup accepts
 `--workspace <name> --tab <tab>`, workspace deep links like
-`linux-conductor://workspace/berlin?tab=checks`, and page deep links like
-`linux-conductor://history`. Review is now a distinct workspace tab target, so
+`linux-archductor://workspace/berlin?tab=checks`, and page deep links like
+`linux-archductor://history`. Review is now a distinct workspace tab target, so
 command palette navigation and deep links can land on Changes, Checks, or
 Review instead of collapsing all three to the outer work stack. Focused
-verification: `cargo test -p linux-conductor-gtk launch_target -- --nocapture`,
-`cargo test -p linux-conductor-gtk command_palette::tests -- --nocapture`, and
-`cargo test -p linux-conductor-gtk workspace_command_center::tests::workspace_tab_stack_name_maps_palette_targets_to_tabs -- --nocapture`.
+verification: `cargo test -p linux-archductor-gtk launch_target -- --nocapture`,
+`cargo test -p linux-archductor-gtk command_palette::tests -- --nocapture`, and
+`cargo test -p linux-archductor-gtk workspace_command_center::tests::workspace_tab_stack_name_maps_palette_targets_to_tabs -- --nocapture`.
 
 Phase 9 now consumes the configured default workspace tab: repository
 customization exposes view defaults through the workspace store, validates
@@ -138,9 +138,9 @@ selection use that tab when opening a workspace unless the launch target passes
 an explicit tab. Supported values include Changes, Checks, Review,
 Chat/Terminal, Big Terminal, Todos, Processes, and Checkpoints plus common
 aliases. Focused verification:
-`cargo test -p linux-conductor-core default_visible_tab -- --nocapture`,
-`cargo test -p linux-conductor-core workspace_view_defaults -- --nocapture`,
-and `cargo test -p linux-conductor-gtk state::tests -- --nocapture`.
+`cargo test -p linux-archductor-core default_visible_tab -- --nocapture`,
+`cargo test -p linux-archductor-core workspace_view_defaults -- --nocapture`,
+and `cargo test -p linux-archductor-gtk state::tests -- --nocapture`.
 
 Phase 9 now consumes the first GTK visual view preferences too: workspace view
 defaults normalize `customization.view.theme`, `accent_color`, and `density`
@@ -149,7 +149,7 @@ preferences, and sidebar workspace selection refreshes those classes. The CSS
 currently covers common light/dark surfaces, blue/green/amber/rose accents,
 and compact/comfortable spacing; this is not full visual parity or a bespoke
 settings UI. Focused verification:
-`cargo test -p linux-conductor-gtk view_preferences -- --nocapture`.
+`cargo test -p linux-archductor-gtk view_preferences -- --nocapture`.
 
 Phase 9 now has configurable global GTK keybindings for the shortcuts that were
 previously hard-coded: refresh, sidebar toggle, and command palette. Repository
@@ -158,17 +158,17 @@ on startup and workspace selection, supports the default/native preset, a `vim`
 preset, and custom mappings such as
 `palette=ctrl+p,refresh=ctrl+shift+r,sidebar=ctrl+alt+b`. The command palette
 shows the active refresh/sidebar shortcuts and filters by those labels. Focused
-verification: `cargo test -p linux-conductor-gtk command_palette -- --nocapture`
-and `cargo test -p linux-conductor-core workspace_view_defaults -- --nocapture`.
+verification: `cargo test -p linux-archductor-gtk command_palette -- --nocapture`
+and `cargo test -p linux-archductor-core workspace_view_defaults -- --nocapture`.
 
 Phase 9 now has CLI settings bundle import/export for registered repositories:
-`linux-conductor repo settings <name> export [--local] [--output <path>]`
+`linux-archductor repo settings <name> export [--local] [--output <path>]`
 exports the exact shared or local TOML file, and
-`linux-conductor repo settings <name> import <path> [--local]` parses,
+`linux-archductor repo settings <name> import <path> [--local]` parses,
 validates, and writes shared or local repository settings. Focused
 verification:
-`cargo test -p linux-conductor-core settings::tests::repository_toml_helpers_parse_validate_and_serialize_settings -- --nocapture`
-and `cargo test -p linux-conductor -- --nocapture`.
+`cargo test -p linux-archductor-core settings::tests::repository_toml_helpers_parse_validate_and_serialize_settings -- --nocapture`
+and `cargo test -p linux-archductor -- --nocapture`.
 
 Phase 9 GTK polish pass completed on 2026-06-21: seven rough/missing
 features were finished. (1) Big Terminal tab removes header chrome in
@@ -207,7 +207,7 @@ labeled section header instead of a single combined label. Full suite:
 - GitHub PR workspace creation fetches the PR head ref before creating the
   worktree.
 - Linear creation uses `LINEAR_API_KEY` and fails clearly when it is missing.
-- Setup/run/archive script plumbing from `.conductor/settings.toml`.
+- Setup/run/archive script plumbing from `.archductor/settings.toml`.
 - Shared/local repository settings load/save, including scripts, run mode,
   Spotlight testing, Files to copy, environment variables, durable prompts,
   provider executable/provider fields, Git behavior flags, and advanced
@@ -336,6 +336,13 @@ labeled section header instead of a single combined label. Full suite:
 
 - Terminal rendering handles common ANSI/control redraws but is not a full
   terminal emulator.
+- Later backlog: repository-native knowledge graph and RAG grounding are not
+  built yet. Each repository should get its own managed knowledge graph so
+  workspace/repository chats can retrieve local context natively. Knowledge
+  points should be tagged by repository plus workspace, then promoted from
+  workspace scope to the main repository graph when the underlying work is
+  pulled in. Claude harness/tooling should also expose the installed tools
+  needed to read/write that graph and use the retrieval flow.
 - GitHub review-thread sync now has structured read plus CLI resolve/reopen
   mutation paths that were live-proven against temporary PR #12 with a real
   review thread. Check/deployment aggregation now has live-proven CLI coverage
@@ -353,7 +360,7 @@ labeled section header instead of a single combined label. Full suite:
 - Platform direction is Linux-first. Keep the core portable where it does not
   compromise Linux quality; consider WSL before native Windows, and treat macOS
   as lower priority while the original Conductor app covers that platform.
-- Visual parity with Conductor is not complete.
+- Visual parity with Archductor is not complete.
 - Release packaging still needs full manual validation on target distros.
 
 ## Release Readiness Phase
@@ -386,7 +393,7 @@ local artifact creation:
 - Public overview: [`README.md`](README.md)
 - End-to-end validation: [`docs/manual-testing-checklist.md`](docs/manual-testing-checklist.md)
 - Local deploy/test guide: [`docs/deploy-and-local-test.md`](docs/deploy-and-local-test.md)
-- Conductor parity references: [`docs/conductor-docs-parity-map.md`](docs/conductor-docs-parity-map.md)
+- Archductor parity references: [`docs/archductor-docs-parity-map.md`](docs/archductor-docs-parity-map.md)
 
 Keep docs grounded in verified app/core behavior. When a feature exists only in
 core, CLI, or GTK, say which layer was verified.

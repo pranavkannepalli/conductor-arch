@@ -4,8 +4,8 @@ use gtk::{
     Box as GBox, Button, ComboBoxText, CssProvider, Entry, Label, ListBox, Orientation, PolicyType,
     ScrolledWindow, TextBuffer, TextView, STYLE_PROVIDER_PRIORITY_APPLICATION,
 };
-use linux_conductor_core::pty::PtySession;
-use linux_conductor_core::workspace::{
+use linux_archductor_core::pty::PtySession;
+use linux_archductor_core::workspace::{
     ProcessRecord, ProcessStatus, SessionKind, TerminalLogMatch, TerminalSessionSummary,
     WorkspaceStore,
 };
@@ -19,6 +19,7 @@ use std::rc::Rc;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
+use crate::buttons::text_button;
 use crate::refresh::{RefreshHub, RefreshScope};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -104,20 +105,33 @@ fn terminal_action_row() -> GBox {
     row
 }
 
+fn terminal_action_stack() -> GBox {
+    let stack = GBox::new(Orientation::Vertical, 8);
+    stack.add_css_class("action-stack");
+    stack
+}
+
+fn terminal_toolbar_label(text: &str) -> Label {
+    let label = Label::new(Some(text));
+    label.add_css_class("toolbar-label");
+    label.set_xalign(0.0);
+    label
+}
+
 fn terminal_secondary_button(label: &str) -> Button {
-    let button = Button::with_label(label);
+    let button = text_button(label);
     button.add_css_class("secondary-action");
     button
 }
 
 fn terminal_flat_button(label: &str) -> Button {
-    let button = Button::with_label(label);
+    let button = text_button(label);
     button.add_css_class("flat-action");
     button
 }
 
 fn terminal_destructive_button(label: &str) -> Button {
-    let button = Button::with_label(label);
+    let button = text_button(label);
     button.add_css_class("destructive-action");
     button
 }
@@ -328,7 +342,7 @@ pub fn embedded_terminal_panel(
     root.append(&transcript_scroll);
 
     let pty_controls = terminal_action_row();
-    let start_pty_btn = Button::with_label("Start Shell");
+    let start_pty_btn = text_button("Start Shell");
     start_pty_btn.add_css_class("suggested-action");
     let stop_pty_btn = terminal_destructive_button("Stop Shell");
     let close_pty_btn = terminal_secondary_button("Close Shell");
@@ -410,15 +424,18 @@ pub fn embedded_terminal_panel(
             ))
         }) {
             Ok((terminal, process_id)) => {
-                let mut sessions = ptys_for_start.borrow_mut();
-                let mut states = terminal_tab_states_for_start.borrow_mut();
-                let index = sessions.len();
-                sessions.push(Some(terminal));
-                states.push(TerminalTabState {
-                    process_id,
-                    attached: true,
-                    status: ProcessStatus::Running,
-                });
+                let index = {
+                    let mut sessions = ptys_for_start.borrow_mut();
+                    let mut states = terminal_tab_states_for_start.borrow_mut();
+                    let index = sessions.len();
+                    sessions.push(Some(terminal));
+                    states.push(TerminalTabState {
+                        process_id,
+                        attached: true,
+                        status: ProcessStatus::Running,
+                    });
+                    index
+                };
                 rebuild_terminal_tabs(
                     &terminal_tabs_for_start,
                     &active_pty_combo_for_start,
@@ -743,45 +760,47 @@ pub fn embedded_terminal_panel(
     if let Ok(store) = WorkspaceStore::open(database_path.clone()) {
         let _ = store.reconcile_terminal_processes();
         if let Ok(processes) = store.list_terminals(workspace_name) {
-            let mut sessions = ptys_for_seed.borrow_mut();
-            let mut states = terminal_tab_states_for_seed.borrow_mut();
             let mut active_terminal = None;
             let mut has_running = false;
             let mut has_attached_running = false;
             let mut has_detached_running = false;
             let mut ordered_processes = processes;
             ordered_processes.sort_by(|left, right| right.started_at.cmp(&left.started_at));
-            for process in ordered_processes.into_iter().take(TERMINAL_TAB_LIMIT) {
-                let index = sessions.len();
-                let running = process.status == ProcessStatus::Running;
-                let (session, attached) = if running {
-                    match TerminalSession::try_reattach_running(
-                        db_for_seed.clone(),
-                        process.id,
-                        process.pid,
-                    ) {
-                        Ok(session) => (Some(session), true),
-                        Err(_) => (None, false),
-                    }
-                } else {
-                    (None, false)
-                };
-                if running {
-                    has_running = true;
-                    if attached {
-                        has_attached_running = true;
+            {
+                let mut sessions = ptys_for_seed.borrow_mut();
+                let mut states = terminal_tab_states_for_seed.borrow_mut();
+                for process in ordered_processes.into_iter().take(TERMINAL_TAB_LIMIT) {
+                    let index = sessions.len();
+                    let running = process.status == ProcessStatus::Running;
+                    let (session, attached) = if running {
+                        match TerminalSession::try_reattach_running(
+                            db_for_seed.clone(),
+                            process.id,
+                            process.pid,
+                        ) {
+                            Ok(session) => (Some(session), true),
+                            Err(_) => (None, false),
+                        }
                     } else {
-                        has_detached_running = true;
+                        (None, false)
+                    };
+                    if running {
+                        has_running = true;
+                        if attached {
+                            has_attached_running = true;
+                        } else {
+                            has_detached_running = true;
+                        }
                     }
-                }
-                sessions.push(session);
-                states.push(TerminalTabState {
-                    process_id: process.id,
-                    attached,
-                    status: process.status,
-                });
-                if running && attached && active_terminal.is_none() {
-                    active_terminal = Some(index);
+                    sessions.push(session);
+                    states.push(TerminalTabState {
+                        process_id: process.id,
+                        attached,
+                        status: process.status,
+                    });
+                    if running && attached && active_terminal.is_none() {
+                        active_terminal = Some(index);
+                    }
                 }
             }
             rebuild_terminal_tabs(
@@ -852,7 +871,7 @@ pub fn embedded_terminal_panel(
     let entry = Entry::new();
     entry.set_placeholder_text(Some("workspace command"));
     entry.set_hexpand(true);
-    let run_btn = Button::with_label("Run");
+    let run_btn = text_button("Run");
     run_btn.add_css_class("suggested-action");
     let interrupt_btn = terminal_destructive_button("Interrupt (Ctrl+C)");
     let buffer = transcript.buffer();
@@ -1025,7 +1044,6 @@ pub fn embedded_terminal_panel(
     command_row.append(&interrupt_btn);
     root.append(&command_row);
 
-    let search_row = terminal_action_row();
     let search_entry = Entry::new();
     search_entry.set_placeholder_text(Some("search terminal history"));
     search_entry.set_hexpand(true);
@@ -1415,21 +1433,38 @@ pub fn embedded_terminal_panel(
     history_browser_scroll.set_hexpand(true);
     history_browser_scroll.set_vexpand(true);
     history_browser_scroll.set_child(Some(&history_browser_for_filter));
+    let search_stack = terminal_action_stack();
+    search_stack.append(&terminal_toolbar_label("Search transcripts"));
+    let search_row = terminal_action_row();
     search_row.append(&search_entry);
     search_row.append(&search_btn);
     search_row.append(&clear_search_btn);
-    search_row.append(&history_session_filter);
-    search_row.append(&history_line_entry);
-    search_row.append(&jump_history_status);
-    search_row.append(&jump_history_btn);
-    search_row.append(&jump_history_prev_btn);
-    search_row.append(&jump_history_next_btn);
     search_row.append(&history_btn);
-    search_row.append(&jump_history_latest_btn);
-    search_row.append(&history_filter);
-    search_row.append(&history_combo);
-    search_row.append(&load_history_btn);
-    root.append(&search_row);
+    search_stack.append(&search_row);
+
+    let sessions_stack = terminal_action_stack();
+    sessions_stack.append(&terminal_toolbar_label("Pick session"));
+    let sessions_row = terminal_action_row();
+    sessions_row.append(&history_session_filter);
+    sessions_row.append(&history_filter);
+    sessions_row.append(&history_combo);
+    sessions_row.append(&load_history_btn);
+    sessions_stack.append(&sessions_row);
+
+    let jump_stack = terminal_action_stack();
+    jump_stack.append(&terminal_toolbar_label("Browse transcript lines"));
+    let jump_row = terminal_action_row();
+    jump_row.append(&history_line_entry);
+    jump_row.append(&jump_history_status);
+    jump_row.append(&jump_history_btn);
+    jump_row.append(&jump_history_prev_btn);
+    jump_row.append(&jump_history_next_btn);
+    jump_row.append(&jump_history_latest_btn);
+    jump_stack.append(&jump_row);
+
+    root.append(&search_stack);
+    root.append(&sessions_stack);
+    root.append(&jump_stack);
     root.append(&history_browser_scroll);
     root
 }
@@ -2198,7 +2233,7 @@ fn set_terminal_search_results_browser(
         let header_row = GBox::new(Orientation::Horizontal, 8);
         header_row.append(&header_label);
 
-        let open_transcript_btn = Button::with_label("Open transcript");
+        let open_transcript_btn = text_button("Open transcript");
         open_transcript_btn.set_tooltip_text(Some("Open full transcript for this process"));
         let open_transcript_btn_db = database_path.clone();
         let open_transcript_btn_workspace = workspace_name.clone();
@@ -2220,7 +2255,7 @@ fn set_terminal_search_results_browser(
         });
         header_row.append(&open_transcript_btn);
 
-        let tail_transcript_btn = Button::with_label("Tail output");
+        let tail_transcript_btn = text_button("Tail output");
         tail_transcript_btn.set_tooltip_text(Some("Load only tail output for this process"));
         let tail_transcript_btn_jump_pages = jump_history_pages.clone();
         tail_transcript_btn.connect_clicked(move |_| {
@@ -2254,7 +2289,7 @@ fn set_terminal_search_results_browser(
                 item.process_id, item.command, context, file_name, snippet
             );
             let row = GBox::new(Orientation::Horizontal, 8);
-            let match_row = Button::with_label(&label);
+            let match_row = text_button(&label);
             match_row.set_hexpand(true);
             let row_db = database_path.clone();
             let row_workspace = workspace_name.clone();
@@ -2286,7 +2321,7 @@ fn set_terminal_search_results_browser(
                 );
             });
 
-            let open_btn = Button::with_label("Open session");
+            let open_btn = text_button("Open session");
             open_btn.set_tooltip_text(Some("Load full session transcript"));
             let open_btn_db = database_path.clone();
             let open_btn_workspace = workspace_name.to_owned();
@@ -2305,7 +2340,7 @@ fn set_terminal_search_results_browser(
                 );
             });
 
-            let tail_btn = Button::with_label("Tail session");
+            let tail_btn = text_button("Tail session");
             tail_btn.set_tooltip_text(Some("Load latest lines from this session"));
             let tail_btn_db = database_path.clone();
             let tail_btn_workspace = workspace_name.to_owned();
@@ -2543,7 +2578,7 @@ fn set_terminal_history_browser(
             let row = GBox::new(Orientation::Horizontal, 8);
             let latest_line = summary.line_count.max(1);
 
-            let row_button = Button::with_label(&row_label);
+            let row_button = text_button(&row_label);
             row_button.set_hexpand(true);
             row_button.set_tooltip_text(Some(&record.command));
             let row_combo = history_combo.clone();
@@ -2576,7 +2611,7 @@ fn set_terminal_history_browser(
                 );
             });
 
-            let open_btn = Button::with_label("Load transcript");
+            let open_btn = text_button("Load transcript");
             open_btn.set_tooltip_text(Some("Load selected session transcript"));
             let open_btn_db = row_db.clone();
             let open_btn_workspace = row_workspace.clone();
@@ -2602,7 +2637,7 @@ fn set_terminal_history_browser(
                 );
             });
 
-            let tail_btn = Button::with_label("Tail output");
+            let tail_btn = text_button("Tail output");
             tail_btn.set_tooltip_text(Some("Load latest lines only"));
             let tail_btn_latest_line = latest_line;
             let tail_btn_jump_pages = jump_history_pages.clone();
@@ -2619,7 +2654,7 @@ fn set_terminal_history_browser(
                 );
             });
 
-            let head_btn = Button::with_label("Head output");
+            let head_btn = text_button("Head output");
             head_btn.set_tooltip_text(Some("Load first lines only"));
             let head_btn_db = row_db.clone();
             let head_btn_workspace = row_workspace.clone();
@@ -2641,7 +2676,7 @@ fn set_terminal_history_browser(
                 );
             });
 
-            let jump_latest_btn = Button::with_label("Jump latest line");
+            let jump_latest_btn = text_button("Jump latest line");
             jump_latest_btn.set_tooltip_text(Some("Load around the latest transcript line"));
             let jump_latest_btn_db = row_db.clone();
             let jump_latest_btn_workspace = row_workspace.clone();
@@ -2665,8 +2700,7 @@ fn set_terminal_history_browser(
                 );
             });
 
-            let jump_prev_btn =
-                Button::with_label(&format!("Prev {TERMINAL_LINE_JUMP_PAGE_SIZE} lines"));
+            let jump_prev_btn = text_button(&format!("Prev {TERMINAL_LINE_JUMP_PAGE_SIZE} lines"));
             jump_prev_btn.set_tooltip_text(Some("Jump back through transcript pages"));
             let jump_prev_btn_db = row_db.clone();
             let jump_prev_btn_workspace = row_workspace.clone();
@@ -2699,8 +2733,7 @@ fn set_terminal_history_browser(
                 );
             });
 
-            let jump_next_btn =
-                Button::with_label(&format!("Next {TERMINAL_LINE_JUMP_PAGE_SIZE} lines"));
+            let jump_next_btn = text_button(&format!("Next {TERMINAL_LINE_JUMP_PAGE_SIZE} lines"));
             jump_next_btn.set_tooltip_text(Some("Jump forward through transcript pages"));
             let jump_next_btn_db = row_db.clone();
             let jump_next_btn_workspace = row_workspace.clone();
@@ -2819,28 +2852,20 @@ fn set_terminal_history_combo(
     }
 }
 
-fn active_terminal_session_option_label(index: usize, process_id: Option<i64>) -> String {
+fn active_terminal_session_option_label(_index: usize, process_id: Option<i64>) -> String {
     match process_id {
-        Some(process_id) => format!("Shell {} #{}", index + 1, process_id),
-        None => format!("Shell {}", index + 1),
+        Some(process_id) => format!("Terminal #{}", process_id),
+        None => "Terminal".to_owned(),
     }
 }
 
 fn active_terminal_tab_label(
-    index: usize,
-    process_id: Option<i64>,
-    status: ProcessStatus,
-    attached: bool,
+    _index: usize,
+    _process_id: Option<i64>,
+    _status: ProcessStatus,
+    _attached: bool,
 ) -> String {
-    let status_label = if status == ProcessStatus::Running && !attached {
-        "detached".to_owned()
-    } else {
-        status.as_str().to_owned()
-    };
-    match process_id {
-        Some(process_id) => format!("Shell {} #{} {}", index + 1, process_id, status_label),
-        None => format!("Shell {} {}", index + 1, status_label),
-    }
+    "Terminal".to_owned()
 }
 
 fn set_terminal_tab_active(tabs: &[Button], active_index: Option<usize>) {
@@ -2873,7 +2898,10 @@ fn rebuild_terminal_tabs(
         tabs.clear();
     }
 
-    let states = terminal_tab_states.borrow().clone();
+    let Ok(states_ref) = terminal_tab_states.try_borrow() else {
+        return;
+    };
+    let states = states_ref.clone();
     let effective_active = active_index.filter(|index| *index < states.len());
 
     for (index, state) in states.iter().enumerate() {
@@ -2881,7 +2909,7 @@ fn rebuild_terminal_tabs(
             Some(&index.to_string()),
             &active_terminal_session_option_label(index, Some(state.process_id)),
         );
-        let tab = Button::with_label(&active_terminal_tab_label(
+        let tab = text_button(&active_terminal_tab_label(
             index,
             Some(state.process_id),
             state.status,
@@ -3004,7 +3032,7 @@ fn format_initial_terminal_text(
     preferences: &TerminalPreferences,
 ) -> String {
     let mut text = format!(
-        "Workspace terminal\nworkspace: {}\npath: {}\n{}\n\nCommands run here execute inside the workspace with CONDUCTOR_* environment variables.",
+        "Workspace terminal\nworkspace: {}\npath: {}\n{}\n\nCommands run here execute inside the workspace with ARCHDUCTOR_* environment variables.",
         workspace_name,
         workspace_path.display(),
         preferences.summary()
@@ -3853,7 +3881,7 @@ pub(crate) fn terminal_command_presets(configured: &[String]) -> Vec<TerminalCom
 
 fn default_terminal_command_presets() -> Vec<TerminalCommandPreset> {
     [
-        ("Env", "env | sort | grep '^CONDUCTOR_'"),
+        ("Env", "env | sort | grep '^ARCHDUCTOR_'"),
         ("Git Status", "git status --short --branch"),
         ("Git Diff", "git diff --stat && git diff -- ."),
         (
@@ -3899,7 +3927,7 @@ fn terminal_command_preset_from_config(entry: &str) -> Option<TerminalCommandPre
         "env" => {
             return Some(terminal_command_preset(
                 "Env",
-                "env | sort | grep '^CONDUCTOR_'",
+                "env | sort | grep '^ARCHDUCTOR_'",
             ))
         }
         "files" => {
@@ -4170,7 +4198,7 @@ fn display_command(program: &Path, args: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use linux_conductor_core::workspace::{ProcessKind, ProcessStatus};
+    use linux_archductor_core::workspace::{ProcessKind, ProcessStatus};
 
     fn terminal_summary(
         id: i64,
@@ -4185,6 +4213,7 @@ mod tests {
             process: ProcessRecord {
                 id,
                 workspace_id: 1,
+                chat_thread_id: None,
                 kind: ProcessKind::Terminal,
                 command: command.to_owned(),
                 pid: 4_000 + id as u32,
@@ -4195,6 +4224,7 @@ mod tests {
                 ended_at: (status != ProcessStatus::Running)
                     .then(|| "2026-06-18T04:00:00Z".to_owned()),
                 session_harness_metadata: None,
+                session_resume_id: None,
             },
             line_count,
             byte_count,
@@ -4690,6 +4720,7 @@ mod tests {
         let record = ProcessRecord {
             id: 19,
             workspace_id: 1,
+            chat_thread_id: None,
             kind: ProcessKind::Terminal,
             command: "/bin/bash".to_owned(),
             pid: 4040,
@@ -4699,6 +4730,7 @@ mod tests {
             exit_code: None,
             ended_at: None,
             session_harness_metadata: None,
+            session_resume_id: None,
         };
 
         let formatted = format_terminal_tail_transcript(&record, "tail line\n");
@@ -4713,6 +4745,7 @@ mod tests {
         let record = ProcessRecord {
             id: 33,
             workspace_id: 1,
+            chat_thread_id: None,
             kind: ProcessKind::Terminal,
             command: "/bin/bash".to_owned(),
             pid: 4040,
@@ -4722,6 +4755,7 @@ mod tests {
             exit_code: None,
             ended_at: None,
             session_harness_metadata: None,
+            session_resume_id: None,
         };
 
         let formatted = format_terminal_head_transcript(&record, "first line\n");
@@ -4736,6 +4770,7 @@ mod tests {
         let record = ProcessRecord {
             id: 88,
             workspace_id: 1,
+            chat_thread_id: None,
             kind: ProcessKind::Terminal,
             command: "/bin/bash".to_owned(),
             pid: 4040,
@@ -4745,6 +4780,7 @@ mod tests {
             exit_code: None,
             ended_at: None,
             session_harness_metadata: None,
+            session_resume_id: None,
         };
 
         let formatted = format_terminal_line_transcript(&record, 17, 5, "ctx\n");
@@ -4984,28 +5020,28 @@ mod tests {
     fn active_terminal_session_option_labels_include_process_id() {
         assert_eq!(
             active_terminal_session_option_label(1, Some(42)),
-            "Shell 2 #42"
+            "Terminal #42"
         );
-        assert_eq!(active_terminal_session_option_label(0, None), "Shell 1");
+        assert_eq!(active_terminal_session_option_label(0, None), "Terminal");
     }
 
     #[test]
     fn active_terminal_tab_labels_include_state() {
         assert_eq!(
             active_terminal_tab_label(1, Some(42), ProcessStatus::Running, true),
-            "Shell 2 #42 running"
+            "Terminal"
         );
         assert_eq!(
             active_terminal_tab_label(0, Some(7), ProcessStatus::Stopped, false),
-            "Shell 1 #7 stopped"
+            "Terminal"
         );
         assert_eq!(
             active_terminal_tab_label(0, Some(7), ProcessStatus::Running, false),
-            "Shell 1 #7 detached"
+            "Terminal"
         );
         assert_eq!(
             active_terminal_tab_label(0, Some(7), ProcessStatus::Exited, false),
-            "Shell 1 #7 exited"
+            "Terminal"
         );
     }
 
@@ -5021,6 +5057,7 @@ mod tests {
         let record = ProcessRecord {
             id: 7,
             workspace_id: 1,
+            chat_thread_id: None,
             kind: ProcessKind::Terminal,
             command: "/bin/bash".to_owned(),
             pid: 4242,
@@ -5030,6 +5067,7 @@ mod tests {
             exit_code: Some(0),
             ended_at: Some("2026-06-18T02:05:00Z".to_owned()),
             session_harness_metadata: None,
+            session_resume_id: None,
         };
 
         let rendered = format_selected_terminal_transcript(&record, "hello\n");
@@ -5046,5 +5084,34 @@ mod tests {
             terminal_process_refresh_scope(),
             crate::refresh::RefreshScope::Workspace
         ));
+    }
+
+    #[test]
+    fn rebuild_terminal_tabs_does_not_panic_on_transient_state_borrow() {
+        let _ = gtk::init();
+        let terminal_tabs = GBox::new(Orientation::Horizontal, 6);
+        let active_pty_combo = ComboBoxText::new();
+        let tab_buttons = Rc::new(RefCell::new(Vec::<Button>::new()));
+        let terminal_tab_states = Rc::new(RefCell::new(vec![TerminalTabState {
+            process_id: 7,
+            attached: true,
+            status: ProcessStatus::Running,
+        }]));
+        let borrow = terminal_tab_states.borrow_mut();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            rebuild_terminal_tabs(
+                &terminal_tabs,
+                &active_pty_combo,
+                &tab_buttons,
+                &terminal_tab_states,
+                PathBuf::from("/tmp/state.db"),
+                "berlin".to_owned(),
+                TextBuffer::new(None),
+                Some(0),
+            );
+        }));
+        drop(borrow);
+
+        assert!(result.is_ok());
     }
 }

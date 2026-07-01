@@ -1,0 +1,228 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "23 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-build:
+    name: Lint & Build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo registry
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev libadwaita-1-dev pkg-config \
+            git sqlite3 openssh-client
+
+      - name: Show toolchain
+        run: |
+          rustc --version
+          cargo --version
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint workspace
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Build workspace
+        run: cargo build --workspace --locked
+
+      - name: Package debug binaries
+        run: |
+          mkdir -p ci-artifacts/bin
+          cp target/debug/linux-archductor ci-artifacts/bin/
+          cp target/debug/linux-archductor-gtk ci-artifacts/bin/
+          cp target/debug/archcar ci-artifacts/bin/
+
+      - name: Upload debug binaries
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-debug-binaries
+          path: ci-artifacts/bin/
+          if-no-files-found: error
+          retention-days: 7
+
+  dependency-scan:
+    name: Dependency Scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    needs: lint-build
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+
+      - name: Cache Cargo registry
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-security-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-security-cargo-
+
+      - name: Check dependency policy
+        uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2
+        with:
+          command: check
+
+      - name: Run Trivy vulnerability gate
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          exit-code: "1"
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          scanners: vuln
+          timeout: 10m
+
+      - name: Generate Trivy SARIF
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        if: always()
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: trivy-filesystem.sarif
+          exit-code: "0"
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          scanners: vuln
+          timeout: 10m
+
+      - name: Upload Trivy SARIF
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: trivy-filesystem-sarif
+          path: trivy-filesystem.sarif
+          if-no-files-found: error
+          retention-days: 14
+
+  workflow-audit:
+    name: Workflow Audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    needs: lint-build
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Run actionlint
+        uses: raven-actions/actionlint@205b530c5d9fa8f44ae9ed59f341a0db994aa6f8 # v2
+
+      - name: Run zizmor
+        uses: zizmorcore/zizmor-action@192e21d79ab29983730a13d1382995c2307fbcaa # v0.5.7
+        with:
+          persona: pedantic
+          min-severity: high
+          advanced-security: false
+          annotations: true
+
+  codeql:
+    name: CodeQL
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    needs: lint-build
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
+        with:
+          languages: rust
+          queries: security-extended,security-and-quality
+          build-mode: none
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
+        with:
+          category: /language:rust
+          output: codeql-results
+          upload: never
+
+      - name: Fail on high-severity CodeQL results
+        run: |
+          jq -e '
+            [ .runs[]?.results[]?
+              | select((.properties."security-severity"? // "0" | tonumber) >= 7)
+            ] as $alerts
+            | if ($alerts | length) == 0 then
+                true
+              else
+                $alerts[]
+                | "\(.ruleId): \(.message.text)"
+                | halt_error(1)
+              end
+          ' codeql-results/rust.sarif
+
+      - name: Upload CodeQL SARIF
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: codeql-rust-sarif
+          path: codeql-results/rust.sarif
+          if-no-files-found: error
+          retention-days: 14
+
+  ci-complete:
+    name: CI Complete
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    needs:
+      - dependency-scan
+      - workflow-audit
+      - codeql
+    steps:
+      - name: Confirm all gates passed
+        run: echo "All CI gates passed."

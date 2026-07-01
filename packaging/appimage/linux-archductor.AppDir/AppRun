@@ -1,11 +1,11 @@
 #!/bin/bash
-# AppRun — entry point for the linux-conductor AppImage.
+# AppRun — entry point for the linux-archductor AppImage.
 # The AppImage runtime sets APPDIR to the squashfs mount point.
 # With no arguments: launch the GUI. With arguments: pass through to CLI.
 set -euo pipefail
 SELF_DIR="$(dirname "$(readlink -f "$0")")"
 if [ $# -eq 0 ]; then
-    exec "$SELF_DIR/usr/bin/linux-conductor-gtk"
+    exec "$SELF_DIR/usr/bin/linux-archductor-gtk"
 else
-    exec "$SELF_DIR/usr/bin/linux-conductor" "$@"
+    exec "$SELF_DIR/usr/bin/linux-archductor" "$@"
 fi

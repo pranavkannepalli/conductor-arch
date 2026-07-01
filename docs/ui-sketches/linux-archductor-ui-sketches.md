@@ -1,20 +1,20 @@
-# Linux Conductor UI Sketches
+# Linux Archductor UI Sketches
 
-These sketches define a fast MVP interface for a Linux-native Conductor-like
+These sketches define a fast MVP interface for a Linux-native Archductor-like
 workflow. They are inspired by the public Conductor product layout and the
 official Conductor docs: dark app chrome, a narrow workspace sidebar, central
 agent session surface, bottom composer, embedded terminal mode, project
 settings, and review/checks affordances.
 
 They are implementation wireframes, not a pixel clone of the macOS app. The
-product target is still Conductor parity first; better-than-Conductor ideas
+product target is still Archductor parity first; better-than-Archductor ideas
 should be chosen deliberately after parity is specified.
 
 ## Sketches
 
-- [Main workspace shell](./linux-conductor-main-workspace.svg)
-- [New workspace flow](./linux-conductor-new-workspace.svg)
-- [Review and checks panel](./linux-conductor-review-checks.svg)
+- [Main workspace shell](./linux-archductor-main-workspace.svg)
+- [New workspace flow](./linux-archductor-new-workspace.svg)
+- [Review and checks panel](./linux-archductor-review-checks.svg)
 
 ## UI Principles
 

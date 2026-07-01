@@ -1,9 +1,12 @@
 #![allow(dead_code)]
 #![allow(clippy::ptr_arg, clippy::too_many_arguments)]
 
+mod archcar_async;
+mod buttons;
 mod command_palette;
 mod dashboard;
 mod history;
+mod logger;
 mod projects;
 mod refresh;
 mod session_surface;
@@ -14,18 +17,22 @@ mod terminal;
 mod theme;
 mod workspace_command_center;
 
+use crate::buttons::{icon_button, text_button};
 use adw::prelude::*;
-use adw::{Application, ApplicationWindow, ColorScheme, HeaderBar, StyleManager};
+use adw::{Application, ApplicationWindow, ColorScheme, StyleManager};
 use command_palette::{
     filter_palette_commands, palette_commands, Keybindings, PaletteCommand, PaletteTarget,
     ShortcutAction,
 };
 use gtk::{
-    Box as GBox, Button, CssProvider, Entry, Label, Orientation, ScrolledWindow, Stack,
+    Align, Box as GBox, CssProvider, Entry, Label, Orientation, Overlay, ScrolledWindow, Stack,
     STYLE_PROVIDER_PRIORITY_APPLICATION,
 };
-use linux_conductor_core::paths::AppPaths;
-use linux_conductor_core::workspace::{ProcessStatus, WorkspaceStore, WorkspaceViewDefaults};
+use linux_archductor_core::archcar::server::{
+    reconcile_managed_sessions_on_startup, ArchcarServer,
+};
+use linux_archductor_core::paths::AppPaths;
+use linux_archductor_core::workspace::{ProcessStatus, WorkspaceStore, WorkspaceViewDefaults};
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use refresh::{RefreshHub, RefreshScope};
 use state::{AppPage, AppState, WorkspaceTab};
@@ -33,8 +40,9 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::mpsc::{self, Sender};
+use std::time::Instant;
 
-const APP_ID: &str = "io.github.pranavkannepalli.linux-conductor";
+const APP_ID: &str = "io.github.pranavkannepalli.linux-archductor";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LaunchTarget {
@@ -166,6 +174,18 @@ impl Default for LaunchTarget {
 }
 
 fn main() {
+    if std::env::args().any(|arg| arg == "--archcar-serve") {
+        let paths = AppPaths::from_env();
+        if let Err(err) = reconcile_managed_sessions_on_startup(&paths)
+            .and_then(|_| ArchcarServer::bind(paths))
+            .and_then(|server| server.serve())
+        {
+            eprintln!("archcar serve failed: {err:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     let launch_target = parse_launch_target(std::env::args()).unwrap_or_default();
 
     let app = Application::builder().application_id(APP_ID).build();
@@ -207,7 +227,7 @@ where
                     .ok_or_else(|| "--page requires a value".to_owned())?;
                 target.page = parse_app_page(value)?;
             }
-            value if value.starts_with("linux-conductor://") => {
+            value if value.starts_with("linux-archductor://") => {
                 target = parse_deep_link(value)?;
             }
             _ => {}
@@ -219,8 +239,8 @@ where
 
 fn parse_deep_link(value: &str) -> Result<LaunchTarget, String> {
     let rest = value
-        .strip_prefix("linux-conductor://")
-        .ok_or_else(|| "deep link must start with linux-conductor://".to_owned())?;
+        .strip_prefix("linux-archductor://")
+        .ok_or_else(|| "deep link must start with linux-archductor://".to_owned())?;
     let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
     let mut target = LaunchTarget::default();
     let parts = path
@@ -346,7 +366,16 @@ fn apply_view_preferences(window: &ApplicationWindow, preferences: &ViewPreferen
 }
 
 fn build_ui(app: &Application, launch_target: LaunchTarget) {
+    let startup = Instant::now();
     let paths = AppPaths::from_env();
+    if let Err(err) = logger::init_dev_logger(&paths) {
+        eprintln!("failed to initialize dev logger: {err:#}");
+    }
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        ?launch_target,
+        "gtk startup: build_ui entered"
+    );
     let initial_tab = if launch_target.explicit_workspace_tab {
         launch_target.workspace_tab.clone()
     } else {
@@ -369,13 +398,16 @@ fn build_ui(app: &Application, launch_target: LaunchTarget) {
         launch_target.page.clone(),
     );
     let refresh_hub = RefreshHub::default();
-
     let window = ApplicationWindow::builder()
         .application(app)
-        .title("Linux Conductor")
+        .title("Linux Archductor")
         .default_width(1280)
         .default_height(800)
         .build();
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: window built"
+    );
     let initial_view_preferences = resolve_view_preferences(
         paths.database_path.clone(),
         launch_target.workspace.as_deref(),
@@ -384,7 +416,6 @@ fn build_ui(app: &Application, launch_target: LaunchTarget) {
         paths.database_path.clone(),
         launch_target.workspace.as_deref(),
     )));
-
     let css = CssProvider::new();
     css.load_from_data(theme::app_css());
     gtk::style_context_add_provider_for_display(
@@ -393,45 +424,82 @@ fn build_ui(app: &Application, launch_target: LaunchTarget) {
         STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
     apply_view_preferences(&window, &initial_view_preferences);
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: styles applied"
+    );
 
     let split = adw::OverlaySplitView::new();
-    split.set_min_sidebar_width(220.0);
-    split.set_max_sidebar_width(280.0);
-    split.set_show_sidebar(true);
+    split.set_min_sidebar_width(120.0);
+    split.set_max_sidebar_width(360.0);
+    split.set_pin_sidebar(false);
+    split.set_collapsed(false);
+    let collapse_sidebar: Rc<dyn Fn()> = {
+        let split = split.clone();
+        Rc::new(move || split.set_collapsed(true))
+    };
 
     let toast_overlay = adw::ToastOverlay::new();
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: building dashboard"
+    );
     let (dashboard, refresh_dashboard) = dashboard::build_dashboard_panel(&app_state.paths);
     dashboard.set_hexpand(true);
     dashboard.set_vexpand(true);
     let main_stack_handle: Rc<RefCell<Option<Stack>>> = Rc::new(RefCell::new(None));
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: dashboard built"
+    );
 
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: building workspace center"
+    );
     let (workspace_detail, refresh_workspace_detail) =
         workspace_command_center::build_workspace_command_center(
             &app_state,
             refresh_hub.clone(),
             toast_overlay.clone(),
-            Rc::new({
-                let state = app_state.clone();
-                let refresh_hub = refresh_hub.clone();
-                let stack_handle = main_stack_handle.clone();
-                move || {
-                    state.set_active_page(AppPage::Projects);
-                    if let Some(stack) = stack_handle.borrow().as_ref() {
-                        stack.set_visible_child_name("projects");
-                    }
-                    refresh_hub.refresh(RefreshScope::Sidebar);
-                    refresh_hub.refresh(RefreshScope::Projects);
-                }
-            }),
+            collapse_sidebar.clone(),
         );
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: workspace center built"
+    );
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: building projects page"
+    );
     let (projects_page, refresh_projects) = projects::build_projects_page(
         &app_state.paths,
         refresh_dashboard.clone(),
         refresh_workspace_detail.clone(),
     );
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: projects page built"
+    );
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: building settings page"
+    );
     let (settings_page, refresh_settings) = settings::build_settings_page(&app_state.paths);
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: settings page built"
+    );
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: building history page"
+    );
     let (history_page, refresh_history) =
         history::build_history_page(app_state.workspace_database_path());
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: history page built"
+    );
 
     let main_stack = Stack::new();
     main_stack.set_hexpand(true);
@@ -469,8 +537,14 @@ fn build_ui(app: &Application, launch_target: LaunchTarget) {
         &app_state,
         refresh_hub.clone(),
         main_stack.clone(),
+        window.clone(),
+        split.clone(),
         refresh_workspace_detail.clone(),
         refresh_view_preferences.clone(),
+    );
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: sidebar built"
     );
 
     refresh_hub.set_dashboard(refresh_dashboard.clone());
@@ -488,33 +562,33 @@ fn build_ui(app: &Application, launch_target: LaunchTarget) {
 
     split.set_sidebar(Some(&sidebar));
     toast_overlay.set_child(Some(&main_stack));
-    split.set_content(Some(&toast_overlay));
 
-    // Header bar
-    let header = HeaderBar::new();
-    header.add_css_class("app-header");
-    header.set_show_end_title_buttons(true);
-    let toggle_btn = Button::from_icon_name("sidebar-show-symbolic");
-    toggle_btn.add_css_class("chrome-button");
-    toggle_btn.set_tooltip_text(Some("Toggle sidebar"));
-    let split_clone = split.clone();
-    toggle_btn.connect_clicked(move |_| {
-        split_clone.set_show_sidebar(!split_clone.shows_sidebar());
-    });
-    // Refresh button
-    let refresh_btn = Button::from_icon_name("view-refresh-symbolic");
-    refresh_btn.add_css_class("chrome-button");
-    refresh_btn.set_tooltip_text(Some("Refresh workspace state"));
-    let hub_refresh = refresh_hub.clone();
-    refresh_btn.connect_clicked(move |_| {
-        hub_refresh.refresh(RefreshScope::All);
-    });
-    let palette_btn = Button::from_icon_name("edit-find-symbolic");
-    palette_btn.add_css_class("chrome-button");
-    palette_btn.set_tooltip_text(Some("Command palette"));
-    let settings_btn = Button::from_icon_name("emblem-system-symbolic");
-    settings_btn.add_css_class("chrome-button");
-    settings_btn.set_tooltip_text(Some("Settings"));
+    let content_overlay = Overlay::new();
+    content_overlay.set_child(Some(&toast_overlay));
+
+    let reopen_sidebar_btn = icon_button("sidebar-show-symbolic", "Show sidebar");
+    reopen_sidebar_btn.add_css_class("sidebar-reopen-button");
+    reopen_sidebar_btn.set_tooltip_text(Some("Show sidebar"));
+    reopen_sidebar_btn.set_halign(Align::Start);
+    reopen_sidebar_btn.set_valign(Align::Start);
+    reopen_sidebar_btn.set_margin_start(10);
+    reopen_sidebar_btn.set_margin_top(10);
+    {
+        let split = split.clone();
+        reopen_sidebar_btn.connect_clicked(move |_| {
+            split.set_collapsed(false);
+        });
+    }
+    content_overlay.add_overlay(&reopen_sidebar_btn);
+    reopen_sidebar_btn.set_visible(split.is_collapsed());
+    {
+        let reopen_sidebar_btn = reopen_sidebar_btn.clone();
+        split.connect_collapsed_notify(move |split| {
+            reopen_sidebar_btn.set_visible(split.is_collapsed());
+        });
+    }
+
+    split.set_content(Some(&content_overlay));
 
     let open_palette: Rc<dyn Fn()> = {
         let window_for_palette = window.clone();
@@ -561,30 +635,12 @@ fn build_ui(app: &Application, launch_target: LaunchTarget) {
             );
         })
     };
-    let open_palette_button = open_palette.clone();
-    palette_btn.connect_clicked(move |_| {
-        open_palette_button();
-    });
-    let stack_settings = main_stack.clone();
-    let state_settings = app_state.clone();
-    let hub_settings = refresh_hub.clone();
-    settings_btn.connect_clicked(move |_| {
-        state_settings.set_active_page(AppPage::Settings);
-        stack_settings.set_visible_child_name("settings");
-        hub_settings.refresh(RefreshScope::Sidebar);
-        hub_settings.refresh(RefreshScope::Projects);
-    });
-    header.pack_start(&toggle_btn);
-    header.pack_end(&settings_btn);
-    header.pack_end(&palette_btn);
-    header.pack_end(&refresh_btn);
-
-    let toolbar_view = adw::ToolbarView::new();
-    toolbar_view.add_top_bar(&header);
-    toolbar_view.set_content(Some(&split));
-
-    window.set_content(Some(&toolbar_view));
+    window.set_content(Some(&split));
     window.present();
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: window presented"
+    );
 
     if reconcile_runtime_state(&app_state.workspace_database_path())
         .map(|report| report.changed())
@@ -659,6 +715,20 @@ fn build_ui(app: &Application, launch_target: LaunchTarget) {
     let refresh_workspace_kb = refresh_workspace_detail.clone();
     evk.connect_key_pressed(move |_, keyval, _, modifiers| {
         if let Some(key) = keyval.to_unicode() {
+            if key.eq_ignore_ascii_case(&'t')
+                && (modifiers.contains(gtk::gdk::ModifierType::META_MASK)
+                    || modifiers.contains(gtk::gdk::ModifierType::SUPER_MASK))
+            {
+                apply_palette_target(
+                    PaletteTarget::WorkspaceTab(WorkspaceTab::Terminal),
+                    &state_kb,
+                    &stack_kb,
+                    &split_kb,
+                    &hub_kb,
+                    &refresh_workspace_kb,
+                );
+                return gtk::glib::Propagation::Stop;
+            }
             let action = keybindings_kb.borrow().action_for_event(
                 key,
                 modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK),
@@ -697,16 +767,6 @@ fn build_ui(app: &Application, launch_target: LaunchTarget) {
         gtk::glib::Propagation::Proceed
     });
     window.add_controller(evk);
-
-    // Auto-refresh panels every 5 seconds
-    let hub_auto = refresh_hub.clone();
-    glib::timeout_add_seconds_local(5, move || {
-        hub_auto.refresh(RefreshScope::Sidebar);
-        hub_auto.refresh(RefreshScope::Dashboard);
-        hub_auto.refresh(RefreshScope::Projects);
-        hub_auto.refresh(RefreshScope::Workspace);
-        glib::ControlFlow::Continue
-    });
 
     // Notification tracker: fires toasts when sessions stop or checks fail.
     // State is (workspace_name, prev_active_sessions, prev_session_was_running).
@@ -866,7 +926,7 @@ fn render_command_palette_results(
             Some(shortcut) => format!("{}  {}", command.label, shortcut),
             None => command.label.to_owned(),
         };
-        let button = Button::with_label(&label);
+        let button = text_button(&label);
         button.set_halign(gtk::Align::Fill);
         button.set_hexpand(true);
         let target = command.target.clone();
@@ -890,7 +950,7 @@ fn apply_palette_target(
 ) {
     match target {
         PaletteTarget::Page(page) => {
-            state.set_active_page(page.clone());
+            state.navigate_to_page(page.clone());
             main_stack.set_visible_child_name(page_stack_name(&page));
             refresh_hub.refresh(RefreshScope::Sidebar);
             if page == AppPage::Workspace {
@@ -898,8 +958,7 @@ fn apply_palette_target(
             }
         }
         PaletteTarget::WorkspaceTab(tab) => {
-            state.set_active_page(AppPage::Workspace);
-            state.set_active_workspace_tab(tab);
+            state.navigate_to_workspace_tab(tab);
             main_stack.set_visible_child_name("workspace");
             refresh_hub.refresh(RefreshScope::Sidebar);
             refresh_workspace();
@@ -1042,9 +1101,9 @@ pub(crate) fn detail_row(label: &str, value: &str) -> GBox {
 pub(crate) fn cli_binary() -> PathBuf {
     std::env::current_exe()
         .ok()
-        .and_then(|path| path.parent().map(|parent| parent.join("linux-conductor")))
+        .and_then(|path| path.parent().map(|parent| parent.join("linux-archductor")))
         .filter(|path| path.exists())
-        .unwrap_or_else(|| PathBuf::from("linux-conductor"))
+        .unwrap_or_else(|| PathBuf::from("linux-archductor"))
 }
 
 pub(crate) fn shell_quote(value: &str) -> String {
@@ -1055,7 +1114,7 @@ pub(crate) fn default_clone_parent() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("conductor")
+        .join("archductor")
         .join("repos")
 }
 
@@ -1133,8 +1192,8 @@ pub(crate) fn spawn_terminal_command(cmd: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use linux_conductor_core::repository::{AddRepository, RepositoryStore};
-    use linux_conductor_core::workspace::{CreateWorkspace, ProcessStatus};
+    use linux_archductor_core::repository::{AddRepository, RepositoryStore};
+    use linux_archductor_core::workspace::{CreateWorkspace, ProcessStatus};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -1184,7 +1243,7 @@ mod tests {
     #[test]
     fn launch_target_parses_workspace_and_tab_args() {
         let target = parse_launch_target([
-            "linux-conductor-gtk",
+            "linux-archductor-gtk",
             "--workspace",
             "berlin",
             "--tab",
@@ -1200,8 +1259,8 @@ mod tests {
     #[test]
     fn launch_target_parses_workspace_deep_link() {
         let target = parse_launch_target([
-            "linux-conductor-gtk",
-            "linux-conductor://workspace/berlin?tab=review",
+            "linux-archductor-gtk",
+            "linux-archductor://workspace/berlin?tab=review",
         ])
         .unwrap();
 
@@ -1213,7 +1272,7 @@ mod tests {
     #[test]
     fn launch_target_parses_page_deep_links_and_tab_aliases() {
         let history =
-            parse_launch_target(["linux-conductor-gtk", "linux-conductor://history"]).unwrap();
+            parse_launch_target(["linux-archductor-gtk", "linux-archductor://history"]).unwrap();
         let terminal = parse_workspace_tab("big-terminal").unwrap();
 
         assert_eq!(history.page, AppPage::History);
@@ -1273,9 +1332,9 @@ mod tests {
             &path,
             [
                 "-c",
-                "user.name=Linux Conductor",
+                "user.name=Linux Archductor",
                 "-c",
-                "user.email=linux-conductor@example.test",
+                "user.email=linux-archductor@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",

@@ -250,7 +250,7 @@ fn default_workspace_parent(repo_name: &str) -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("conductor")
+        .join("archductor")
         .join("workspaces")
         .join(repo_name)
 }

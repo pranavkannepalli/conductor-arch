@@ -1,8 +1,8 @@
 [Desktop Entry]
-Name=Linux Conductor
+Name=Linux Archductor
 GenericName=Coding Agent Workspace Manager
-Exec=linux-conductor-gtk
-Icon=linux-conductor
+Exec=linux-archductor-gtk
+Icon=linux-archductor
 Type=Application
 Categories=Development;IDE;
 Terminal=false

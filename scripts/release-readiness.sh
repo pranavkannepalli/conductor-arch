@@ -5,12 +5,12 @@ usage() {
     cat <<'USAGE'
 Usage: scripts/release-readiness.sh [--version VERSION] [--skip-tests] [--package]
 
-Runs the local release-readiness gate for Linux Conductor.
+Runs the local release-readiness gate for Linux Archductor.
 
 Options:
   --version VERSION  Version used for local package names. Default: 0.1.0
   --skip-tests       Skip fmt, clippy, tests, and release build.
-  --skip-doctor      Skip the linux-conductor doctor check.
+  --skip-doctor      Skip the linux-archductor doctor check.
   --skip-deny        Skip cargo-deny even when it is installed.
   --package          Build local .deb/.rpm/AppImage artifacts on Linux.
 
@@ -83,11 +83,11 @@ if [ "$skip_tests" -eq 0 ]; then
 fi
 
 if [ "$skip_doctor" -eq 0 ]; then
-    if [ ! -x ./target/release/linux-conductor ]; then
-        echo "error: ./target/release/linux-conductor is missing; run without --skip-tests first" >&2
+    if [ ! -x ./target/release/linux-archductor ]; then
+        echo "error: ./target/release/linux-archductor is missing; run without --skip-tests first" >&2
         exit 1
     fi
-    run ./target/release/linux-conductor doctor
+    run ./target/release/linux-archductor doctor
 fi
 
 if [ "$skip_deny" -eq 1 ]; then
@@ -114,8 +114,8 @@ fi
 
 run mkdir -p dist
 
-run tar -czf "dist/linux-conductor-${version}-linux-x86_64.tar.gz" \
-    -C target/release linux-conductor linux-conductor-gtk
+run tar -czf "dist/linux-archductor-${version}-linux-x86_64.tar.gz" \
+    -C target/release linux-archductor linux-archductor-gtk
 
 if ! command -v nfpm >/dev/null 2>&1; then
     echo "error: nfpm is required for --package on Linux" >&2
@@ -134,11 +134,11 @@ echo
 echo "==> VERSION=${version} nfpm package --packager rpm --target dist/"
 VERSION="$version" nfpm package --packager rpm --target dist/
 
-appdir="packaging/appimage/linux-conductor.AppDir"
-run install -Dm755 target/release/linux-conductor "$appdir/usr/bin/linux-conductor"
-run install -Dm755 target/release/linux-conductor-gtk "$appdir/usr/bin/linux-conductor-gtk"
+appdir="packaging/appimage/linux-archductor.AppDir"
+run install -Dm755 target/release/linux-archductor "$appdir/usr/bin/linux-archductor"
+run install -Dm755 target/release/linux-archductor-gtk "$appdir/usr/bin/linux-archductor-gtk"
 run appimagetool --appimage-extract-and-run "$appdir" \
-    "dist/linux-conductor-${version}-x86_64.AppImage"
+    "dist/linux-archductor-${version}-x86_64.AppImage"
 
 if compgen -G "dist/*" >/dev/null; then
     echo

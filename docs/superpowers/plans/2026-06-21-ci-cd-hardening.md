@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add mature GitHub Actions validation, security scanning, release artifact checks, and dependency automation for the Rust Linux Conductor workspace.
+**Goal:** Add mature GitHub Actions validation, security scanning, release artifact checks, and dependency automation for the Rust Linux Archductor workspace.
 
 **Architecture:** Keep fast Rust build/test validation in the existing `Test` workflow. Put supply-chain, SARIF-producing scans, and GitHub Actions analysis in a separate `Security` workflow with least-privilege permissions. Harden release publishing by scanning generated artifacts, producing checksums, and creating provenance attestations.
 

@@ -1,5 +1,5 @@
 # Maintainer: Pranav Kannepalli <pranav.kannepalli@gmail.com>
-pkgname=linux-conductor
+pkgname=linux-archductor
 pkgver=0.1.0
 pkgrel=1
 pkgdesc="Linux-native parallel coding-agent workflow tool built around Git worktrees"
@@ -18,12 +18,12 @@ build() {
 
 package() {
     cd "conductor-arch-$pkgver"
-    install -Dm755 target/release/linux-conductor "$pkgdir/usr/bin/linux-conductor"
-    install -Dm755 target/release/linux-conductor-gtk "$pkgdir/usr/bin/linux-conductor-gtk"
-    install -Dm644 packaging/linux-conductor-gtk.desktop \
-        "$pkgdir/usr/share/applications/linux-conductor-gtk.desktop"
-    install -Dm644 packaging/linux-conductor.svg \
-        "$pkgdir/usr/share/icons/hicolor/scalable/apps/linux-conductor.svg"
+    install -Dm755 target/release/linux-archductor "$pkgdir/usr/bin/linux-archductor"
+    install -Dm755 target/release/linux-archductor-gtk "$pkgdir/usr/bin/linux-archductor-gtk"
+    install -Dm644 packaging/linux-archductor-gtk.desktop \
+        "$pkgdir/usr/share/applications/linux-archductor-gtk.desktop"
+    install -Dm644 packaging/linux-archductor.svg \
+        "$pkgdir/usr/share/icons/hicolor/scalable/apps/linux-archductor.svg"
     install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
     install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }
