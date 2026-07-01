@@ -6764,16 +6764,40 @@ fn process_alive(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
-fn stop_process(pid: u32) -> Result<()> {
-    // Try SIGTERM to process group first, then to process directly.
-    let group_ok = Command::new("kill")
-        .arg("-TERM")
-        .arg(format!("-{pid}"))
-        .stdout(Stdio::null())
+#[cfg(unix)]
+fn process_group_matches_pid(pid: u32) -> bool {
+    Command::new("ps")
+        .args(["-o", "pgid=", "-p", &pid.to_string()])
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .status()
-        .context("run kill")?
-        .success();
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .and_then(|stdout| stdout.trim().parse::<u32>().ok())
+        .map(|pgid| pgid == pid)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn process_group_matches_pid(_pid: u32) -> bool {
+    false
+}
+
+fn stop_process(pid: u32) -> Result<()> {
+    // Try SIGTERM to the process group only when the child owns a distinct group.
+    let group_ok = if process_group_matches_pid(pid) {
+        Command::new("kill")
+            .arg("-TERM")
+            .arg(format!("-{pid}"))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .context("run kill")?
+            .success()
+    } else {
+        false
+    };
     if !group_ok {
         let _ = Command::new("kill")
             .arg("-TERM")
@@ -6794,12 +6818,14 @@ fn stop_process(pid: u32) -> Result<()> {
 
     // Still alive — send SIGKILL to process group, then process.
     if process_alive(pid) {
-        let _ = Command::new("kill")
-            .arg("-KILL")
-            .arg(format!("-{pid}"))
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        if process_group_matches_pid(pid) {
+            let _ = Command::new("kill")
+                .arg("-KILL")
+                .arg(format!("-{pid}"))
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
         std::thread::sleep(Duration::from_millis(200));
         let _ = Command::new("kill")
             .arg("-KILL")
