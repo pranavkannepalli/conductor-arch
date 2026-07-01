@@ -25,8 +25,6 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: write
-      attestations: write
-      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -161,16 +159,6 @@ jobs:
           name: trivy-release-artifacts-sarif
           path: trivy-release-artifacts.sarif
           if-no-files-found: error
-
-      - name: Attest release artifacts
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
-        with:
-          subject-path: |
-            dist/*.tar.gz
-            dist/*.deb
-            dist/*.rpm
-            dist/*.AppImage
-            dist/SHA256SUMS
 
       # Upload
       - name: Upload all artifacts
