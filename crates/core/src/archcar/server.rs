@@ -223,6 +223,8 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                             role: message.role,
                             content: message.content,
                             source: message.source,
+                            inline_event: None,
+                            context_usage: None,
                         })
                         .collect(),
                 },
@@ -749,8 +751,8 @@ mod tests {
             .record_session_process_for_thread("berlin", thread.id, &launch, child.id())
             .unwrap();
         assert!(
-            wait_for_fake_codex_identity(child.id()),
-            "fake codex child should settle before reconciliation"
+            wait_for_fake_codex_child_alive(child.id()),
+            "fake codex child should be alive before reconciliation"
         );
 
         reconcile_managed_sessions_on_startup(&paths).unwrap();
@@ -909,22 +911,19 @@ mod tests {
         let _ = child.wait();
     }
 
-    fn wait_for_fake_codex_identity(pid: u32) -> bool {
+    fn wait_for_fake_codex_child_alive(pid: u32) -> bool {
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {
-            let cmdline = fs::read(format!("/proc/{pid}/cmdline")).ok().map(|bytes| {
-                bytes
-                    .split(|byte| *byte == 0)
-                    .filter(|segment| !segment.is_empty())
-                    .map(|segment| String::from_utf8_lossy(segment).into_owned())
-                    .collect::<Vec<_>>()
-            });
-            if let Some(args) = cmdline {
-                if args.first().map(|value| value == "codex").unwrap_or(false)
-                    && args.iter().any(|arg| arg == "--no-alt-screen")
-                {
-                    return true;
-                }
+            let alive = Command::new("kill")
+                .arg("-0")
+                .arg(pid.to_string())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false);
+            if alive {
+                return true;
             }
             std::thread::sleep(Duration::from_millis(25));
         }

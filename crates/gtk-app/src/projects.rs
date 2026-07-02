@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use gtk::prelude::*;
 use gtk::{
-    Box as GBox, Button, CheckButton, ComboBoxText, Entry, Label, Orientation, PolicyType,
-    ScrolledWindow, Stack, TextView,
+    Box as GBox, Button, CheckButton, ComboBoxText, Entry, Image, Label, ListBox, ListBoxRow,
+    Orientation, PolicyType, Popover, ScrolledWindow, Stack, TextView,
 };
 use linux_archductor_core::paths::AppPaths;
 use linux_archductor_core::repository::{AddRepository, RepositoryStore};
@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
 
-use crate::buttons::text_button;
+use crate::buttons::{resolve_icon_name, text_button};
 use crate::{default_clone_parent, detail_row, repo_name_from_url};
 
 pub(crate) fn build_projects_page(
@@ -835,7 +835,7 @@ pub(crate) fn show_create_workspace_dialog(
     }
     body.append(&repo_select);
 
-    let source_header = GBox::new(Orientation::Vertical, 10);
+    let source_header = GBox::new(Orientation::Horizontal, 12);
     source_header.add_css_class("workspace-modal-split");
     let start_column = GBox::new(Orientation::Vertical, 6);
     start_column.set_hexpand(true);
@@ -951,7 +951,7 @@ pub(crate) fn show_create_workspace_dialog(
     source_header.append(&source_column);
     body.append(&source_header);
 
-    let workspace_header = GBox::new(Orientation::Vertical, 10);
+    let workspace_header = GBox::new(Orientation::Horizontal, 12);
     workspace_header.add_css_class("workspace-modal-split");
     let name_column = GBox::new(Orientation::Vertical, 6);
     name_column.set_hexpand(true);
@@ -1324,6 +1324,21 @@ fn dialog_body(subtitle: &str) -> GBox {
     body
 }
 
+fn modal_form_section(title: &str, description: &str) -> GBox {
+    let section = GBox::new(Orientation::Vertical, 8);
+    section.add_css_class("workspace-modal-section");
+    let title_label = Label::new(Some(title));
+    title_label.add_css_class("workspace-modal-section-title");
+    title_label.set_xalign(0.0);
+    let description_label = Label::new(Some(description));
+    description_label.add_css_class("surface-note");
+    description_label.set_wrap(true);
+    description_label.set_xalign(0.0);
+    section.append(&title_label);
+    section.append(&description_label);
+    section
+}
+
 struct WorkspaceSourceFormCopy {
     field_label: &'static str,
     placeholder: &'static str,
@@ -1590,94 +1605,141 @@ struct NewProjectTemplate {
     description: &'static str,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProjectCreateAction {
+    id: &'static str,
+    label: &'static str,
+}
+
+fn project_create_actions() -> Vec<ProjectCreateAction> {
+    vec![
+        ProjectCreateAction {
+            id: "folder",
+            label: "Open project",
+        },
+        ProjectCreateAction {
+            id: "clone",
+            label: "Open GitHub project",
+        },
+        ProjectCreateAction {
+            id: "new",
+            label: "Quick start",
+        },
+    ]
+}
+
 pub(crate) fn show_repository_quick_add_dialog(
     database_path: PathBuf,
     refresh: Rc<dyn Fn()>,
     initial_mode: Option<&str>,
 ) {
+    match initial_mode.unwrap_or("folder") {
+        "clone" => show_github_project_dialog(database_path, refresh),
+        "new" => show_quick_start_dialog(database_path, refresh),
+        _ => show_open_project_dialog(database_path, refresh),
+    }
+}
+
+pub(crate) fn show_project_creation_popover(
+    anchor: &Button,
+    database_path: PathBuf,
+    refresh: Rc<dyn Fn()>,
+) {
+    let popover = Popover::new();
+    popover.add_css_class("project-create-menu");
+    popover.set_parent(anchor);
+
+    let menu = GBox::new(Orientation::Vertical, 4);
+    menu.set_margin_top(6);
+    menu.set_margin_bottom(6);
+    menu.set_margin_start(6);
+    menu.set_margin_end(6);
+
+    let actions = project_create_actions();
+    let open_project = project_create_menu_row("folder-open-symbolic", actions[0].label);
+    let open_github = project_create_menu_row("network-workgroup-symbolic", actions[1].label);
+    let quick_start = project_create_menu_row("folder-new-symbolic", actions[2].label);
+
+    {
+        let popover = popover.clone();
+        let database_path = database_path.clone();
+        let refresh = refresh.clone();
+        open_project.connect_clicked(move |_| {
+            popover.popdown();
+            show_open_project_dialog(database_path.clone(), refresh.clone());
+        });
+    }
+    {
+        let popover = popover.clone();
+        let database_path = database_path.clone();
+        let refresh = refresh.clone();
+        open_github.connect_clicked(move |_| {
+            popover.popdown();
+            show_github_project_dialog(database_path.clone(), refresh.clone());
+        });
+    }
+    {
+        let popover = popover.clone();
+        quick_start.connect_clicked(move |_| {
+            popover.popdown();
+            show_quick_start_dialog(database_path.clone(), refresh.clone());
+        });
+    }
+
+    menu.append(&open_project);
+    menu.append(&open_github);
+    menu.append(&quick_start);
+    popover.set_child(Some(&menu));
+    popover.popup();
+}
+
+fn project_create_menu_row(icon: &str, label: &str) -> Button {
+    let button = Button::new();
+    button.add_css_class("project-create-menu-row");
+    let row = GBox::new(Orientation::Horizontal, 10);
+    row.set_valign(gtk::Align::Center);
+    let image = Image::from_icon_name(resolve_icon_name(icon));
+    image.add_css_class("project-create-menu-icon");
+    let text = Label::new(Some(label));
+    text.add_css_class("project-create-menu-label");
+    text.set_xalign(0.0);
+    text.set_hexpand(true);
+    row.append(&image);
+    row.append(&text);
+    button.set_child(Some(&row));
+    button
+}
+
+fn show_open_project_dialog(database_path: PathBuf, refresh: Rc<dyn Fn()>) {
     let dialog = gtk::Window::builder()
-        .title("Add Repository")
+        .title("Open Project")
         .modal(true)
-        .default_width(720)
-        .default_height(420)
+        .default_width(560)
+        .default_height(360)
         .build();
-    let body = dialog_body("Open a checked-out folder, clone from GitHub, or start a new project.");
+    let body = dialog_body("Register an existing checked-out repository.");
     body.add_css_class("workspace-modal");
 
-    let mode_label = Label::new(Some("Add mode"));
-    mode_label.add_css_class("detail-label");
-    mode_label.set_xalign(0.0);
-    body.append(&mode_label);
-
-    let mode_select = ComboBoxText::new();
-    mode_select.add_css_class("workspace-modal-field");
-    mode_select.append(Some("folder"), "Folder");
-    mode_select.append(Some("clone"), "Clone");
-    mode_select.append(Some("new"), "New");
-    mode_select.set_active_id(initial_mode.or(Some("folder")));
-    body.append(&mode_select);
-
-    let stack = Stack::new();
-    stack.set_vexpand(true);
-    body.append(&stack);
-
-    let folder_box = GBox::new(Orientation::Vertical, 8);
-    let folder_path_row = GBox::new(Orientation::Horizontal, 8);
+    let picker = GBox::new(Orientation::Vertical, 10);
+    picker.add_css_class("project-folder-picker");
     let folder_path_entry = Entry::new();
     folder_path_entry.add_css_class("workspace-modal-field");
     folder_path_entry.set_hexpand(true);
-    folder_path_entry.set_placeholder_text(Some("repository folder"));
-    let folder_browse_btn = text_button("Browse");
-    folder_path_row.append(&folder_path_entry);
-    folder_path_row.append(&folder_browse_btn);
+    folder_path_entry.set_placeholder_text(Some("Path to repository folder"));
     let folder_name_entry = Entry::new();
     folder_name_entry.add_css_class("workspace-modal-field");
     folder_name_entry.set_placeholder_text(Some("project name, optional"));
-    folder_box.append(&folder_path_row);
-    folder_box.append(&folder_name_entry);
-    stack.add_named(&folder_box, Some("folder"));
-
-    let clone_box = GBox::new(Orientation::Vertical, 8);
-    let github_row = GBox::new(Orientation::Horizontal, 8);
-    let github_repo_select = ComboBoxText::new();
-    github_repo_select.add_css_class("workspace-modal-field");
-    github_repo_select.set_hexpand(true);
-    let load_github_btn = text_button("Load GitHub Repos");
-    github_row.append(&github_repo_select);
-    github_row.append(&load_github_btn);
-    let clone_url_entry = Entry::new();
-    clone_url_entry.add_css_class("workspace-modal-field");
-    clone_url_entry.set_placeholder_text(Some("git URL"));
-    let clone_name_entry = Entry::new();
-    clone_name_entry.add_css_class("workspace-modal-field");
-    clone_name_entry.set_placeholder_text(Some("project name, optional"));
-    clone_box.append(&github_row);
-    clone_box.append(&clone_url_entry);
-    clone_box.append(&clone_name_entry);
-    stack.add_named(&clone_box, Some("clone"));
-
-    let new_box = GBox::new(Orientation::Vertical, 8);
-    let template_select = ComboBoxText::new();
-    template_select.add_css_class("workspace-modal-field");
-    for template in new_project_templates() {
-        template_select.append(Some(template.id), template.label);
-    }
-    template_select.set_active(Some(0));
-    let new_parent_row = GBox::new(Orientation::Horizontal, 8);
-    let new_parent_entry = Entry::new();
-    new_parent_entry.add_css_class("workspace-modal-field");
-    new_parent_entry.set_hexpand(true);
-    new_parent_entry.set_placeholder_text(Some("parent folder"));
-    let new_parent_browse_btn = text_button("Browse");
-    new_parent_row.append(&new_parent_entry);
-    new_parent_row.append(&new_parent_browse_btn);
-    let new_name_entry = Entry::new();
-    new_name_entry.add_css_class("workspace-modal-field");
-    new_name_entry.set_placeholder_text(Some("project name"));
-    new_box.append(&template_select);
-    new_box.append(&new_parent_row);
-    new_box.append(&new_name_entry);
-    stack.add_named(&new_box, Some("new"));
+    let folder_browse_btn = text_button("Choose Folder");
+    folder_browse_btn.add_css_class("suggested-action");
+    let path_preview = Label::new(Some("The repository stays where it is. Workspaces are created beside it unless project settings override that."));
+    path_preview.add_css_class("project-path-preview");
+    path_preview.set_wrap(true);
+    path_preview.set_xalign(0.0);
+    picker.append(&folder_browse_btn);
+    picker.append(&folder_path_entry);
+    picker.append(&folder_name_entry);
+    picker.append(&path_preview);
+    body.append(&picker);
 
     let feedback = Label::new(None);
     feedback.add_css_class("card-meta");
@@ -1685,102 +1747,247 @@ pub(crate) fn show_repository_quick_add_dialog(
     feedback.set_wrap(true);
     body.append(&feedback);
 
-    let refresh_mode: Rc<dyn Fn()> = {
-        let stack = stack.clone();
-        let mode_select = mode_select.clone();
-        Rc::new(move || {
-            let mode = mode_select
-                .active_id()
-                .map(|id| id.to_string())
-                .unwrap_or_else(|| "folder".to_owned());
-            stack.set_visible_child_name(&mode);
-        })
-    };
-    refresh_mode();
-    let refresh_mode_on_change = refresh_mode.clone();
-    mode_select.connect_changed(move |_| refresh_mode_on_change());
+    {
+        let folder_path_entry = folder_path_entry.clone();
+        folder_browse_btn.connect_clicked(move |_| {
+            choose_folder_for_entry(&folder_path_entry, "Pick a checked-out repository");
+        });
+    }
 
-    let folder_path_entry_for_picker = folder_path_entry.clone();
-    folder_browse_btn.connect_clicked(move |_| {
-        choose_folder_for_entry(
-            &folder_path_entry_for_picker,
-            "Pick a checked-out repository",
-        );
-    });
-    let new_parent_entry_for_picker = new_parent_entry.clone();
-    new_parent_browse_btn.connect_clicked(move |_| {
-        choose_folder_for_entry(&new_parent_entry_for_picker, "Pick a parent folder");
-    });
-
-    let clone_url_entry_for_select = clone_url_entry.clone();
-    let clone_name_entry_for_select = clone_name_entry.clone();
-    github_repo_select.connect_changed(move |select| {
-        if let Some(url) = select.active_id().map(|id| id.to_string()) {
-            clone_url_entry_for_select.set_text(&url);
-            if clone_name_entry_for_select.text().trim().is_empty() {
-                clone_name_entry_for_select.set_text(&repo_name_from_url(&url));
-            }
-        }
-    });
-
-    let github_repo_select_for_load = github_repo_select.clone();
-    let feedback_for_load = feedback.clone();
-    load_github_btn.connect_clicked(move |_| match load_github_repo_choices() {
-        Ok(repos) if repos.is_empty() => {
-            feedback_for_load.set_text("No GitHub repos returned by gh repo list.");
-        }
-        Ok(repos) => {
-            github_repo_select_for_load.remove_all();
-            for repo in repos {
-                github_repo_select_for_load.append(Some(&repo.url), &repo.label);
-            }
-            github_repo_select_for_load.set_active(Some(0));
-            feedback_for_load.set_text("Loaded GitHub repos.");
-        }
-        Err(err) => feedback_for_load.set_text(&format!("GitHub repo load failed: {err:#}")),
-    });
-
-    let actions = dialog_actions(&dialog, "Add");
+    let actions = dialog_actions(&dialog, "Open Project");
     let confirm = actions.1.clone();
     let dialog_for_confirm = dialog.clone();
     confirm.connect_clicked(move |_| {
-        let mode = mode_select
-            .active_id()
-            .map(|id| id.to_string())
-            .unwrap_or_else(|| "folder".to_owned());
-        let result = match mode.as_str() {
-            "clone" => {
-                let url = clone_url_entry.text().trim().to_owned();
-                let explicit_name = optional_entry_text(&clone_name_entry);
-                clone_repository_into_default_parent(&database_path, &url, explicit_name)
-            }
-            "new" => {
-                let parent = new_parent_entry.text().trim().to_owned();
-                let name = new_name_entry.text().trim().to_owned();
-                let template = template_select
-                    .active_id()
-                    .map(|id| id.to_string())
-                    .unwrap_or_else(|| "empty".to_owned());
-                create_repository_from_template(&database_path, &parent, &name, &template)
-            }
-            _ => {
-                let path = folder_path_entry.text().trim().to_owned();
-                let explicit_name = optional_entry_text(&folder_name_entry);
-                add_repository_from_path(&database_path, &path, explicit_name)
-            }
-        };
-
-        match result {
+        let path = folder_path_entry.text().trim().to_owned();
+        let explicit_name = optional_entry_text(&folder_name_entry);
+        match add_repository_from_path(&database_path, &path, explicit_name) {
             Ok(_) => {
                 refresh();
                 dialog_for_confirm.close();
             }
-            Err(err) => feedback.set_text(&format!("Add failed: {err:#}")),
+            Err(err) => feedback.set_text(&format!("Open project failed: {err:#}")),
         }
     });
     body.append(&actions.0);
     dialog.set_child(Some(&body));
     dialog.present();
+}
+
+fn show_github_project_dialog(database_path: PathBuf, refresh: Rc<dyn Fn()>) {
+    let dialog = gtk::Window::builder()
+        .title("Open GitHub Project")
+        .modal(true)
+        .default_width(640)
+        .default_height(520)
+        .build();
+    let body = dialog_body("Pick a GitHub repository or paste a Git URL.");
+    body.add_css_class("workspace-modal");
+
+    let clone_url_entry = Entry::new();
+    clone_url_entry.add_css_class("workspace-modal-field");
+    clone_url_entry.set_placeholder_text(Some("Git URL"));
+    let clone_name_entry = Entry::new();
+    clone_name_entry.add_css_class("workspace-modal-field");
+    clone_name_entry.set_placeholder_text(Some("project name, optional"));
+
+    let repo_list = ListBox::new();
+    repo_list.add_css_class("project-repo-list");
+    repo_list.set_selection_mode(gtk::SelectionMode::Single);
+    let repo_scroll = ScrolledWindow::new();
+    repo_scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
+    repo_scroll.set_min_content_height(220);
+    repo_scroll.set_child(Some(&repo_list));
+
+    let load_github_btn = text_button("Load GitHub Repos");
+    load_github_btn.add_css_class("suggested-action");
+    body.append(&load_github_btn);
+    body.append(&repo_scroll);
+    body.append(&clone_url_entry);
+    body.append(&clone_name_entry);
+
+    let selected_repos = Rc::new(RefCell::new(Vec::<GithubRepoChoice>::new()));
+
+    let feedback = Label::new(None);
+    feedback.add_css_class("card-meta");
+    feedback.set_xalign(0.0);
+    feedback.set_wrap(true);
+    body.append(&feedback);
+
+    {
+        let clone_url_entry = clone_url_entry.clone();
+        let clone_name_entry = clone_name_entry.clone();
+        let selected_repos = selected_repos.clone();
+        repo_list.connect_row_activated(move |_, row| {
+            if let Some(repo) = selected_repos.borrow().get(row.index() as usize) {
+                clone_url_entry.set_text(&repo.url);
+                if clone_name_entry.text().trim().is_empty() {
+                    clone_name_entry.set_text(&repo_name_from_url(&repo.url));
+                }
+            }
+        });
+    }
+
+    {
+        let repo_list = repo_list.clone();
+        let selected_repos = selected_repos.clone();
+        let feedback = feedback.clone();
+        load_github_btn.connect_clicked(move |_| match load_github_repo_choices() {
+            Ok(repos) if repos.is_empty() => {
+                feedback.set_text("No GitHub repos returned by gh repo list.");
+            }
+            Ok(repos) => {
+                while let Some(child) = repo_list.first_child() {
+                    repo_list.remove(&child);
+                }
+                *selected_repos.borrow_mut() = repos.clone();
+                for repo in repos {
+                    let row = ListBoxRow::new();
+                    row.add_css_class("project-repo-row");
+                    let row_box = GBox::new(Orientation::Vertical, 2);
+                    row_box.set_margin_top(9);
+                    row_box.set_margin_bottom(9);
+                    row_box.set_margin_start(10);
+                    row_box.set_margin_end(10);
+                    let label = Label::new(Some(&repo.label));
+                    label.add_css_class("card-title");
+                    label.set_xalign(0.0);
+                    let url = Label::new(Some(&repo.url));
+                    url.add_css_class("card-meta");
+                    url.set_xalign(0.0);
+                    row_box.append(&label);
+                    row_box.append(&url);
+                    row.set_child(Some(&row_box));
+                    repo_list.append(&row);
+                }
+                feedback.set_text("Loaded GitHub repos.");
+            }
+            Err(err) => feedback.set_text(&format!("GitHub repo load failed: {err:#}")),
+        });
+    }
+
+    let actions = dialog_actions(&dialog, "Clone");
+    let confirm = actions.1.clone();
+    let dialog_for_confirm = dialog.clone();
+    confirm.connect_clicked(move |_| {
+        let url = clone_url_entry.text().trim().to_owned();
+        let explicit_name = optional_entry_text(&clone_name_entry);
+
+        match clone_repository_into_default_parent(&database_path, &url, explicit_name) {
+            Ok(_) => {
+                refresh();
+                dialog_for_confirm.close();
+            }
+            Err(err) => feedback.set_text(&format!("Clone failed: {err:#}")),
+        }
+    });
+    body.append(&actions.0);
+    dialog.set_child(Some(&body));
+    dialog.present();
+}
+
+fn show_quick_start_dialog(database_path: PathBuf, refresh: Rc<dyn Fn()>) {
+    let dialog = gtk::Window::builder()
+        .title("Quick Start")
+        .modal(true)
+        .default_width(640)
+        .default_height(500)
+        .build();
+    let body = dialog_body("Create a new repository from a starter template.");
+    body.add_css_class("workspace-modal");
+
+    let selected_template = Rc::new(RefCell::new("empty".to_owned()));
+    let template_grid = GBox::new(Orientation::Vertical, 8);
+    template_grid.add_css_class("project-template-grid");
+    let template_buttons = Rc::new(RefCell::new(Vec::<Button>::new()));
+    for template in new_project_templates() {
+        let card = project_template_card(&template);
+        if template.id == "empty" {
+            card.add_css_class("project-template-card-selected");
+        }
+        {
+            let selected_template = selected_template.clone();
+            let template_buttons = template_buttons.clone();
+            let id = template.id.to_owned();
+            let card_for_click = card.clone();
+            card.connect_clicked(move |_| {
+                *selected_template.borrow_mut() = id.clone();
+                for button in template_buttons.borrow().iter() {
+                    button.remove_css_class("project-template-card-selected");
+                }
+                card_for_click.add_css_class("project-template-card-selected");
+            });
+        }
+        template_grid.append(&card);
+        template_buttons.borrow_mut().push(card);
+    }
+    body.append(&template_grid);
+
+    let parent_row = GBox::new(Orientation::Horizontal, 8);
+    let new_parent_entry = Entry::new();
+    new_parent_entry.add_css_class("workspace-modal-field");
+    new_parent_entry.set_hexpand(true);
+    new_parent_entry.set_placeholder_text(Some("Parent folder"));
+    let new_parent_browse_btn = text_button("Browse");
+    parent_row.append(&new_parent_entry);
+    parent_row.append(&new_parent_browse_btn);
+    let new_name_entry = Entry::new();
+    new_name_entry.add_css_class("workspace-modal-field");
+    new_name_entry.set_placeholder_text(Some("project name"));
+    body.append(&parent_row);
+    body.append(&new_name_entry);
+
+    let feedback = Label::new(None);
+    feedback.add_css_class("card-meta");
+    feedback.set_xalign(0.0);
+    feedback.set_wrap(true);
+    body.append(&feedback);
+
+    {
+        let new_parent_entry = new_parent_entry.clone();
+        new_parent_browse_btn.connect_clicked(move |_| {
+            choose_folder_for_entry(&new_parent_entry, "Pick a parent folder");
+        });
+    }
+
+    let actions = dialog_actions(&dialog, "Create");
+    let confirm = actions.1.clone();
+    let dialog_for_confirm = dialog.clone();
+    confirm.connect_clicked(move |_| {
+        let parent = new_parent_entry.text().trim().to_owned();
+        let name = new_name_entry.text().trim().to_owned();
+        let template = selected_template.borrow().clone();
+        match create_repository_from_template(&database_path, &parent, &name, &template) {
+            Ok(_) => {
+                refresh();
+                dialog_for_confirm.close();
+            }
+            Err(err) => feedback.set_text(&format!("Quick start failed: {err:#}")),
+        }
+    });
+    body.append(&actions.0);
+    dialog.set_child(Some(&body));
+    dialog.present();
+}
+
+fn project_template_card(template: &NewProjectTemplate) -> Button {
+    let button = Button::new();
+    button.add_css_class("project-template-card");
+    let body = GBox::new(Orientation::Vertical, 4);
+    body.set_margin_top(10);
+    body.set_margin_bottom(10);
+    body.set_margin_start(12);
+    body.set_margin_end(12);
+    let title = Label::new(Some(template.label));
+    title.add_css_class("project-template-title");
+    title.set_xalign(0.0);
+    let copy = Label::new(Some(template.description));
+    copy.add_css_class("project-template-copy");
+    copy.set_wrap(true);
+    copy.set_xalign(0.0);
+    body.append(&title);
+    body.append(&copy);
+    button.set_child(Some(&body));
+    button
 }
 
 fn choose_folder_for_entry(entry: &Entry, title: &str) {
@@ -2281,6 +2488,28 @@ mod tests {
         assert_eq!(templates[0].id, "empty");
         assert_eq!(templates[1].id, "rust-bin");
         assert_eq!(templates[2].id, "rust-lib");
+    }
+
+    #[test]
+    fn project_create_actions_match_plus_menu_flow() {
+        let actions = project_create_actions();
+        assert_eq!(
+            actions,
+            vec![
+                ProjectCreateAction {
+                    id: "folder",
+                    label: "Open project",
+                },
+                ProjectCreateAction {
+                    id: "clone",
+                    label: "Open GitHub project",
+                },
+                ProjectCreateAction {
+                    id: "new",
+                    label: "Quick start",
+                },
+            ]
+        );
     }
 
     #[test]

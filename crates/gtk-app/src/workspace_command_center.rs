@@ -1,4 +1,4 @@
-use adw::{Toast, ToastOverlay};
+use adw::ToastOverlay;
 use gtk::prelude::*;
 use gtk::{
     Align, Box as GBox, Button, CheckButton, ComboBoxText, Entry, Label, ListBox, ListBoxRow,
@@ -28,6 +28,7 @@ type WorkspaceTabSelector = Rc<dyn Fn(&str)>;
 
 use crate::refresh::{RefreshHub, RefreshScope};
 use crate::state::{AppState, WorkspaceTab};
+use crate::toast::{show_toast as emit_toast, ToastMessage};
 use crate::{
     buttons::text_button, cli_binary, detail_row, history, session_surface, shell_quote,
     spawn_terminal_command, terminal, title_case_workspace,
@@ -5394,7 +5395,7 @@ fn apply_runtime_action_feedback(
 ) {
     status.set_text(&feedback.status_text);
     if let Some(toast_text) = feedback.toast_text {
-        toast_overlay.add_toast(Toast::new(&toast_text));
+        emit_toast(toast_overlay, ToastMessage::error(toast_text));
     }
 }
 
@@ -5406,7 +5407,7 @@ fn apply_action_feedback(
 ) {
     status.set_text(text);
     if show_toast {
-        toast_overlay.add_toast(Toast::new(text));
+        emit_toast(toast_overlay, ToastMessage::info(text));
     }
 }
 

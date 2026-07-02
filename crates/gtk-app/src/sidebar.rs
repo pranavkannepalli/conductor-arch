@@ -16,8 +16,8 @@ use std::time::Duration;
 use tracing::error;
 
 use crate::archcar_async::spawn_archcar_request;
-use crate::buttons::{icon_button, text_button};
-use crate::projects::show_repository_quick_add_dialog;
+use crate::buttons::{icon_button, resolve_icon_name, text_button};
+use crate::projects::show_project_creation_popover;
 use crate::refresh::{RefreshHub, RefreshScope};
 use crate::state::{AppPage, AppState, WorkspaceTab};
 use crate::title_case_workspace;
@@ -154,8 +154,9 @@ pub(crate) fn build_app_sidebar(
         let hub_hdr = refresh_hub.clone();
         let rw_hdr = refresh_workspace.clone();
         let rvp_hdr = refresh_view_preferences.clone();
-        add_workspace_btn.connect_clicked(move |_| {
-            show_repository_quick_add_dialog(
+        add_workspace_btn.connect_clicked(move |button| {
+            show_project_creation_popover(
+                button,
                 db_path_hdr.clone(),
                 Rc::new({
                     let hub_hdr = hub_hdr.clone();
@@ -168,7 +169,6 @@ pub(crate) fn build_app_sidebar(
                         rvp_hdr();
                     }
                 }),
-                Some("folder"),
             );
         });
     }
@@ -448,8 +448,9 @@ pub(crate) fn build_app_sidebar(
         let hub_bar = refresh_hub.clone();
         let rw_bar = refresh_workspace.clone();
         let rvp_bar = refresh_view_preferences.clone();
-        add_repo_btn.connect_clicked(move |_| {
-            show_repository_quick_add_dialog(
+        add_repo_btn.connect_clicked(move |button| {
+            show_project_creation_popover(
+                button,
                 db_path_bar.clone(),
                 Rc::new({
                     let hub_bar = hub_bar.clone();
@@ -462,7 +463,6 @@ pub(crate) fn build_app_sidebar(
                         rvp_bar();
                     }
                 }),
-                Some("folder"),
             );
         });
     }
@@ -570,7 +570,7 @@ fn sidebar_nav_button(icon: &str, tooltip: &str) -> Button {
     row.set_margin_top(2);
     row.set_margin_bottom(2);
 
-    let image = Image::from_icon_name(icon);
+    let image = Image::from_icon_name(resolve_icon_name(icon));
     image.add_css_class("sidebar-nav-icon");
     row.append(&image);
 
@@ -617,7 +617,7 @@ fn build_workspace_row(
         row_box.add_css_class("workspace-row-active");
     }
 
-    let branch_icon = Image::from_icon_name("list-drag-handle-symbolic");
+    let branch_icon = Image::from_icon_name(resolve_icon_name("list-drag-handle-symbolic"));
     branch_icon.add_css_class("workspace-row-branch-icon");
     if is_active {
         branch_icon.add_css_class("workspace-row-branch-icon-active");
@@ -728,7 +728,7 @@ fn section_header_row(
     let shell = GBox::new(Orientation::Horizontal, 6);
     shell.add_css_class("repo-section-row");
 
-    let repo_icon = Image::from_icon_name("folder-symbolic");
+    let repo_icon = Image::from_icon_name(resolve_icon_name("folder-symbolic"));
     repo_icon.add_css_class("repo-section-icon");
     shell.append(&repo_icon);
 

@@ -11,10 +11,12 @@ mod projects;
 mod refresh;
 mod session_surface;
 mod settings;
+mod setup;
 mod sidebar;
 mod state;
 mod terminal;
 mod theme;
+mod toast;
 mod workspace_command_center;
 
 use crate::buttons::{icon_button, text_button};
@@ -41,6 +43,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::mpsc::{self, Sender};
 use std::time::Instant;
+use toast::{ToastManager, ToastMessage};
 
 const APP_ID: &str = "io.github.pranavkannepalli.linux-archductor";
 
@@ -440,6 +443,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget) {
     };
 
     let toast_overlay = adw::ToastOverlay::new();
+    let toast_manager = ToastManager::new(&toast_overlay);
     tracing::info!(
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: building dashboard"
@@ -637,6 +641,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget) {
     };
     window.set_content(Some(&split));
     window.present();
+    setup::show_blocking_setup_if_needed(&window);
     tracing::info!(
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: window presented"
@@ -774,7 +779,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget) {
     {
         let db_path_notif = app_state.workspace_database_path();
         let state_notif = app_state.clone();
-        let toast_notif = toast_overlay.clone();
+        let toast_notif = toast_manager.clone();
         let prev_notif = notification_prev.clone();
         glib::timeout_add_seconds_local(5, move || {
             let Some(workspace) = state_notif.selected_workspace() else {
@@ -811,9 +816,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget) {
             if let Some((ref prev_ws, _prev_active, prev_running)) = *prev {
                 if prev_ws == &workspace && notify_session_stop && prev_running && !session_running
                 {
-                    let toast = adw::Toast::new("Agent session stopped.");
-                    toast.set_timeout(4);
-                    toast_notif.add_toast(toast);
+                    toast_notif.show(ToastMessage::success("Agent session stopped."));
                 }
             }
             let _ = notify_check_fail;

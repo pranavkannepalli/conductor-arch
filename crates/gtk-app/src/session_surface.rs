@@ -6,7 +6,9 @@ use gtk::{
 };
 use linux_archductor_core::archcar::protocol::{ArchcarEvent, ArchcarInputKind, ArchcarResponse};
 use linux_archductor_core::codex_tui::{
-    detect_directory_trust_prompt, merge_screen_messages, parse_codex_screen_messages,
+    detect_directory_trust_prompt, merge_screen_messages, parse_codex_context_usage,
+    parse_codex_inline_event, parse_codex_screen_messages,
+    CodexFileReference as CoreCodexFileReference, CodexInlineEvent as CoreCodexInlineEvent,
     ScreenMessage, ScreenMessageRole,
 };
 use linux_archductor_core::pty::PtySession;
@@ -32,7 +34,9 @@ use crate::archcar_async::{
     clear_archcar_ready, note_archcar_ready, AsyncArchcarBridge, AsyncArchcarMessage,
     AsyncArchcarRequestKind, AsyncArchcarResponse,
 };
-use crate::buttons::{icon_button, style_icon_button, style_text_button, text_button};
+use crate::buttons::{
+    icon_button, resolve_icon_name, style_icon_button, style_text_button, text_button,
+};
 use crate::state::AppState;
 use crate::terminal::terminal_display_text;
 
@@ -45,6 +49,50 @@ const DEFAULT_CHAT_TITLE_PREFIX: &str = "New Chat";
 pub type ExternalThreadSelectionController = Rc<RefCell<Option<Rc<dyn Fn(Option<i64>)>>>>;
 type RefreshChatSurfaceController = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
 type SwitchChatHarnessController = Rc<RefCell<Option<Rc<dyn Fn(SessionKind)>>>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodexInlineEventKind {
+    Tool,
+    Skill,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodexInlineEventStatus {
+    Loading,
+    Complete,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodexInlineEvent {
+    kind: CodexInlineEventKind,
+    title: String,
+    subtitle: Option<String>,
+    body: Option<String>,
+    path: Option<PathBuf>,
+    status: CodexInlineEventStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CodexContextUsage {
+    used_tokens: Option<u64>,
+    max_tokens: Option<u64>,
+    percent: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InlineEventBodyPreview {
+    preview: String,
+    full: String,
+    truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContextUsageDisplayState {
+    percent_label: String,
+    css_class: &'static str,
+    tooltip: String,
+}
 
 #[derive(Clone)]
 pub struct ExternalChatTabs {
@@ -285,12 +333,14 @@ pub fn agent_session_panel(
     right_group.set_hexpand(false);
     let new_chat_btn = session_secondary_button("New Chat");
     new_chat_btn.set_tooltip_text(Some("Create a new chat thread"));
+    let context_usage = context_usage_widget();
 
     let send_btn = icon_button("send-symbolic", "Send message");
     send_btn.add_css_class("chat-send-btn");
     send_btn.set_tooltip_text(Some("Send message"));
 
     right_group.append(&new_chat_btn);
+    right_group.append(&context_usage);
     right_group.append(&send_btn);
 
     toolbar.append(&left_group);
@@ -395,6 +445,7 @@ pub fn agent_session_panel(
         let archcar_ready_cache = archcar_ready_cache.clone();
         let update_composer_for_view = update_composer_state.clone();
         let external_chat_tabs = external_chat_tabs.clone();
+        let context_usage = context_usage.clone();
         Rc::new(move || {
             debug!(workspace = %workspace, "chat refresh_view start");
             let (loaded, loaded_threads) = WorkspaceStore::open(database_path.clone())
@@ -509,6 +560,7 @@ pub fn agent_session_panel(
             while let Some(child) = messages.first_child() {
                 messages.remove(&child);
             }
+            apply_context_usage_state(&context_usage, None);
 
             let current = record_state.borrow();
             let selected_thread_id = *selected_thread.borrow();
@@ -589,6 +641,10 @@ pub fn agent_session_panel(
                         "chat refresh_view loaded thread messages"
                     );
                     if !thread_messages.is_empty() {
+                        apply_context_usage_state(
+                            &context_usage,
+                            latest_context_usage_from_messages(&thread_messages),
+                        );
                         for message in thread_messages {
                             messages.append(&chat_message_widget(&message));
                         }
@@ -1839,7 +1895,7 @@ pub(crate) fn session_header_row(
     let breadcrumb = GBox::new(Orientation::Horizontal, 8);
     breadcrumb.set_hexpand(true);
 
-    let repo_icon = Image::from_icon_name("folder-symbolic");
+    let repo_icon = Image::from_icon_name(resolve_icon_name("folder-symbolic"));
     repo_icon.add_css_class("chat-repo-icon");
     breadcrumb.append(&repo_icon);
 
@@ -1921,6 +1977,10 @@ fn chat_message_widget(message: &ChatMessageRecord) -> Widget {
             label.upcast()
         }
         _ => {
+            let inline_events = parse_codex_inline_events_local(&message.content);
+            if !inline_events.is_empty() {
+                return inline_events_widget(&inline_events);
+            }
             let label = Label::new(Some(&message.content));
             label.add_css_class("chat-agent-text");
             label.set_selectable(true);
@@ -1931,6 +1991,455 @@ fn chat_message_widget(message: &ChatMessageRecord) -> Widget {
             label.upcast()
         }
     }
+}
+
+fn inline_event_kind_label(kind: CodexInlineEventKind) -> &'static str {
+    match kind {
+        CodexInlineEventKind::Tool => "Tool",
+        CodexInlineEventKind::Skill => "Skill",
+    }
+}
+
+fn inline_event_kind_glyph(kind: CodexInlineEventKind) -> &'static str {
+    match kind {
+        CodexInlineEventKind::Tool => "▸",
+        CodexInlineEventKind::Skill => "◆",
+    }
+}
+
+fn inline_event_status_label(status: CodexInlineEventStatus) -> &'static str {
+    match status {
+        CodexInlineEventStatus::Loading => "Running",
+        CodexInlineEventStatus::Complete => "Done",
+        CodexInlineEventStatus::Failed => "Failed",
+    }
+}
+
+fn inline_event_status_css_class(status: CodexInlineEventStatus) -> Option<&'static str> {
+    match status {
+        CodexInlineEventStatus::Loading => Some("chat-inline-event-loading"),
+        CodexInlineEventStatus::Complete => None,
+        CodexInlineEventStatus::Failed => Some("chat-inline-event-failed"),
+    }
+}
+
+fn truncate_inline_event_body(body: &str, max_chars: usize) -> InlineEventBodyPreview {
+    let full = body.trim().to_owned();
+    if full.chars().count() <= max_chars {
+        return InlineEventBodyPreview {
+            preview: full.clone(),
+            full,
+            truncated: false,
+        };
+    }
+    let preview = full.chars().take(max_chars).collect::<String>();
+    InlineEventBodyPreview {
+        preview: format!("{preview}..."),
+        full,
+        truncated: true,
+    }
+}
+
+fn local_preview_eligibility(path: impl AsRef<Path>) -> Option<PathBuf> {
+    const MAX_PREVIEW_BYTES: u64 = 64 * 1024;
+    let path = path.as_ref();
+    let metadata = fs::metadata(path).ok()?;
+    if !metadata.is_file() || metadata.len() > MAX_PREVIEW_BYTES {
+        return None;
+    }
+    let mut file = fs::File::open(path).ok()?;
+    let mut buffer = [0_u8; 512];
+    let read = file.read(&mut buffer).ok()?;
+    if buffer[..read].contains(&0) {
+        return None;
+    }
+    Some(path.to_path_buf())
+}
+
+fn parse_codex_inline_events_local(content: &str) -> Vec<CodexInlineEvent> {
+    content
+        .lines()
+        .filter_map(parse_codex_inline_event_line)
+        .collect()
+}
+
+fn parse_codex_inline_event_line(line: &str) -> Option<CodexInlineEvent> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(event) = parse_codex_inline_event(trimmed) {
+        return codex_inline_event_from_core(event, trimmed);
+    }
+    if let Some(rest) = trimmed.strip_prefix("Using ") {
+        let title = rest
+            .split_once(" to ")
+            .map(|(skill, _)| skill)
+            .unwrap_or(rest)
+            .trim();
+        if title.starts_with("superpowers:")
+            || title.starts_with("build-")
+            || title.starts_with("vercel:")
+            || title.starts_with("github:")
+            || title.starts_with("figma:")
+            || title.starts_with("caveman:")
+        {
+            return Some(CodexInlineEvent {
+                kind: CodexInlineEventKind::Skill,
+                title: title.to_owned(),
+                subtitle: trimmed
+                    .split_once(" to ")
+                    .map(|(_, purpose)| purpose.to_owned()),
+                body: Some(trimmed.to_owned()),
+                path: extract_local_path(trimmed),
+                status: codex_event_status_from_line(trimmed),
+            });
+        }
+    }
+    let tool_name = known_codex_tool_marker(trimmed)?;
+    Some(CodexInlineEvent {
+        kind: CodexInlineEventKind::Tool,
+        title: tool_name.to_owned(),
+        subtitle: tool_subtitle(trimmed, tool_name),
+        body: Some(trimmed.to_owned()),
+        path: extract_local_path(trimmed),
+        status: codex_event_status_from_line(trimmed),
+    })
+}
+
+fn codex_inline_event_from_core(
+    event: CoreCodexInlineEvent,
+    original_line: &str,
+) -> Option<CodexInlineEvent> {
+    match event {
+        CoreCodexInlineEvent::Tool(tool) => Some(CodexInlineEvent {
+            kind: CodexInlineEventKind::Tool,
+            title: tool.marker,
+            subtitle: tool_subtitle(original_line, &format!("{}.{}", tool.namespace, tool.name)),
+            body: Some(original_line.to_owned()),
+            path: extract_local_path(original_line),
+            status: codex_event_status_from_line(original_line),
+        }),
+        CoreCodexInlineEvent::Skill(skill) => Some(CodexInlineEvent {
+            kind: CodexInlineEventKind::Skill,
+            title: skill.skill,
+            subtitle: Some(skill.message),
+            body: Some(original_line.to_owned()),
+            path: extract_local_path(original_line),
+            status: codex_event_status_from_line(original_line),
+        }),
+        CoreCodexInlineEvent::FileReference(reference) => {
+            codex_file_reference_event(reference, original_line)
+        }
+    }
+}
+
+fn codex_file_reference_event(
+    reference: CoreCodexFileReference,
+    original_line: &str,
+) -> Option<CodexInlineEvent> {
+    Some(CodexInlineEvent {
+        kind: CodexInlineEventKind::Tool,
+        title: "File preview".to_owned(),
+        subtitle: Some(reference.path.clone()),
+        body: Some(original_line.to_owned()),
+        path: Some(PathBuf::from(reference.path)),
+        status: CodexInlineEventStatus::Complete,
+    })
+}
+
+fn known_codex_tool_marker(line: &str) -> Option<&str> {
+    const MARKERS: &[&str] = &[
+        "functions.exec_command",
+        "functions.write_stdin",
+        "functions.apply_patch",
+        "web.run",
+        "image_gen.imagegen",
+        "multi_tool_use.parallel",
+        "tool_search.tool_search_tool",
+        "multi_agent_v1.spawn_agent",
+    ];
+    MARKERS.iter().copied().find(|marker| line.contains(marker))
+}
+
+fn tool_subtitle(line: &str, marker: &str) -> Option<String> {
+    line.split(marker)
+        .nth(1)
+        .map(str::trim)
+        .filter(|rest| !rest.is_empty())
+        .map(|rest| rest.chars().take(96).collect::<String>())
+}
+
+fn codex_event_status_from_line(line: &str) -> CodexInlineEventStatus {
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("failed") || lower.contains("error") {
+        CodexInlineEventStatus::Failed
+    } else if lower.contains("running") || lower.contains("started") || lower.contains("waiting") {
+        CodexInlineEventStatus::Loading
+    } else {
+        CodexInlineEventStatus::Complete
+    }
+}
+
+fn extract_local_path(line: &str) -> Option<PathBuf> {
+    line.split(|ch: char| ch.is_whitespace() || matches!(ch, '"' | '\'' | '`' | ',' | ')'))
+        .map(|token| token.trim_matches(|ch: char| matches!(ch, ':' | ';' | '(' | '[' | ']')))
+        .find(|token| token.starts_with('/') || token.starts_with("./") || token.starts_with("../"))
+        .map(PathBuf::from)
+}
+
+fn inline_events_widget(events: &[CodexInlineEvent]) -> Widget {
+    let group = GBox::new(Orientation::Vertical, 8);
+    group.set_hexpand(true);
+    group.set_margin_bottom(18);
+    for event in events {
+        group.append(&inline_event_widget(event));
+    }
+    group.upcast()
+}
+
+fn inline_event_widget(event: &CodexInlineEvent) -> Widget {
+    let root = GBox::new(Orientation::Vertical, 8);
+    root.add_css_class("chat-inline-event");
+    if let Some(class) = inline_event_status_css_class(event.status) {
+        root.add_css_class(class);
+    }
+    root.set_hexpand(true);
+
+    let header = GBox::new(Orientation::Horizontal, 8);
+    header.add_css_class("chat-inline-event-header");
+    header.set_hexpand(true);
+
+    let glyph = Label::new(Some(inline_event_kind_glyph(event.kind)));
+    glyph.add_css_class("chat-inline-event-meta");
+    header.append(&glyph);
+
+    let text = GBox::new(Orientation::Vertical, 2);
+    text.set_hexpand(true);
+    let title = Label::new(Some(&format!(
+        "{} · {}",
+        inline_event_kind_label(event.kind),
+        event.title
+    )));
+    title.add_css_class("chat-inline-event-title");
+    title.set_xalign(0.0);
+    title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    text.append(&title);
+    let meta_text = event
+        .subtitle
+        .as_deref()
+        .unwrap_or_else(|| inline_event_status_label(event.status));
+    let meta = Label::new(Some(meta_text));
+    meta.add_css_class("chat-inline-event-meta");
+    meta.set_xalign(0.0);
+    meta.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    text.append(&meta);
+    header.append(&text);
+
+    let toggle = ToggleButton::with_label("Show");
+    toggle.add_css_class("chat-toolbar-btn");
+    header.append(&toggle);
+    root.append(&header);
+
+    let body_text = inline_event_body_text(event);
+    let body_preview = truncate_inline_event_body(&body_text, 320);
+    let body = Label::new(Some(&body_preview.preview));
+    body.add_css_class("chat-inline-event-body");
+    body.set_selectable(true);
+    body.set_wrap(true);
+    body.set_xalign(0.0);
+    body.set_visible(false);
+    root.append(&body);
+
+    toggle.connect_toggled({
+        let body = body.clone();
+        let full = body_preview.full.clone();
+        let preview = body_preview.preview.clone();
+        move |button| {
+            if button.is_active() {
+                body.set_text(&full);
+                body.set_visible(true);
+                button.set_label("Hide");
+            } else {
+                body.set_text(&preview);
+                body.set_visible(false);
+                button.set_label("Show");
+            }
+        }
+    });
+
+    root.upcast()
+}
+
+fn inline_event_body_text(event: &CodexInlineEvent) -> String {
+    let mut parts = Vec::new();
+    if let Some(body) = event
+        .body
+        .as_deref()
+        .map(str::trim)
+        .filter(|body| !body.is_empty())
+    {
+        parts.push(body.to_owned());
+    }
+    if let Some(path) = event.path.as_ref().and_then(local_preview_eligibility) {
+        if let Ok(preview) = fs::read_to_string(path) {
+            parts.push(preview);
+        }
+    }
+    if parts.is_empty() {
+        inline_event_status_label(event.status).to_owned()
+    } else {
+        parts.join("\n\n")
+    }
+}
+
+fn parse_codex_context_usage_local(content: &str) -> Option<CodexContextUsage> {
+    content
+        .lines()
+        .rev()
+        .find_map(parse_codex_context_usage_line)
+}
+
+fn parse_codex_context_usage_line(line: &str) -> Option<CodexContextUsage> {
+    if let Some(usage) = parse_codex_context_usage(line) {
+        let percent = usage.percent.or_else(|| {
+            usage
+                .used_tokens
+                .zip(usage.total_tokens)
+                .and_then(|(used, total)| {
+                    (total > 0).then_some(((used.saturating_mul(100)) / total).min(100) as u8)
+                })
+        })?;
+        return Some(CodexContextUsage {
+            used_tokens: usage.used_tokens,
+            max_tokens: usage.total_tokens,
+            percent,
+        });
+    }
+    let lower = line.to_ascii_lowercase();
+    if !lower.contains("context") && !lower.contains("tokens") {
+        return None;
+    }
+    let (used_tokens, max_tokens) = parse_token_pair(&lower).unwrap_or((None, None));
+    let percent = parse_percent(&lower).or_else(|| match (used_tokens, max_tokens) {
+        (Some(used), Some(max)) if max > 0 => {
+            Some(((used.saturating_mul(100)) / max).min(100) as u8)
+        }
+        _ => None,
+    })?;
+    Some(CodexContextUsage {
+        used_tokens,
+        max_tokens,
+        percent,
+    })
+}
+
+fn parse_percent(line: &str) -> Option<u8> {
+    let percent_index = line.find('%')?;
+    let digits = line[..percent_index]
+        .chars()
+        .rev()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    digits.parse::<u8>().ok().filter(|percent| *percent <= 100)
+}
+
+fn parse_token_pair(line: &str) -> Option<(Option<u64>, Option<u64>)> {
+    let slash = line.find('/')?;
+    let used = parse_token_number_before(&line[..slash])?;
+    let max = parse_token_number_after(&line[slash + 1..])?;
+    Some((Some(used), Some(max)))
+}
+
+fn parse_token_number_before(text: &str) -> Option<u64> {
+    text.split_whitespace().rev().find_map(parse_token_amount)
+}
+
+fn parse_token_number_after(text: &str) -> Option<u64> {
+    text.split_whitespace().find_map(parse_token_amount)
+}
+
+fn parse_token_amount(token: &str) -> Option<u64> {
+    let trimmed = token.trim_matches(|ch: char| !ch.is_ascii_alphanumeric());
+    if trimmed.is_empty() {
+        return None;
+    }
+    let multiplier = if trimmed.ends_with('k') { 1_000 } else { 1 };
+    let digits = trimmed.trim_end_matches('k').replace(',', "");
+    digits.parse::<u64>().ok().map(|value| value * multiplier)
+}
+
+fn latest_context_usage_from_messages(messages: &[ChatMessageRecord]) -> Option<CodexContextUsage> {
+    messages
+        .iter()
+        .rev()
+        .find_map(|message| parse_codex_context_usage_local(&message.content))
+}
+
+fn context_usage_display_state(usage: Option<CodexContextUsage>) -> ContextUsageDisplayState {
+    let Some(usage) = usage else {
+        return ContextUsageDisplayState {
+            percent_label: "--".to_owned(),
+            css_class: "chat-context-usage-empty",
+            tooltip: "Context usage unknown".to_owned(),
+        };
+    };
+    let css_class = match usage.percent {
+        0..=69 => "chat-context-usage-normal",
+        70..=89 => "chat-context-usage-warning",
+        _ => "chat-context-usage-danger",
+    };
+    let tooltip = match (usage.used_tokens, usage.max_tokens) {
+        (Some(used), Some(max)) => format!(
+            "Context usage: {} / {} tokens ({}%)",
+            format_token_count(used),
+            format_token_count(max),
+            usage.percent
+        ),
+        _ => format!("Context usage: {}%", usage.percent),
+    };
+    ContextUsageDisplayState {
+        percent_label: format!("{}%", usage.percent),
+        css_class,
+        tooltip,
+    }
+}
+
+fn format_token_count(value: u64) -> String {
+    let raw = value.to_string();
+    let mut out = String::new();
+    for (index, ch) in raw.chars().rev().enumerate() {
+        if index > 0 && index % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out.chars().rev().collect()
+}
+
+fn context_usage_widget() -> Label {
+    let label = Label::new(Some("--"));
+    label.add_css_class("chat-context-usage");
+    apply_context_usage_state(&label, None);
+    label
+}
+
+fn apply_context_usage_state(label: &Label, usage: Option<CodexContextUsage>) {
+    for class in [
+        "chat-context-usage-normal",
+        "chat-context-usage-warning",
+        "chat-context-usage-danger",
+        "chat-context-usage-empty",
+    ] {
+        label.remove_css_class(class);
+    }
+    let state = context_usage_display_state(usage);
+    label.set_text(&state.percent_label);
+    label.set_tooltip_text(Some(&state.tooltip));
+    label.add_css_class(state.css_class);
 }
 
 fn session_kind_name(kind: SessionKind) -> &'static str {
@@ -2393,7 +2902,7 @@ fn mode_icon_toggle_button(label: &str, icon_name: &str, active: bool) -> Toggle
     style_icon_button(&button);
     button.set_active(active);
     button.set_tooltip_text(Some(label));
-    let icon = Image::from_icon_name(icon_name);
+    let icon = Image::from_icon_name(resolve_icon_name(icon_name));
     icon.add_css_class("chat-mode-icon");
     button.set_child(Some(&icon));
     button.connect_toggled({
@@ -2448,13 +2957,13 @@ fn mode_menu_child(icon_name: &str, text_label: &str) -> GBox {
         icon.add_css_class("chat-mode-glyph");
         icon.upcast()
     } else {
-        let icon = Image::from_icon_name(icon_name);
+        let icon = Image::from_icon_name(resolve_icon_name(icon_name));
         icon.add_css_class("chat-mode-icon");
         icon.upcast()
     };
     let text = Label::new(Some(text_label));
     text.add_css_class("chat-mode-label");
-    let arrow = Image::from_icon_name("pan-down-symbolic");
+    let arrow = Image::from_icon_name(resolve_icon_name("pan-down-symbolic"));
     arrow.add_css_class("chat-mode-arrow");
     shell.append(&icon);
     shell.append(&text);
@@ -2478,7 +2987,7 @@ fn mode_menu_popover(
         let row = Button::new();
         row.add_css_class("chat-menu-item");
         let row_box = GBox::new(Orientation::Horizontal, 10);
-        let icon = Image::from_icon_name("application-x-executable-symbolic");
+        let icon = Image::from_icon_name(resolve_icon_name("application-x-executable-symbolic"));
         icon.add_css_class("chat-menu-item-icon");
         let name = Label::new(Some(option));
         name.add_css_class("chat-menu-item-label");
@@ -2532,11 +3041,11 @@ fn editor_picker_button() -> Button {
 
 fn editor_picker_set_button_child(button: &Button, choice: &EditorChoice) {
     let shell = GBox::new(Orientation::Horizontal, 6);
-    let icon = Image::from_icon_name(choice.icon);
+    let icon = Image::from_icon_name(resolve_icon_name(choice.icon));
     icon.add_css_class("chat-editor-icon");
     let text = Label::new(Some(&choice.name));
     text.add_css_class("chat-editor-label");
-    let arrow = Image::from_icon_name("pan-down-symbolic");
+    let arrow = Image::from_icon_name(resolve_icon_name("pan-down-symbolic"));
     arrow.add_css_class("chat-mode-arrow");
     shell.append(&icon);
     shell.append(&text);
@@ -2557,7 +3066,7 @@ fn editor_picker_popover(
         let row = Button::new();
         row.add_css_class("chat-menu-item");
         let row_box = GBox::new(Orientation::Horizontal, 10);
-        let icon = Image::from_icon_name(choice.icon);
+        let icon = Image::from_icon_name(resolve_icon_name(choice.icon));
         icon.add_css_class("chat-menu-item-icon");
         let name = Label::new(Some(&choice.name));
         name.add_css_class("chat-menu-item-label");
@@ -4111,7 +4620,7 @@ fn codex_startup_status_widget(state: &CodexStartupState) -> Option<Widget> {
             row.append(&label);
         }
         CodexStartupState::Error { message } => {
-            let icon = Image::from_icon_name("dialog-error-symbolic");
+            let icon = Image::from_icon_name(resolve_icon_name("dialog-error-symbolic"));
             row.append(&icon);
 
             let label = Label::new(Some(&format!("Codex failed to start. {message}")));
@@ -5450,6 +5959,13 @@ mod tests {
     }
 
     #[test]
+    fn editor_choices_use_resolvable_icons() {
+        for choice in detected_editor_choices() {
+            assert_ne!(resolve_icon_name(choice.icon), "");
+        }
+    }
+
+    #[test]
     fn session_history_bootstrap_markdown_summarizes_user_and_agent_turns() {
         let transcript = "\
 [session started] #11 kind=Codex pid=1234
@@ -5591,6 +6107,123 @@ fix it
             .as_deref(),
             Some("Fix the parser failure in main.rs")
         );
+    }
+
+    #[test]
+    fn codex_inline_event_display_maps_kind_and_status() {
+        let tool = CodexInlineEvent {
+            kind: CodexInlineEventKind::Tool,
+            title: "functions.exec_command".to_owned(),
+            subtitle: Some("cargo test".to_owned()),
+            body: Some("running".to_owned()),
+            path: None,
+            status: CodexInlineEventStatus::Loading,
+        };
+        let skill = CodexInlineEvent {
+            kind: CodexInlineEventKind::Skill,
+            title: "superpowers:test-driven-development".to_owned(),
+            subtitle: None,
+            body: None,
+            path: None,
+            status: CodexInlineEventStatus::Failed,
+        };
+
+        assert_eq!(inline_event_kind_label(tool.kind), "Tool");
+        assert_eq!(inline_event_kind_label(skill.kind), "Skill");
+        assert_eq!(inline_event_status_label(tool.status), "Running");
+        assert_eq!(
+            inline_event_status_css_class(tool.status),
+            Some("chat-inline-event-loading")
+        );
+        assert_eq!(
+            inline_event_status_css_class(skill.status),
+            Some("chat-inline-event-failed")
+        );
+    }
+
+    #[test]
+    fn codex_inline_event_local_preview_requires_existing_small_text_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let text_path = temp.path().join("result.txt");
+        fs::write(&text_path, "plain text output").unwrap();
+        let binary_path = temp.path().join("image.bin");
+        fs::write(&binary_path, b"\x00\x01\x02").unwrap();
+
+        assert!(local_preview_eligibility(&text_path).is_some());
+        assert!(local_preview_eligibility(temp.path().join("missing.txt")).is_none());
+        assert!(local_preview_eligibility(temp.path()).is_none());
+        assert!(local_preview_eligibility(&binary_path).is_none());
+    }
+
+    #[test]
+    fn codex_inline_event_body_truncates_but_reports_expandability() {
+        let short = truncate_inline_event_body("short body", 20);
+        assert_eq!(short.preview, "short body");
+        assert!(!short.truncated);
+
+        let long = truncate_inline_event_body("abcdef", 4);
+        assert_eq!(long.preview, "abcd...");
+        assert!(long.truncated);
+        assert_eq!(long.full, "abcdef");
+    }
+
+    #[test]
+    fn context_usage_display_state_maps_percent_and_tooltips() {
+        let empty = context_usage_display_state(None);
+        assert_eq!(empty.percent_label, "--");
+        assert_eq!(empty.css_class, "chat-context-usage-empty");
+        assert_eq!(empty.tooltip, "Context usage unknown");
+
+        let normal = context_usage_display_state(Some(CodexContextUsage {
+            used_tokens: Some(68_000),
+            max_tokens: Some(100_000),
+            percent: 68,
+        }));
+        assert_eq!(normal.percent_label, "68%");
+        assert_eq!(normal.css_class, "chat-context-usage-normal");
+        assert!(normal.tooltip.contains("68,000 / 100,000 tokens"));
+
+        assert_eq!(
+            context_usage_display_state(Some(CodexContextUsage {
+                used_tokens: None,
+                max_tokens: None,
+                percent: 70,
+            }))
+            .css_class,
+            "chat-context-usage-warning"
+        );
+        assert_eq!(
+            context_usage_display_state(Some(CodexContextUsage {
+                used_tokens: None,
+                max_tokens: None,
+                percent: 90,
+            }))
+            .css_class,
+            "chat-context-usage-danger"
+        );
+    }
+
+    #[test]
+    fn codex_context_usage_parser_derives_percent_from_token_pair() {
+        let usage = parse_codex_context_usage_local("128k / 200k tokens").unwrap();
+
+        assert_eq!(usage.used_tokens, Some(128_000));
+        assert_eq!(usage.max_tokens, Some(200_000));
+        assert_eq!(usage.percent, 64);
+    }
+
+    #[test]
+    fn codex_inline_event_parser_detects_tool_and_skill_markers() {
+        let events = parse_codex_inline_events_local(
+            "functions.exec_command running cargo test\nUsing superpowers:brainstorming to shape the UI",
+        );
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].kind, CodexInlineEventKind::Tool);
+        assert_eq!(events[0].title, "functions.exec_command");
+        assert_eq!(events[0].status, CodexInlineEventStatus::Loading);
+        assert_eq!(events[1].kind, CodexInlineEventKind::Skill);
+        assert_eq!(events[1].title, "superpowers:brainstorming");
     }
 
     #[test]
@@ -6299,13 +6932,12 @@ Using writing-plans to create the implementation plan.
     }
 
     #[test]
-    fn startup_status_widget_is_built_for_error_state() {
-        let _ = gtk::init();
-        let widget = codex_startup_status_widget(&CodexStartupState::Error {
-            message: "spawn failed".to_owned(),
-        });
-
-        assert!(widget.is_some());
+    fn startup_error_state_requires_status_card() {
+        assert!(should_render_codex_startup_card(
+            &CodexStartupState::Error {
+                message: "spawn failed".to_owned(),
+            }
+        ));
     }
 
     #[test]

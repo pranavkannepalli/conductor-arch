@@ -13,6 +13,18 @@ process, PTY, path, and shell abstractions are intentionally ported.
 
 ## Build packages locally
 
+## Typography assets
+
+The GTK theme prefers `Mona Sans` for UI text and `Commit Mono` for code-like
+surfaces, then falls back to the platform UI and mono stacks. Native packages do
+not vendor those font files yet, so release builds should either bundle the
+licensed font files into the package target or document them as recommended
+desktop fonts for the distribution channel.
+
+Do not replace the app CSS with `Inter`, `Geist`, or other generic SaaS font
+defaults when packaging. The runtime CSS already includes the fallback stacks
+needed for systems where Mona Sans or Commit Mono are not installed.
+
 Install [nfpm](https://nfpm.goreleaser.com/):
 
 ```bash

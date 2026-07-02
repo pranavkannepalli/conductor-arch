@@ -16,6 +16,20 @@ pub struct DoctorReport {
     pub dependencies: Vec<DependencyCheck>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetupReadiness {
+    pub gh_installed: bool,
+    pub codex_installed: bool,
+    pub claude_installed: bool,
+    pub opencode_installed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetupBlocker {
+    MissingGithubCli,
+    MissingAgent,
+}
+
 impl DoctorReport {
     pub fn missing_required(&self) -> Vec<&'static str> {
         self.dependencies
@@ -24,6 +38,32 @@ impl DoctorReport {
             .map(|dep| dep.name)
             .collect()
     }
+}
+
+impl SetupReadiness {
+    pub fn from_host() -> Self {
+        Self {
+            gh_installed: command_exists("gh"),
+            codex_installed: command_exists("codex"),
+            claude_installed: command_exists("claude"),
+            opencode_installed: command_exists("opencode"),
+        }
+    }
+
+    pub fn any_agent_installed(&self) -> bool {
+        self.codex_installed || self.claude_installed || self.opencode_installed
+    }
+}
+
+pub fn setup_blockers(readiness: &SetupReadiness) -> Vec<SetupBlocker> {
+    let mut blockers = Vec::new();
+    if !readiness.gh_installed {
+        blockers.push(SetupBlocker::MissingGithubCli);
+    }
+    if !readiness.any_agent_installed() {
+        blockers.push(SetupBlocker::MissingAgent);
+    }
+    blockers
 }
 
 pub fn report_from_os_release(os_release: &str) -> DoctorReport {
@@ -79,6 +119,7 @@ fn dependency_checks() -> Vec<DependencyCheck> {
         ("ssh", true),
         ("codex", false),
         ("claude", false),
+        ("opencode", false),
         ("code", false),
         ("cursor", false),
     ]
@@ -152,5 +193,54 @@ ID_LIKE=arch
             report.install_command,
             Some("sudo pacman -S git github-cli sqlite openssh")
         );
+    }
+
+    #[test]
+    fn setup_blockers_require_github_cli() {
+        let readiness = SetupReadiness {
+            gh_installed: false,
+            codex_installed: true,
+            claude_installed: false,
+            opencode_installed: false,
+        };
+
+        assert_eq!(
+            setup_blockers(&readiness),
+            vec![SetupBlocker::MissingGithubCli]
+        );
+    }
+
+    #[test]
+    fn setup_blockers_require_at_least_one_agent() {
+        let readiness = SetupReadiness {
+            gh_installed: true,
+            codex_installed: false,
+            claude_installed: false,
+            opencode_installed: false,
+        };
+
+        assert_eq!(setup_blockers(&readiness), vec![SetupBlocker::MissingAgent]);
+    }
+
+    #[test]
+    fn setup_blockers_accept_opencode_as_agent() {
+        let readiness = SetupReadiness {
+            gh_installed: true,
+            codex_installed: false,
+            claude_installed: false,
+            opencode_installed: true,
+        };
+
+        assert!(setup_blockers(&readiness).is_empty());
+    }
+
+    #[test]
+    fn dependency_checks_include_opencode() {
+        let names = dependency_checks()
+            .into_iter()
+            .map(|dep| dep.name)
+            .collect::<Vec<_>>();
+
+        assert!(names.contains(&"opencode"));
     }
 }

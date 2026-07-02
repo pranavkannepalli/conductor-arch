@@ -1,3 +1,48 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CodexInlineEvent {
+    Tool(CodexToolCall),
+    Skill(CodexSkillAnnouncement),
+    FileReference(CodexFileReference),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodexToolCall {
+    pub namespace: String,
+    pub name: String,
+    pub marker: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodexSkillAnnouncement {
+    pub skill: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodexFileReference {
+    pub path: String,
+    pub line: Option<u32>,
+    pub column: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodexContextUsage {
+    pub percent: Option<u8>,
+    pub used_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CodexParsedLine {
+    Message { content: String },
+    InlineEvent { event: CodexInlineEvent },
+    ContextUsage { usage: CodexContextUsage },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScreenMessageRole {
     User,
@@ -33,6 +78,37 @@ pub fn is_trust_prompt_visible(screen: &str, trust_enabled: bool) -> bool {
 
 pub fn detect_directory_trust_prompt(screen: &str) -> bool {
     is_trust_prompt_visible(screen, true)
+}
+
+pub fn parse_codex_inline_event(line: &str) -> Option<CodexInlineEvent> {
+    parse_codex_tool_call(line)
+        .map(CodexInlineEvent::Tool)
+        .or_else(|| parse_codex_skill_announcement(line).map(CodexInlineEvent::Skill))
+        .or_else(|| parse_codex_file_reference(line).map(CodexInlineEvent::FileReference))
+}
+
+pub fn parse_codex_context_usage(line: &str) -> Option<CodexContextUsage> {
+    parse_context_window_percent(line).or_else(|| parse_context_token_fraction(line))
+}
+
+pub fn parse_codex_structured_lines(text: &str) -> Vec<CodexParsedLine> {
+    text.lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            if let Some(usage) = parse_codex_context_usage(trimmed) {
+                return Some(CodexParsedLine::ContextUsage { usage });
+            }
+            if let Some(event) = parse_codex_inline_event(trimmed) {
+                return Some(CodexParsedLine::InlineEvent { event });
+            }
+            Some(CodexParsedLine::Message {
+                content: trimmed.to_owned(),
+            })
+        })
+        .collect()
 }
 
 pub fn parse_codex_screen_messages(screen: &str) -> Vec<ScreenMessage> {
@@ -182,6 +258,177 @@ pub fn parse_codex_screen_messages(screen: &str) -> Vec<ScreenMessage> {
     }
 
     messages
+}
+
+fn parse_codex_tool_call(line: &str) -> Option<CodexToolCall> {
+    const KNOWN_NAMESPACES: &[&str] = &[
+        "functions",
+        "web",
+        "multi_agent_v1",
+        "tool_search",
+        "image_gen",
+        "multi_tool_use",
+    ];
+
+    for namespace in KNOWN_NAMESPACES {
+        let prefix = format!("{namespace}.");
+        let Some(start) = line.find(&prefix) else {
+            continue;
+        };
+        if !is_token_start_boundary(line, start) {
+            continue;
+        }
+        let name_start = start + prefix.len();
+        let name_end = line[name_start..]
+            .char_indices()
+            .find_map(|(offset, ch)| (!is_identifier_char(ch)).then_some(name_start + offset))
+            .unwrap_or(line.len());
+        if name_end == name_start || !is_token_end_boundary(line, name_end) {
+            continue;
+        }
+        let name = &line[name_start..name_end];
+        return Some(CodexToolCall {
+            namespace: (*namespace).to_owned(),
+            name: name.to_owned(),
+            marker: line[start..name_end].to_owned(),
+        });
+    }
+    None
+}
+
+fn parse_codex_skill_announcement(line: &str) -> Option<CodexSkillAnnouncement> {
+    let rest = line.strip_prefix("Using ")?;
+    let (skill, message) = rest.split_once(" to ")?;
+    if !is_skill_name(skill) || message.trim().is_empty() {
+        return None;
+    }
+    Some(CodexSkillAnnouncement {
+        skill: skill.to_owned(),
+        message: message.trim().to_owned(),
+    })
+}
+
+fn parse_codex_file_reference(line: &str) -> Option<CodexFileReference> {
+    for marker in ["file:", "path:", "output path:"] {
+        if let Some(index) = line.find(marker) {
+            let raw = line[index + marker.len()..].trim_start();
+            return parse_path_reference(raw);
+        }
+    }
+    None
+}
+
+fn parse_path_reference(raw: &str) -> Option<CodexFileReference> {
+    let candidate = raw.split_whitespace().next()?.trim_matches(|ch| {
+        matches!(
+            ch,
+            '(' | ')' | '[' | ']' | '<' | '>' | '"' | '\'' | ',' | ';'
+        )
+    });
+    let candidate = candidate.trim_end_matches('.');
+    if !is_probable_output_path(candidate) {
+        return None;
+    }
+
+    let (path, line, column) = split_path_line_column(candidate);
+    Some(CodexFileReference { path, line, column })
+}
+
+fn split_path_line_column(candidate: &str) -> (String, Option<u32>, Option<u32>) {
+    let Some((before_last, last)) = candidate.rsplit_once(':') else {
+        return (candidate.to_owned(), None, None);
+    };
+    let Ok(last_number) = last.parse::<u32>() else {
+        return (candidate.to_owned(), None, None);
+    };
+    if let Some((path, line_part)) = before_last.rsplit_once(':') {
+        if let Ok(line) = line_part.parse::<u32>() {
+            return (path.to_owned(), Some(line), Some(last_number));
+        }
+    }
+    (before_last.to_owned(), Some(last_number), None)
+}
+
+fn is_probable_output_path(candidate: &str) -> bool {
+    !candidate.is_empty()
+        && (candidate.starts_with('/')
+            || candidate.starts_with("./")
+            || candidate.starts_with("../")
+            || candidate.starts_with("~")
+            || candidate.starts_with("r")
+                && candidate
+                    .chars()
+                    .nth(1)
+                    .is_some_and(|ch| ch.is_ascii_digit()))
+        && candidate.contains('/')
+}
+
+fn parse_context_window_percent(line: &str) -> Option<CodexContextUsage> {
+    let rest = line.trim().strip_prefix("Context window:")?.trim();
+    let percent = rest.strip_suffix('%')?.trim().parse::<u8>().ok()?;
+    if percent > 100 {
+        return None;
+    }
+    Some(CodexContextUsage {
+        percent: Some(percent),
+        used_tokens: None,
+        total_tokens: None,
+    })
+}
+
+fn parse_context_token_fraction(line: &str) -> Option<CodexContextUsage> {
+    let trimmed = line.trim();
+    let token_prefix = trimmed.strip_suffix("tokens")?.trim();
+    let (used, total) = token_prefix.split_once('/')?;
+    Some(CodexContextUsage {
+        percent: None,
+        used_tokens: Some(parse_token_count(used.trim())?),
+        total_tokens: Some(parse_token_count(total.trim())?),
+    })
+}
+
+fn parse_token_count(value: &str) -> Option<u64> {
+    let value = value.replace(',', "");
+    if let Some(number) = value.strip_suffix(['k', 'K']) {
+        return number
+            .parse::<u64>()
+            .ok()
+            .map(|tokens| tokens.saturating_mul(1_000));
+    }
+    value.parse::<u64>().ok()
+}
+
+fn is_identifier_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
+}
+
+fn is_token_start_boundary(line: &str, index: usize) -> bool {
+    if index == 0 {
+        return true;
+    }
+    line[..index]
+        .chars()
+        .next_back()
+        .map(|ch| !is_identifier_char(ch) && ch != '.')
+        .unwrap_or(true)
+}
+
+fn is_token_end_boundary(line: &str, index: usize) -> bool {
+    if index == line.len() {
+        return true;
+    }
+    line[index..]
+        .chars()
+        .next()
+        .map(|ch| !is_identifier_char(ch) && ch != '.')
+        .unwrap_or(true)
+}
+
+fn is_skill_name(value: &str) -> bool {
+    value.contains(':')
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, ':' | '-' | '_' | '.'))
 }
 
 pub fn merge_screen_messages(existing: &mut Vec<ScreenMessage>, incoming: &[ScreenMessage]) {
@@ -557,12 +804,96 @@ fn trim_blank_edges(content: &str) -> String {
 mod tests {
     use super::{
         detect_directory_trust_prompt, encode_send_line, is_trust_prompt_visible,
-        merge_screen_messages, parse_codex_screen_messages, ScreenMessage, ScreenMessageRole,
+        merge_screen_messages, parse_codex_context_usage, parse_codex_inline_event,
+        parse_codex_screen_messages, parse_codex_structured_lines, CodexContextUsage,
+        CodexFileReference, CodexInlineEvent, CodexParsedLine, CodexSkillAnnouncement,
+        CodexToolCall, ScreenMessage, ScreenMessageRole,
     };
 
     #[test]
     fn encode_send_line_returns_line_bytes_plus_carriage_return() {
         assert_eq!(encode_send_line("status"), b"status\r");
+    }
+
+    #[test]
+    fn parses_known_tool_markers_as_inline_events() {
+        assert_eq!(
+            parse_codex_inline_event("Calling functions.exec_command with cargo test"),
+            Some(CodexInlineEvent::Tool(CodexToolCall {
+                namespace: "functions".to_owned(),
+                name: "exec_command".to_owned(),
+                marker: "functions.exec_command".to_owned(),
+            }))
+        );
+        assert_eq!(
+            parse_codex_inline_event("queued tool_search.tool_search_tool for discovery"),
+            Some(CodexInlineEvent::Tool(CodexToolCall {
+                namespace: "tool_search".to_owned(),
+                name: "tool_search_tool".to_owned(),
+                marker: "tool_search.tool_search_tool".to_owned(),
+            }))
+        );
+        assert_eq!(parse_codex_inline_event("version 1.2.3 is available"), None);
+    }
+
+    #[test]
+    fn parses_skill_announcements_as_inline_events() {
+        assert_eq!(
+            parse_codex_inline_event("Using superpowers:brainstorming to shape the implementation"),
+            Some(CodexInlineEvent::Skill(CodexSkillAnnouncement {
+                skill: "superpowers:brainstorming".to_owned(),
+                message: "shape the implementation".to_owned(),
+            }))
+        );
+        assert_eq!(
+            parse_codex_inline_event("using lowercase is plain prose"),
+            None
+        );
+    }
+
+    #[test]
+    fn parses_file_references_from_tool_and_skill_output_paths() {
+        assert_eq!(
+            parse_codex_inline_event("skill body lives at (file: r3/brainstorming/SKILL.md:12)"),
+            Some(CodexInlineEvent::FileReference(CodexFileReference {
+                path: "r3/brainstorming/SKILL.md".to_owned(),
+                line: Some(12),
+                column: None,
+            }))
+        );
+        assert_eq!(
+            parse_codex_inline_event("wrote output path: /tmp/codex-results/report.json"),
+            Some(CodexInlineEvent::FileReference(CodexFileReference {
+                path: "/tmp/codex-results/report.json".to_owned(),
+                line: None,
+                column: None,
+            }))
+        );
+        assert_eq!(
+            parse_codex_inline_event("this line mentions src/lib.rs casually"),
+            None
+        );
+    }
+
+    #[test]
+    fn parses_context_usage_percent_and_token_fraction() {
+        assert_eq!(
+            parse_codex_context_usage("Context window: 42%"),
+            Some(CodexContextUsage {
+                percent: Some(42),
+                used_tokens: None,
+                total_tokens: None,
+            })
+        );
+        assert_eq!(
+            parse_codex_context_usage("128k / 200k tokens"),
+            Some(CodexContextUsage {
+                percent: None,
+                used_tokens: Some(128_000),
+                total_tokens: Some(200_000),
+            })
+        );
+        assert_eq!(parse_codex_context_usage("42% of tests are skipped"), None);
     }
 
     #[test]
@@ -602,6 +933,33 @@ Do you trust the contents of this directory?
                 ScreenMessage {
                     role: ScreenMessageRole::Agent,
                     content: "Ready.\nRunning checks now.".to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_structured_lines_with_events_usage_and_messages() {
+        assert_eq!(
+            parse_codex_structured_lines(
+                "Context window: 42%\nUsing superpowers:brainstorming to shape work\nPlain reply"
+            ),
+            vec![
+                CodexParsedLine::ContextUsage {
+                    usage: CodexContextUsage {
+                        percent: Some(42),
+                        used_tokens: None,
+                        total_tokens: None,
+                    },
+                },
+                CodexParsedLine::InlineEvent {
+                    event: CodexInlineEvent::Skill(CodexSkillAnnouncement {
+                        skill: "superpowers:brainstorming".to_owned(),
+                        message: "shape work".to_owned(),
+                    }),
+                },
+                CodexParsedLine::Message {
+                    content: "Plain reply".to_owned(),
                 },
             ]
         );

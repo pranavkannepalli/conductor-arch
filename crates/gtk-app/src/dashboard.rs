@@ -122,6 +122,7 @@ fn append_dashboard_column(
     column.set_hexpand(true);
 
     let header = GBox::new(Orientation::Horizontal, 8);
+    header.add_css_class("kanban-column-header");
     let title_label = Label::new(Some(title));
     title_label.add_css_class("column-title");
     title_label.set_xalign(0.0);
@@ -161,6 +162,7 @@ fn build_dashboard_card(line: &WorkspaceStatusLine, store: &WorkspaceStore) -> G
     card.add_css_class("shell-card");
 
     let top = GBox::new(Orientation::Horizontal, 8);
+    top.add_css_class("dashboard-card-top");
     let branch = Label::new(Some(&ws.branch));
     branch.add_css_class("card-branch");
     branch.set_xalign(0.0);
@@ -213,6 +215,7 @@ fn build_dashboard_card(line: &WorkspaceStatusLine, store: &WorkspaceStore) -> G
     card.append(&meta_label);
 
     let foot = GBox::new(Orientation::Horizontal, 8);
+    foot.add_css_class("dashboard-card-footer");
     let activity = if line.run_running {
         "Running"
     } else if line.active_sessions > 0 {

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::codex_tui::{CodexContextUsage, CodexInlineEvent};
 use crate::workspace::{SessionHarnessOptions, SessionKind};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -88,6 +89,10 @@ pub struct ArchcarMessage {
     pub role: String,
     pub content: String,
     pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inline_event: Option<CodexInlineEvent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_usage: Option<CodexContextUsage>,
 }
 
 pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
@@ -262,6 +267,7 @@ pub enum ArchcarEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codex_tui::{CodexContextUsage, CodexInlineEvent, CodexToolCall};
 
     #[test]
     fn protocol_round_trips_spawn_event() {
@@ -292,6 +298,42 @@ mod tests {
             archcar_request_summary(&request),
             "send_input session_id=9 kind=user chars=9"
         );
+    }
+
+    #[test]
+    fn archcar_message_skips_absent_codex_metadata_and_round_trips_present_metadata() {
+        let message = ArchcarMessage {
+            id: 1,
+            role: "assistant".to_owned(),
+            content: "Running tests".to_owned(),
+            source: "codex".to_owned(),
+            inline_event: None,
+            context_usage: None,
+        };
+        let json = serde_json::to_string(&message).unwrap();
+        assert!(!json.contains("inline_event"));
+        assert!(!json.contains("context_usage"));
+        let decoded: ArchcarMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, message);
+
+        let message = ArchcarMessage {
+            inline_event: Some(CodexInlineEvent::Tool(CodexToolCall {
+                namespace: "web".to_owned(),
+                name: "run".to_owned(),
+                marker: "web.run".to_owned(),
+            })),
+            context_usage: Some(CodexContextUsage {
+                percent: Some(42),
+                used_tokens: None,
+                total_tokens: None,
+            }),
+            ..message
+        };
+        let json = serde_json::to_string(&message).unwrap();
+        assert!(json.contains("inline_event"));
+        assert!(json.contains("context_usage"));
+        let decoded: ArchcarMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, message);
     }
 
     #[test]
