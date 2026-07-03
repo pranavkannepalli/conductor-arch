@@ -1,0 +1,5 @@
+› first user message
+• first agent response
+› second user message
+• second agent response
+  with continuation

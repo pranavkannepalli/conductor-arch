@@ -4031,7 +4031,17 @@ mutation($threadId: ID!) {{
             )
             .optional()?;
         Ok(latest.and_then(
-            |(item_type, id, thread_id, latest_role, latest_content, latest_source, timeline_seq, created_at, updated_at)| {
+            |(
+                item_type,
+                id,
+                thread_id,
+                latest_role,
+                latest_content,
+                latest_source,
+                timeline_seq,
+                created_at,
+                updated_at,
+            )| {
                 (item_type == "message"
                     && latest_role.as_deref() == Some(role)
                     && latest_content.as_deref() == Some(content)
@@ -4126,7 +4136,7 @@ mutation($threadId: ID!) {{
             )?;
             self.touch_chat_thread(thread_id, &now)?;
             let event_id = self.conn.last_insert_rowid();
-            Ok(self.get_chat_event(event_id)?)
+            self.get_chat_event(event_id)
         })();
 
         match outcome {
@@ -13880,7 +13890,9 @@ spotlight_testing = true
 
         let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
         let messages = store.list_chat_messages(thread.id).unwrap();
-        assert!(messages.iter().all(|message| message.timeline_seq.is_some()));
+        assert!(messages
+            .iter()
+            .all(|message| message.timeline_seq.is_some()));
         assert_eq!(messages[0].timeline_seq, Some(4));
         assert_eq!(messages[1].timeline_seq, Some(5));
         assert_eq!(messages[2].timeline_seq, Some(6));
@@ -14172,6 +14184,44 @@ spotlight_testing = true
                 "second question",
                 "second answer"
             ]
+        );
+    }
+
+    #[test]
+    fn chat_messages_codex_repaint_after_new_message_does_not_persist_old_messages_again() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Bugfix A", None)
+            .unwrap();
+        let process = process_record_for_thread(&store, thread.id);
+        store
+            .append_chat_message(thread.id, "user", "first user message", "user_send")
+            .unwrap();
+        store
+            .append_chat_message(
+                thread.id,
+                "agent",
+                "first agent response",
+                "agent_screen_parse",
+            )
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "second user message", "user_send")
+            .unwrap();
+
+        let screen = include_str!("../tests/fixtures/codex_replay_duplicate_screen.txt");
+        store
+            .persist_codex_screen_delta(thread.id, process.id, screen)
+            .unwrap();
+        store
+            .persist_codex_screen_delta(thread.id, process.id, screen)
+            .unwrap();
+
+        let messages = store.list_chat_messages(thread.id).unwrap();
+        assert_eq!(messages.len(), 4);
+        assert_eq!(
+            messages[3].content,
+            "second agent response\nwith continuation"
         );
     }
 
