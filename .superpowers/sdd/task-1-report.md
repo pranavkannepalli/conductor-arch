@@ -26,3 +26,9 @@ Task 1 parser review follow-up:
 - Extended `delta_event_start_index` to honor `last_agent_message` with the same boundary handling used for user anchors.
 - Kept the change scoped to `crates/core/src/codex_tui.rs`.
 - Verified with `cargo test -p linux-archductor-core codex_tui -- --nocapture` — passed (`30` tests).
+
+Task 1 multiline anchor fix:
+- Added a regression test for multiline `last_user_message` anchoring so older tool events are not replayed.
+- Reworked `delta_event_start_index` to anchor from parsed message spans and assembled message bodies instead of single physical lines.
+- Kept `parse_codex_screen_messages` behavior intact and left the change scoped to `crates/core/src/codex_tui.rs`.
+- Verified with `cargo test -p linux-archductor-core codex_tui -- --nocapture` — passed (`31` tests).
