@@ -47,6 +47,7 @@ const SESSION_TAIL_HISTORY: usize = 120;
 const SESSION_POLL_INTERVAL_MS: u64 = 100;
 const SESSION_RECONCILE_EVERY_TICKS: u32 = 10;
 const DEFAULT_CHAT_TITLE_PREFIX: &str = "New Chat";
+const REVEAL_EXISTING_CHAT_REFRESH_ROWS: bool = false;
 
 pub type ExternalThreadSelectionController = Rc<RefCell<Option<Rc<dyn Fn(Option<i64>)>>>>;
 type RefreshChatSurfaceController = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
@@ -509,7 +510,7 @@ pub fn agent_session_panel(
                     let empty = Label::new(Some("No chats yet for this provider."));
                     empty.add_css_class("card-meta");
                     empty.set_xalign(0.0);
-                    append_revealed(&thread_row, &empty);
+                    append_chat_refresh_row(&thread_row, &empty);
                 } else {
                     for thread in visible_threads.drain(..) {
                         let button = thread_chip_button(&thread, Some(thread.id) == selected, {
@@ -535,7 +536,7 @@ pub fn agent_session_panel(
                             "{} chat",
                             session_kind_name(current_kind)
                         )));
-                        append_revealed(&thread_row, &button);
+                        append_chat_refresh_row(&thread_row, &button);
                     }
                 }
             }
@@ -574,7 +575,7 @@ pub fn agent_session_panel(
                         label.add_css_class("chat-agent-text");
                         label.set_wrap(true);
                         label.set_xalign(0.0);
-                        append_revealed(&messages, &label);
+                        append_chat_refresh_row(&messages, &label);
                         return;
                     }
                     let record = maybe_process_id
@@ -626,7 +627,7 @@ pub fn agent_session_panel(
                         )
                     });
                     if let Some(widget) = codex_startup_status_widget(&startup_state) {
-                        append_revealed(&messages, &widget);
+                        append_chat_refresh_row(&messages, &widget);
                     }
 
                     let thread_messages = WorkspaceStore::open(database_path.clone())
@@ -644,7 +645,7 @@ pub fn agent_session_panel(
                             latest_context_usage_from_messages(&thread_messages),
                         );
                         for message in thread_messages {
-                            append_revealed(&messages, &chat_message_widget(&message));
+                            append_chat_refresh_row(&messages, &chat_message_widget(&message));
                         }
                         return;
                     }
@@ -655,14 +656,14 @@ pub fn agent_session_panel(
                     empty.add_css_class("chat-agent-text");
                     empty.set_wrap(true);
                     empty.set_xalign(0.0);
-                    append_revealed(&messages, &empty);
+                    append_chat_refresh_row(&messages, &empty);
                 }
                 (None, _) => {
                     let prompt = format!(
                         "No {} chat yet. Create one or send a message to start one.",
                         session_kind_name(current_kind)
                     );
-                    append_revealed(&messages, &chat_user_bubble(&prompt));
+                    append_chat_refresh_row(&messages, &chat_user_bubble(&prompt));
                 }
             }
             debug!(workspace = %workspace, "chat refresh_view complete");
@@ -1942,6 +1943,14 @@ fn chat_user_bubble(text: &str) -> GBox {
     bubble.set_halign(gtk::Align::Fill);
     row.append(&bubble);
     row
+}
+
+fn append_chat_refresh_row<W: IsA<Widget>>(container: &GBox, child: &W) {
+    if REVEAL_EXISTING_CHAT_REFRESH_ROWS {
+        append_revealed(container, child);
+    } else {
+        container.append(child);
+    }
 }
 
 fn session_transcript_event_widget(event: &SessionTranscriptEvent) -> Widget {
@@ -6538,6 +6547,11 @@ fix it
         assert_eq!(events[2].title, "graphify");
         assert_eq!(events[3].kind, CodexInlineEventKind::Skill);
         assert_eq!(events[3].title, "superpowers:brainstorming");
+    }
+
+    #[test]
+    fn chat_refresh_rows_do_not_reveal_existing_messages_on_poll() {
+        assert!(!REVEAL_EXISTING_CHAT_REFRESH_ROWS);
     }
 
     #[test]
