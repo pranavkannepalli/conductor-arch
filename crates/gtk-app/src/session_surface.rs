@@ -10,12 +10,12 @@ use linux_archductor_core::codex_tui::{
     parse_codex_file_change_block, parse_codex_inline_event, parse_codex_screen_messages,
     CodexFileChangeAction as CoreCodexFileChangeAction,
     CodexFileReference as CoreCodexFileReference, CodexInlineEvent as CoreCodexInlineEvent,
-    ScreenMessage, ScreenMessageRole,
+    CodexTranscriptEvent, ScreenMessage, ScreenMessageRole,
 };
 use linux_archductor_core::pty::PtySession;
 use linux_archductor_core::workspace::{
-    ChatMessageRecord, ChatThreadRecord, ProcessRecord, ProcessStatus, SessionHarnessOptions,
-    SessionKind, WorkspaceStore,
+    ChatEventRecord, ChatMessageRecord, ChatThreadRecord, ProcessRecord, ProcessStatus,
+    SessionHarnessOptions, SessionKind, WorkspaceStore,
 };
 use std::any::Any;
 use std::backtrace::Backtrace;
@@ -74,6 +74,12 @@ struct CodexInlineEvent {
     body: Option<String>,
     path: Option<PathBuf>,
     status: CodexInlineEventStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ChatTimelineItem {
+    Message(ChatMessageRecord),
+    Event(ChatEventRecord),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -630,22 +636,41 @@ pub fn agent_session_panel(
                         append_chat_refresh_row(&messages, &widget);
                     }
 
-                    let thread_messages = WorkspaceStore::open(database_path.clone())
-                        .and_then(|store| store.list_chat_messages(thread_id))
-                        .unwrap_or_default();
+                    let (thread_messages, thread_events) =
+                        WorkspaceStore::open(database_path.clone())
+                            .map(|store| {
+                                (
+                                    store.list_chat_messages(thread_id).unwrap_or_default(),
+                                    store.list_chat_events(thread_id).unwrap_or_default(),
+                                )
+                            })
+                            .unwrap_or_default();
+                    let render_legacy_inline_events = thread_events.is_empty();
+                    let timeline =
+                        merge_chat_timeline_for_render(thread_messages.clone(), thread_events);
                     debug!(
                         workspace = %workspace,
                         thread_id,
                         thread_message_count = thread_messages.len(),
-                        "chat refresh_view loaded thread messages"
+                        thread_timeline_count = timeline.len(),
+                        render_legacy_inline_events,
+                        "chat refresh_view loaded persisted chat timeline"
                     );
-                    if !thread_messages.is_empty() {
+                    if !timeline.is_empty() {
                         apply_context_usage_state(
                             &context_usage,
                             latest_context_usage_from_messages(&thread_messages),
                         );
-                        for message in thread_messages {
-                            append_chat_refresh_row(&messages, &chat_message_widget(&message));
+                        for item in timeline {
+                            match item {
+                                ChatTimelineItem::Message(message) => append_chat_refresh_row(
+                                    &messages,
+                                    &chat_message_widget(&message, render_legacy_inline_events),
+                                ),
+                                ChatTimelineItem::Event(event) => {
+                                    append_chat_refresh_row(&messages, &chat_event_widget(&event));
+                                }
+                            }
                         }
                         return;
                     }
@@ -2083,7 +2108,33 @@ fn skill_name_from_read_header(header: &str) -> Option<&str> {
     (!skill.is_empty()).then_some(skill)
 }
 
-fn chat_message_widget(message: &ChatMessageRecord) -> Widget {
+fn merge_chat_timeline_for_render(
+    messages: Vec<ChatMessageRecord>,
+    events: Vec<ChatEventRecord>,
+) -> Vec<ChatTimelineItem> {
+    let mut items = messages
+        .into_iter()
+        .map(ChatTimelineItem::Message)
+        .chain(events.into_iter().map(ChatTimelineItem::Event))
+        .collect::<Vec<_>>();
+    items.sort_by(|left, right| {
+        let left_seq = chat_timeline_item_sort_key(left);
+        let right_seq = chat_timeline_item_sort_key(right);
+        left_seq.cmp(&right_seq)
+    });
+    items
+}
+
+fn chat_timeline_item_sort_key(item: &ChatTimelineItem) -> (i64, u8, i64) {
+    match item {
+        ChatTimelineItem::Message(message) => {
+            (message.timeline_seq.unwrap_or(message.id), 0, message.id)
+        }
+        ChatTimelineItem::Event(event) => (event.timeline_seq, 1, event.id),
+    }
+}
+
+fn chat_message_widget(message: &ChatMessageRecord, render_legacy_inline_events: bool) -> Widget {
     match message.role.as_str() {
         "user" => chat_user_bubble(&message.content).upcast(),
         "system" => {
@@ -2096,7 +2147,8 @@ fn chat_message_widget(message: &ChatMessageRecord) -> Widget {
             label.upcast()
         }
         _ => {
-            let inline_events = parse_codex_inline_events_local(&message.content);
+            let inline_events =
+                legacy_inline_events_for_message(message, render_legacy_inline_events);
             if !inline_events.is_empty() {
                 return inline_events_widget(&inline_events);
             }
@@ -2110,6 +2162,171 @@ fn chat_message_widget(message: &ChatMessageRecord) -> Widget {
             label.upcast()
         }
     }
+}
+
+fn legacy_inline_events_for_message(
+    message: &ChatMessageRecord,
+    render_legacy_inline_events: bool,
+) -> Vec<CodexInlineEvent> {
+    if render_legacy_inline_events && message.role != "user" && message.role != "system" {
+        parse_codex_inline_events_local(&message.content)
+    } else {
+        Vec::new()
+    }
+}
+
+fn chat_event_widget(event: &ChatEventRecord) -> Widget {
+    stored_chat_event_inline_event(event)
+        .map(|inline| inline_event_widget(&inline))
+        .unwrap_or_else(|| {
+            let label = Label::new(Some(&event.body));
+            label.add_css_class("chat-agent-text");
+            label.set_selectable(true);
+            label.set_wrap(true);
+            label.set_xalign(0.0);
+            label.set_hexpand(true);
+            label.set_margin_bottom(18);
+            label.upcast()
+        })
+}
+
+fn stored_chat_event_inline_event(event: &ChatEventRecord) -> Option<CodexInlineEvent> {
+    let transcript_event = codex_transcript_event_from_payload_json(&event.payload_json)?;
+    codex_inline_event_from_transcript_event(&transcript_event)
+}
+
+fn codex_inline_event_from_transcript_event(
+    event: &CodexTranscriptEvent,
+) -> Option<CodexInlineEvent> {
+    match event {
+        CodexTranscriptEvent::Tool { title, body } => Some(CodexInlineEvent {
+            kind: CodexInlineEventKind::Tool,
+            title: title.clone(),
+            subtitle: Some("Command result".to_owned()),
+            body: Some(body.clone()),
+            path: None,
+            status: codex_event_status_from_line(body),
+        }),
+        CodexTranscriptEvent::Skill { title, body } => Some(CodexInlineEvent {
+            kind: CodexInlineEventKind::Skill,
+            title: title.clone(),
+            subtitle: None,
+            body: Some(body.clone()),
+            path: None,
+            status: codex_event_status_from_line(body),
+        }),
+        CodexTranscriptEvent::FileChange(change) => Some(CodexInlineEvent {
+            kind: CodexInlineEventKind::Tool,
+            title: format!(
+                "{} {}",
+                codex_file_change_action_label(change.action),
+                change.path
+            ),
+            subtitle: codex_file_change_counts(change.additions, change.deletions),
+            body: Some(format_codex_file_change_event(change)),
+            path: Some(PathBuf::from(&change.path)),
+            status: CodexInlineEventStatus::Complete,
+        }),
+    }
+}
+
+fn codex_transcript_event_from_payload_json(payload_json: &str) -> Option<CodexTranscriptEvent> {
+    let value = serde_json::from_str::<serde_json::Value>(payload_json).ok()?;
+    let event_type = value.get("type")?.as_str()?;
+    match event_type {
+        "tool" => Some(CodexTranscriptEvent::Tool {
+            title: value.get("title")?.as_str()?.to_owned(),
+            body: value.get("body")?.as_str()?.to_owned(),
+        }),
+        "skill" => Some(CodexTranscriptEvent::Skill {
+            title: value.get("title")?.as_str()?.to_owned(),
+            body: value.get("body")?.as_str()?.to_owned(),
+        }),
+        "file_change" => {
+            let action = match value.get("action")?.as_str()? {
+                "added" => CoreCodexFileChangeAction::Added,
+                "edited" => CoreCodexFileChangeAction::Edited,
+                "deleted" => CoreCodexFileChangeAction::Deleted,
+                _ => return None,
+            };
+            let lines = value
+                .get("lines")
+                .and_then(|lines| lines.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|line| {
+                    let kind = match line.get("kind")?.as_str()? {
+                        "context" => {
+                            linux_archductor_core::codex_tui::CodexFileChangeLineKind::Context
+                        }
+                        "added" => linux_archductor_core::codex_tui::CodexFileChangeLineKind::Added,
+                        "deleted" => {
+                            linux_archductor_core::codex_tui::CodexFileChangeLineKind::Deleted
+                        }
+                        _ => return None,
+                    };
+                    Some(linux_archductor_core::codex_tui::CodexFileChangeLine {
+                        kind,
+                        old_line: line
+                            .get("old_line")
+                            .and_then(|value| value.as_u64())
+                            .and_then(|value| u32::try_from(value).ok()),
+                        new_line: line
+                            .get("new_line")
+                            .and_then(|value| value.as_u64())
+                            .and_then(|value| u32::try_from(value).ok()),
+                        content: line.get("content")?.as_str()?.to_owned(),
+                    })
+                })
+                .collect();
+            Some(CodexTranscriptEvent::FileChange(
+                linux_archductor_core::codex_tui::CodexFileChange {
+                    action,
+                    path: value.get("path")?.as_str()?.to_owned(),
+                    additions: value
+                        .get("additions")
+                        .and_then(|value| value.as_u64())
+                        .and_then(|value| u32::try_from(value).ok()),
+                    deletions: value
+                        .get("deletions")
+                        .and_then(|value| value.as_u64())
+                        .and_then(|value| u32::try_from(value).ok()),
+                    lines,
+                },
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn format_codex_file_change_event(
+    change: &linux_archductor_core::codex_tui::CodexFileChange,
+) -> String {
+    let mut body = format!(
+        "{} {}",
+        codex_file_change_action_label(change.action),
+        change.path
+    );
+    if let Some(counts) = codex_file_change_counts(change.additions, change.deletions) {
+        body.push(' ');
+        body.push('(');
+        body.push_str(&counts);
+        body.push(')');
+    }
+    for line in &change.lines {
+        let prefix = match line.kind {
+            linux_archductor_core::codex_tui::CodexFileChangeLineKind::Context => " ",
+            linux_archductor_core::codex_tui::CodexFileChangeLineKind::Added => "+",
+            linux_archductor_core::codex_tui::CodexFileChangeLineKind::Deleted => "-",
+        };
+        let line_number = line
+            .new_line
+            .or(line.old_line)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "?".to_owned());
+        body.push_str(&format!("\n    {line_number} {prefix}{}", line.content));
+    }
+    body
 }
 
 fn inline_event_kind_label(kind: CodexInlineEventKind) -> &'static str {
@@ -7045,6 +7262,72 @@ I summarized the result.
         assert_eq!(change.lines.len(), 3);
         assert_eq!(change.lines[1].new_line, Some(379));
         assert_eq!(change.lines[1].content, "added");
+    }
+
+    #[test]
+    fn chat_timeline_keeps_messages_and_events_in_persisted_order() {
+        let messages = vec![
+            ChatMessageRecord {
+                id: 30,
+                thread_id: 7,
+                role: "user".to_owned(),
+                content: "run tests".to_owned(),
+                source: "user_send".to_owned(),
+                timeline_seq: Some(1),
+                created_at: "now".to_owned(),
+                updated_at: "now".to_owned(),
+            },
+            ChatMessageRecord {
+                id: 10,
+                thread_id: 7,
+                role: "agent".to_owned(),
+                content: "tests passed".to_owned(),
+                source: "agent_reply".to_owned(),
+                timeline_seq: Some(3),
+                created_at: "now".to_owned(),
+                updated_at: "now".to_owned(),
+            },
+        ];
+        let events = vec![ChatEventRecord {
+            id: 99,
+            thread_id: 7,
+            process_id: Some(5),
+            kind: "tool".to_owned(),
+            title: "cargo test".to_owned(),
+            body: "ok".to_owned(),
+            path: None,
+            payload_json: r#"{"type":"tool","title":"cargo test","body":"ok"}"#.to_owned(),
+            timeline_seq: 2,
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+        }];
+
+        let timeline = merge_chat_timeline_for_render(messages, events);
+
+        assert_eq!(timeline.len(), 3);
+        assert!(matches!(timeline[0], ChatTimelineItem::Message(_)));
+        assert!(matches!(timeline[1], ChatTimelineItem::Event(_)));
+        assert!(matches!(timeline[2], ChatTimelineItem::Message(_)));
+    }
+
+    #[test]
+    fn legacy_inline_event_parsing_only_runs_without_persisted_events() {
+        let message = ChatMessageRecord {
+            id: 10,
+            thread_id: 7,
+            role: "agent".to_owned(),
+            content: "functions.exec_command running cargo test".to_owned(),
+            source: "agent_reply".to_owned(),
+            timeline_seq: Some(3),
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+        };
+
+        let legacy_events = legacy_inline_events_for_message(&message, true);
+        let persisted_timeline_events = legacy_inline_events_for_message(&message, false);
+
+        assert_eq!(legacy_events.len(), 1);
+        assert!(persisted_timeline_events.is_empty());
     }
 
     #[test]
