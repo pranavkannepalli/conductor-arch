@@ -1,0 +1,12 @@
+Ran cargo test -p linux-archductor-core codex_tui
+running 24 tests
+test codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok
+
+Read SKILL.md (graphify), SKILL.md (skill-creator)
+# Graphify
+Build a knowledge graph from input.
+
+• Edited crates/core/src/codex_tui.rs (+2 -1)
+    10  old context
+    11 -old line
+    12 +new line

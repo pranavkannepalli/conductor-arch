@@ -164,6 +164,53 @@ pub fn parse_codex_file_change_block(text: &str) -> Option<CodexFileChange> {
     Some(change)
 }
 
+pub fn parse_codex_event_blocks(text: &str) -> Vec<CodexTranscriptEvent> {
+    let lines = text.lines().collect::<Vec<_>>();
+    let mut events = Vec::new();
+    let mut index = 0usize;
+
+    while index < lines.len() {
+        let header = lines[index].trim_end();
+        if header.trim().is_empty() {
+            index += 1;
+            continue;
+        }
+
+        if let Some(command) = header.strip_prefix("Ran ") {
+            let (body, next) = collect_event_body(&lines, index + 1);
+            events.push(CodexTranscriptEvent::Tool {
+                title: command.trim().to_owned(),
+                body,
+            });
+            index = next;
+            continue;
+        }
+
+        if header.starts_with("Read SKILL.md ") {
+            let (body, next) = collect_event_body(&lines, index + 1);
+            events.push(CodexTranscriptEvent::Skill {
+                title: skill_titles_from_read_header(header),
+                body,
+            });
+            index = next;
+            continue;
+        }
+
+        if is_raw_file_change_event_line(header) {
+            let (body, next) = collect_event_body_including_header(&lines, index);
+            if let Some(change) = parse_codex_file_change_block(&body) {
+                events.push(CodexTranscriptEvent::FileChange(change));
+            }
+            index = next;
+            continue;
+        }
+
+        index += 1;
+    }
+
+    events
+}
+
 pub fn parse_codex_structured_lines(text: &str) -> Vec<CodexParsedLine> {
     text.lines()
         .filter_map(|line| {
@@ -547,6 +594,54 @@ fn parse_file_change_count(line: &str, sign: char) -> Option<u32> {
                 .then(|| digits.parse::<u32>().ok())
                 .flatten()
         })
+}
+
+fn collect_event_body(lines: &[&str], start: usize) -> (String, usize) {
+    let mut body = Vec::new();
+    let mut index = start;
+
+    while index < lines.len() {
+        let line = lines[index].trim_end();
+        if line.starts_with("Ran ")
+            || line.starts_with("Read SKILL.md ")
+            || is_raw_file_change_event_line(line)
+        {
+            break;
+        }
+        body.push(line);
+        index += 1;
+    }
+
+    (body.join("\n").trim().to_owned(), index)
+}
+
+fn collect_event_body_including_header(lines: &[&str], start: usize) -> (String, usize) {
+    let (tail, next) = collect_event_body(lines, start + 1);
+    let mut block = lines[start].to_owned();
+    if !tail.is_empty() {
+        block.push('\n');
+        block.push_str(&tail);
+    }
+    (block, next)
+}
+
+fn skill_titles_from_read_header(header: &str) -> String {
+    let skills = header
+        .split('(')
+        .skip(1)
+        .filter_map(|part| part.split(')').next())
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if skills.is_empty() {
+        "SKILL.md".to_owned()
+    } else {
+        skills.join(", ")
+    }
+}
+
+fn is_raw_file_change_event_line(line: &str) -> bool {
+    parse_codex_file_change(normalize_codex_bullet_line(line)).is_some()
 }
 
 fn is_probable_changed_file_path(path: &str) -> bool {
@@ -1083,12 +1178,13 @@ fn trim_blank_edges(content: &str) -> String {
 mod tests {
     use super::{
         detect_directory_trust_prompt, encode_send_line, is_trust_prompt_visible,
-        merge_screen_messages, parse_codex_context_usage, parse_codex_file_change_block,
-        parse_codex_inline_event, parse_codex_screen_delta, parse_codex_screen_messages,
-        parse_codex_structured_lines, CodexContextUsage, CodexFileChange, CodexFileChangeAction,
-        CodexFileChangeLine, CodexFileChangeLineKind, CodexFileReference, CodexInlineEvent,
-        CodexParseBenchmark, CodexParsedItem, CodexParsedLine, CodexSkillAnnouncement,
-        CodexToolCall, ScreenMessage, ScreenMessageRole,
+        merge_screen_messages, parse_codex_context_usage, parse_codex_event_blocks,
+        parse_codex_file_change_block, parse_codex_inline_event, parse_codex_screen_delta,
+        parse_codex_screen_messages, parse_codex_structured_lines, CodexContextUsage,
+        CodexFileChange, CodexFileChangeAction, CodexFileChangeLine, CodexFileChangeLineKind,
+        CodexFileReference, CodexInlineEvent, CodexParseBenchmark, CodexParsedItem,
+        CodexParsedLine, CodexSkillAnnouncement, CodexToolCall, CodexTranscriptEvent,
+        ScreenMessage, ScreenMessageRole,
     };
 
     #[test]
@@ -1314,6 +1410,22 @@ mod tests {
                 ],
             })
         );
+    }
+
+    #[test]
+    fn parses_tool_skill_and_file_change_blocks_as_events() {
+        let text = include_str!("../tests/fixtures/codex_tool_skill_file_events.txt");
+
+        let events = parse_codex_event_blocks(text);
+
+        assert_eq!(events.len(), 3);
+        assert!(matches!(&events[0], CodexTranscriptEvent::Tool { title, body }
+            if title == "cargo test -p linux-archductor-core codex_tui"
+                && body.contains("running 24 tests")));
+        assert!(matches!(&events[1], CodexTranscriptEvent::Skill { title, body }
+            if title == "graphify, skill-creator" && body.contains("# Graphify")));
+        assert!(matches!(&events[2], CodexTranscriptEvent::FileChange(change)
+            if change.path == "crates/core/src/codex_tui.rs" && change.lines.len() == 3));
     }
 
     #[test]
