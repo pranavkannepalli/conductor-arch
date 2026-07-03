@@ -7,6 +7,7 @@ mod command_palette;
 mod dashboard;
 mod history;
 mod logger;
+mod motion;
 mod projects;
 mod refresh;
 mod session_surface;

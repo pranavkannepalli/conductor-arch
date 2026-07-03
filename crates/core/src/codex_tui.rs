@@ -6,6 +6,7 @@ pub enum CodexInlineEvent {
     Tool(CodexToolCall),
     Skill(CodexSkillAnnouncement),
     FileReference(CodexFileReference),
+    FileChange(CodexFileChange),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -26,6 +27,39 @@ pub struct CodexFileReference {
     pub path: String,
     pub line: Option<u32>,
     pub column: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodexFileChange {
+    pub action: CodexFileChangeAction,
+    pub path: String,
+    pub additions: Option<u32>,
+    pub deletions: Option<u32>,
+    pub lines: Vec<CodexFileChangeLine>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexFileChangeAction {
+    Added,
+    Edited,
+    Deleted,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodexFileChangeLine {
+    pub kind: CodexFileChangeLineKind,
+    pub old_line: Option<u32>,
+    pub new_line: Option<u32>,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexFileChangeLineKind {
+    Context,
+    Added,
+    Deleted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -85,10 +119,19 @@ pub fn parse_codex_inline_event(line: &str) -> Option<CodexInlineEvent> {
         .map(CodexInlineEvent::Tool)
         .or_else(|| parse_codex_skill_announcement(line).map(CodexInlineEvent::Skill))
         .or_else(|| parse_codex_file_reference(line).map(CodexInlineEvent::FileReference))
+        .or_else(|| parse_codex_file_change(line).map(CodexInlineEvent::FileChange))
 }
 
 pub fn parse_codex_context_usage(line: &str) -> Option<CodexContextUsage> {
     parse_context_window_percent(line).or_else(|| parse_context_token_fraction(line))
+}
+
+pub fn parse_codex_file_change_block(text: &str) -> Option<CodexFileChange> {
+    let mut lines = text.lines();
+    let header = lines.next()?;
+    let mut change = parse_codex_file_change(header)?;
+    change.lines = lines.filter_map(parse_codex_file_change_line).collect();
+    Some(change)
 }
 
 pub fn parse_codex_structured_lines(text: &str) -> Vec<CodexParsedLine> {
@@ -270,33 +313,18 @@ fn parse_codex_tool_call(line: &str) -> Option<CodexToolCall> {
         "multi_tool_use",
     ];
 
-    for namespace in KNOWN_NAMESPACES {
-        let prefix = format!("{namespace}.");
-        let Some(start) = line.find(&prefix) else {
-            continue;
-        };
-        if !is_token_start_boundary(line, start) {
-            continue;
-        }
-        let name_start = start + prefix.len();
-        let name_end = line[name_start..]
-            .char_indices()
-            .find_map(|(offset, ch)| (!is_identifier_char(ch)).then_some(name_start + offset))
-            .unwrap_or(line.len());
-        if name_end == name_start || !is_token_end_boundary(line, name_end) {
-            continue;
-        }
-        let name = &line[name_start..name_end];
-        return Some(CodexToolCall {
-            namespace: (*namespace).to_owned(),
-            name: name.to_owned(),
-            marker: line[start..name_end].to_owned(),
-        });
-    }
-    None
+    line.split_whitespace()
+        .filter_map(normalize_tool_token)
+        .find_map(|token| {
+            parse_mcp_tool_marker(token)
+                .or_else(|| parse_dotted_tool_marker(token, KNOWN_NAMESPACES, line))
+        })
 }
 
 fn parse_codex_skill_announcement(line: &str) -> Option<CodexSkillAnnouncement> {
+    if let Some(skill_read) = parse_skill_read_line(line) {
+        return Some(skill_read);
+    }
     let rest = line.strip_prefix("Using ")?;
     let (skill, message) = rest.split_once(" to ")?;
     if !is_skill_name(skill) || message.trim().is_empty() {
@@ -308,6 +336,31 @@ fn parse_codex_skill_announcement(line: &str) -> Option<CodexSkillAnnouncement> 
     })
 }
 
+fn parse_skill_read_line(line: &str) -> Option<CodexSkillAnnouncement> {
+    let trimmed = line.trim();
+    let rest = trimmed.strip_prefix("Read SKILL.md ")?;
+    let mut skills = Vec::new();
+    let mut remaining = rest;
+    while let Some(start) = remaining.find('(') {
+        let after_start = &remaining[start + 1..];
+        let Some(end) = after_start.find(')') else {
+            break;
+        };
+        let skill = after_start[..end].trim();
+        if is_skill_name(skill) {
+            skills.push(skill.to_owned());
+        }
+        remaining = &after_start[end + 1..];
+    }
+    if skills.is_empty() {
+        return None;
+    }
+    Some(CodexSkillAnnouncement {
+        skill: skills.join(", "),
+        message: "Read SKILL.md".to_owned(),
+    })
+}
+
 fn parse_codex_file_reference(line: &str) -> Option<CodexFileReference> {
     for marker in ["file:", "path:", "output path:"] {
         if let Some(index) = line.find(marker) {
@@ -316,6 +369,103 @@ fn parse_codex_file_reference(line: &str) -> Option<CodexFileReference> {
         }
     }
     None
+}
+
+fn parse_codex_file_change(line: &str) -> Option<CodexFileChange> {
+    let trimmed = normalize_codex_bullet_line(line);
+    let (action, rest) = parse_file_change_action(trimmed)?;
+    let path = rest
+        .split_whitespace()
+        .next()?
+        .trim_matches(|ch: char| matches!(ch, '`' | '"' | '\'' | ',' | ';'));
+    if !is_probable_changed_file_path(path) {
+        return None;
+    }
+    Some(CodexFileChange {
+        action,
+        path: path.to_owned(),
+        additions: parse_file_change_count(trimmed, '+'),
+        deletions: parse_file_change_count(trimmed, '-'),
+        lines: Vec::new(),
+    })
+}
+
+fn normalize_codex_bullet_line(line: &str) -> &str {
+    line.trim()
+        .strip_prefix('•')
+        .map(str::trim_start)
+        .unwrap_or_else(|| line.trim())
+}
+
+fn parse_codex_file_change_line(line: &str) -> Option<CodexFileChangeLine> {
+    let trimmed = line.trim_start();
+    if trimmed.is_empty() || trimmed == "⋮" {
+        return None;
+    }
+    let (line_number, rest) = parse_leading_line_number(trimmed)?;
+    let rest = rest.strip_prefix(' ')?;
+    if let Some(content) = rest.strip_prefix('+') {
+        return Some(CodexFileChangeLine {
+            kind: CodexFileChangeLineKind::Added,
+            old_line: None,
+            new_line: Some(line_number),
+            content: content.to_owned(),
+        });
+    }
+    if let Some(content) = rest.strip_prefix('-') {
+        return Some(CodexFileChangeLine {
+            kind: CodexFileChangeLineKind::Deleted,
+            old_line: Some(line_number),
+            new_line: None,
+            content: content.to_owned(),
+        });
+    }
+    Some(CodexFileChangeLine {
+        kind: CodexFileChangeLineKind::Context,
+        old_line: Some(line_number),
+        new_line: Some(line_number),
+        content: rest.trim_start().to_owned(),
+    })
+}
+
+fn parse_leading_line_number(value: &str) -> Option<(u32, &str)> {
+    let first_non_digit = value
+        .char_indices()
+        .find_map(|(index, ch)| (!ch.is_ascii_digit()).then_some(index))?;
+    if first_non_digit == 0 {
+        return None;
+    }
+    let line_number = value[..first_non_digit].parse::<u32>().ok()?;
+    Some((line_number, &value[first_non_digit..]))
+}
+
+fn parse_file_change_action(line: &str) -> Option<(CodexFileChangeAction, &str)> {
+    if let Some(rest) = line.strip_prefix("Added ") {
+        return Some((CodexFileChangeAction::Added, rest));
+    }
+    if let Some(rest) = line.strip_prefix("Edited ") {
+        return Some((CodexFileChangeAction::Edited, rest));
+    }
+    if let Some(rest) = line.strip_prefix("Deleted ") {
+        return Some((CodexFileChangeAction::Deleted, rest));
+    }
+    None
+}
+
+fn parse_file_change_count(line: &str, sign: char) -> Option<u32> {
+    line.split(|ch: char| ch.is_whitespace() || matches!(ch, '(' | ')' | ',' | ';'))
+        .find_map(|token| {
+            let digits = token.strip_prefix(sign)?;
+            (!digits.is_empty())
+                .then(|| digits.parse::<u32>().ok())
+                .flatten()
+        })
+}
+
+fn is_probable_changed_file_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('-')
+        && (path.contains('/') || path.contains('\\') || path.contains('.'))
 }
 
 fn parse_path_reference(raw: &str) -> Option<CodexFileReference> {
@@ -402,30 +552,72 @@ fn is_identifier_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || ch == '_'
 }
 
-fn is_token_start_boundary(line: &str, index: usize) -> bool {
-    if index == 0 {
-        return true;
-    }
-    line[..index]
-        .chars()
-        .next_back()
-        .map(|ch| !is_identifier_char(ch) && ch != '.')
-        .unwrap_or(true)
+fn normalize_tool_token(token: &str) -> Option<&str> {
+    let token = token.trim_matches(|ch: char| {
+        matches!(
+            ch,
+            '(' | ')' | '[' | ']' | '<' | '>' | '"' | '\'' | '`' | ',' | ';' | ':'
+        )
+    });
+    (!token.is_empty()).then_some(token)
 }
 
-fn is_token_end_boundary(line: &str, index: usize) -> bool {
-    if index == line.len() {
-        return true;
+fn parse_mcp_tool_marker(token: &str) -> Option<CodexToolCall> {
+    let rest = token.strip_prefix("mcp__")?;
+    let (server, name) = rest.split_once("__")?;
+    if !is_tool_identifier_segment(server) || !is_tool_identifier_segment(name) {
+        return None;
     }
-    line[index..]
-        .chars()
-        .next()
-        .map(|ch| !is_identifier_char(ch) && ch != '.')
-        .unwrap_or(true)
+    Some(CodexToolCall {
+        namespace: format!("mcp__{server}"),
+        name: name.to_owned(),
+        marker: format!("mcp__{server}__{name}"),
+    })
+}
+
+fn parse_dotted_tool_marker(
+    token: &str,
+    known_namespaces: &[&str],
+    line: &str,
+) -> Option<CodexToolCall> {
+    let (namespace, name) = token.split_once('.')?;
+    if name.contains('.')
+        || !is_tool_identifier_segment(namespace)
+        || !is_tool_identifier_segment(name)
+    {
+        return None;
+    }
+    let known_namespace = known_namespaces.contains(&namespace);
+    if !known_namespace
+        && !is_explicit_tool_call_line(line)
+        && !namespace.contains('_')
+        && !name.contains('_')
+    {
+        return None;
+    }
+    Some(CodexToolCall {
+        namespace: namespace.to_owned(),
+        name: name.to_owned(),
+        marker: token.to_owned(),
+    })
+}
+
+fn is_tool_identifier_segment(value: &str) -> bool {
+    !value.is_empty() && value.chars().all(is_identifier_char)
+}
+
+fn is_explicit_tool_call_line(line: &str) -> bool {
+    let lower = line.trim_start().to_ascii_lowercase();
+    lower.starts_with("calling ")
+        || lower.starts_with("called ")
+        || lower.starts_with("queued ")
+        || lower.starts_with("running ")
+        || lower.starts_with("ran ")
+        || lower.contains(" tool ")
 }
 
 fn is_skill_name(value: &str) -> bool {
-    value.contains(':')
+    !value.is_empty()
         && value
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, ':' | '-' | '_' | '.'))
@@ -804,10 +996,11 @@ fn trim_blank_edges(content: &str) -> String {
 mod tests {
     use super::{
         detect_directory_trust_prompt, encode_send_line, is_trust_prompt_visible,
-        merge_screen_messages, parse_codex_context_usage, parse_codex_inline_event,
-        parse_codex_screen_messages, parse_codex_structured_lines, CodexContextUsage,
-        CodexFileReference, CodexInlineEvent, CodexParsedLine, CodexSkillAnnouncement,
-        CodexToolCall, ScreenMessage, ScreenMessageRole,
+        merge_screen_messages, parse_codex_context_usage, parse_codex_file_change_block,
+        parse_codex_inline_event, parse_codex_screen_messages, parse_codex_structured_lines,
+        CodexContextUsage, CodexFileChange, CodexFileChangeAction, CodexFileChangeLine,
+        CodexFileChangeLineKind, CodexFileReference, CodexInlineEvent, CodexParsedLine,
+        CodexSkillAnnouncement, CodexToolCall, ScreenMessage, ScreenMessageRole,
     };
 
     #[test]
@@ -833,7 +1026,61 @@ mod tests {
                 marker: "tool_search.tool_search_tool".to_owned(),
             }))
         );
+        assert_eq!(
+            parse_codex_inline_event("Calling web.run to verify current docs"),
+            Some(CodexInlineEvent::Tool(CodexToolCall {
+                namespace: "web".to_owned(),
+                name: "run".to_owned(),
+                marker: "web.run".to_owned(),
+            }))
+        );
+        assert_eq!(
+            parse_codex_inline_event("Calling multi_agent_v1.spawn_agent for review"),
+            Some(CodexInlineEvent::Tool(CodexToolCall {
+                namespace: "multi_agent_v1".to_owned(),
+                name: "spawn_agent".to_owned(),
+                marker: "multi_agent_v1.spawn_agent".to_owned(),
+            }))
+        );
+        assert_eq!(
+            parse_codex_inline_event("Calling image_gen.imagegen for bitmap asset"),
+            Some(CodexInlineEvent::Tool(CodexToolCall {
+                namespace: "image_gen".to_owned(),
+                name: "imagegen".to_owned(),
+                marker: "image_gen.imagegen".to_owned(),
+            }))
+        );
+        assert_eq!(
+            parse_codex_inline_event("Calling multi_tool_use.parallel for independent reads"),
+            Some(CodexInlineEvent::Tool(CodexToolCall {
+                namespace: "multi_tool_use".to_owned(),
+                name: "parallel".to_owned(),
+                marker: "multi_tool_use.parallel".to_owned(),
+            }))
+        );
+        assert_eq!(
+            parse_codex_inline_event("Calling node_repl.js for browser automation"),
+            Some(CodexInlineEvent::Tool(CodexToolCall {
+                namespace: "node_repl".to_owned(),
+                name: "js".to_owned(),
+                marker: "node_repl.js".to_owned(),
+            }))
+        );
+        assert_eq!(
+            parse_codex_inline_event(
+                "Calling mcp__xcodebuildmcp__session_show_defaults before build"
+            ),
+            Some(CodexInlineEvent::Tool(CodexToolCall {
+                namespace: "mcp__xcodebuildmcp".to_owned(),
+                name: "session_show_defaults".to_owned(),
+                marker: "mcp__xcodebuildmcp__session_show_defaults".to_owned(),
+            }))
+        );
         assert_eq!(parse_codex_inline_event("version 1.2.3 is available"), None);
+        assert_eq!(
+            parse_codex_inline_event("this prose mentions config.toml casually"),
+            None
+        );
     }
 
     #[test]
@@ -846,8 +1093,33 @@ mod tests {
             }))
         );
         assert_eq!(
+            parse_codex_inline_event("Using graphify to map the repository"),
+            Some(CodexInlineEvent::Skill(CodexSkillAnnouncement {
+                skill: "graphify".to_owned(),
+                message: "map the repository".to_owned(),
+            }))
+        );
+        assert_eq!(
+            parse_codex_inline_event("Using skill-creator to add a local workflow"),
+            Some(CodexInlineEvent::Skill(CodexSkillAnnouncement {
+                skill: "skill-creator".to_owned(),
+                message: "add a local workflow".to_owned(),
+            }))
+        );
+        assert_eq!(
             parse_codex_inline_event("using lowercase is plain prose"),
             None
+        );
+    }
+
+    #[test]
+    fn parses_skill_read_lines_as_inline_events() {
+        assert_eq!(
+            parse_codex_inline_event("Read SKILL.md (graphify), SKILL.md (skill-creator)"),
+            Some(CodexInlineEvent::Skill(CodexSkillAnnouncement {
+                skill: "graphify, skill-creator".to_owned(),
+                message: "Read SKILL.md".to_owned(),
+            }))
         );
     }
 
@@ -872,6 +1144,87 @@ mod tests {
         assert_eq!(
             parse_codex_inline_event("this line mentions src/lib.rs casually"),
             None
+        );
+    }
+
+    #[test]
+    fn parses_file_change_summaries_as_inline_events() {
+        assert_eq!(
+            parse_codex_inline_event("Edited crates/core/src/codex_tui.rs (+12 -3)"),
+            Some(CodexInlineEvent::FileChange(CodexFileChange {
+                action: CodexFileChangeAction::Edited,
+                path: "crates/core/src/codex_tui.rs".to_owned(),
+                additions: Some(12),
+                deletions: Some(3),
+                lines: Vec::new(),
+            }))
+        );
+        assert_eq!(
+            parse_codex_inline_event("Added docs/superpowers/plans/manual.md"),
+            Some(CodexInlineEvent::FileChange(CodexFileChange {
+                action: CodexFileChangeAction::Added,
+                path: "docs/superpowers/plans/manual.md".to_owned(),
+                additions: None,
+                deletions: None,
+                lines: Vec::new(),
+            }))
+        );
+        assert_eq!(
+            parse_codex_inline_event("Deleted crates/old.rs (-22)"),
+            Some(CodexInlineEvent::FileChange(CodexFileChange {
+                action: CodexFileChangeAction::Deleted,
+                path: "crates/old.rs".to_owned(),
+                additions: None,
+                deletions: Some(22),
+                lines: Vec::new(),
+            }))
+        );
+    }
+
+    #[test]
+    fn parses_codex_numbered_file_change_blocks() {
+        assert_eq!(
+            parse_codex_file_change_block("• Edited docs/superpowers/plans/manual.md (+17 -2)\n    378  assert_eq!(parse_codex_inline_event(\"this prose mentions config.toml casually\"), None);\n    379 +assert!(matches!(\n    381 -- [ ] **Step 2: Verify**\n    389 +- [ ] **Step 2: Add transcript grouping tests**\n    420 -"),
+            Some(CodexFileChange {
+                action: CodexFileChangeAction::Edited,
+                path: "docs/superpowers/plans/manual.md".to_owned(),
+                additions: Some(17),
+                deletions: Some(2),
+                lines: vec![
+                    CodexFileChangeLine {
+                        kind: CodexFileChangeLineKind::Context,
+                        old_line: Some(378),
+                        new_line: Some(378),
+                        content:
+                            "assert_eq!(parse_codex_inline_event(\"this prose mentions config.toml casually\"), None);"
+                                .to_owned(),
+                    },
+                    CodexFileChangeLine {
+                        kind: CodexFileChangeLineKind::Added,
+                        old_line: None,
+                        new_line: Some(379),
+                        content: "assert!(matches!(".to_owned(),
+                    },
+                    CodexFileChangeLine {
+                        kind: CodexFileChangeLineKind::Deleted,
+                        old_line: Some(381),
+                        new_line: None,
+                        content: "- [ ] **Step 2: Verify**".to_owned(),
+                    },
+                    CodexFileChangeLine {
+                        kind: CodexFileChangeLineKind::Added,
+                        old_line: None,
+                        new_line: Some(389),
+                        content: "- [ ] **Step 2: Add transcript grouping tests**".to_owned(),
+                    },
+                    CodexFileChangeLine {
+                        kind: CodexFileChangeLineKind::Deleted,
+                        old_line: Some(420),
+                        new_line: None,
+                        content: String::new(),
+                    },
+                ],
+            })
         );
     }
 

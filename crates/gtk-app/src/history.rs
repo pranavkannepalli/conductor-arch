@@ -13,6 +13,8 @@ use std::sync::mpsc;
 use std::time::Duration;
 use tracing::error;
 
+use crate::motion::{append_revealed_to_list, clear_list};
+
 pub(crate) fn build_history_page(database_path: PathBuf) -> (GBox, impl Fn() + Clone + 'static) {
     let root = GBox::new(Orientation::Vertical, 0);
     root.add_css_class("dashboard");
@@ -62,9 +64,7 @@ pub(crate) fn build_history_page(database_path: PathBuf) -> (GBox, impl Fn() + C
         let database_path = database_path.clone();
         let refresh_generation = Rc::clone(&refresh_generation);
         move || {
-            while let Some(child) = list.first_child() {
-                list.remove(&child);
-            }
+            clear_list(&list);
             session_ids.borrow_mut().clear();
 
             let loading = Label::new(Some("Loading history..."));
@@ -72,7 +72,7 @@ pub(crate) fn build_history_page(database_path: PathBuf) -> (GBox, impl Fn() + C
             loading.set_xalign(0.0);
             loading.set_margin_start(24);
             loading.set_margin_top(24);
-            list.append(&loading);
+            append_revealed_to_list(&list, &loading);
 
             *refresh_generation.borrow_mut() += 1;
             let generation = *refresh_generation.borrow();
@@ -90,12 +90,10 @@ pub(crate) fn build_history_page(database_path: PathBuf) -> (GBox, impl Fn() + C
                     if *refresh_generation.borrow() != generation {
                         return glib::ControlFlow::Break;
                     }
-                    while let Some(child) = list.first_child() {
-                        list.remove(&child);
-                    }
+                    clear_list(&list);
                     session_ids.borrow_mut().clear();
                     for (idx, session) in sessions.into_iter().enumerate() {
-                        list.append(&session_summary_row(&session));
+                        append_revealed_to_list(&list, &session_summary_row(&session));
                         session_ids
                             .borrow_mut()
                             .insert(i32::try_from(idx).unwrap_or(i32::MAX), session.id);
@@ -106,22 +104,20 @@ pub(crate) fn build_history_page(database_path: PathBuf) -> (GBox, impl Fn() + C
                         empty.set_xalign(0.0);
                         empty.set_margin_start(24);
                         empty.set_margin_top(24);
-                        list.append(&empty);
+                        append_revealed_to_list(&list, &empty);
                     }
                     glib::ControlFlow::Break
                 }
                 Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
                 Err(mpsc::TryRecvError::Disconnected) => {
                     if *refresh_generation.borrow() == generation {
-                        while let Some(child) = list.first_child() {
-                            list.remove(&child);
-                        }
+                        clear_list(&list);
                         let empty = Label::new(Some("Could not load chat history."));
                         empty.add_css_class("empty-label");
                         empty.set_xalign(0.0);
                         empty.set_margin_start(24);
                         empty.set_margin_top(24);
-                        list.append(&empty);
+                        append_revealed_to_list(&list, &empty);
                     }
                     glib::ControlFlow::Break
                 }

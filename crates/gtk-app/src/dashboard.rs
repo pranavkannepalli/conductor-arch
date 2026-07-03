@@ -4,6 +4,7 @@ use linux_archductor_core::paths::AppPaths;
 use linux_archductor_core::workspace::WorkspaceStatusLine;
 use linux_archductor_core::workspace::WorkspaceStore;
 
+use crate::motion::{append_revealed, clear_box};
 use crate::title_case_workspace;
 use crate::workspace_command_center::workspace_pull_request_status_summary;
 
@@ -38,12 +39,8 @@ pub(crate) fn build_dashboard_panel(paths: &AppPaths) -> (GBox, impl Fn() + Clon
 
     let db_path = paths.database_path.clone();
     let refresh = move || {
-        while let Some(child) = project_tabs.first_child() {
-            project_tabs.remove(&child);
-        }
-        while let Some(child) = board.first_child() {
-            board.remove(&child);
-        }
+        clear_box(&project_tabs);
+        clear_box(&board);
 
         let Ok(store) = WorkspaceStore::open(db_path.clone()) else {
             append_empty_dashboard(&project_tabs, &board, "No workspace database yet.");
@@ -108,7 +105,7 @@ fn append_empty_dashboard(project_tabs: &GBox, board: &GBox, message: &str) {
     empty.set_xalign(0.0);
     empty.set_margin_start(24);
     empty.set_margin_top(24);
-    board.append(&empty);
+    append_revealed(board, &empty);
 }
 
 fn append_dashboard_column(
@@ -137,14 +134,14 @@ fn append_dashboard_column(
         let empty = Label::new(Some("No workspaces"));
         empty.add_css_class("column-empty");
         empty.set_xalign(0.0);
-        column.append(&empty);
+        append_revealed(&column, &empty);
     } else {
         for line in lines.iter().take(12) {
-            column.append(&build_dashboard_card(line, store));
+            append_revealed(&column, &build_dashboard_card(line, store));
         }
     }
 
-    board.append(&column);
+    append_revealed(board, &column);
 }
 fn dashboard_pr_meta(repository_name: &str, pr_number: i64, pr_attention: Option<&str>) -> String {
     match pr_attention {

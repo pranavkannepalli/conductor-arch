@@ -2,3 +2,4 @@
 .claude/
 /dist/
 .worktrees/
+docs/superpowers/plans/*.md

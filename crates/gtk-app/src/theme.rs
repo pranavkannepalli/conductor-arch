@@ -9,6 +9,33 @@ window {
     font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", "Cantarell", "Noto Sans", sans-serif;
 }
 
+button,
+entry,
+combobox,
+textview,
+.workspace-card,
+.shell-card,
+.metric-card,
+.kanban-column,
+.workspace-row-shell,
+.project-row,
+.history-row,
+.nav-button,
+.nav-row,
+.chat-menu-item,
+.chat-composer-box,
+.chat-inline-event-chip,
+.chat-inline-event-body,
+.settings-content-panel,
+.settings-inspector,
+.workspace-modal,
+.workspace-modal-preview,
+.project-template-card {
+    transition-property: background-color, border-color, color, box-shadow, opacity;
+    transition-duration: 160ms;
+    transition-timing-function: ease-out;
+}
+
 .dashboard,
 .page-shell,
 .history-view {
@@ -1897,18 +1924,21 @@ row:hover .ws-folder-name {
     margin-bottom: 18px;
 }
 .chat-inline-event {
+    background-color: transparent;
+    border: none;
+    border-radius: 0;
+    padding: 0;
+}
+.chat-inline-event-chip {
     background-color: #202020;
-    border: 1px solid #313131;
-    border-radius: 8px;
-    padding: 10px 12px;
-}
-.chat-inline-event-header {
-    min-height: 28px;
-}
-.chat-inline-event-title {
-    color: #e4e4e4;
-    font-size: 13px;
+    border: 1px solid #343434;
+    border-radius: 999px;
+    color: #e7e7e7;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-size: 12px;
     font-weight: 650;
+    min-height: 28px;
+    padding: 3px 10px;
 }
 .chat-inline-event-meta {
     color: #8f8f8f;
@@ -1926,10 +1956,10 @@ row:hover .ws-folder-name {
     padding: 10px;
 }
 .chat-inline-event-loading {
-    border-color: #3f4a5f;
+    color: #b6c7e8;
 }
 .chat-inline-event-failed {
-    border-color: #7f3838;
+    color: #f0a8a8;
 }
 .chat-composer {
     padding: 0 16px 16px;
@@ -2180,7 +2210,6 @@ window,
 .settings-content-panel,
 .settings-inspector,
 .workspace-modal-preview,
-.chat-inline-event,
 .chat-menu-popover {
     background-color: #1f1f1f;
     border: 1px solid #2b2b2b;
@@ -2333,8 +2362,7 @@ window,
     color: #052e16;
 }
 
-.destructive-action,
-.chat-inline-event-failed {
+.destructive-action {
     background-color: #3f1d2a;
     border-color: #ef4444;
     color: #fecdd3;
@@ -2417,18 +2445,20 @@ textview:focus,
     color: #f5f5f5;
 }
 
-.chat-inline-event-title {
-    color: #f2f2f2;
-}
-
 .chat-inline-event-body {
     background-color: #0d0d0d;
     border-color: #2b2b2b;
     color: #d6d6d6;
 }
 
-.chat-inline-event-loading {
-    border-color: #8a8a8a;
+.chat-inline-event-loading .chat-inline-event-chip {
+    border-color: #53617a;
+    color: #c5d5f4;
+}
+
+.chat-inline-event-failed .chat-inline-event-chip {
+    border-color: #7f3838;
+    color: #f0a8a8;
 }
 
 .chat-context-usage-empty {
@@ -2508,6 +2538,11 @@ mod tests {
         assert!(css.contains(".kanban-column-header"));
         assert!(css.contains(".dashboard-card-top"));
         assert!(css.contains("outline-offset: 2px"));
+        assert!(css.contains(
+            "transition-property: background-color, border-color, color, box-shadow, opacity"
+        ));
+        assert!(css.contains("transition-duration: 160ms"));
+        assert!(css.contains(".chat-inline-event-chip"));
         assert!(!css.contains("#38bdf8"));
         assert!(!css.contains("#2563eb"));
         assert!(!css.contains("#1d4ed8"));

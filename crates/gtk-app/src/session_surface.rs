@@ -1,13 +1,14 @@
 use gtk::prelude::*;
 use gtk::{
     Align, Box as GBox, Button, CheckButton, ComboBoxText, Entry, EventControllerKey, Image, Label,
-    Orientation, Overlay, Popover, ScrolledWindow, Spinner, TextBuffer, TextView, ToggleButton,
-    Widget,
+    Orientation, Overlay, Popover, Revealer, RevealerTransitionType, ScrolledWindow, Spinner,
+    TextBuffer, TextView, ToggleButton, Widget,
 };
 use linux_archductor_core::archcar::protocol::{ArchcarEvent, ArchcarInputKind, ArchcarResponse};
 use linux_archductor_core::codex_tui::{
     detect_directory_trust_prompt, merge_screen_messages, parse_codex_context_usage,
-    parse_codex_inline_event, parse_codex_screen_messages,
+    parse_codex_file_change_block, parse_codex_inline_event, parse_codex_screen_messages,
+    CodexFileChangeAction as CoreCodexFileChangeAction,
     CodexFileReference as CoreCodexFileReference, CodexInlineEvent as CoreCodexInlineEvent,
     ScreenMessage, ScreenMessageRole,
 };
@@ -37,6 +38,7 @@ use crate::archcar_async::{
 use crate::buttons::{
     icon_button, resolve_icon_name, style_icon_button, style_text_button, text_button,
 };
+use crate::motion::{append_revealed, clear_box};
 use crate::state::AppState;
 use crate::terminal::terminal_display_text;
 
@@ -492,9 +494,7 @@ pub fn agent_session_panel(
                 );
             }
 
-            while let Some(child) = thread_row.first_child() {
-                thread_row.remove(&child);
-            }
+            clear_box(&thread_row);
             {
                 let current = thread_state.borrow();
                 let selected = *selected_thread.borrow();
@@ -509,7 +509,7 @@ pub fn agent_session_panel(
                     let empty = Label::new(Some("No chats yet for this provider."));
                     empty.add_css_class("card-meta");
                     empty.set_xalign(0.0);
-                    thread_row.append(&empty);
+                    append_revealed(&thread_row, &empty);
                 } else {
                     for thread in visible_threads.drain(..) {
                         let button = thread_chip_button(&thread, Some(thread.id) == selected, {
@@ -535,7 +535,7 @@ pub fn agent_session_panel(
                             "{} chat",
                             session_kind_name(current_kind)
                         )));
-                        thread_row.append(&button);
+                        append_revealed(&thread_row, &button);
                     }
                 }
             }
@@ -557,9 +557,7 @@ pub fn agent_session_panel(
             *selected_session.borrow_mut() = active_record;
             app_state.set_selected_agent_session(active_record);
 
-            while let Some(child) = messages.first_child() {
-                messages.remove(&child);
-            }
+            clear_box(&messages);
             apply_context_usage_state(&context_usage, None);
 
             let current = record_state.borrow();
@@ -576,7 +574,7 @@ pub fn agent_session_panel(
                         label.add_css_class("chat-agent-text");
                         label.set_wrap(true);
                         label.set_xalign(0.0);
-                        messages.append(&label);
+                        append_revealed(&messages, &label);
                         return;
                     }
                     let record = maybe_process_id
@@ -628,7 +626,7 @@ pub fn agent_session_panel(
                         )
                     });
                     if let Some(widget) = codex_startup_status_widget(&startup_state) {
-                        messages.append(&widget);
+                        append_revealed(&messages, &widget);
                     }
 
                     let thread_messages = WorkspaceStore::open(database_path.clone())
@@ -646,7 +644,7 @@ pub fn agent_session_panel(
                             latest_context_usage_from_messages(&thread_messages),
                         );
                         for message in thread_messages {
-                            messages.append(&chat_message_widget(&message));
+                            append_revealed(&messages, &chat_message_widget(&message));
                         }
                         return;
                     }
@@ -657,14 +655,14 @@ pub fn agent_session_panel(
                     empty.add_css_class("chat-agent-text");
                     empty.set_wrap(true);
                     empty.set_xalign(0.0);
-                    messages.append(&empty);
+                    append_revealed(&messages, &empty);
                 }
                 (None, _) => {
                     let prompt = format!(
                         "No {} chat yet. Create one or send a message to start one.",
                         session_kind_name(current_kind)
                     );
-                    messages.append(&chat_user_bubble(&prompt));
+                    append_revealed(&messages, &chat_user_bubble(&prompt));
                 }
             }
             debug!(workspace = %workspace, "chat refresh_view complete");
@@ -904,7 +902,7 @@ pub fn agent_session_panel(
                         err_label.add_css_class("chat-agent-text");
                         err_label.set_wrap(true);
                         err_label.set_xalign(0.0);
-                        messages_for_resize.append(&err_label);
+                        append_revealed(&messages_for_resize, &err_label);
                     }
                 }
 
@@ -917,7 +915,7 @@ pub fn agent_session_panel(
                         err_label.add_css_class("chat-agent-text");
                         err_label.set_wrap(true);
                         err_label.set_xalign(0.0);
-                        messages_for_resize.append(&err_label);
+                        append_revealed(&messages_for_resize, &err_label);
                     }
                 }
             }
@@ -1071,7 +1069,7 @@ pub fn agent_session_panel(
                 error.add_css_class("chat-agent-text");
                 error.set_wrap(true);
                 error.set_xalign(0.0);
-                messages_for_send.append(&error);
+                append_revealed(&messages_for_send, &error);
                 return;
             }
         };
@@ -1090,7 +1088,7 @@ pub fn agent_session_panel(
                 error.add_css_class("chat-agent-text");
                 error.set_wrap(true);
                 error.set_xalign(0.0);
-                messages_for_send.append(&error);
+                append_revealed(&messages_for_send, &error);
                 return;
             }
         };
@@ -1302,7 +1300,7 @@ pub fn agent_session_panel(
                     error.add_css_class("chat-agent-text");
                     error.set_wrap(true);
                     error.set_xalign(0.0);
-                    messages_for_send.append(&error);
+                    append_revealed(&messages_for_send, &error);
                     return None;
                 }
             };
@@ -1328,7 +1326,7 @@ pub fn agent_session_panel(
                 error.add_css_class("chat-agent-text");
                 error.set_wrap(true);
                 error.set_xalign(0.0);
-                messages_for_send.append(&error);
+                append_revealed(&messages_for_send, &error);
                 return None;
             }
 
@@ -1360,7 +1358,7 @@ pub fn agent_session_panel(
                     error.add_css_class("chat-agent-text");
                     error.set_wrap(true);
                     error.set_xalign(0.0);
-                    messages_for_send.append(&error);
+                    append_revealed(&messages_for_send, &error);
                     return None;
                 }
             };
@@ -1386,7 +1384,7 @@ pub fn agent_session_panel(
                     error.add_css_class("chat-agent-text");
                     error.set_wrap(true);
                     error.set_xalign(0.0);
-                    messages_for_send.append(&error);
+                    append_revealed(&messages_for_send, &error);
                     return None;
                 }
             };
@@ -1422,7 +1420,7 @@ pub fn agent_session_panel(
                     error.add_css_class("chat-agent-text");
                     error.set_wrap(true);
                     error.set_xalign(0.0);
-                    messages_for_send.append(&error);
+                    append_revealed(&messages_for_send, &error);
                     return None;
                 }
             };
@@ -1470,7 +1468,7 @@ pub fn agent_session_panel(
                 error.add_css_class("chat-agent-text");
                 error.set_wrap(true);
                 error.set_xalign(0.0);
-                messages_for_send.append(&error);
+                append_revealed(&messages_for_send, &error);
                 return;
             } else if record_kind && record.status != ProcessStatus::Running {
                 let mut harness = session_harness_options_from_record(record);
@@ -1563,7 +1561,7 @@ pub fn agent_session_panel(
                 error.add_css_class("chat-agent-text");
                 error.set_wrap(true);
                 error.set_xalign(0.0);
-                messages_for_send.append(&error);
+                append_revealed(&messages_for_send, &error);
                 return;
             };
             debug!(
@@ -1589,7 +1587,7 @@ pub fn agent_session_panel(
                     error.add_css_class("chat-agent-text");
                     error.set_wrap(true);
                     error.set_xalign(0.0);
-                    messages_for_send.append(&error);
+                    append_revealed(&messages_for_send, &error);
                     return;
                 }
                 if let Ok(writer) = WorkspaceStore::open(db_for_send.clone()) {
@@ -1632,7 +1630,7 @@ pub fn agent_session_panel(
                 error.add_css_class("chat-agent-text");
                 error.set_wrap(true);
                 error.set_xalign(0.0);
-                messages_for_send.append(&error);
+                append_revealed(&messages_for_send, &error);
                 return;
             }
             debug!(
@@ -1704,7 +1702,7 @@ pub fn agent_session_panel(
                         error.add_css_class("chat-agent-text");
                         error.set_wrap(true);
                         error.set_xalign(0.0);
-                        messages_for_switch.append(&error);
+                        append_revealed(&messages_for_switch, &error);
                         return;
                     }
                 };
@@ -1951,17 +1949,125 @@ fn session_transcript_event_widget(event: &SessionTranscriptEvent) -> Widget {
         SessionTranscriptRole::User | SessionTranscriptRole::ReviewPrompt => {
             chat_user_bubble(&event.body).upcast()
         }
-        _ => {
-            let label = Label::new(Some(&format!("{}\n{}", event.role.label(), event.body)));
-            label.add_css_class("chat-agent-text");
-            label.set_selectable(true);
-            label.set_wrap(true);
-            label.set_xalign(0.0);
-            label.set_hexpand(true);
-            label.set_margin_bottom(18);
-            label.upcast()
+        SessionTranscriptRole::Tool | SessionTranscriptRole::Skill => {
+            let inline_events = session_transcript_inline_events(event);
+            if !inline_events.is_empty() {
+                return inline_events_widget(&inline_events);
+            }
+            session_transcript_label_widget(event)
         }
+        _ => session_transcript_label_widget(event),
     }
+}
+
+fn session_transcript_label_widget(event: &SessionTranscriptEvent) -> Widget {
+    let label = Label::new(Some(&format!("{}\n{}", event.role.label(), event.body)));
+    label.add_css_class("chat-agent-text");
+    label.set_selectable(true);
+    label.set_wrap(true);
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    label.set_margin_bottom(18);
+    label.upcast()
+}
+
+fn session_transcript_inline_events(event: &SessionTranscriptEvent) -> Vec<CodexInlineEvent> {
+    match event.role {
+        SessionTranscriptRole::Tool | SessionTranscriptRole::Skill => event
+            .body
+            .lines()
+            .next()
+            .and_then(|line| parse_session_transcript_inline_event(event.role, line, &event.body))
+            .into_iter()
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn parse_session_transcript_inline_event(
+    role: SessionTranscriptRole,
+    header: &str,
+    body: &str,
+) -> Option<CodexInlineEvent> {
+    if let Some(command) = header.trim().strip_prefix("Ran ") {
+        return Some(CodexInlineEvent {
+            kind: CodexInlineEventKind::Tool,
+            title: command.trim().to_owned(),
+            subtitle: Some("Command result".to_owned()),
+            body: Some(body.to_owned()),
+            path: None,
+            status: codex_event_status_from_line(body),
+        });
+    }
+    if let Some(event) = read_file_inline_event(role, header, body) {
+        return Some(event);
+    }
+    let event = if role == SessionTranscriptRole::Tool && is_raw_file_change_event_line(header) {
+        CoreCodexInlineEvent::FileChange(parse_codex_file_change_block(body)?)
+    } else {
+        parse_codex_inline_event(header.trim())?
+    };
+    let mut inline = codex_inline_event_from_core(event, header.trim())?;
+    inline.body = Some(body.to_owned());
+    if role == SessionTranscriptRole::Skill {
+        inline.kind = CodexInlineEventKind::Skill;
+    }
+    Some(inline)
+}
+
+fn read_file_inline_event(
+    role: SessionTranscriptRole,
+    header: &str,
+    body: &str,
+) -> Option<CodexInlineEvent> {
+    let path = read_file_path_from_header(header)?;
+    let title = match role {
+        SessionTranscriptRole::Skill => skill_name_from_read_header(header)
+            .map(str::to_owned)
+            .unwrap_or_else(|| path.display().to_string()),
+        _ => format!("Read {}", path.display()),
+    };
+    Some(CodexInlineEvent {
+        kind: match role {
+            SessionTranscriptRole::Skill => CodexInlineEventKind::Skill,
+            _ => CodexInlineEventKind::Tool,
+        },
+        title,
+        subtitle: Some("File preview".to_owned()),
+        body: Some(body.to_owned()),
+        path: Some(path),
+        status: CodexInlineEventStatus::Complete,
+    })
+}
+
+fn read_file_path_from_header(header: &str) -> Option<PathBuf> {
+    let rest = header
+        .trim()
+        .strip_prefix('•')
+        .map(str::trim_start)
+        .unwrap_or_else(|| header.trim())
+        .strip_prefix("Read ")?;
+    let raw_path = rest.split_whitespace().next()?.trim_matches(|ch: char| {
+        matches!(ch, '`' | '"' | '\'' | ',' | ';' | '(' | ')' | '[' | ']')
+    });
+    is_readable_path_token(raw_path).then(|| PathBuf::from(raw_path))
+}
+
+fn is_readable_path_token(value: &str) -> bool {
+    !value.is_empty()
+        && (value.starts_with('/')
+            || value.starts_with("./")
+            || value.starts_with("../")
+            || value.contains('/')
+            || value.contains('\\')
+            || value.contains('.'))
+}
+
+fn skill_name_from_read_header(header: &str) -> Option<&str> {
+    let start = header.rfind('(')?;
+    let end = header[start + 1..].find(')')? + start + 1;
+    let skill = header[start + 1..end].trim();
+    (!skill.is_empty()).then_some(skill)
 }
 
 fn chat_message_widget(message: &ChatMessageRecord) -> Widget {
@@ -2021,6 +2127,22 @@ fn inline_event_status_css_class(status: CodexInlineEventStatus) -> Option<&'sta
         CodexInlineEventStatus::Complete => None,
         CodexInlineEventStatus::Failed => Some("chat-inline-event-failed"),
     }
+}
+
+fn inline_event_chip_label(event: &CodexInlineEvent, expanded: bool) -> String {
+    let marker = if expanded { '-' } else { '+' };
+    format!("{marker} {}", inline_event_chip_name(event))
+}
+
+fn inline_event_chip_name(event: &CodexInlineEvent) -> String {
+    event
+        .path
+        .as_ref()
+        .and_then(|path| path.file_name())
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| event.title.clone())
 }
 
 fn truncate_inline_event_body(body: &str, max_chars: usize) -> InlineEventBodyPreview {
@@ -2131,7 +2253,38 @@ fn codex_inline_event_from_core(
         CoreCodexInlineEvent::FileReference(reference) => {
             codex_file_reference_event(reference, original_line)
         }
+        CoreCodexInlineEvent::FileChange(change) => Some(CodexInlineEvent {
+            kind: CodexInlineEventKind::Tool,
+            title: format!(
+                "{} {}",
+                codex_file_change_action_label(change.action),
+                change.path
+            ),
+            subtitle: codex_file_change_counts(change.additions, change.deletions),
+            body: Some(original_line.to_owned()),
+            path: Some(PathBuf::from(change.path)),
+            status: CodexInlineEventStatus::Complete,
+        }),
     }
+}
+
+fn codex_file_change_action_label(action: CoreCodexFileChangeAction) -> &'static str {
+    match action {
+        CoreCodexFileChangeAction::Added => "Added",
+        CoreCodexFileChangeAction::Edited => "Edited",
+        CoreCodexFileChangeAction::Deleted => "Deleted",
+    }
+}
+
+fn codex_file_change_counts(additions: Option<u32>, deletions: Option<u32>) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(additions) = additions {
+        parts.push(format!("+{additions}"));
+    }
+    if let Some(deletions) = deletions {
+        parts.push(format!("-{deletions}"));
+    }
+    (!parts.is_empty()).then(|| parts.join(" "))
 }
 
 fn codex_file_reference_event(
@@ -2206,40 +2359,11 @@ fn inline_event_widget(event: &CodexInlineEvent) -> Widget {
     }
     root.set_hexpand(true);
 
-    let header = GBox::new(Orientation::Horizontal, 8);
-    header.add_css_class("chat-inline-event-header");
-    header.set_hexpand(true);
-
-    let glyph = Label::new(Some(inline_event_kind_glyph(event.kind)));
-    glyph.add_css_class("chat-inline-event-meta");
-    header.append(&glyph);
-
-    let text = GBox::new(Orientation::Vertical, 2);
-    text.set_hexpand(true);
-    let title = Label::new(Some(&format!(
-        "{} · {}",
-        inline_event_kind_label(event.kind),
-        event.title
-    )));
-    title.add_css_class("chat-inline-event-title");
-    title.set_xalign(0.0);
-    title.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    text.append(&title);
-    let meta_text = event
-        .subtitle
-        .as_deref()
-        .unwrap_or_else(|| inline_event_status_label(event.status));
-    let meta = Label::new(Some(meta_text));
-    meta.add_css_class("chat-inline-event-meta");
-    meta.set_xalign(0.0);
-    meta.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    text.append(&meta);
-    header.append(&text);
-
-    let toggle = ToggleButton::with_label("Show");
-    toggle.add_css_class("chat-toolbar-btn");
-    header.append(&toggle);
-    root.append(&header);
+    let toggle = ToggleButton::with_label(&inline_event_chip_label(event, false));
+    toggle.add_css_class("chat-inline-event-chip");
+    toggle.set_halign(Align::Start);
+    toggle.set_tooltip_text(Some(&inline_event_tooltip(event)));
+    root.append(&toggle);
 
     let body_text = inline_event_body_text(event);
     let body_preview = truncate_inline_event_body(&body_text, 320);
@@ -2248,27 +2372,48 @@ fn inline_event_widget(event: &CodexInlineEvent) -> Widget {
     body.set_selectable(true);
     body.set_wrap(true);
     body.set_xalign(0.0);
-    body.set_visible(false);
-    root.append(&body);
+    body.set_margin_top(2);
+    let body_revealer = Revealer::new();
+    body_revealer.set_transition_type(RevealerTransitionType::SlideDown);
+    body_revealer.set_transition_duration(180);
+    body_revealer.set_reveal_child(false);
+    body_revealer.set_child(Some(&body));
+    root.append(&body_revealer);
 
     toggle.connect_toggled({
         let body = body.clone();
+        let body_revealer = body_revealer.clone();
         let full = body_preview.full.clone();
         let preview = body_preview.preview.clone();
+        let collapsed_label = inline_event_chip_label(event, false);
+        let expanded_label = inline_event_chip_label(event, true);
         move |button| {
             if button.is_active() {
                 body.set_text(&full);
-                body.set_visible(true);
-                button.set_label("Hide");
+                body_revealer.set_reveal_child(true);
+                button.set_label(&expanded_label);
             } else {
                 body.set_text(&preview);
-                body.set_visible(false);
-                button.set_label("Show");
+                body_revealer.set_reveal_child(false);
+                button.set_label(&collapsed_label);
             }
         }
     });
 
     root.upcast()
+}
+
+fn inline_event_tooltip(event: &CodexInlineEvent) -> String {
+    let mut parts = vec![format!(
+        "{}: {}",
+        inline_event_kind_label(event.kind),
+        event.title
+    )];
+    if let Some(subtitle) = event.subtitle.as_deref().filter(|value| !value.is_empty()) {
+        parts.push(subtitle.to_owned());
+    }
+    parts.push(inline_event_status_label(event.status).to_owned());
+    parts.join("\n")
 }
 
 fn inline_event_body_text(event: &CodexInlineEvent) -> String {
@@ -4209,8 +4354,9 @@ fn parse_session_transcript_events(transcript: &str) -> Vec<SessionTranscriptEve
         }
 
         if let Some(role) = session_event_role_for_line(line) {
-            push_session_event(&mut events, role, line.to_owned());
-            index += 1;
+            let (body, next) = collect_session_role_event(&lines, index, role);
+            push_session_event(&mut events, role, body);
+            index = next;
             continue;
         }
 
@@ -4308,6 +4454,84 @@ fn collect_until_marker(lines: &[&str], start: usize) -> (String, usize) {
         index += 1;
     }
     (body.join("\n"), index)
+}
+
+fn collect_session_role_event(
+    lines: &[&str],
+    start: usize,
+    role: SessionTranscriptRole,
+) -> (String, usize) {
+    let header = lines[start].trim_end();
+    if matches!(
+        role,
+        SessionTranscriptRole::System | SessionTranscriptRole::Harness
+    ) {
+        return (header.to_owned(), start + 1);
+    }
+    if role == SessionTranscriptRole::Tool && is_raw_file_change_event_line(header) {
+        return collect_file_change_event(lines, start);
+    }
+    if role == SessionTranscriptRole::Tool
+        && !header.starts_with("[tool ")
+        && !header.starts_with("Ran ")
+        && !header.starts_with("Read ")
+    {
+        return (header.to_owned(), start + 1);
+    }
+
+    let mut body = vec![header];
+    let mut index = start + 1;
+    while index < lines.len() {
+        let line = lines[index].trim_end();
+        if is_session_event_marker(line) {
+            break;
+        }
+        body.push(line);
+        index += 1;
+    }
+    (body.join("\n"), index)
+}
+
+fn collect_file_change_event(lines: &[&str], start: usize) -> (String, usize) {
+    let mut body = vec![lines[start].trim_end()];
+    let mut index = start + 1;
+    while index < lines.len() {
+        let line = lines[index].trim_end();
+        if is_session_event_marker(line) || !is_file_change_detail_line(line) {
+            break;
+        }
+        body.push(line);
+        index += 1;
+    }
+    (body.join("\n"), index)
+}
+
+fn is_file_change_detail_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with("@@")
+        || trimmed.starts_with("+++")
+        || trimmed.starts_with("---")
+        || trimmed.starts_with('+')
+        || trimmed.starts_with('-')
+        || is_numbered_file_change_detail_line(trimmed)
+}
+
+fn is_numbered_file_change_detail_line(line: &str) -> bool {
+    let Some((_, rest)) = parse_numbered_detail_prefix(line) else {
+        return false;
+    };
+    rest.starts_with("  ") || rest.starts_with(" +") || rest.starts_with(" -")
+}
+
+fn parse_numbered_detail_prefix(line: &str) -> Option<(u32, &str)> {
+    let first_non_digit = line
+        .char_indices()
+        .find_map(|(index, ch)| (!ch.is_ascii_digit()).then_some(index))?;
+    if first_non_digit == 0 {
+        return None;
+    }
+    let number = line[..first_non_digit].parse().ok()?;
+    Some((number, &line[first_non_digit..]))
 }
 
 fn collect_user_input_event(lines: &[&str], start: usize) -> (String, usize) {
@@ -4674,6 +4898,15 @@ fn is_raw_skill_event_line(line: &str) -> bool {
 
 fn is_raw_tool_event_line(line: &str) -> bool {
     let trimmed = line.trim();
+    if trimmed
+        .strip_prefix("Ran ")
+        .is_some_and(|command| !command.trim().is_empty())
+    {
+        return true;
+    }
+    if is_raw_file_change_event_line(trimmed) {
+        return true;
+    }
     let Some((verb, rest)) = trimmed.split_once(' ') else {
         return false;
     };
@@ -4693,6 +4926,19 @@ fn is_raw_tool_event_line(line: &str) -> bool {
             | "Edit"
     );
     verb_matches && raw_tool_target_looks_path_like(rest)
+}
+
+fn is_raw_file_change_event_line(line: &str) -> bool {
+    let trimmed = line
+        .trim()
+        .strip_prefix('•')
+        .map(str::trim_start)
+        .unwrap_or_else(|| line.trim());
+    ["Added ", "Edited ", "Deleted "].iter().any(|prefix| {
+        trimmed
+            .strip_prefix(prefix)
+            .is_some_and(raw_tool_target_looks_path_like)
+    })
 }
 
 fn raw_tool_target_looks_path_like(rest: &str) -> bool {
@@ -6142,6 +6388,41 @@ fix it
     }
 
     #[test]
+    fn codex_inline_event_chip_label_uses_plus_minus_and_compact_name() {
+        let file_event = CodexInlineEvent {
+            kind: CodexInlineEventKind::Tool,
+            title: "Edited docs/superpowers/plans/2026-07-03-manual-skill-tool-calls.md".to_owned(),
+            subtitle: Some("+17 -2".to_owned()),
+            body: None,
+            path: Some(PathBuf::from(
+                "docs/superpowers/plans/2026-07-03-manual-skill-tool-calls.md",
+            )),
+            status: CodexInlineEventStatus::Complete,
+        };
+        let command_event = CodexInlineEvent {
+            kind: CodexInlineEventKind::Tool,
+            title: "cargo test -p linux-archductor-core codex_tui".to_owned(),
+            subtitle: Some("Command result".to_owned()),
+            body: None,
+            path: None,
+            status: CodexInlineEventStatus::Complete,
+        };
+
+        assert_eq!(
+            inline_event_chip_label(&file_event, false),
+            "+ 2026-07-03-manual-skill-tool-calls.md"
+        );
+        assert_eq!(
+            inline_event_chip_label(&file_event, true),
+            "- 2026-07-03-manual-skill-tool-calls.md"
+        );
+        assert_eq!(
+            inline_event_chip_label(&command_event, false),
+            "+ cargo test -p linux-archductor-core codex_tui"
+        );
+    }
+
+    #[test]
     fn codex_inline_event_local_preview_requires_existing_small_text_file() {
         let temp = tempfile::tempdir().unwrap();
         let text_path = temp.path().join("result.txt");
@@ -6153,6 +6434,35 @@ fix it
         assert!(local_preview_eligibility(temp.path().join("missing.txt")).is_none());
         assert!(local_preview_eligibility(temp.path()).is_none());
         assert!(local_preview_eligibility(&binary_path).is_none());
+    }
+
+    #[test]
+    fn codex_inline_event_body_loads_file_read_by_tool_or_skill() {
+        let temp = tempfile::tempdir().unwrap();
+        let tool_path = temp.path().join("result.txt");
+        fs::write(&tool_path, "tool file contents").unwrap();
+        let skill_path = temp.path().join("SKILL.md");
+        fs::write(&skill_path, "---\nname: graphify\n---").unwrap();
+
+        let tool = parse_session_transcript_inline_event(
+            SessionTranscriptRole::Tool,
+            &format!("Read {}", tool_path.display()),
+            &format!("Read {}", tool_path.display()),
+        )
+        .unwrap();
+        let skill = parse_session_transcript_inline_event(
+            SessionTranscriptRole::Skill,
+            &format!("Read {} (graphify)", skill_path.display()),
+            &format!("Read {} (graphify)", skill_path.display()),
+        )
+        .unwrap();
+
+        assert_eq!(tool.kind, CodexInlineEventKind::Tool);
+        assert_eq!(tool.path.as_deref(), Some(tool_path.as_path()));
+        assert!(inline_event_body_text(&tool).contains("tool file contents"));
+        assert_eq!(skill.kind, CodexInlineEventKind::Skill);
+        assert_eq!(skill.path.as_deref(), Some(skill_path.as_path()));
+        assert!(inline_event_body_text(&skill).contains("name: graphify"));
     }
 
     #[test]
@@ -6215,15 +6525,19 @@ fix it
     #[test]
     fn codex_inline_event_parser_detects_tool_and_skill_markers() {
         let events = parse_codex_inline_events_local(
-            "functions.exec_command running cargo test\nUsing superpowers:brainstorming to shape the UI",
+            "functions.exec_command running cargo test\nCalling mcp__xcodebuildmcp__session_show_defaults before build\nUsing graphify to map the repository\nUsing superpowers:brainstorming to shape the UI",
         );
 
-        assert_eq!(events.len(), 2);
+        assert_eq!(events.len(), 4);
         assert_eq!(events[0].kind, CodexInlineEventKind::Tool);
         assert_eq!(events[0].title, "functions.exec_command");
         assert_eq!(events[0].status, CodexInlineEventStatus::Loading);
-        assert_eq!(events[1].kind, CodexInlineEventKind::Skill);
-        assert_eq!(events[1].title, "superpowers:brainstorming");
+        assert_eq!(events[1].kind, CodexInlineEventKind::Tool);
+        assert_eq!(events[1].title, "mcp__xcodebuildmcp__session_show_defaults");
+        assert_eq!(events[2].kind, CodexInlineEventKind::Skill);
+        assert_eq!(events[2].title, "graphify");
+        assert_eq!(events[3].kind, CodexInlineEventKind::Skill);
+        assert_eq!(events[3].title, "superpowers:brainstorming");
     }
 
     #[test]
@@ -6630,6 +6944,89 @@ Using writing-plans to create the implementation plan.
             events[0].body,
             "Using writing-plans to create the implementation plan."
         );
+    }
+
+    #[test]
+    fn transcript_groups_tool_and_skill_result_blocks() {
+        let transcript = "\
+Read SKILL.md (graphify), SKILL.md (skill-creator)
+---
+name: graphify
+---
+Ran cargo test -p linux-archductor-core codex_tui
+running 23 tests
+test result: ok. 23 passed
+• Edited crates/core/src/codex_tui.rs (+12 -3)
+    378  context
+    379 +new line
+    381 -old line
+I summarized the result.
+";
+
+        let events = parse_session_transcript_events(transcript);
+
+        assert_eq!(events.len(), 4);
+        assert_eq!(events[0].role, SessionTranscriptRole::Skill);
+        assert_eq!(
+            events[0].body,
+            "Read SKILL.md (graphify), SKILL.md (skill-creator)\n---\nname: graphify\n---"
+        );
+        assert_eq!(events[1].role, SessionTranscriptRole::Tool);
+        assert_eq!(
+            events[1].body,
+            "Ran cargo test -p linux-archductor-core codex_tui\nrunning 23 tests\ntest result: ok. 23 passed"
+        );
+        assert_eq!(events[2].role, SessionTranscriptRole::Tool);
+        assert_eq!(
+            events[2].body,
+            "• Edited crates/core/src/codex_tui.rs (+12 -3)\n    378  context\n    379 +new line\n    381 -old line"
+        );
+        assert_eq!(events[3].role, SessionTranscriptRole::Agent);
+        assert_eq!(events[3].body, "I summarized the result.");
+    }
+
+    #[test]
+    fn transcript_tool_and_skill_blocks_render_as_inline_events() {
+        let skill = SessionTranscriptEvent {
+            role: SessionTranscriptRole::Skill,
+            body: "Read SKILL.md (graphify)\n---\nname: graphify\n---".to_owned(),
+        };
+        let command = SessionTranscriptEvent {
+            role: SessionTranscriptRole::Tool,
+            body: "Ran cargo test\nok".to_owned(),
+        };
+        let edit = SessionTranscriptEvent {
+            role: SessionTranscriptRole::Tool,
+            body: "Edited crates/core/src/codex_tui.rs (+12 -3)\n    378  context\n    379 +added\n    381 -deleted".to_owned(),
+        };
+
+        let skill_events = session_transcript_inline_events(&skill);
+        let command_events = session_transcript_inline_events(&command);
+        let edit_events = session_transcript_inline_events(&edit);
+
+        assert_eq!(skill_events[0].kind, CodexInlineEventKind::Skill);
+        assert_eq!(skill_events[0].title, "graphify");
+        assert!(skill_events[0]
+            .body
+            .as_deref()
+            .unwrap()
+            .contains("name: graphify"));
+        assert_eq!(command_events[0].kind, CodexInlineEventKind::Tool);
+        assert_eq!(command_events[0].title, "cargo test");
+        assert!(command_events[0].body.as_deref().unwrap().contains("ok"));
+        assert_eq!(edit_events[0].kind, CodexInlineEventKind::Tool);
+        assert_eq!(edit_events[0].title, "Edited crates/core/src/codex_tui.rs");
+        assert_eq!(edit_events[0].subtitle.as_deref(), Some("+12 -3"));
+        assert!(edit_events[0]
+            .body
+            .as_deref()
+            .unwrap()
+            .contains("379 +added"));
+        let change =
+            parse_codex_file_change_block(edit_events[0].body.as_deref().unwrap()).unwrap();
+        assert_eq!(change.lines.len(), 3);
+        assert_eq!(change.lines[1].new_line, Some(379));
+        assert_eq!(change.lines[1].content, "added");
     }
 
     #[test]

@@ -19,6 +19,7 @@ use std::process::Command;
 use std::rc::Rc;
 
 use crate::buttons::{resolve_icon_name, text_button};
+use crate::motion::{append_revealed, append_revealed_row, clear_box, clear_list};
 use crate::{default_clone_parent, detail_row, repo_name_from_url};
 
 pub(crate) fn build_projects_page(
@@ -348,22 +349,23 @@ pub(crate) fn build_projects_page(
     let refresh = {
         let repo_list = repo_list.clone();
         move || {
-            while let Some(child) = repo_list.first_child() {
-                repo_list.remove(&child);
-            }
+            clear_box(&repo_list);
             if let Ok(store) = RepositoryStore::open(db_path.clone()) {
                 if let Ok(repos) = store.list_with_workspace_counts() {
                     for (repo, active, total) in repos {
-                        repo_list.append(&detail_row(
-                            &repo.name,
-                            &format!(
-                                "{} active / {} total / {} / base {}",
-                                active,
-                                total,
-                                repo.root_path.display(),
-                                repo.default_branch
+                        append_revealed(
+                            &repo_list,
+                            &detail_row(
+                                &repo.name,
+                                &format!(
+                                    "{} active / {} total / {} / base {}",
+                                    active,
+                                    total,
+                                    repo.root_path.display(),
+                                    repo.default_branch
+                                ),
                             ),
-                        ));
+                        );
                     }
                 }
             }
@@ -1836,9 +1838,7 @@ fn show_github_project_dialog(database_path: PathBuf, refresh: Rc<dyn Fn()>) {
                 feedback.set_text("No GitHub repos returned by gh repo list.");
             }
             Ok(repos) => {
-                while let Some(child) = repo_list.first_child() {
-                    repo_list.remove(&child);
-                }
+                clear_list(&repo_list);
                 *selected_repos.borrow_mut() = repos.clone();
                 for repo in repos {
                     let row = ListBoxRow::new();
@@ -1857,7 +1857,7 @@ fn show_github_project_dialog(database_path: PathBuf, refresh: Rc<dyn Fn()>) {
                     row_box.append(&label);
                     row_box.append(&url);
                     row.set_child(Some(&row_box));
-                    repo_list.append(&row);
+                    append_revealed_row(&repo_list, &row);
                 }
                 feedback.set_text("Loaded GitHub repos.");
             }
@@ -1917,7 +1917,7 @@ fn show_quick_start_dialog(database_path: PathBuf, refresh: Rc<dyn Fn()>) {
                 card_for_click.add_css_class("project-template-card-selected");
             });
         }
-        template_grid.append(&card);
+        append_revealed(&template_grid, &card);
         template_buttons.borrow_mut().push(card);
     }
     body.append(&template_grid);

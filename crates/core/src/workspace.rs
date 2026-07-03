@@ -7,7 +7,7 @@ use crate::pty::PtySession;
 use crate::settings::load_repository_settings;
 use anyhow::{Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 use std::collections::{BTreeSet, HashSet};
 use std::ffi::OsString;
@@ -3963,6 +3963,12 @@ mutation($threadId: ID!) {{
         content: &str,
         source: &str,
     ) -> Result<ChatMessageRecord> {
+        if let Some(existing) =
+            self.latest_matching_adjacent_chat_message(thread_id, role, content, source)?
+        {
+            return Ok(existing);
+        }
+
         let now = timestamp();
         self.conn.execute(
             "INSERT INTO chat_messages (thread_id, role, content, source, created_at, updated_at)
@@ -3971,6 +3977,30 @@ mutation($threadId: ID!) {{
         )?;
         self.touch_chat_thread(thread_id, &now)?;
         self.get_chat_message(self.conn.last_insert_rowid())
+    }
+
+    fn latest_matching_adjacent_chat_message(
+        &self,
+        thread_id: i64,
+        role: &str,
+        content: &str,
+        source: &str,
+    ) -> Result<Option<ChatMessageRecord>> {
+        let latest = self
+            .conn
+            .query_row(
+                "SELECT id, thread_id, role, content, source, created_at, updated_at
+                 FROM chat_messages
+                 WHERE thread_id = ?1
+                 ORDER BY id DESC
+                 LIMIT 1",
+                [thread_id],
+                row_to_chat_message,
+            )
+            .optional()?;
+        Ok(latest.filter(|message| {
+            message.role == role && message.content == content && message.source == source
+        }))
     }
 
     pub fn update_chat_thread_title(&self, thread_id: i64, title: &str) -> Result<()> {
@@ -13459,6 +13489,34 @@ spotlight_testing = true
         assert_eq!(messages[0].role, "user");
         assert_eq!(messages[1].source, "control_command");
         assert_eq!(messages[2].role, "agent");
+    }
+
+    #[test]
+    fn chat_messages_skip_exact_adjacent_duplicates_from_same_source() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Bugfix A", None)
+            .unwrap();
+
+        let first = store
+            .append_chat_message(thread.id, "user", "run tests", "user_send")
+            .unwrap();
+        let second = store
+            .append_chat_message(thread.id, "user", "run tests", "user_send")
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "agent", "Running.", "agent_screen_parse")
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "run tests", "user_send")
+            .unwrap();
+
+        let messages = store.list_chat_messages(thread.id).unwrap();
+        assert_eq!(first.id, second.id);
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].content, "run tests");
+        assert_eq!(messages[1].content, "Running.");
+        assert_eq!(messages[2].content, "run tests");
     }
 
     #[test]
