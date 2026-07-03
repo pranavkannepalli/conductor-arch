@@ -658,8 +658,10 @@ pub fn agent_session_panel(
                                     .unwrap_or_default();
                             let render_legacy_inline_events =
                                 render_legacy_inline_events_for_thread(&thread_events);
-                            let timeline =
-                                merge_chat_timeline_for_render(thread_messages.clone(), thread_events);
+                            let timeline = merge_chat_timeline_for_render(
+                                thread_messages.clone(),
+                                thread_events,
+                            );
                             debug!(
                                 workspace = %workspace,
                                 thread_id,
@@ -675,10 +677,15 @@ pub fn agent_session_panel(
                                 );
                                 for item in timeline {
                                     match item {
-                                        ChatTimelineItem::Message(message) => append_chat_refresh_row(
-                                            &messages,
-                                            &chat_message_widget(&message, render_legacy_inline_events),
-                                        ),
+                                        ChatTimelineItem::Message(message) => {
+                                            append_chat_refresh_row(
+                                                &messages,
+                                                &chat_message_widget(
+                                                    &message,
+                                                    render_legacy_inline_events,
+                                                ),
+                                            )
+                                        }
                                         ChatTimelineItem::Event(event) => {
                                             append_chat_refresh_row(
                                                 &messages,
@@ -7374,16 +7381,17 @@ I summarized the result.
 
         assert_eq!(file_change_inline.kind, CodexInlineEventKind::Tool);
         assert_eq!(file_change_inline.title, "Edited src/lib.rs");
-        assert_eq!(file_change_inline.path.as_deref(), Some(Path::new("src/lib.rs")));
+        assert_eq!(
+            file_change_inline.path.as_deref(),
+            Some(Path::new("src/lib.rs"))
+        );
         assert_eq!(file_change_inline.status, CodexInlineEventStatus::Complete);
         assert_eq!(file_change_inline.subtitle.as_deref(), Some("+2 -1"));
-        assert!(
-            file_change_inline
-                .body
-                .as_deref()
-                .unwrap()
-                .contains("fn new() {}")
-        );
+        assert!(file_change_inline
+            .body
+            .as_deref()
+            .unwrap()
+            .contains("fn new() {}"));
     }
 
     #[test]

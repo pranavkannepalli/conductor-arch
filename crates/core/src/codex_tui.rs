@@ -1544,13 +1544,19 @@ mod tests {
         let events = parse_codex_event_blocks(text);
 
         assert_eq!(events.len(), 3);
-        assert!(matches!(&events[0], CodexTranscriptEvent::Tool { title, body }
+        assert!(
+            matches!(&events[0], CodexTranscriptEvent::Tool { title, body }
             if title == "cargo test -p linux-archductor-core codex_tui"
-                && body.contains("running 24 tests")));
-        assert!(matches!(&events[1], CodexTranscriptEvent::Skill { title, body }
-            if title == "graphify, skill-creator" && body.contains("# Graphify")));
-        assert!(matches!(&events[2], CodexTranscriptEvent::FileChange(change)
-            if change.path == "crates/core/src/codex_tui.rs" && change.lines.len() == 3));
+                && body.contains("running 24 tests"))
+        );
+        assert!(
+            matches!(&events[1], CodexTranscriptEvent::Skill { title, body }
+            if title == "graphify, skill-creator" && body.contains("# Graphify"))
+        );
+        assert!(
+            matches!(&events[2], CodexTranscriptEvent::FileChange(change)
+            if change.path == "crates/core/src/codex_tui.rs" && change.lines.len() == 3)
+        );
     }
 
     #[test]
