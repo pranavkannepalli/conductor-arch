@@ -487,6 +487,13 @@ fn run_session_loop(
             if let Ok(store) = WorkspaceStore::open(&db_path) {
                 let formatted = format_session_screen_output(current.kind, &screen);
                 let _ = store.append_session_process_output(current.session_id, &formatted);
+                if current.kind == SessionKind::Codex {
+                    let _ = store.persist_codex_screen_delta(
+                        current.thread_id,
+                        current.session_id,
+                        &screen,
+                    );
+                }
             }
             write_pty_screen_snapshot(
                 &logs_dir,

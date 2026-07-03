@@ -1,6 +1,7 @@
 use crate::codex_tui::{
-    detect_directory_trust_prompt, merge_screen_messages, parse_codex_screen_messages,
-    CodexFileChangeAction, CodexParseCursor, CodexTranscriptEvent, ScreenMessage,
+    detect_directory_trust_prompt, merge_screen_messages, parse_codex_screen_delta,
+    parse_codex_screen_messages, CodexFileChangeAction, CodexParseBenchmark, CodexParseCursor,
+    CodexParsedItem, CodexTranscriptEvent, ScreenMessage, ScreenMessageRole,
 };
 use crate::harness;
 use crate::pty::PtySession;
@@ -1489,11 +1490,6 @@ impl WorkspaceStore {
             .with_context(|| format!("open log {}", process.log_path.display()))?
             .write_all(output.as_bytes())
             .with_context(|| format!("write log {}", process.log_path.display()))?;
-        if let Some(thread_id) = process.chat_thread_id {
-            for screen in extract_codex_screen_snapshots(output) {
-                self.merge_chat_thread_codex_screen(thread_id, &screen)?;
-            }
-        }
         Ok(())
     }
 
@@ -4145,6 +4141,39 @@ mutation($threadId: ID!) {{
         }
     }
 
+    pub fn persist_codex_screen_delta(
+        &self,
+        thread_id: i64,
+        process_id: i64,
+        screen: &str,
+    ) -> Result<()> {
+        let messages = self.list_chat_messages(thread_id)?;
+        let benchmark = codex_parse_benchmark_from_messages(&messages);
+        let previous_cursor = self.get_codex_parse_cursor(process_id)?;
+        let delta = parse_codex_screen_delta(screen, &benchmark, previous_cursor.as_ref());
+
+        for item in delta.items {
+            match item {
+                CodexParsedItem::Message(message) => {
+                    if message.role == ScreenMessageRole::Agent {
+                        self.append_chat_message(
+                            thread_id,
+                            "agent",
+                            &message.content,
+                            "agent_screen_parse",
+                        )?;
+                    }
+                }
+                CodexParsedItem::Event(event) => {
+                    self.append_chat_event(thread_id, process_id, &event)?;
+                }
+            }
+        }
+
+        self.set_codex_parse_cursor(process_id, &delta.cursor)?;
+        Ok(())
+    }
+
     pub fn list_chat_events(&self, thread_id: i64) -> Result<Vec<ChatEventRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, thread_id, process_id, kind, title, body, path, payload_json, timeline_seq, created_at, updated_at
@@ -4334,87 +4363,6 @@ mutation($threadId: ID!) {{
             )
             .optional()
             .map_err(Into::into)
-    }
-
-    fn update_chat_message_content(&self, message_id: i64, content: &str) -> Result<()> {
-        let now = timestamp();
-        self.conn.execute(
-            "UPDATE chat_messages
-             SET content = ?1, updated_at = ?2
-             WHERE id = ?3",
-            params![content, now, message_id],
-        )?;
-        let thread_id = self
-            .conn
-            .query_row(
-                "SELECT thread_id FROM chat_messages WHERE id = ?1",
-                [message_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .with_context(|| format!("load chat message thread {message_id}"))?;
-        self.touch_chat_thread(thread_id, &now)?;
-        Ok(())
-    }
-
-    fn merge_chat_thread_codex_screen(&self, thread_id: i64, screen: &str) -> Result<()> {
-        let parsed = parse_codex_screen_messages(screen);
-        if parsed.is_empty() {
-            return Ok(());
-        }
-        let existing = self.list_chat_messages(thread_id)?;
-        let timeline = existing
-            .iter()
-            .filter_map(chat_message_to_screen_message)
-            .collect::<Vec<_>>();
-        let mut merged = timeline.clone();
-        merge_screen_messages(&mut merged, &parsed);
-        self.persist_merged_screen_messages(thread_id, &existing, &timeline, &merged)
-    }
-
-    fn persist_merged_screen_messages(
-        &self,
-        thread_id: i64,
-        existing: &[ChatMessageRecord],
-        existing_timeline: &[ScreenMessage],
-        merged: &[ScreenMessage],
-    ) -> Result<()> {
-        if merged.len() < existing_timeline.len() {
-            return Ok(());
-        }
-        let persisted = existing
-            .iter()
-            .filter(|message| matches!(message.role.as_str(), "user" | "agent"))
-            .collect::<Vec<_>>();
-        if persisted.len() < existing_timeline.len() {
-            return Ok(());
-        }
-        for (index, message) in merged.iter().enumerate() {
-            let role = screen_role_name(message.role);
-            if index < existing_timeline.len() {
-                let existing_row = persisted[index];
-                if existing_row.role != role {
-                    continue;
-                }
-                if existing_row.content == message.content {
-                    continue;
-                }
-                if existing_row.source == "agent_screen_parse"
-                    && message.content.starts_with(&existing_row.content)
-                {
-                    self.update_chat_message_content(existing_row.id, &message.content)?;
-                }
-                continue;
-            }
-            if role == "agent" {
-                self.append_chat_message(
-                    thread_id,
-                    "agent",
-                    &message.content,
-                    "agent_screen_parse",
-                )?;
-            }
-        }
-        Ok(())
     }
 
     fn get_by_name(&self, name: &str) -> Result<Workspace> {
@@ -5110,38 +5058,18 @@ pub fn format_codex_screen_snapshot(screen: &str) -> String {
     )
 }
 
-fn extract_codex_screen_snapshots(output: &str) -> Vec<String> {
-    let mut screens = Vec::new();
-    let mut remaining = output;
-    while let Some(start) = remaining.find("[codex screen]\n") {
-        let after_start = &remaining[start + "[codex screen]\n".len()..];
-        let Some(end) = after_start.find("\n[/codex screen]") else {
-            break;
-        };
-        screens.push(after_start[..end].to_owned());
-        remaining = &after_start[end + "\n[/codex screen]".len()..];
-    }
-    screens
-}
-
-fn chat_message_to_screen_message(message: &ChatMessageRecord) -> Option<ScreenMessage> {
-    match message.role.as_str() {
-        "user" => Some(ScreenMessage {
-            role: crate::codex_tui::ScreenMessageRole::User,
-            content: message.content.clone(),
-        }),
-        "agent" => Some(ScreenMessage {
-            role: crate::codex_tui::ScreenMessageRole::Agent,
-            content: message.content.clone(),
-        }),
-        _ => None,
-    }
-}
-
-fn screen_role_name(role: crate::codex_tui::ScreenMessageRole) -> &'static str {
-    match role {
-        crate::codex_tui::ScreenMessageRole::User => "user",
-        crate::codex_tui::ScreenMessageRole::Agent => "agent",
+fn codex_parse_benchmark_from_messages(messages: &[ChatMessageRecord]) -> CodexParseBenchmark {
+    CodexParseBenchmark {
+        last_user_message: messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "user")
+            .map(|message| message.content.clone()),
+        last_agent_message: messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "agent")
+            .map(|message| message.content.clone()),
     }
 }
 
@@ -14153,7 +14081,7 @@ spotlight_testing = true
     }
 
     #[test]
-    fn session_screen_snapshots_persist_structured_agent_messages_for_threads() {
+    fn persist_codex_screen_delta_persists_structured_agent_messages_for_threads() {
         let (_temp, store) = test_workspace_store();
         let thread = store
             .create_chat_thread("berlin", "codex", "Bugfix A", None)
@@ -14179,19 +14107,17 @@ spotlight_testing = true
             .unwrap();
 
         store
-            .append_session_process_output(
+            .persist_codex_screen_delta(
+                thread.id,
                 process.id,
-                &format_codex_screen_snapshot(
-                    "╭─ You\n│ Fix the failing test\n╰─\n╭─ Codex\n│ Running the test suite now.\n╰─",
-                ),
+                "╭─ You\n│ Fix the failing test\n╰─\n╭─ Codex\n│ Running the test suite now.\n╰─",
             )
             .unwrap();
         store
-            .append_session_process_output(
+            .persist_codex_screen_delta(
+                thread.id,
                 process.id,
-                &format_codex_screen_snapshot(
-                    "╭─ You\n│ Fix the failing test\n╰─\n╭─ Codex\n│ Running the test suite now.\n│ The failure is in parser.rs.\n╰─",
-                ),
+                "╭─ You\n│ Fix the failing test\n╰─\n╭─ Codex\n│ Running the test suite now.\n│ The failure is in parser.rs.\n╰─",
             )
             .unwrap();
 
@@ -14204,6 +14130,49 @@ spotlight_testing = true
             "Running the test suite now.\nThe failure is in parser.rs."
         );
         assert_eq!(messages[1].source, "agent_screen_parse");
+    }
+
+    #[test]
+    fn codex_screen_delta_does_not_replay_old_messages_after_new_user_input() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Bugfix A", None)
+            .unwrap();
+        let process = process_record_for_thread(&store, thread.id);
+        store
+            .append_chat_message(thread.id, "user", "first question", "user_send")
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "agent", "first answer", "agent_screen_parse")
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "second question", "user_send")
+            .unwrap();
+
+        let screen = "\
+› first question
+• first answer
+› second question
+• second answer
+";
+
+        store
+            .persist_codex_screen_delta(thread.id, process.id, screen)
+            .unwrap();
+
+        let messages = store.list_chat_messages(thread.id).unwrap();
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "first question",
+                "first answer",
+                "second question",
+                "second answer"
+            ]
+        );
     }
 
     #[test]
