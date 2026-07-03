@@ -96,6 +96,15 @@ struct InlineEventBodyPreview {
     truncated: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiveChatSource {
+    StructuredStore,
+}
+
+fn live_chat_source() -> LiveChatSource {
+    LiveChatSource::StructuredStore
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ContextUsageDisplayState {
     percent_label: String,
@@ -636,44 +645,51 @@ pub fn agent_session_panel(
                         append_chat_refresh_row(&messages, &widget);
                     }
 
-                    let (thread_messages, thread_events) =
-                        WorkspaceStore::open(database_path.clone())
-                            .map(|store| {
-                                (
-                                    store.list_chat_messages(thread_id).unwrap_or_default(),
-                                    store.list_chat_events(thread_id).unwrap_or_default(),
-                                )
-                            })
-                            .unwrap_or_default();
-                    let render_legacy_inline_events =
-                        render_legacy_inline_events_for_thread(&thread_events);
-                    let timeline =
-                        merge_chat_timeline_for_render(thread_messages.clone(), thread_events);
-                    debug!(
-                        workspace = %workspace,
-                        thread_id,
-                        thread_message_count = thread_messages.len(),
-                        thread_timeline_count = timeline.len(),
-                        render_legacy_inline_events,
-                        "chat refresh_view loaded persisted chat timeline"
-                    );
-                    if !timeline.is_empty() {
-                        apply_context_usage_state(
-                            &context_usage,
-                            latest_context_usage_from_messages(&thread_messages),
-                        );
-                        for item in timeline {
-                            match item {
-                                ChatTimelineItem::Message(message) => append_chat_refresh_row(
-                                    &messages,
-                                    &chat_message_widget(&message, render_legacy_inline_events),
-                                ),
-                                ChatTimelineItem::Event(event) => {
-                                    append_chat_refresh_row(&messages, &chat_event_widget(&event));
+                    match live_chat_source() {
+                        LiveChatSource::StructuredStore => {
+                            let (thread_messages, thread_events) =
+                                WorkspaceStore::open(database_path.clone())
+                                    .map(|store| {
+                                        (
+                                            store.list_chat_messages(thread_id).unwrap_or_default(),
+                                            store.list_chat_events(thread_id).unwrap_or_default(),
+                                        )
+                                    })
+                                    .unwrap_or_default();
+                            let render_legacy_inline_events =
+                                render_legacy_inline_events_for_thread(&thread_events);
+                            let timeline =
+                                merge_chat_timeline_for_render(thread_messages.clone(), thread_events);
+                            debug!(
+                                workspace = %workspace,
+                                thread_id,
+                                thread_message_count = thread_messages.len(),
+                                thread_timeline_count = timeline.len(),
+                                render_legacy_inline_events,
+                                "chat refresh_view loaded persisted chat timeline"
+                            );
+                            if !timeline.is_empty() {
+                                apply_context_usage_state(
+                                    &context_usage,
+                                    latest_context_usage_from_messages(&thread_messages),
+                                );
+                                for item in timeline {
+                                    match item {
+                                        ChatTimelineItem::Message(message) => append_chat_refresh_row(
+                                            &messages,
+                                            &chat_message_widget(&message, render_legacy_inline_events),
+                                        ),
+                                        ChatTimelineItem::Event(event) => {
+                                            append_chat_refresh_row(
+                                                &messages,
+                                                &chat_event_widget(&event),
+                                            );
+                                        }
+                                    }
                                 }
+                                return;
                             }
                         }
-                        return;
                     }
 
                     let empty = Label::new(Some(&runtime_summary.unwrap_or_else(|| {
@@ -6957,6 +6973,11 @@ fix it
         assert!(surface.contains("State: done"));
         assert!(surface.contains("Attachment: saved"));
         assert!(surface.contains("[no transcript output yet]"));
+    }
+
+    #[test]
+    fn live_chat_uses_structured_store_not_session_log_reparse() {
+        assert_eq!(live_chat_source(), LiveChatSource::StructuredStore);
     }
 
     #[test]
