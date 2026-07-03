@@ -1,6 +1,6 @@
 use crate::codex_tui::{
     detect_directory_trust_prompt, merge_screen_messages, parse_codex_screen_messages,
-    ScreenMessage,
+    CodexFileChangeAction, CodexParseCursor, CodexTranscriptEvent, ScreenMessage,
 };
 use crate::harness;
 use crate::pty::PtySession;
@@ -8,7 +8,7 @@ use crate::settings::load_repository_settings;
 use anyhow::{Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use rusqlite::{params, Connection, OptionalExtension};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashSet};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
@@ -580,6 +580,22 @@ pub struct ChatMessageRecord {
     pub role: String,
     pub content: String,
     pub source: String,
+    pub timeline_seq: Option<i64>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatEventRecord {
+    pub id: i64,
+    pub thread_id: i64,
+    pub process_id: Option<i64>,
+    pub kind: String,
+    pub title: String,
+    pub body: String,
+    pub path: Option<String>,
+    pub payload_json: String,
+    pub timeline_seq: i64,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -3970,10 +3986,11 @@ mutation($threadId: ID!) {{
         }
 
         let now = timestamp();
+        let timeline_seq = self.next_chat_timeline_seq()?;
         self.conn.execute(
-            "INSERT INTO chat_messages (thread_id, role, content, source, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
-            params![thread_id, role, content, source, now],
+            "INSERT INTO chat_messages (thread_id, role, content, source, timeline_seq, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+            params![thread_id, role, content, source, timeline_seq, now],
         )?;
         self.touch_chat_thread(thread_id, &now)?;
         self.get_chat_message(self.conn.last_insert_rowid())
@@ -3989,10 +4006,10 @@ mutation($threadId: ID!) {{
         let latest = self
             .conn
             .query_row(
-                "SELECT id, thread_id, role, content, source, created_at, updated_at
+                "SELECT id, thread_id, role, content, source, timeline_seq, created_at, updated_at
                  FROM chat_messages
                  WHERE thread_id = ?1
-                 ORDER BY id DESC
+                 ORDER BY COALESCE(timeline_seq, id) DESC, id DESC
                  LIMIT 1",
                 [thread_id],
                 row_to_chat_message,
@@ -4001,6 +4018,95 @@ mutation($threadId: ID!) {{
         Ok(latest.filter(|message| {
             message.role == role && message.content == content && message.source == source
         }))
+    }
+
+    pub fn get_codex_parse_cursor(&self, process_id: i64) -> Result<Option<CodexParseCursor>> {
+        let fingerprint = self
+            .conn
+            .query_row(
+                "SELECT fingerprint
+                 FROM codex_parse_cursors
+                 WHERE process_id = ?1",
+                [process_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?;
+        Ok(fingerprint.map(|fingerprint| CodexParseCursor { fingerprint }))
+    }
+
+    pub fn set_codex_parse_cursor(&self, process_id: i64, cursor: &CodexParseCursor) -> Result<()> {
+        let now = timestamp();
+        self.conn.execute(
+            "INSERT INTO codex_parse_cursors (process_id, fingerprint, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(process_id) DO UPDATE SET
+               fingerprint = excluded.fingerprint,
+               updated_at = excluded.updated_at",
+            params![process_id, cursor.fingerprint.as_deref(), now],
+        )?;
+        Ok(())
+    }
+
+    pub fn append_chat_event(
+        &self,
+        thread_id: i64,
+        process_id: i64,
+        event: &CodexTranscriptEvent,
+    ) -> Result<ChatEventRecord> {
+        let fields = chat_event_fields(event)?;
+        if let Some(existing) = self.find_existing_chat_event(
+            thread_id,
+            process_id,
+            &fields.kind,
+            &fields.title,
+            &fields.body,
+            &fields.payload_json,
+        )? {
+            return Ok(existing);
+        }
+
+        let now = timestamp();
+        let timeline_seq = self.next_chat_timeline_seq()?;
+        self.conn.execute(
+            "INSERT INTO chat_events (
+                thread_id,
+                process_id,
+                kind,
+                title,
+                body,
+                path,
+                payload_json,
+                timeline_seq,
+                created_at,
+                updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+            params![
+                thread_id,
+                process_id,
+                fields.kind,
+                fields.title,
+                fields.body,
+                fields.path,
+                fields.payload_json,
+                timeline_seq,
+                now
+            ],
+        )?;
+        self.touch_chat_thread(thread_id, &now)?;
+        self.get_chat_event(self.conn.last_insert_rowid())
+    }
+
+    pub fn list_chat_events(&self, thread_id: i64) -> Result<Vec<ChatEventRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, thread_id, process_id, kind, title, body, path, payload_json, timeline_seq, created_at, updated_at
+             FROM chat_events
+             WHERE thread_id = ?1
+             ORDER BY timeline_seq ASC, id ASC",
+        )?;
+        let events = stmt
+            .query_map([thread_id], row_to_chat_event)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(events)
     }
 
     pub fn update_chat_thread_title(&self, thread_id: i64, title: &str) -> Result<()> {
@@ -4018,10 +4124,10 @@ mutation($threadId: ID!) {{
 
     pub fn list_chat_messages(&self, thread_id: i64) -> Result<Vec<ChatMessageRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, thread_id, role, content, source, created_at, updated_at
+            "SELECT id, thread_id, role, content, source, timeline_seq, created_at, updated_at
              FROM chat_messages
              WHERE thread_id = ?1
-             ORDER BY id ASC",
+             ORDER BY COALESCE(timeline_seq, id) ASC, id ASC",
         )?;
         let messages = stmt
             .query_map([thread_id], row_to_chat_message)?
@@ -4147,6 +4253,40 @@ mutation($threadId: ID!) {{
         Ok(())
     }
 
+    fn next_chat_timeline_seq(&self) -> Result<i64> {
+        self.conn
+            .execute("INSERT INTO chat_timeline_seq DEFAULT VALUES", [])?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    fn find_existing_chat_event(
+        &self,
+        thread_id: i64,
+        process_id: i64,
+        kind: &str,
+        title: &str,
+        body: &str,
+        payload_json: &str,
+    ) -> Result<Option<ChatEventRecord>> {
+        self.conn
+            .query_row(
+                "SELECT id, thread_id, process_id, kind, title, body, path, payload_json, timeline_seq, created_at, updated_at
+                 FROM chat_events
+                 WHERE thread_id = ?1
+                   AND process_id = ?2
+                   AND kind = ?3
+                   AND title = ?4
+                   AND body = ?5
+                   AND payload_json = ?6
+                 ORDER BY timeline_seq DESC, id DESC
+                 LIMIT 1",
+                params![thread_id, process_id, kind, title, body, payload_json],
+                row_to_chat_event,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     fn update_chat_message_content(&self, message_id: i64, content: &str) -> Result<()> {
         let now = timestamp();
         self.conn.execute(
@@ -4264,12 +4404,23 @@ mutation($threadId: ID!) {{
     fn get_chat_message(&self, id: i64) -> Result<ChatMessageRecord> {
         self.conn
             .query_row(
-                "SELECT id, thread_id, role, content, source, created_at, updated_at
+                "SELECT id, thread_id, role, content, source, timeline_seq, created_at, updated_at
                  FROM chat_messages WHERE id = ?1",
                 [id],
                 row_to_chat_message,
             )
             .with_context(|| format!("load chat message {id}"))
+    }
+
+    fn get_chat_event(&self, id: i64) -> Result<ChatEventRecord> {
+        self.conn
+            .query_row(
+                "SELECT id, thread_id, process_id, kind, title, body, path, payload_json, timeline_seq, created_at, updated_at
+                 FROM chat_events WHERE id = ?1",
+                [id],
+                row_to_chat_event,
+            )
+            .with_context(|| format!("load chat event {id}"))
     }
 
     fn load_repository_by_id(&self, id: i64) -> Result<RepositoryRecord> {
@@ -4695,8 +4846,34 @@ mutation($threadId: ID!) {{
               role TEXT NOT NULL,
               content TEXT NOT NULL,
               source TEXT NOT NULL,
+              timeline_seq INTEGER,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS chat_timeline_seq (
+              id INTEGER PRIMARY KEY AUTOINCREMENT
+            );
+
+            CREATE TABLE IF NOT EXISTS codex_parse_cursors (
+              process_id INTEGER PRIMARY KEY REFERENCES processes(id) ON DELETE CASCADE,
+              fingerprint TEXT,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS chat_events (
+              id INTEGER PRIMARY KEY,
+              thread_id INTEGER NOT NULL REFERENCES chat_threads(id) ON DELETE CASCADE,
+              process_id INTEGER NOT NULL REFERENCES processes(id) ON DELETE CASCADE,
+              kind TEXT NOT NULL,
+              title TEXT NOT NULL,
+              body TEXT NOT NULL DEFAULT '',
+              path TEXT,
+              payload_json TEXT NOT NULL,
+              timeline_seq INTEGER NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              UNIQUE(thread_id, process_id, kind, title, body, payload_json)
             );
             ",
         )?;
@@ -4723,6 +4900,12 @@ mutation($threadId: ID!) {{
             "processes",
             "chat_thread_id",
             "ALTER TABLE processes ADD COLUMN chat_thread_id INTEGER REFERENCES chat_threads(id)",
+        )?;
+        ensure_column(
+            &self.conn,
+            "chat_messages",
+            "timeline_seq",
+            "ALTER TABLE chat_messages ADD COLUMN timeline_seq INTEGER",
         )?;
         Ok(())
     }
@@ -4872,6 +5055,73 @@ fn screen_role_name(role: crate::codex_tui::ScreenMessageRole) -> &'static str {
         crate::codex_tui::ScreenMessageRole::User => "user",
         crate::codex_tui::ScreenMessageRole::Agent => "agent",
     }
+}
+
+struct ChatEventFields {
+    kind: String,
+    title: String,
+    body: String,
+    path: Option<String>,
+    payload_json: String,
+}
+
+fn chat_event_fields(event: &CodexTranscriptEvent) -> Result<ChatEventFields> {
+    let payload_json = match event {
+        CodexTranscriptEvent::Tool { title, body } => json!({
+            "type": "tool",
+            "title": title,
+            "body": body,
+        })
+        .to_string(),
+        CodexTranscriptEvent::Skill { title, body } => json!({
+            "type": "skill",
+            "title": title,
+            "body": body,
+        })
+        .to_string(),
+        CodexTranscriptEvent::FileChange(change) => json!({
+            "type": "file_change",
+            "action": match change.action {
+                CodexFileChangeAction::Added => "added",
+                CodexFileChangeAction::Edited => "edited",
+                CodexFileChangeAction::Deleted => "deleted",
+            },
+            "path": &change.path,
+            "additions": change.additions,
+            "deletions": change.deletions,
+            "lines": &change.lines,
+        })
+        .to_string(),
+    };
+
+    Ok(match event {
+        CodexTranscriptEvent::Tool { title, body } => ChatEventFields {
+            kind: "tool".to_owned(),
+            title: title.clone(),
+            body: body.clone(),
+            path: None,
+            payload_json,
+        },
+        CodexTranscriptEvent::Skill { title, body } => ChatEventFields {
+            kind: "skill".to_owned(),
+            title: title.clone(),
+            body: body.clone(),
+            path: None,
+            payload_json,
+        },
+        CodexTranscriptEvent::FileChange(change) => ChatEventFields {
+            kind: "file_change".to_owned(),
+            title: change.path.clone(),
+            body: match change.action {
+                CodexFileChangeAction::Added => "added",
+                CodexFileChangeAction::Edited => "edited",
+                CodexFileChangeAction::Deleted => "deleted",
+            }
+            .to_owned(),
+            path: Some(change.path.clone()),
+            payload_json,
+        },
+    })
 }
 
 fn find_codex_rollout_session_id(cwd: &Path, started_at: &str) -> Result<Option<String>> {
@@ -5060,8 +5310,25 @@ fn row_to_chat_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessageR
         role: row.get(2)?,
         content: row.get(3)?,
         source: row.get(4)?,
-        created_at: row.get(5)?,
-        updated_at: row.get(6)?,
+        timeline_seq: row.get(5)?,
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
+    })
+}
+
+fn row_to_chat_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatEventRecord> {
+    Ok(ChatEventRecord {
+        id: row.get(0)?,
+        thread_id: row.get(1)?,
+        process_id: row.get(2)?,
+        kind: row.get(3)?,
+        title: row.get(4)?,
+        body: row.get(5)?,
+        path: row.get(6)?,
+        payload_json: row.get(7)?,
+        timeline_seq: row.get(8)?,
+        created_at: row.get(9)?,
+        updated_at: row.get(10)?,
     })
 }
 
@@ -13520,6 +13787,92 @@ spotlight_testing = true
     }
 
     #[test]
+    fn codex_parser_cursor_and_events_persist_separately_from_messages() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Bugfix A", None)
+            .unwrap();
+        let process = process_record_for_thread(&store, thread.id);
+        let cursor = CodexParseCursor {
+            fingerprint: Some("12:300:last lines".to_owned()),
+        };
+        let event = CodexTranscriptEvent::Tool {
+            title: "cargo test".to_owned(),
+            body: "ok".to_owned(),
+        };
+
+        store.set_codex_parse_cursor(process.id, &cursor).unwrap();
+        store
+            .append_chat_event(thread.id, process.id, &event)
+            .unwrap();
+
+        assert_eq!(
+            store.get_codex_parse_cursor(process.id).unwrap(),
+            Some(cursor)
+        );
+        assert_eq!(store.list_chat_messages(thread.id).unwrap().len(), 0);
+        let events = store.list_chat_events(thread.id).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "tool");
+        assert_eq!(events[0].title, "cargo test");
+    }
+
+    #[test]
+    fn chat_messages_and_events_share_a_monotonic_timeline_sequence() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Bugfix A", None)
+            .unwrap();
+        let process = process_record_for_thread(&store, thread.id);
+
+        let first_message = store
+            .append_chat_message(thread.id, "user", "run tests", "user_send")
+            .unwrap();
+        let event = store
+            .append_chat_event(
+                thread.id,
+                process.id,
+                &CodexTranscriptEvent::Tool {
+                    title: "cargo test".to_owned(),
+                    body: "ok".to_owned(),
+                },
+            )
+            .unwrap();
+        let second_message = store
+            .append_chat_message(thread.id, "agent", "running now", "agent_screen_parse")
+            .unwrap();
+
+        assert_eq!(first_message.timeline_seq, Some(1));
+        assert_eq!(event.timeline_seq, 2);
+        assert_eq!(second_message.timeline_seq, Some(3));
+    }
+
+    #[test]
+    fn chat_events_are_idempotent_without_allocating_new_timeline_sequence() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Bugfix A", None)
+            .unwrap();
+        let process = process_record_for_thread(&store, thread.id);
+        let event = CodexTranscriptEvent::Tool {
+            title: "cargo test".to_owned(),
+            body: "ok".to_owned(),
+        };
+
+        let first = store
+            .append_chat_event(thread.id, process.id, &event)
+            .unwrap();
+        let second = store
+            .append_chat_event(thread.id, process.id, &event)
+            .unwrap();
+        let events = store.list_chat_events(thread.id).unwrap();
+
+        assert_eq!(first.id, second.id);
+        assert_eq!(first.timeline_seq, second.timeline_seq);
+        assert_eq!(events.len(), 1);
+    }
+
+    #[test]
     fn chat_thread_title_updates_without_creating_extra_rows() {
         let (_temp, store) = test_workspace_store();
         let thread = store
@@ -13724,6 +14077,25 @@ spotlight_testing = true
             })
             .unwrap();
         (temp, store)
+    }
+
+    fn process_record_for_thread(store: &WorkspaceStore, thread_id: i64) -> ProcessRecord {
+        store
+            .record_session_process_for_thread(
+                "berlin",
+                thread_id,
+                &SessionLaunch {
+                    kind: SessionKind::Codex,
+                    program: PathBuf::from("codex"),
+                    args: vec!["--no-alt-screen".to_owned()],
+                    cwd: PathBuf::from("/tmp/berlin"),
+                    env: Vec::new(),
+                    harness_metadata: Some("harness=codex".to_owned()),
+                    session_resume_id: None,
+                },
+                exited_child_pid(),
+            )
+            .unwrap()
     }
 
     fn init_repo(path: PathBuf) -> PathBuf {
