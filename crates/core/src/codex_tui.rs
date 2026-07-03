@@ -98,6 +98,36 @@ pub struct ScreenMessage {
     pub content: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CodexParseBenchmark {
+    pub last_user_message: Option<String>,
+    pub last_agent_message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CodexParseCursor {
+    pub fingerprint: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexParsedDelta {
+    pub items: Vec<CodexParsedItem>,
+    pub cursor: CodexParseCursor,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodexParsedItem {
+    Message(ScreenMessage),
+    Event(CodexTranscriptEvent),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodexTranscriptEvent {
+    Tool { title: String, body: String },
+    Skill { title: String, body: String },
+    FileChange(CodexFileChange),
+}
+
 pub fn encode_send_line(line: &str) -> Vec<u8> {
     let mut encoded = line.as_bytes().to_vec();
     encoded.push(b'\r');
@@ -301,6 +331,63 @@ pub fn parse_codex_screen_messages(screen: &str) -> Vec<ScreenMessage> {
     }
 
     messages
+}
+
+pub fn parse_codex_screen_delta(
+    screen: &str,
+    benchmark: &CodexParseBenchmark,
+    previous_cursor: Option<&CodexParseCursor>,
+) -> CodexParsedDelta {
+    let messages = parse_codex_screen_messages(screen);
+    let start = delta_start_index(&messages, benchmark);
+    let items = messages
+        .into_iter()
+        .skip(start)
+        .filter(|message| message.role != ScreenMessageRole::User)
+        .map(CodexParsedItem::Message)
+        .collect::<Vec<_>>();
+    let fingerprint = screen_fingerprint(screen);
+    if previous_cursor
+        .and_then(|cursor| cursor.fingerprint.as_ref())
+        .is_some_and(|previous| Some(previous) == fingerprint.as_ref())
+    {
+        return CodexParsedDelta {
+            items: Vec::new(),
+            cursor: CodexParseCursor { fingerprint },
+        };
+    }
+    CodexParsedDelta {
+        items,
+        cursor: CodexParseCursor { fingerprint },
+    }
+}
+
+fn delta_start_index(messages: &[ScreenMessage], benchmark: &CodexParseBenchmark) -> usize {
+    if let Some(last_user) = benchmark.last_user_message.as_deref() {
+        if let Some(index) = messages.iter().rposition(|message| {
+            message.role == ScreenMessageRole::User && message.content == last_user
+        }) {
+            return index + 1;
+        }
+    }
+    if let Some(last_agent) = benchmark.last_agent_message.as_deref() {
+        if let Some(index) = messages.iter().rposition(|message| {
+            message.role == ScreenMessageRole::Agent && message.content == last_agent
+        }) {
+            return index + 1;
+        }
+    }
+    0
+}
+
+fn screen_fingerprint(screen: &str) -> Option<String> {
+    let normalized = screen.trim();
+    (!normalized.is_empty()).then(|| {
+        let line_count = normalized.lines().count();
+        let byte_count = normalized.len();
+        let tail = normalized.lines().rev().take(8).collect::<Vec<_>>().join("\n");
+        format!("{line_count}:{byte_count}:{tail}")
+    })
 }
 
 fn parse_codex_tool_call(line: &str) -> Option<CodexToolCall> {
@@ -997,10 +1084,11 @@ mod tests {
     use super::{
         detect_directory_trust_prompt, encode_send_line, is_trust_prompt_visible,
         merge_screen_messages, parse_codex_context_usage, parse_codex_file_change_block,
-        parse_codex_inline_event, parse_codex_screen_messages, parse_codex_structured_lines,
-        CodexContextUsage, CodexFileChange, CodexFileChangeAction, CodexFileChangeLine,
-        CodexFileChangeLineKind, CodexFileReference, CodexInlineEvent, CodexParsedLine,
-        CodexSkillAnnouncement, CodexToolCall, ScreenMessage, ScreenMessageRole,
+        parse_codex_inline_event, parse_codex_screen_delta, parse_codex_screen_messages,
+        parse_codex_structured_lines, CodexContextUsage, CodexFileChange, CodexFileChangeAction,
+        CodexFileChangeLine, CodexFileChangeLineKind, CodexFileReference, CodexInlineEvent,
+        CodexParseBenchmark, CodexParsedItem, CodexParsedLine, CodexSkillAnnouncement,
+        CodexToolCall, ScreenMessage, ScreenMessageRole,
     };
 
     #[test]
@@ -1288,6 +1376,31 @@ Do you trust the contents of this directory?
                     content: "Ready.\nRunning checks now.".to_owned(),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn screen_delta_starts_after_latest_known_user_message() {
+        let screen = "\
+› old question
+• old answer
+› new question
+• new answer line 1
+  new answer line 2
+";
+        let benchmark = CodexParseBenchmark {
+            last_user_message: Some("new question".to_owned()),
+            last_agent_message: None,
+        };
+
+        let delta = parse_codex_screen_delta(screen, &benchmark, None);
+
+        assert_eq!(
+            delta.items,
+            vec![CodexParsedItem::Message(ScreenMessage {
+                role: ScreenMessageRole::Agent,
+                content: "new answer line 1\nnew answer line 2".to_owned(),
+            })]
         );
     }
 
