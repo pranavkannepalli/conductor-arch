@@ -1,0 +1,9 @@
+{
+  "rows": 24,
+  "cols": 100,
+  "chunks": [
+    {
+      "data": "Do you trust the contents of this directory?\r\n1. Yes, continue\r\n2. No, exit\r\n"
+    }
+  ]
+}

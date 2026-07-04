@@ -1,0 +1,16 @@
+{
+  "rows": 24,
+  "cols": 100,
+  "chunks": [
+    {
+      "data": "› Generate migration\r\n• Working (12s"
+    },
+    {
+      "data": " • esc to interrupt)\r\n^C\r\n",
+      "delay_ms": 80
+    },
+    {
+      "data": "• Stopped before writing files.\r\n"
+    }
+  ]
+}

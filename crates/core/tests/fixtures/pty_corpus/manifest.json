@@ -1,0 +1,60 @@
+{
+  "fixtures": [
+    {
+      "id": "success_basic_live_answer",
+      "outcome": "success",
+      "features": [],
+      "raw_log": "raw/success_basic_live_answer.json",
+      "expected_events": "expected/success_basic_live_answer.json"
+    },
+    {
+      "id": "success_ansi_tool_output",
+      "outcome": "success",
+      "features": ["ansi", "tool_output"],
+      "raw_log": "raw/success_ansi_tool_output.json",
+      "expected_events": "expected/success_ansi_tool_output.json"
+    },
+    {
+      "id": "success_partial_delayed_chunks",
+      "outcome": "success",
+      "features": ["partial_lines", "delayed_chunks"],
+      "raw_log": "raw/success_partial_delayed_chunks.json",
+      "expected_events": "expected/success_partial_delayed_chunks.json"
+    },
+    {
+      "id": "success_duplicated_repaint",
+      "outcome": "success",
+      "features": ["ansi", "duplicated_chunks"],
+      "raw_log": "raw/success_duplicated_repaint.json",
+      "expected_events": "expected/success_duplicated_repaint.json"
+    },
+    {
+      "id": "success_skill_and_file_change",
+      "outcome": "success",
+      "features": [],
+      "raw_log": "raw/success_skill_and_file_change.json",
+      "expected_events": "expected/success_skill_and_file_change.json"
+    },
+    {
+      "id": "failure_command_error",
+      "outcome": "failure",
+      "features": ["tool_output", "error"],
+      "raw_log": "raw/failure_command_error.json",
+      "expected_events": "expected/failure_command_error.json"
+    },
+    {
+      "id": "failure_trust_prompt",
+      "outcome": "failure",
+      "features": ["prompt"],
+      "raw_log": "raw/failure_trust_prompt.json",
+      "expected_events": "expected/failure_trust_prompt.json"
+    },
+    {
+      "id": "interruption_ctrl_c",
+      "outcome": "interruption",
+      "features": ["partial_lines", "error"],
+      "raw_log": "raw/interruption_ctrl_c.json",
+      "expected_events": "expected/interruption_ctrl_c.json"
+    }
+  ]
+}

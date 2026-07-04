@@ -1,0 +1,9 @@
+{
+  "rows": 24,
+  "cols": 100,
+  "chunks": [
+    {
+      "data": "› Summarize the repo state\r\n• Repo state is quiet.\r\n  No changes need attention.\r\n"
+    }
+  ]
+}

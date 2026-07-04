@@ -1,0 +1,7 @@
+[
+  {
+    "type": "message",
+    "role": "agent",
+    "content": "First line\nsecond line"
+  }
+]

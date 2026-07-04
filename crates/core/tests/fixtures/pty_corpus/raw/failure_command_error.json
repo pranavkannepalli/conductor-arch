@@ -1,0 +1,9 @@
+{
+  "rows": 24,
+  "cols": 120,
+  "chunks": [
+    {
+      "data": "› Run missing test\r\nRan cargo test -p linux-archductor-core missing_test\r\nerror: no test target named `missing_test` in `linux-archductor-core` package\r\n\r\n• Tests failed because the requested target does not exist.\r\n"
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+[
+  {
+    "type": "skill",
+    "title": "graphify, skill-creator",
+    "body": "# Graphify\nBuild a knowledge graph from input."
+  },
+  {
+    "type": "message",
+    "role": "agent",
+    "content": "Edited crates/core/src/codex_tui.rs (+2 -1)\n10  old context\n11 -old line\n12 +new line"
+  },
+  {
+    "type": "file_change",
+    "action": "edited",
+    "path": "crates/core/src/codex_tui.rs"
+  }
+]

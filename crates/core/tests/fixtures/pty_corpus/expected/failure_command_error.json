@@ -1,0 +1,12 @@
+[
+  {
+    "type": "tool",
+    "title": "cargo test -p linux-archductor-core missing_test",
+    "body": "error: no test target named `missing_test` in `linux-archductor-core` package"
+  },
+  {
+    "type": "message",
+    "role": "agent",
+    "content": "Tests failed because the requested target does not exist."
+  }
+]

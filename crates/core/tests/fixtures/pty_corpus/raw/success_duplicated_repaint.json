@@ -1,0 +1,15 @@
+{
+  "rows": 24,
+  "cols": 100,
+  "chunks": [
+    {
+      "data": "\u001b[2J\u001b[H› Explain parser\r\n• Final answer\r\n"
+    },
+    {
+      "data": "\u001b[2J\u001b[H› Explain parser\r\n• Final answer\r\n"
+    },
+    {
+      "data": "\u001b[2J\u001b[H› Explain parser\r\n• Final answer\r\n  More detail\r\n"
+    }
+  ]
+}

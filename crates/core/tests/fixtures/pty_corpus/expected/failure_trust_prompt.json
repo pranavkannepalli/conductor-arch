@@ -1,0 +1,7 @@
+[
+  {
+    "type": "message",
+    "role": "agent",
+    "content": "Do you trust the contents of this directory?\n1. Yes, continue\n2. No, exit"
+  }
+]

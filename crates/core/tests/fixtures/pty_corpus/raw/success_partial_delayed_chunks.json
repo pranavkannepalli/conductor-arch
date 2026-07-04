@@ -1,0 +1,16 @@
+{
+  "rows": 24,
+  "cols": 100,
+  "chunks": [
+    {
+      "data": "› Update docs\r\n• First li"
+    },
+    {
+      "data": "ne\r\n  second line",
+      "delay_ms": 120
+    },
+    {
+      "data": "\r\n"
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+[
+  {
+    "type": "message",
+    "role": "agent",
+    "content": "Repo state is quiet.\nNo changes need attention."
+  }
+]

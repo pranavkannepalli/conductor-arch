@@ -1,0 +1,9 @@
+{
+  "rows": 24,
+  "cols": 100,
+  "chunks": [
+    {
+      "data": "\u001b[2J\u001b[H› Run core tests\r\n\u001b[32mRan cargo test -p linux-archductor-core codex_tui\u001b[0m\r\nrunning 3 tests\r\ntest codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok\r\ntest result: ok. 3 passed\r\n"
+    }
+  ]
+}

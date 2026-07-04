@@ -1,0 +1,7 @@
+[
+  {
+    "type": "tool",
+    "title": "cargo test -p linux-archductor-core codex_tui",
+    "body": "running 3 tests\ntest codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok\ntest result: ok. 3 passed"
+  }
+]

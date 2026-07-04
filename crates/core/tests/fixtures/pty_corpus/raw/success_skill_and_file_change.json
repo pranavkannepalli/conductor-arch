@@ -1,0 +1,9 @@
+{
+  "rows": 24,
+  "cols": 120,
+  "chunks": [
+    {
+      "data": "› Add parser fixtures\r\nRead SKILL.md (graphify), SKILL.md (skill-creator)\r\n# Graphify\r\nBuild a knowledge graph from input.\r\n\r\n• Edited crates/core/src/codex_tui.rs (+2 -1)\r\n    10  old context\r\n    11 -old line\r\n    12 +new line\r\n"
+    }
+  ]
+}
