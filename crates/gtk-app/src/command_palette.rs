@@ -369,6 +369,9 @@ fn palette_command_search_terms(command: &PaletteCommand) -> Vec<String> {
         PaletteTarget::Page(AppPage::Dashboard) => vec!["home".to_owned(), "overview".to_owned()],
         PaletteTarget::Page(AppPage::Projects) => Vec::new(),
         PaletteTarget::Page(AppPage::History) => vec!["archive".to_owned(), "past".to_owned()],
+        PaletteTarget::Page(AppPage::PtyInspector) => {
+            vec!["debug".to_owned(), "pty".to_owned(), "sessions".to_owned()]
+        }
         PaletteTarget::Page(AppPage::Workspace) => vec!["worktree".to_owned(), "branch".to_owned()],
         PaletteTarget::Page(AppPage::Settings) => vec!["config".to_owned()],
         PaletteTarget::Page(AppPage::Review) => vec!["review".to_owned()],

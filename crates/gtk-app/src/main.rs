@@ -9,6 +9,7 @@ mod history;
 mod logger;
 mod motion;
 mod projects;
+mod pty_inspector;
 mod refresh;
 mod session_surface;
 mod settings;
@@ -190,14 +191,27 @@ fn main() {
         return;
     }
 
-    let launch_target = parse_launch_target(std::env::args()).unwrap_or_default();
+    let debug_mode = debug_mode_enabled();
+    let launch_target =
+        parse_launch_target_with_debug_mode(std::env::args(), debug_mode).unwrap_or_default();
 
     let app = Application::builder().application_id(APP_ID).build();
-    app.connect_activate(move |app| build_ui(app, launch_target.clone()));
+    app.connect_activate(move |app| build_ui(app, launch_target.clone(), debug_mode));
     app.run();
 }
 
 fn parse_launch_target<I, S>(args: I) -> Result<LaunchTarget, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    parse_launch_target_with_debug_mode(args, false)
+}
+
+fn parse_launch_target_with_debug_mode<I, S>(
+    args: I,
+    debug_mode: bool,
+) -> Result<LaunchTarget, String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
@@ -229,10 +243,10 @@ where
                 let value = args
                     .get(index)
                     .ok_or_else(|| "--page requires a value".to_owned())?;
-                target.page = parse_app_page(value)?;
+                target.page = parse_app_page_with_debug_mode(value, debug_mode)?;
             }
             value if value.starts_with("linux-archductor://") => {
-                target = parse_deep_link(value)?;
+                target = parse_deep_link_with_debug_mode(value, debug_mode)?;
             }
             _ => {}
         }
@@ -242,6 +256,10 @@ where
 }
 
 fn parse_deep_link(value: &str) -> Result<LaunchTarget, String> {
+    parse_deep_link_with_debug_mode(value, false)
+}
+
+fn parse_deep_link_with_debug_mode(value: &str, debug_mode: bool) -> Result<LaunchTarget, String> {
     let rest = value
         .strip_prefix("linux-archductor://")
         .ok_or_else(|| "deep link must start with linux-archductor://".to_owned())?;
@@ -260,9 +278,12 @@ fn parse_deep_link(value: &str) -> Result<LaunchTarget, String> {
         ["dashboard"] => target.page = AppPage::Dashboard,
         ["projects"] | ["repositories"] => target.page = AppPage::Projects,
         ["history"] => target.page = AppPage::History,
+        ["pty-inspector"] | ["pty", "inspector"] if debug_mode => {
+            target.page = AppPage::PtyInspector;
+        }
         ["workspace"] | ["workspaces"] => target.page = AppPage::Workspace,
         [] => {}
-        [page] => target.page = parse_app_page(page)?,
+        [page] => target.page = parse_app_page_with_debug_mode(page, debug_mode)?,
         _ => return Err(format!("unsupported deep link path: {path}")),
     }
 
@@ -285,14 +306,30 @@ fn parse_deep_link(value: &str) -> Result<LaunchTarget, String> {
 }
 
 fn parse_app_page(value: &str) -> Result<AppPage, String> {
+    parse_app_page_with_debug_mode(value, false)
+}
+
+fn parse_app_page_with_debug_mode(value: &str, debug_mode: bool) -> Result<AppPage, String> {
     match normalize_launch_token(value).as_str() {
         "dashboard" | "home" => Ok(AppPage::Dashboard),
         "projects" | "repositories" | "repos" => Ok(AppPage::Projects),
         "settings" | "config" => Ok(AppPage::Settings),
         "history" | "archive" => Ok(AppPage::History),
         "workspace" | "workspaces" => Ok(AppPage::Workspace),
+        "ptyinspector" | "pty" if debug_mode => Ok(AppPage::PtyInspector),
         other => Err(format!("unknown page: {other}")),
     }
+}
+
+fn debug_mode_enabled() -> bool {
+    debug_mode_enabled_from_env(std::env::var("ARCHDUCTOR_DEBUG").ok().as_deref())
+}
+
+fn debug_mode_enabled_from_env(value: Option<&str>) -> bool {
+    matches!(
+        value.map(|value| value.trim().to_ascii_lowercase()),
+        Some(value) if matches!(value.as_str(), "1" | "true" | "yes" | "on")
+    )
 }
 
 fn parse_workspace_tab(value: &str) -> Result<WorkspaceTab, String> {
@@ -369,7 +406,7 @@ fn apply_view_preferences(window: &ApplicationWindow, preferences: &ViewPreferen
     }
 }
 
-fn build_ui(app: &Application, launch_target: LaunchTarget) {
+fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     let startup = Instant::now();
     let paths = AppPaths::from_env();
     if let Err(err) = logger::init_dev_logger(&paths) {
@@ -377,6 +414,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget) {
     }
     tracing::info!(
         elapsed_ms = startup.elapsed().as_millis(),
+        debug_mode,
         ?launch_target,
         "gtk startup: build_ui entered"
     );
@@ -515,11 +553,18 @@ fn build_ui(app: &Application, launch_target: LaunchTarget) {
     main_stack.add_named(&settings_page, Some("settings"));
     main_stack.add_named(&history_page, Some("history"));
     main_stack.add_named(&workspace_detail, Some("workspace"));
+    if debug_mode {
+        main_stack.add_named(
+            &pty_inspector::build_pty_inspector_page(app_state.workspace_database_path()),
+            Some("pty-inspector"),
+        );
+    }
     main_stack.set_visible_child_name(match app_state.snapshot().active_page {
         AppPage::Workspace => "workspace",
         AppPage::Projects => "projects",
         AppPage::Settings => "settings",
         AppPage::History => "history",
+        AppPage::PtyInspector if debug_mode => "pty-inspector",
         _ => "dashboard",
     });
 
@@ -544,6 +589,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget) {
         main_stack.clone(),
         window.clone(),
         split.clone(),
+        debug_mode,
         refresh_workspace_detail.clone(),
         refresh_view_preferences.clone(),
     );
@@ -985,6 +1031,7 @@ fn page_stack_name(page: &AppPage) -> &'static str {
         AppPage::Projects => "projects",
         AppPage::Settings => "settings",
         AppPage::History => "history",
+        AppPage::PtyInspector => "pty-inspector",
         AppPage::Workspace | AppPage::Review => "workspace",
     }
 }
@@ -1282,6 +1329,36 @@ mod tests {
         assert_eq!(history.page, AppPage::History);
         assert_eq!(history.workspace, None);
         assert_eq!(terminal, WorkspaceTab::Terminal);
+    }
+
+    #[test]
+    fn debug_mode_accepts_only_explicit_truthy_env_values() {
+        assert!(!debug_mode_enabled_from_env(None));
+        assert!(!debug_mode_enabled_from_env(Some("")));
+        assert!(!debug_mode_enabled_from_env(Some("0")));
+        assert!(!debug_mode_enabled_from_env(Some("false")));
+        assert!(debug_mode_enabled_from_env(Some("1")));
+        assert!(debug_mode_enabled_from_env(Some("true")));
+        assert!(debug_mode_enabled_from_env(Some("yes")));
+    }
+
+    #[test]
+    fn pty_inspector_route_is_gated_by_debug_mode() {
+        let err = parse_launch_target_with_debug_mode(
+            ["linux-archductor-gtk", "--page", "pty-inspector"],
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(err, "unknown page: ptyinspector");
+
+        let target = parse_launch_target_with_debug_mode(
+            ["linux-archductor-gtk", "--page", "pty-inspector"],
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(target.page, AppPage::PtyInspector);
+        assert_eq!(target.workspace, None);
     }
 
     #[test]

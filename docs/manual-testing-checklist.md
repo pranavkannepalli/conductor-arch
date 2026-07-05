@@ -134,6 +134,23 @@ you want to test. Run `gh auth login` before GitHub checks. Set
   do not leave duplicate or misplaced text.
 - [ ] Confirm stopped/exited terminal process rows reconcile after restart.
 - [ ] Confirm terminal transcripts are persisted, searchable, and reloadable.
+- [ ] Launch `./target/release/linux-archductor-gtk` without
+  `ARCHDUCTOR_DEBUG`; confirm there is no PTY Inspector sidebar item, no debug
+  fields in normal workspace/session UI, and `--page pty-inspector` falls back
+  to the normal default page.
+- [ ] Launch `ARCHDUCTOR_DEBUG=1 ./target/release/linux-archductor-gtk`;
+  confirm PTY Inspector appears directly under Dashboard and History.
+- [ ] With debug mode on and at least one active or recent agent session,
+  select PTY Inspector and confirm the left list shows session id, workspace,
+  process status, parser state, last activity, PID, and chunk count.
+- [ ] Select an inspector session and confirm the raw/normalized output pane,
+  parsed event panel, and process diagnostics panel update together.
+- [ ] In the inspector, exercise raw vs normalized output, pause auto-scroll,
+  clear local view, copy visible output, jump to latest, and parsed-event
+  filter controls.
+- [ ] Confirm inspector diagnostics redact token/secret/password/key values and
+  show PID, command, workspace, start time, exit code/signal, restart count,
+  session state, last lifecycle action, and ordered lifecycle transitions.
 
 ## Runtime
 

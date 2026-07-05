@@ -29,6 +29,7 @@ pub(crate) fn build_app_sidebar(
     stack: Stack,
     window: ApplicationWindow,
     split: adw::OverlaySplitView,
+    debug_mode: bool,
     refresh_workspace: impl Fn() + Clone + 'static,
     refresh_view_preferences: Rc<dyn Fn()>,
 ) -> (GBox, impl Fn() + Clone + 'static) {
@@ -135,6 +136,23 @@ pub(crate) fn build_app_sidebar(
         });
     }
     nav_group.append(&history_nav_btn);
+    if debug_mode {
+        let pty_inspector_nav_btn =
+            sidebar_nav_button("utilities-terminal-symbolic", "PTY Inspector");
+        {
+            let stack_p = stack.clone();
+            let state_p = app_state.clone();
+            let refresh_hub = refresh_hub.clone();
+            let sync_nav_buttons = sync_nav_buttons.clone();
+            pty_inspector_nav_btn.connect_clicked(move |_| {
+                state_p.navigate_to_page(AppPage::PtyInspector);
+                stack_p.set_visible_child_name("pty-inspector");
+                refresh_hub.refresh(RefreshScope::Sidebar);
+                sync_nav_buttons();
+            });
+        }
+        nav_group.append(&pty_inspector_nav_btn);
+    }
     sidebar_box.append(&nav_group);
 
     sidebar_box.append(&gtk::Separator::new(Orientation::Horizontal));
@@ -503,6 +521,7 @@ pub(crate) fn build_app_sidebar(
                     refresh_workspace_back();
                 }
                 AppPage::History => stack_back.set_visible_child_name("history"),
+                AppPage::PtyInspector => stack_back.set_visible_child_name("pty-inspector"),
                 AppPage::Settings => stack_back.set_visible_child_name("settings"),
                 AppPage::Review => stack_back.set_visible_child_name("workspace"),
             }
@@ -529,6 +548,7 @@ pub(crate) fn build_app_sidebar(
                     refresh_workspace_forward();
                 }
                 AppPage::History => stack_forward.set_visible_child_name("history"),
+                AppPage::PtyInspector => stack_forward.set_visible_child_name("pty-inspector"),
                 AppPage::Settings => stack_forward.set_visible_child_name("settings"),
                 AppPage::Review => stack_forward.set_visible_child_name("workspace"),
             }
@@ -720,6 +740,14 @@ fn workspace_badge_text(
     None
 }
 
+fn primary_sidebar_nav_labels(debug_mode: bool) -> Vec<&'static str> {
+    let mut labels = vec!["Dashboard", "History"];
+    if debug_mode {
+        labels.push("PTY Inspector");
+    }
+    labels
+}
+
 fn section_header_row(
     name: &str,
     _workspace_count: usize,
@@ -833,7 +861,7 @@ fn relative_time(ts: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{spawn_background_job, workspace_badge_text};
+    use super::{primary_sidebar_nav_labels, spawn_background_job, workspace_badge_text};
     use std::time::{Duration, Instant};
 
     #[test]
@@ -846,6 +874,18 @@ mod tests {
     fn workspace_badge_falls_back_to_pr_number_without_github_state() {
         let badge = workspace_badge_text(Some(42), None, false, 0, 0, 0);
         assert_eq!(badge.as_deref(), Some("PR #42"));
+    }
+
+    #[test]
+    fn primary_sidebar_nav_labels_gate_pty_inspector_under_history() {
+        assert_eq!(
+            primary_sidebar_nav_labels(false),
+            vec!["Dashboard", "History"]
+        );
+        assert_eq!(
+            primary_sidebar_nav_labels(true),
+            vec!["Dashboard", "History", "PTY Inspector"]
+        );
     }
 
     #[test]
