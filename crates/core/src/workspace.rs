@@ -15143,30 +15143,47 @@ spotlight_testing = true
         let workspace = store.get_by_name("berlin").unwrap();
         fs::write(workspace.path.join("delete-me.txt"), "delete me\n").unwrap();
         fs::write(workspace.path.join("rename-me.txt"), "rename me\n").unwrap();
-        Command::new("git")
+        let add_status = Command::new("git")
             .arg("-C")
             .arg(&workspace.path)
             .args(["add", "delete-me.txt", "rename-me.txt"])
             .status()
             .unwrap();
-        Command::new("git")
+        assert!(add_status.success(), "git add failed: {add_status:?}");
+        let commit_status = Command::new("git")
             .arg("-C")
             .arg(&workspace.path)
-            .args(["commit", "-m", "add tracked files"])
+            .args([
+                "-c",
+                "user.name=Linux Archductor",
+                "-c",
+                "user.email=linux-archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "add tracked files",
+            ])
             .status()
             .unwrap();
-        Command::new("git")
+        assert!(
+            commit_status.success(),
+            "git commit failed: {commit_status:?}"
+        );
+        let rm_status = Command::new("git")
             .arg("-C")
             .arg(&workspace.path)
             .args(["rm", "delete-me.txt"])
             .status()
             .unwrap();
-        Command::new("git")
+        assert!(rm_status.success(), "git rm failed: {rm_status:?}");
+        let mv_status = Command::new("git")
             .arg("-C")
             .arg(&workspace.path)
             .args(["mv", "rename-me.txt", "renamed.txt"])
             .status()
             .unwrap();
+        assert!(mv_status.success(), "git mv failed: {mv_status:?}");
 
         let summaries = store.diff_file_summaries("berlin").unwrap();
         assert!(summaries.iter().any(|summary| {
