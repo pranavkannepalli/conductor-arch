@@ -186,7 +186,7 @@ fn log_archcar_rpc(
             direction,
             message_type,
             summary = %summary,
-            payload,
+            payload = %payload,
             "archcar unix rpc"
         );
     } else {
@@ -201,14 +201,39 @@ fn log_archcar_rpc(
     }
 }
 
-fn archcar_rpc_log_payload(raw_payload: &str) -> Option<&str> {
-    std::env::var("ARCHDUCTOR_LOG_ARCHCAR_PAYLOADS")
-        .map(|value| {
-            matches!(
-                value.as_str(),
-                "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
-            )
-        })
-        .unwrap_or(false)
-        .then_some(raw_payload)
+fn archcar_rpc_log_payload(raw_payload: &str) -> Option<String> {
+    archcar_rpc_log_payload_for_flag(
+        raw_payload,
+        crate::env_flags::enabled("ARCHDUCTOR_LOG_ARCHCAR_PAYLOADS"),
+    )
+}
+
+fn archcar_rpc_log_payload_for_flag(raw_payload: &str, enabled: bool) -> Option<String> {
+    enabled.then(|| crate::redaction::redact_sensitive_text(raw_payload))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::archcar_rpc_log_payload_for_flag;
+    use crate::archcar::protocol::{ArchcarInputKind, ArchcarRequest, RpcEnvelope};
+
+    #[test]
+    fn client_rpc_log_payload_redacts_sensitive_values_when_payload_logging_is_enabled() {
+        let envelope = RpcEnvelope {
+            id: "abc".to_owned(),
+            payload: ArchcarRequest::SendInput {
+                session_id: 42,
+                input: "OPENAI_API_KEY=sk-secret bearer ghp_secret --password swordfish".to_owned(),
+                kind: ArchcarInputKind::User,
+            },
+        };
+        let line = serde_json::to_string(&envelope).unwrap();
+
+        let payload = archcar_rpc_log_payload_for_flag(&line, true).unwrap();
+
+        assert!(payload.contains("[redacted]"));
+        assert!(!payload.contains("sk-secret"));
+        assert!(!payload.contains("ghp_secret"));
+        assert!(!payload.contains("swordfish"));
+    }
 }

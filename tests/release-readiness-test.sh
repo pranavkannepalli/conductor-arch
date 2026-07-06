@@ -4,11 +4,22 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 script="$repo_root/scripts/release-readiness.sh"
 aur_script="$repo_root/scripts/update-aur-checksum.sh"
+required_docs=(
+    docs/conductor-gui-mvp-handoff.md
+    docs/mvp-scope.md
+    docs/manual-testing-checklist.md
+    docs/archductor-docs-parity-map.md
+    README.md
+)
 
 fail() {
     echo "FAIL: $*" >&2
     exit 1
 }
+
+for doc in "${required_docs[@]}"; do
+    [ -s "$repo_root/$doc" ] || fail "required repository guidance doc missing or empty: $doc"
+done
 
 output="$("$script" --help)"
 [[ "$output" == *"Usage: scripts/release-readiness.sh"* ]] \

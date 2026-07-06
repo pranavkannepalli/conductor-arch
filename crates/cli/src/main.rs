@@ -17,7 +17,7 @@ use linux_archductor_core::settings::{
 use linux_archductor_core::workspace::{
     CreateWorkspace, LinkedDirectory, LocalChatHistoryMessage, LocalChatHistorySummary,
     ProcessRecord, ProcessStatus, SessionHarnessOptions, SessionKind, SessionLaunch,
-    WorkspaceStatusLine, WorkspaceStore,
+    WorkspaceStatusLine, WorkspaceStore, WorkspaceTimelineEvent,
 };
 use std::fs;
 use std::fs::OpenOptions;
@@ -289,6 +289,12 @@ enum WorkspaceCommand {
         name: String,
         new_name: String,
     },
+    Duplicate {
+        name: String,
+        new_name: String,
+        #[arg(long)]
+        branch: Option<String>,
+    },
     LinkDir {
         workspace: String,
         target: String,
@@ -300,7 +306,25 @@ enum WorkspaceCommand {
     LinkedDirs {
         workspace: String,
     },
+    Branch {
+        workspace: String,
+        #[command(subcommand)]
+        command: WorkspaceBranchCommand,
+    },
+    Timeline {
+        workspace: String,
+        #[arg(long)]
+        kind: Option<String>,
+    },
     SourcePreflight,
+}
+
+#[derive(Debug, Subcommand)]
+enum WorkspaceBranchCommand {
+    Create { branch: String },
+    Checkout { branch: String },
+    Rename { branch: String },
+    Delete { branch: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -772,6 +796,20 @@ fn main() -> Result<()> {
                         workspace.path.display()
                     );
                 }
+                WorkspaceCommand::Duplicate {
+                    name,
+                    new_name,
+                    branch,
+                } => {
+                    let workspace = store.duplicate(&name, &new_name, branch.as_deref())?;
+                    println!(
+                        "Duplicated {} to {} at {} (branch: {})",
+                        name,
+                        workspace.name,
+                        workspace.path.display(),
+                        workspace.branch
+                    );
+                }
                 WorkspaceCommand::LinkDir { workspace, target } => {
                     let link = store.link_workspace_directory(&workspace, &target)?;
                     println!(
@@ -792,6 +830,32 @@ fn main() -> Result<()> {
                     print!(
                         "{}",
                         render_linked_directories(&store.list_linked_directories(&workspace)?)
+                    );
+                }
+                WorkspaceCommand::Branch { workspace, command } => match command {
+                    WorkspaceBranchCommand::Create { branch } => {
+                        store.create_branch(&workspace, &branch)?;
+                        println!("Created branch {branch} for {workspace}");
+                    }
+                    WorkspaceBranchCommand::Checkout { branch } => {
+                        let updated = store.checkout_branch(&workspace, &branch)?;
+                        println!("Checked out {} in {}", updated.branch, updated.name);
+                    }
+                    WorkspaceBranchCommand::Rename { branch } => {
+                        let updated = store.rename_branch(&workspace, &branch)?;
+                        println!("Renamed workspace branch to {}", updated.branch);
+                    }
+                    WorkspaceBranchCommand::Delete { branch } => {
+                        store.delete_branch(&workspace, &branch)?;
+                        println!("Deleted branch {branch} for {workspace}");
+                    }
+                },
+                WorkspaceCommand::Timeline { workspace, kind } => {
+                    print!(
+                        "{}",
+                        render_workspace_timeline(
+                            &store.workspace_timeline(&workspace, kind.as_deref())?
+                        )
                     );
                 }
                 WorkspaceCommand::SourcePreflight => {
@@ -1332,6 +1396,17 @@ fn render_linked_directories(links: &[LinkedDirectory]) -> String {
             link.target_workspace_name,
             link.target_workspace_path.display(),
             link.link_path.display()
+        ));
+    }
+    out
+}
+
+fn render_workspace_timeline(events: &[WorkspaceTimelineEvent]) -> String {
+    let mut out = String::new();
+    for event in events {
+        out.push_str(&format!(
+            "#{}\t{}\t{}\t{}\n",
+            event.id, event.created_at, event.kind, event.summary
         ));
     }
     out
@@ -2024,5 +2099,102 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn cli_parses_workspace_branch_actions() {
+        let parse = Cli::try_parse_from([
+            "linux-archductor",
+            "workspace",
+            "branch",
+            "berlin",
+            "checkout",
+            "lc/next",
+        ])
+        .unwrap();
+
+        match parse.command {
+            Command::Workspace {
+                command:
+                    WorkspaceCommand::Branch {
+                        workspace,
+                        command: WorkspaceBranchCommand::Checkout { branch },
+                    },
+            } => {
+                assert_eq!(workspace, "berlin");
+                assert_eq!(branch, "lc/next");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_workspace_duplicate_branch() {
+        let parse = Cli::try_parse_from([
+            "linux-archductor",
+            "workspace",
+            "duplicate",
+            "berlin",
+            "oslo",
+            "--branch",
+            "lc/oslo",
+        ])
+        .unwrap();
+
+        match parse.command {
+            Command::Workspace {
+                command:
+                    WorkspaceCommand::Duplicate {
+                        name,
+                        new_name,
+                        branch,
+                    },
+            } => {
+                assert_eq!(name, "berlin");
+                assert_eq!(new_name, "oslo");
+                assert_eq!(branch.as_deref(), Some("lc/oslo"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_workspace_timeline_filter() {
+        let parse = Cli::try_parse_from([
+            "linux-archductor",
+            "workspace",
+            "timeline",
+            "berlin",
+            "--kind",
+            "branch.renamed",
+        ])
+        .unwrap();
+
+        match parse.command {
+            Command::Workspace {
+                command: WorkspaceCommand::Timeline { workspace, kind },
+            } => {
+                assert_eq!(workspace, "berlin");
+                assert_eq!(kind.as_deref(), Some("branch.renamed"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn timeline_render_outputs_append_only_rows() {
+        let text = render_workspace_timeline(&[WorkspaceTimelineEvent {
+            id: 7,
+            workspace_id: 2,
+            workspace_name: "berlin".to_owned(),
+            kind: "branch.renamed".to_owned(),
+            summary: "Renamed branch lc/a to lc/b".to_owned(),
+            created_at: "2026-07-09T12:00:00Z".to_owned(),
+        }]);
+
+        assert_eq!(
+            text,
+            "#7\t2026-07-09T12:00:00Z\tbranch.renamed\tRenamed branch lc/a to lc/b\n"
+        );
     }
 }

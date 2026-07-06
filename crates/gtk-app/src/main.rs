@@ -326,10 +326,7 @@ fn debug_mode_enabled() -> bool {
 }
 
 fn debug_mode_enabled_from_env(value: Option<&str>) -> bool {
-    matches!(
-        value.map(|value| value.trim().to_ascii_lowercase()),
-        Some(value) if matches!(value.as_str(), "1" | "true" | "yes" | "on")
-    )
+    linux_archductor_core::env_flags::explicit_truthy(value)
 }
 
 fn parse_workspace_tab(value: &str) -> Result<WorkspaceTab, String> {

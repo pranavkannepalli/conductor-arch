@@ -1,16 +1,27 @@
 pub mod archcar;
+pub mod chat_store;
 pub mod codex_tui;
 pub mod doctor;
+pub mod env_flags;
+pub mod git_review_service;
+pub mod github_pr;
 pub mod harness;
 pub mod import;
+pub mod linear;
+pub mod local_chat;
 pub mod mcp;
 pub mod paths;
 pub mod pty;
+pub mod redaction;
 pub mod repository;
+pub mod runtime_session_store;
 pub mod session_event;
 pub mod session_pipeline;
 pub mod session_state;
 pub mod settings;
+pub mod storage;
+pub mod terminal_logs;
+pub mod todos;
 pub mod workspace;
 
 #[cfg(test)]

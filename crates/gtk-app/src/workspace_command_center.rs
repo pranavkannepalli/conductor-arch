@@ -9,6 +9,7 @@ use linux_archductor_core::archcar::protocol::{ArchcarInputKind, ArchcarRequest}
 use linux_archductor_core::workspace::{
     ChatThreadRecord, DiffFileSummary, ProcessRecord, ProcessStatus, PullRequest,
     PullRequestReviewThread, ReviewComment, SessionKind, Workspace, WorkspaceStore,
+    WorkspaceTimelineEvent,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -2166,6 +2167,13 @@ fn lifecycle_panel(
     rename_entry.set_placeholder_text(Some("new workspace name"));
     rename_entry.set_text(&ws.name);
     let rename_btn = secondary_button("Rename");
+    let duplicate_name_entry = Entry::new();
+    duplicate_name_entry.set_placeholder_text(Some("duplicate workspace name"));
+    duplicate_name_entry.set_hexpand(true);
+    let duplicate_branch_entry = Entry::new();
+    duplicate_branch_entry.set_placeholder_text(Some("duplicate branch"));
+    duplicate_branch_entry.set_hexpand(true);
+    let duplicate_btn = secondary_button("Duplicate");
     let confirm = CheckButton::with_label("Confirm archive/discard/delete");
     let archive_btn = secondary_button("Archive");
     let restore_btn = flat_button("Restore");
@@ -2204,6 +2212,45 @@ fn lifecycle_panel(
             ),
         }
         refresh_after_rename.refresh(RefreshScope::All);
+    });
+
+    let db_duplicate = db_path.to_path_buf();
+    let source_for_duplicate = ws.name.clone();
+    let refresh_after_duplicate = refresh_hub.clone();
+    let progress_duplicate = progress.clone();
+    let toast_duplicate = toast_overlay.clone();
+    let duplicate_name_entry_clone = duplicate_name_entry.clone();
+    let duplicate_branch_entry_clone = duplicate_branch_entry.clone();
+    duplicate_btn.connect_clicked(move |_| {
+        let new_name = duplicate_name_entry_clone.text().trim().to_owned();
+        let branch = duplicate_branch_entry_clone.text().trim().to_owned();
+        if new_name.is_empty() {
+            progress_duplicate.set_text("Enter a duplicate workspace name.");
+            return;
+        }
+        progress_duplicate.set_text("Duplicating...");
+        match WorkspaceStore::open(db_duplicate.clone()).and_then(|store| {
+            store.duplicate(
+                &source_for_duplicate,
+                &new_name,
+                (!branch.is_empty()).then_some(branch.as_str()),
+            )
+        }) {
+            Ok(workspace) => {
+                progress_duplicate.set_text(&format!(
+                    "Duplicated to {} on {}",
+                    workspace.name, workspace.branch
+                ));
+                duplicate_name_entry_clone.set_text("");
+                duplicate_branch_entry_clone.set_text("");
+            }
+            Err(err) => apply_runtime_action_feedback(
+                &progress_duplicate,
+                &toast_duplicate,
+                lifecycle_action_failure_feedback("Duplicate", &err),
+            ),
+        }
+        refresh_after_duplicate.refresh(RefreshScope::All);
     });
 
     for (button, action) in [
@@ -2257,6 +2304,10 @@ fn lifecycle_panel(
     let rename_row = make_action_row();
     rename_row.append(&rename_entry);
     rename_row.append(&rename_btn);
+    let duplicate_row = make_action_row();
+    duplicate_row.append(&duplicate_name_entry);
+    duplicate_row.append(&duplicate_branch_entry);
+    duplicate_row.append(&duplicate_btn);
     let lifecycle_row = make_action_row();
     lifecycle_row.append(&confirm);
     lifecycle_row.append(&archive_btn);
@@ -2264,6 +2315,7 @@ fn lifecycle_panel(
     lifecycle_row.append(&discard_btn);
     lifecycle_row.append(&delete_btn);
     row.append(&rename_row);
+    row.append(&duplicate_row);
     row.append(&lifecycle_row);
     panel.append(&row);
     panel.append(&progress);
@@ -2356,6 +2408,22 @@ fn work_tabs(
         Some("processes"),
         "Processes",
     );
+    tabs.add_titled(
+        &workspace_branch_panel(
+            db_path,
+            store,
+            ws,
+            refresh_hub.clone(),
+            toast_overlay.clone(),
+        ),
+        Some("branch"),
+        "Branch",
+    );
+    tabs.add_titled(
+        &workspace_timeline_panel(store, &ws.name),
+        Some("timeline"),
+        "Timeline",
+    );
     tabs.set_visible_child_name(workspace_tab_stack_name(
         &state.snapshot().active_workspace_tab,
     ));
@@ -2392,6 +2460,125 @@ fn workspace_tab_stack_name(tab: &WorkspaceTab) -> &'static str {
         WorkspaceTab::Processes => "processes",
         WorkspaceTab::Terminal => "terminal",
     }
+}
+
+fn workspace_branch_panel(
+    db_path: &Path,
+    store: &WorkspaceStore,
+    ws: &Workspace,
+    refresh_hub: RefreshHub,
+    toast_overlay: ToastOverlay,
+) -> GBox {
+    let panel = GBox::new(Orientation::Vertical, 8);
+    panel.add_css_class("command-panel");
+    panel.append(&section_title("Branch"));
+    panel.append(&detail_row("Current", &ws.branch));
+    panel.append(&detail_row(
+        "Upstream",
+        &workspace_branch_state_text(store, &ws.name),
+    ));
+
+    let branch_entry = Entry::new();
+    branch_entry.set_placeholder_text(Some("branch name"));
+    branch_entry.set_hexpand(true);
+    let create_btn = secondary_button("Create");
+    let checkout_btn = secondary_button("Checkout");
+    let rename_btn = secondary_button("Rename");
+    let confirm_delete = CheckButton::with_label("Confirm delete");
+    let delete_btn = destructive_button("Delete");
+    let feedback = Label::new(None);
+    feedback.add_css_class("card-meta");
+    feedback.set_xalign(0.0);
+    feedback.set_wrap(true);
+
+    for (button, action) in [
+        (create_btn.clone(), "create"),
+        (checkout_btn.clone(), "checkout"),
+        (rename_btn.clone(), "rename"),
+        (delete_btn.clone(), "delete"),
+    ] {
+        let db_for_action = db_path.to_path_buf();
+        let workspace_for_action = ws.name.clone();
+        let entry_for_action = branch_entry.clone();
+        let feedback_for_action = feedback.clone();
+        let toast_for_action = toast_overlay.clone();
+        let refresh_after_action = refresh_hub.clone();
+        let confirm_delete_for_action = confirm_delete.clone();
+        button.connect_clicked(move |_| {
+            let branch = entry_for_action.text().trim().to_owned();
+            if branch.is_empty() {
+                apply_action_feedback(
+                    &feedback_for_action,
+                    &toast_for_action,
+                    "Enter a branch name.",
+                    true,
+                );
+                return;
+            }
+            if action == "delete" && !confirm_delete_for_action.is_active() {
+                apply_action_feedback(
+                    &feedback_for_action,
+                    &toast_for_action,
+                    "Confirm branch delete first.",
+                    true,
+                );
+                return;
+            }
+            let result =
+                WorkspaceStore::open(db_for_action.clone()).and_then(|store| match action {
+                    "create" => store
+                        .create_branch(&workspace_for_action, &branch)
+                        .map(|_| format!("Created branch {branch}.")),
+                    "checkout" => store
+                        .checkout_branch(&workspace_for_action, &branch)
+                        .map(|workspace| format!("Checked out {}.", workspace.branch)),
+                    "rename" => store
+                        .rename_branch(&workspace_for_action, &branch)
+                        .map(|workspace| format!("Renamed branch to {}.", workspace.branch)),
+                    "delete" => store
+                        .delete_branch(&workspace_for_action, &branch)
+                        .map(|_| format!("Deleted branch {branch}.")),
+                    _ => unreachable!(),
+                });
+            match result {
+                Ok(message) => {
+                    apply_action_feedback(&feedback_for_action, &toast_for_action, &message, true);
+                    refresh_after_action.refresh(RefreshScope::Workspace);
+                }
+                Err(err) => apply_action_feedback(
+                    &feedback_for_action,
+                    &toast_for_action,
+                    &format!("Branch {action} failed: {err:#}"),
+                    true,
+                ),
+            }
+        });
+    }
+
+    let branch_row = make_action_row();
+    branch_row.append(&branch_entry);
+    branch_row.append(&create_btn);
+    branch_row.append(&checkout_btn);
+    branch_row.append(&rename_btn);
+    let delete_row = make_action_row();
+    delete_row.append(&confirm_delete);
+    delete_row.append(&delete_btn);
+    panel.append(&branch_row);
+    panel.append(&delete_row);
+    panel.append(&feedback);
+    panel
+}
+
+fn workspace_timeline_panel(store: &WorkspaceStore, name: &str) -> GBox {
+    let panel = GBox::new(Orientation::Vertical, 8);
+    panel.add_css_class("command-panel");
+    panel.append(&section_title("Timeline"));
+    let text = store
+        .workspace_timeline(name, None)
+        .map(|events| format_workspace_timeline(&events))
+        .unwrap_or_else(|err| format!("Could not load timeline: {err:#}"));
+    panel.append(&text_panel(&text));
+    panel
 }
 
 fn workspace_checkpoint_panel(
@@ -3511,7 +3698,7 @@ fn diff_summary_label(summary: &DiffFileSummary) -> String {
         (Some(additions), Some(deletions)) => format!("+{additions} -{deletions}"),
         _ => "binary".to_owned(),
     };
-    format!("{} {}", summary.path, counts)
+    format!("{} {} {}", summary.path, diff_state_label(summary), counts)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3584,9 +3771,24 @@ fn format_diff_file_summary(summaries: &[DiffFileSummary]) -> String {
             (Some(additions), Some(deletions)) => format!("+{additions} -{deletions}"),
             _ => "binary".to_owned(),
         };
-        out.push_str(&format!("{} {}\n", summary.path, counts));
+        out.push_str(&format!(
+            "{} {} {}\n",
+            summary.path,
+            diff_state_label(summary),
+            counts
+        ));
     }
     out
+}
+
+fn diff_state_label(summary: &DiffFileSummary) -> &'static str {
+    match (summary.staged, summary.unstaged, summary.untracked) {
+        (_, _, true) => "[untracked]",
+        (true, true, _) => "[staged+unstaged]",
+        (true, false, _) => "[staged]",
+        (false, true, _) => "[unstaged]",
+        _ => "[clean]",
+    }
 }
 
 fn workspace_checks_text(store: &WorkspaceStore, name: &str) -> String {
@@ -3642,6 +3844,20 @@ fn workspace_checks_text(store: &WorkspaceStore, name: &str) -> String {
         }
         Err(err) => format!("Could not read checks: {err:#}"),
     }
+}
+
+fn format_workspace_timeline(events: &[WorkspaceTimelineEvent]) -> String {
+    if events.is_empty() {
+        return "No workspace timeline events yet.".to_owned();
+    }
+    let mut out = String::new();
+    for event in events {
+        out.push_str(&format!(
+            "#{} {} [{}] {}\n",
+            event.id, event.created_at, event.kind, event.summary
+        ));
+    }
+    out
 }
 
 fn ws_checks_visual_header(store: &WorkspaceStore, name: &str) -> GBox {
@@ -5371,19 +5587,25 @@ mod tests {
                 path: "README.md".to_owned(),
                 additions: Some(2),
                 deletions: Some(1),
+                staged: true,
+                unstaged: true,
+                untracked: false,
             },
             linux_archductor_core::workspace::DiffFileSummary {
                 path: "assets/logo.png".to_owned(),
                 additions: None,
                 deletions: None,
+                staged: false,
+                unstaged: false,
+                untracked: true,
             },
         ];
 
         let rendered = format_diff_file_summary(&summaries);
 
         assert!(rendered.contains("Files changed"));
-        assert!(rendered.contains("README.md +2 -1"));
-        assert!(rendered.contains("assets/logo.png binary"));
+        assert!(rendered.contains("README.md [staged+unstaged] +2 -1"));
+        assert!(rendered.contains("assets/logo.png [untracked] binary"));
     }
 
     #[test]
@@ -5447,11 +5669,17 @@ mod tests {
                 path: "src/lib.rs".to_owned(),
                 additions: Some(1),
                 deletions: Some(0),
+                staged: false,
+                unstaged: true,
+                untracked: false,
             },
             linux_archductor_core::workspace::DiffFileSummary {
                 path: "src/ui/panel.rs".to_owned(),
                 additions: Some(3),
                 deletions: Some(1),
+                staged: true,
+                unstaged: false,
+                untracked: false,
             },
         ];
 
@@ -5468,7 +5696,7 @@ mod tests {
         );
         assert_eq!(
             diff_tree_file_label(&summaries[1]),
-            "    src/ui/panel.rs +3 -1"
+            "    src/ui/panel.rs [staged] +3 -1"
         );
     }
 
@@ -5964,6 +6192,23 @@ mod tests {
 
         let failure = workspace_delete_feedback(Err(anyhow::anyhow!("worktree remove failed")));
         assert_eq!(failure, "Delete failed: worktree remove failed");
+    }
+
+    #[test]
+    fn workspace_timeline_formatter_lists_events() {
+        let text = format_workspace_timeline(&[WorkspaceTimelineEvent {
+            id: 9,
+            workspace_id: 1,
+            workspace_name: "berlin".to_owned(),
+            kind: "branch.renamed".to_owned(),
+            summary: "Renamed branch lc/a to lc/b".to_owned(),
+            created_at: "2026-07-09T12:00:00Z".to_owned(),
+        }]);
+
+        assert_eq!(
+            text,
+            "#9 2026-07-09T12:00:00Z [branch.renamed] Renamed branch lc/a to lc/b\n"
+        );
     }
 
     #[test]

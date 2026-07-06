@@ -3,6 +3,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 
@@ -39,10 +40,24 @@ pub fn reconcile_managed_sessions_on_startup(paths: &AppPaths) -> Result<()> {
             if !is_archcar_managed_persisted_session(&record, &paths.logs_dir) {
                 continue;
             }
+            if archcar_process_alive(record.pid) {
+                continue;
+            }
             let _ = store.mark_session_process_exited(record.id, None)?;
         }
     }
     Ok(())
+}
+
+fn archcar_process_alive(pid: u32) -> bool {
+    Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 impl ArchcarServer {
@@ -149,7 +164,7 @@ fn log_archcar_rpc(
             direction,
             message_type,
             summary = %summary,
-            payload,
+            payload = %payload,
             "archcar unix rpc"
         );
     } else {
@@ -163,19 +178,15 @@ fn log_archcar_rpc(
     }
 }
 
-fn archcar_rpc_log_payload(raw_payload: &str) -> Option<&str> {
-    explicit_log_flag_enabled("ARCHDUCTOR_LOG_ARCHCAR_PAYLOADS").then_some(raw_payload)
+fn archcar_rpc_log_payload(raw_payload: &str) -> Option<String> {
+    archcar_rpc_log_payload_for_flag(
+        raw_payload,
+        crate::env_flags::enabled("ARCHDUCTOR_LOG_ARCHCAR_PAYLOADS"),
+    )
 }
 
-fn explicit_log_flag_enabled(name: &str) -> bool {
-    std::env::var(name)
-        .map(|value| {
-            matches!(
-                value.as_str(),
-                "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
-            )
-        })
-        .unwrap_or(false)
+fn archcar_rpc_log_payload_for_flag(raw_payload: &str, enabled: bool) -> Option<String> {
+    enabled.then(|| crate::redaction::redact_sensitive_text(raw_payload))
 }
 
 fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) -> ArchcarResponse {
@@ -778,6 +789,27 @@ mod tests {
     }
 
     #[test]
+    fn archcar_rpc_log_payload_redacts_sensitive_values_when_payload_logging_is_enabled() {
+        let envelope = RpcEnvelope {
+            id: "abc".to_owned(),
+            payload: ArchcarRequest::SendInput {
+                session_id: 42,
+                input: "paste OPENAI_API_KEY=sk-secret bearer ghp_secret --password swordfish"
+                    .to_owned(),
+                kind: ArchcarInputKind::User,
+            },
+        };
+        let line = serde_json::to_string(&envelope).unwrap();
+
+        let payload = archcar_rpc_log_payload_for_flag(&line, true).unwrap();
+
+        assert!(payload.contains("[redacted]"));
+        assert!(!payload.contains("sk-secret"));
+        assert!(!payload.contains("ghp_secret"));
+        assert!(!payload.contains("swordfish"));
+    }
+
+    #[test]
     fn ensure_default_session_reuses_existing_running_session() {
         let snapshot = crate::archcar::session::SessionSnapshot {
             session_id: 9,
@@ -909,7 +941,7 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_startup_marks_stale_codex_sessions_exited() {
+    fn reconcile_startup_leaves_live_managed_codex_sessions_running() {
         let temp = tempfile::tempdir().unwrap();
         let paths = app_paths(temp.path());
         let store = seeded_workspace_store(&paths.database_path, &paths.logs_dir, temp.path());
@@ -933,11 +965,32 @@ mod tests {
             "startup reconciliation should not signal live pids"
         );
         let reconciled = store.get_process_record(process.id).unwrap();
-        assert_eq!(reconciled.status, ProcessStatus::Exited);
-        assert!(reconciled.ended_at.is_some());
+        assert_eq!(reconciled.status, ProcessStatus::Running);
+        assert!(reconciled.ended_at.is_none());
         assert!(reconciled.log_path.starts_with(&paths.logs_dir));
 
         terminate_test_child(&mut child);
+    }
+
+    #[test]
+    fn reconcile_startup_marks_dead_managed_codex_sessions_exited() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = app_paths(temp.path());
+        let store = seeded_workspace_store(&paths.database_path, &paths.logs_dir, temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
+        let launch = store.session_launch("berlin", SessionKind::Codex).unwrap();
+        let process = store
+            .record_session_process_for_thread("berlin", thread.id, &launch, exited_child_pid())
+            .unwrap();
+
+        reconcile_managed_sessions_on_startup(&paths).unwrap();
+
+        let reconciled = store.get_process_record(process.id).unwrap();
+        assert_eq!(reconciled.status, ProcessStatus::Exited);
+        assert!(reconciled.ended_at.is_some());
+        assert!(reconciled.log_path.starts_with(&paths.logs_dir));
     }
 
     #[test]
@@ -1099,5 +1152,19 @@ mod tests {
             std::thread::sleep(Duration::from_millis(25));
         }
         false
+    }
+
+    fn exited_child_pid() -> u32 {
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("exit 0")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        pid
     }
 }
