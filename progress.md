@@ -343,6 +343,9 @@ labeled section header instead of a single combined label. Full suite:
   labeled section: General, Code review, Create PR, Fix errors, Resolve merge
   conflicts, Rename branch, Commit message, Test fixing, Refactor style) plus
   an advanced customization TOML block for file-editable workflow defaults.
+- Dedicated Settings page now loads, saves, imports, and exports shared or
+  local repository settings TOML bundles through GTK-native controls while
+  reusing the same validation as the CLI.
 - Projects source creation uses a test-covered form mapping before dispatching
   to branch, GitHub issue, GitHub PR, Linear, or prompt workspace creation.
 - Projects source creation reports test-covered success/failure feedback for

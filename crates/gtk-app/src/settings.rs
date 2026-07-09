@@ -8,10 +8,13 @@ use linux_archductor_core::paths::AppPaths;
 use linux_archductor_core::repository::RepositoryStore;
 use linux_archductor_core::settings::{
     customization_settings_from_toml, customization_settings_to_toml, inspect_repository_settings,
-    load_repository_settings, save_repository_settings, FilePatternSource, GitSettings,
-    PromptSettings, ProviderSettings, RepositorySettings, ScriptSettings, SettingsLayer,
+    load_repository_settings, repository_settings_from_toml, save_repository_settings,
+    FilePatternSource, GitSettings, PromptSettings, ProviderSettings, RepositorySettings,
+    ScriptSettings, SettingsLayer,
 };
 use std::cell::RefCell;
+use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -68,11 +71,15 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
     layer_select.set_active_id(Some("shared"));
     let load_settings_btn = text_button("Load");
     let save_settings_btn = text_button("Save");
+    let import_settings_btn = text_button("Import...");
+    let export_settings_btn = text_button("Export...");
     save_settings_btn.add_css_class("suggested-action");
     settings_top.append(&settings_repo_entry);
     settings_top.append(&layer_select);
     settings_top.append(&load_settings_btn);
     settings_top.append(&save_settings_btn);
+    settings_top.append(&import_settings_btn);
+    settings_top.append(&export_settings_btn);
     settings_toolbar.append(&settings_top);
 
     let settings_result = Label::new(Some(
@@ -543,20 +550,23 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
     });
 
     let db_path_save_settings = paths.database_path.clone();
+    let settings_repo_entry_save = settings_repo_entry.clone();
+    let settings_result_save = settings_result.clone();
+    let layer_select_save = layer_select.clone();
     save_settings_btn.connect_clicked(move |_| {
-        let repo_name = settings_repo_entry.text().trim().to_owned();
+        let repo_name = settings_repo_entry_save.text().trim().to_owned();
         if repo_name.is_empty() {
-            settings_result.set_text("Repository name is required.");
+            settings_result_save.set_text("Repository name is required.");
             return;
         }
-        let layer = match layer_select.active_id().as_deref() {
+        let layer = match layer_select_save.active_id().as_deref() {
             Some("local") => SettingsLayer::LocalOverride,
             _ => SettingsLayer::RepositoryShared,
         };
         let repo_path = match repository_root(&db_path_save_settings, &repo_name) {
             Ok(path) => path,
             Err(err) => {
-                settings_result.set_text(&format!("Save failed: {err:#}"));
+                settings_result_save.set_text(&format!("Save failed: {err:#}"));
                 return;
             }
         };
@@ -567,7 +577,7 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
             match customization_settings_from_toml(&text_buffer_text(&customization_view.1)) {
                 Ok(customization) => customization,
                 Err(err) => {
-                    settings_result
+                    settings_result_save
                         .set_text(&format!("Save failed: customization TOML invalid: {err:#}"));
                     return;
                 }
@@ -623,11 +633,112 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
             customization,
         };
         match save_repository_settings(&repo_path, layer, &settings) {
-            Ok(()) => {
-                settings_result.set_text(&format!("Saved settings for {}", repo_path.display()))
-            }
-            Err(err) => settings_result.set_text(&format!("Save failed: {err:#}")),
+            Ok(()) => settings_result_save
+                .set_text(&format!("Saved settings for {}", repo_path.display())),
+            Err(err) => settings_result_save.set_text(&format!("Save failed: {err:#}")),
         }
+    });
+
+    let db_path_import_settings = paths.database_path.clone();
+    let settings_repo_entry_import = settings_repo_entry.clone();
+    let settings_result_import = settings_result.clone();
+    let layer_select_import = layer_select.clone();
+    let load_settings_btn_import = load_settings_btn.clone();
+    import_settings_btn.connect_clicked(move |_| {
+        let repo_name = settings_repo_entry_import.text().trim().to_owned();
+        if repo_name.is_empty() {
+            settings_result_import.set_text("Repository name is required.");
+            return;
+        }
+        let repo_path = match repository_root(&db_path_import_settings, &repo_name) {
+            Ok(path) => path,
+            Err(err) => {
+                settings_result_import.set_text(&format!("Import failed: {err:#}"));
+                return;
+            }
+        };
+        let layer = settings_layer_from_select(&layer_select_import);
+        let layer_label = repo_settings_layer_label(layer);
+        let dialog = gtk::FileChooserNative::builder()
+            .title(&format!("Import {layer_label} settings"))
+            .action(gtk::FileChooserAction::Open)
+            .accept_label("Import")
+            .cancel_label("Cancel")
+            .build();
+        let repo_name = repo_name.clone();
+        let settings_result_import = settings_result_import.clone();
+        let load_settings_btn_import = load_settings_btn_import.clone();
+        dialog.connect_response(move |dialog, response| {
+            if response == gtk::ResponseType::Accept {
+                match dialog.file().and_then(|file| file.path()) {
+                    Some(path) => match import_settings_file(&repo_path, layer, &path) {
+                        Ok(()) => {
+                            settings_result_import.set_text(&format!(
+                                "Imported {layer_label} settings for {repo_name} from {}",
+                                path.display()
+                            ));
+                            load_settings_btn_import.emit_clicked();
+                        }
+                        Err(err) => {
+                            settings_result_import.set_text(&format!("Import failed: {err:#}"))
+                        }
+                    },
+                    None => settings_result_import
+                        .set_text("Import failed: selected file path is unavailable."),
+                }
+            }
+            dialog.destroy();
+        });
+        dialog.show();
+    });
+
+    let db_path_export_settings = paths.database_path.clone();
+    let settings_repo_entry_export = settings_repo_entry.clone();
+    let settings_result_export = settings_result.clone();
+    let layer_select_export = layer_select.clone();
+    export_settings_btn.connect_clicked(move |_| {
+        let repo_name = settings_repo_entry_export.text().trim().to_owned();
+        if repo_name.is_empty() {
+            settings_result_export.set_text("Repository name is required.");
+            return;
+        }
+        let repo_path = match repository_root(&db_path_export_settings, &repo_name) {
+            Ok(path) => path,
+            Err(err) => {
+                settings_result_export.set_text(&format!("Export failed: {err:#}"));
+                return;
+            }
+        };
+        let layer = settings_layer_from_select(&layer_select_export);
+        let layer_label = repo_settings_layer_label(layer);
+        let dialog = gtk::FileChooserNative::builder()
+            .title(&format!("Export {layer_label} settings"))
+            .action(gtk::FileChooserAction::Save)
+            .accept_label("Export")
+            .cancel_label("Cancel")
+            .build();
+        dialog.set_current_name(repo_settings_export_name(layer));
+        let repo_name = repo_name.clone();
+        let settings_result_export = settings_result_export.clone();
+        dialog.connect_response(move |dialog, response| {
+            if response == gtk::ResponseType::Accept {
+                match dialog.file().and_then(|file| file.path()) {
+                    Some(path) => match export_settings_file(&repo_path, layer, &path) {
+                        Ok(()) => settings_result_export.set_text(&format!(
+                            "Exported {layer_label} settings for {repo_name} to {}",
+                            path.display()
+                        )),
+                        Err(err) => {
+                            settings_result_export.set_text(&format!("Export failed: {err:#}"))
+                        }
+                    },
+                    None => settings_result_export
+                        .set_text("Export failed: selected file path is unavailable."),
+                }
+            }
+            dialog.destroy();
+        });
+        dialog.show();
     });
 
     (root, || {})
@@ -779,6 +890,59 @@ fn repository_root(db_path: &PathBuf, name: &str) -> anyhow::Result<PathBuf> {
         .ok_or_else(|| anyhow::anyhow!("repository {name} not found"))
 }
 
+fn settings_layer_from_select(layer_select: &ComboBoxText) -> SettingsLayer {
+    match layer_select.active_id().as_deref() {
+        Some("local") => SettingsLayer::LocalOverride,
+        _ => SettingsLayer::RepositoryShared,
+    }
+}
+
+fn repo_settings_layer_label(layer: SettingsLayer) -> &'static str {
+    match layer {
+        SettingsLayer::RepositoryShared => "shared",
+        SettingsLayer::LocalOverride => "local",
+    }
+}
+
+fn repo_settings_export_name(layer: SettingsLayer) -> &'static str {
+    match layer {
+        SettingsLayer::RepositoryShared => "settings.shared.toml",
+        SettingsLayer::LocalOverride => "settings.local.toml",
+    }
+}
+
+fn repo_settings_path(repo_path: &Path, layer: SettingsLayer) -> PathBuf {
+    match layer {
+        SettingsLayer::RepositoryShared => repo_path.join(".archductor/settings.toml"),
+        SettingsLayer::LocalOverride => repo_path.join(".archductor/settings.local.toml"),
+    }
+}
+
+fn import_settings_file(
+    repo_path: &Path,
+    layer: SettingsLayer,
+    input: &Path,
+) -> anyhow::Result<()> {
+    let contents = fs::read_to_string(input)
+        .map_err(anyhow::Error::from)
+        .and_then(|contents| repository_settings_from_toml(&contents))?;
+    save_repository_settings(repo_path, layer, &contents)
+}
+
+fn export_settings_file(
+    repo_path: &Path,
+    layer: SettingsLayer,
+    output: &Path,
+) -> anyhow::Result<()> {
+    let input = repo_settings_path(repo_path, layer);
+    let contents = fs::read_to_string(&input)
+        .map_err(anyhow::Error::from)
+        .map_err(|err| err.context(format!("read {}", input.display())))?;
+    fs::write(output, contents)
+        .map_err(anyhow::Error::from)
+        .map_err(|err| err.context(format!("write {}", output.display())))
+}
+
 fn optional_entry_text(entry: &Entry) -> Option<String> {
     let value = entry.text().trim().to_owned();
     (!value.is_empty()).then_some(value)
@@ -829,5 +993,26 @@ mod tests {
             .find(|section| section.id == "prompts")
             .unwrap();
         assert!(prompts.description.contains("Prompt") || prompts.description.contains("prompt"));
+    }
+
+    #[test]
+    fn repo_settings_helpers_match_expected_layer_paths_and_names() {
+        let root = Path::new("/tmp/demo");
+        assert_eq!(
+            repo_settings_path(root, SettingsLayer::RepositoryShared),
+            PathBuf::from("/tmp/demo/.archductor/settings.toml")
+        );
+        assert_eq!(
+            repo_settings_path(root, SettingsLayer::LocalOverride),
+            PathBuf::from("/tmp/demo/.archductor/settings.local.toml")
+        );
+        assert_eq!(
+            repo_settings_export_name(SettingsLayer::RepositoryShared),
+            "settings.shared.toml"
+        );
+        assert_eq!(
+            repo_settings_export_name(SettingsLayer::LocalOverride),
+            "settings.local.toml"
+        );
     }
 }

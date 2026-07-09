@@ -111,7 +111,7 @@ Keep these visible in release notes and the website:
   terminal emulator
 - project onboarding/settings need more polish and fuller visibility
 - deeper layout/theme coverage is incomplete
-- prompt packs, naming templates, hooks, import/export, and richer notification
-  options are not fully surfaced in the GUI
+- prompt packs, naming templates, hooks, and richer notification options are
+  not fully surfaced in the GUI
 - visual parity with macOS Archductor is incomplete
 - Linux is the only launch target for packages
