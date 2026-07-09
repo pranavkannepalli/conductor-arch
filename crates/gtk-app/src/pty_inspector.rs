@@ -3,6 +3,7 @@ use gtk::{
     Box as GBox, Button, CheckButton, Label, ListBox, ListBoxRow, Orientation, PolicyType,
     ScrolledWindow, SelectionMode, Stack,
 };
+use linux_archductor_core::redaction::redact_sensitive_text;
 use linux_archductor_core::session_event::{SessionEvent, SessionEventPayload};
 use linux_archductor_core::workspace::{
     ProcessRecord, ProcessStatus, PtyChunkRecord, WorkspaceStore,
@@ -402,70 +403,6 @@ fn signal_label(exit_code: Option<i32>) -> String {
         Some(code) if code >= 128 => format!("signal {}", code - 128),
         _ => "n/a".to_owned(),
     }
-}
-
-fn redact_sensitive_text(value: &str) -> String {
-    let mut redact_next = false;
-    let mut parts = Vec::new();
-    for part in value.split_whitespace() {
-        if redact_next {
-            parts.push("[redacted]".to_owned());
-            redact_next = false;
-            continue;
-        }
-
-        if is_bearer_marker(part) {
-            parts.push(part.to_owned());
-            redact_next = true;
-            continue;
-        }
-
-        if let Some(redacted) = redact_assignment_secret(part) {
-            parts.push(redacted);
-            continue;
-        }
-
-        if is_flag_secret(part) {
-            parts.push(part.to_owned());
-            redact_next = true;
-            continue;
-        }
-
-        parts.push(part.to_owned());
-    }
-    parts.join(" ")
-}
-
-fn redact_assignment_secret(part: &str) -> Option<String> {
-    let (key, _) = part.split_once('=')?;
-    is_sensitive_key_or_flag(key).then(|| format!("{key}=[redacted]"))
-}
-
-fn is_flag_secret(part: &str) -> bool {
-    part.starts_with("--") && is_sensitive_key_or_flag(part.trim_start_matches('-'))
-}
-
-fn is_bearer_marker(part: &str) -> bool {
-    part.trim_matches(|ch: char| ch == '\'' || ch == '"' || ch == ':')
-        .eq_ignore_ascii_case("bearer")
-}
-
-fn is_sensitive_key_or_flag(key: &str) -> bool {
-    let normalized = key
-        .trim_matches(|ch: char| ch == '\'' || ch == '"' || ch == ':')
-        .trim_start_matches('-')
-        .replace('-', "_")
-        .to_ascii_lowercase();
-    normalized == "token"
-        || normalized.ends_with("_token")
-        || normalized == "api_key"
-        || normalized.ends_with("_api_key")
-        || normalized == "key"
-        || normalized.ends_with("_key")
-        || normalized == "password"
-        || normalized.ends_with("_password")
-        || normalized == "secret"
-        || normalized.ends_with("_secret")
 }
 
 fn pluralize(count: usize, noun: &str) -> String {

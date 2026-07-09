@@ -20,6 +20,31 @@ The GTK app is usable but still rough. Agent sessions run PTY-backed harnesses
 and render structured app-native transcript events, terminal rendering is not a
 full emulator, and several app controls remain unfinished.
 
+July 6 workspace/review slice now has focused core, CLI, and GTK coverage:
+workspace lifecycle actions, including duplicate, keep persisted event history;
+workspace timeline events are recorded for creation, duplicate, rename, archive,
+restore, delete, session start/stop/exit, branch actions, commits, PR recording,
+and branch pushes/check refreshes where those app paths run. Branch create,
+checkout, rename, and delete are available through core, CLI, and a GTK Branch
+tab with clean-tree/collision errors surfaced. The workspace command center
+also has a Timeline tab for latest persisted events. Changed-file summaries now
+combine staged, unstaged, and untracked files with staged/unstaged state labels
+so staged-only changes appear in review/check surfaces. Focused verification
+passed:
+`cargo fmt --all -- --check`,
+`cargo test -p linux-archductor-core workspace::tests:: -- --nocapture`,
+`cargo test -p linux-archductor-core diff_file_summaries_include_deleted_and_renamed_changes -- --nocapture`,
+`cargo test -p linux-archductor cli_parses_workspace_branch_actions -- --nocapture`,
+`cargo test -p linux-archductor cli_parses_workspace_timeline_filter -- --nocapture`,
+`cargo test -p linux-archductor timeline_render_outputs_append_only_rows -- --nocapture`,
+`cargo test -p linux-archductor cli_parses_workspace_duplicate_branch -- --nocapture`,
+and
+`cargo test -p linux-archductor-gtk workspace_timeline_formatter_lists_events -- --nocapture`.
+Full workspace verification also passed:
+`cargo test --workspace`
+and
+`cargo clippy --workspace --all-targets --locked -- -D warnings`.
+
 July 6 core planning slice completed its debugging verification pass on
 2026-07-05: the V1 PTY/runtime model now has an explicit session state machine
 for starting, running,

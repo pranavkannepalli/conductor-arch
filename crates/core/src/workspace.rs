@@ -1,9 +1,22 @@
 use crate::codex_tui::{
-    merge_message_content, merge_screen_messages, parse_codex_screen_delta,
-    parse_codex_screen_messages, CodexFileChangeAction, CodexParseBenchmark, CodexParseCursor,
-    CodexParsedItem, CodexTranscriptEvent, ScreenMessage, ScreenMessageRole,
+    merge_message_content, parse_codex_screen_delta, CodexFileChangeAction, CodexParseBenchmark,
+    CodexParseCursor, CodexParsedItem, CodexTranscriptEvent, ScreenMessageRole,
+};
+use crate::github_pr::{
+    append_unique_checks, append_unique_deployments, extract_json_string_field,
+    extract_pull_request_url, format_pull_request_checks_agent_prompt,
+    format_pull_request_readiness, format_pull_request_readiness_agent_prompt,
+    format_pull_request_review_agent_prompt, json_root_string, parse_github_commit_status_checks,
+    parse_github_deployment_entries, parse_github_deployment_latest_status,
+    parse_pull_request_check_runs, parse_pull_request_number, parse_pull_request_readiness,
+    parse_pull_request_review_thread_mutation, parse_pull_request_review_threads,
 };
 use crate::harness;
+use crate::linear::fetch_linear_issue;
+use crate::local_chat::{
+    local_chat_agent_type, parse_local_chat_transcript, session_events_to_local_chat_messages,
+    truncate_chars,
+};
 use crate::session_event::{
     codex_parsed_item_to_session_event, SessionEvent, SessionEventPayload, SessionEventSource,
 };
@@ -12,6 +25,11 @@ use crate::session_pipeline::{
 };
 use crate::session_state::AgentSessionState;
 use crate::settings::load_repository_settings;
+use crate::terminal_logs::{
+    search_terminal_logs as search_terminal_logs_in_processes, summarize_terminal_sessions,
+    terminal_log_preview,
+};
+use crate::todos::parse_context_todos;
 use anyhow::{Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -27,8 +45,17 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
+pub use crate::github_pr::{
+    parse_github_numbered_stateful_choices, GitHubNumberedChoice, PullRequestCheckRun,
+    PullRequestCommentEntry, PullRequestDeployment, PullRequestReadiness, PullRequestReviewEntry,
+    PullRequestReviewThread, PullRequestThreadComment,
+};
+pub use crate::local_chat::{
+    LocalChatHistoryMessage, LocalChatHistorySummary, LocalChatThreadSummary,
+};
+pub use crate::terminal_logs::{TerminalLogMatch, TerminalSessionSummary};
+
 const SIGTERM_EXIT_CODE: i32 = 143;
-const TERMINAL_SEARCH_CONTEXT_LINES: usize = 4;
 const WORKSPACE_CITY_NAMES: [&str; 200] = [
     "berlin",
     "tokyo",
@@ -684,43 +711,6 @@ pub struct ChatEventRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LocalChatHistorySummary {
-    pub process_id: i64,
-    pub chat_thread_id: Option<i64>,
-    pub repository_name: String,
-    pub workspace_name: String,
-    pub workspace_path: PathBuf,
-    pub agent_type: String,
-    pub status: String,
-    pub started_at: String,
-    pub updated_at: String,
-    pub message_count: usize,
-    pub preview: String,
-    pub harness: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LocalChatThreadSummary {
-    pub thread_id: i64,
-    pub repository_name: String,
-    pub workspace_name: String,
-    pub workspace_path: PathBuf,
-    pub provider: String,
-    pub title: String,
-    pub status: String,
-    pub updated_at: String,
-    pub message_count: usize,
-    pub preview: String,
-    pub native_thread_id: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LocalChatHistoryMessage {
-    pub role: String,
-    pub content: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkedDirectory {
     pub id: i64,
     pub workspace_id: i64,
@@ -759,29 +749,23 @@ pub struct TerminalCommandResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TerminalLogMatch {
-    pub process_id: i64,
-    pub command: String,
-    pub log_path: PathBuf,
-    pub line_number: usize,
-    pub line: String,
-    pub context_before: Vec<String>,
-    pub context_after: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TerminalSessionSummary {
-    pub process: ProcessRecord,
-    pub line_count: usize,
-    pub byte_count: usize,
-    pub preview: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiffFileSummary {
     pub path: String,
     pub additions: Option<usize>,
     pub deletions: Option<usize>,
+    pub staged: bool,
+    pub unstaged: bool,
+    pub untracked: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceTimelineEvent {
+    pub id: i64,
+    pub workspace_id: i64,
+    pub workspace_name: String,
+    pub kind: String,
+    pub summary: String,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -816,133 +800,11 @@ pub struct PullRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PullRequestCheckRun {
-    pub name: String,
-    pub status: String,
-    pub detail: Option<String>,
-}
-
-impl PullRequestCheckRun {
-    pub fn is_failure(&self) -> bool {
-        matches!(
-            self.status.to_ascii_lowercase().as_str(),
-            "fail" | "failed" | "failure" | "error" | "cancelled" | "timed_out"
-        )
-    }
-
-    pub fn is_pending(&self) -> bool {
-        matches!(
-            self.status.to_ascii_lowercase().as_str(),
-            "pending" | "queued" | "requested" | "waiting" | "in_progress" | "in progress"
-        )
-    }
-
-    pub fn is_success(&self) -> bool {
-        matches!(
-            self.status.to_ascii_lowercase().as_str(),
-            "pass" | "passed" | "success" | "successful" | "completed"
-        )
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PullRequestReviewEntry {
-    pub author: String,
-    pub state: String,
-    pub body: Option<String>,
-    pub submitted_at: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PullRequestCommentEntry {
-    pub author: String,
-    pub body: String,
-    pub created_at: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PullRequestDeployment {
-    pub environment: String,
-    pub status: String,
-    pub url: Option<String>,
-}
-
-impl PullRequestDeployment {
-    pub fn is_failure(&self) -> bool {
-        matches!(
-            self.status.to_ascii_lowercase().as_str(),
-            "fail" | "failed" | "failure" | "error" | "inactive" | "cancelled" | "timed_out"
-        )
-    }
-
-    pub fn is_pending(&self) -> bool {
-        matches!(
-            self.status.to_ascii_lowercase().as_str(),
-            "pending" | "queued" | "requested" | "waiting" | "in_progress" | "in progress"
-        )
-    }
-
-    pub fn is_success(&self) -> bool {
-        matches!(
-            self.status.to_ascii_lowercase().as_str(),
-            "pass" | "passed" | "success" | "successful" | "active"
-        )
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PullRequestThreadComment {
-    pub author: String,
-    pub body: String,
-    pub url: Option<String>,
-    pub created_at: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PullRequestReviewThread {
-    pub id: Option<String>,
-    pub path: Option<String>,
-    pub line: Option<i64>,
-    pub resolved: bool,
-    pub comments: Vec<PullRequestThreadComment>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PullRequestReadiness {
-    pub review_decision: Option<String>,
-    pub latest_reviews: Vec<PullRequestReviewEntry>,
-    pub comments: Vec<PullRequestCommentEntry>,
-    pub review_threads: Vec<PullRequestReviewThread>,
-    pub checks: Vec<PullRequestCheckRun>,
-    pub deployments: Vec<PullRequestDeployment>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GitHubNumberedChoice {
-    pub number: u64,
-    pub state: String,
-    pub title: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PullRequestPanelState {
     pub pull_request: Option<PullRequest>,
     pub readiness: Option<PullRequestReadiness>,
     pub readiness_text: String,
     pub review_text: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct GitHubDeploymentEntry {
-    id: i64,
-    environment: String,
-    status: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct GitHubDeploymentStatus {
-    state: String,
-    url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1100,6 +962,10 @@ impl WorkspaceStore {
         Ok(store)
     }
 
+    pub(crate) fn owns_process_log_path(&self, log_path: &Path) -> bool {
+        log_path.starts_with(&self.logs_dir)
+    }
+
     pub fn create(&self, input: CreateWorkspace) -> Result<Workspace> {
         let repository = self.load_repository(&input.repository_name)?;
         let settings = load_repository_settings(&repository.root_path)?;
@@ -1177,6 +1043,12 @@ impl WorkspaceStore {
             ],
         )?;
         let workspace = self.get_by_path(&path)?;
+        self.record_workspace_event(
+            workspace.id,
+            &workspace.name,
+            "workspace.created",
+            &format!("Created workspace on branch {}", workspace.branch),
+        )?;
         if auto_setup {
             self.setup_workspace(&workspace.name)?;
         }
@@ -1358,7 +1230,14 @@ impl WorkspaceStore {
             params![new_name, workspace.id],
         )?;
         anyhow::ensure!(changed > 0, "workspace {name} not found");
-        self.get_by_name(new_name)
+        let renamed = self.get_by_name(new_name)?;
+        self.record_workspace_event(
+            renamed.id,
+            &renamed.name,
+            "workspace.renamed",
+            &format!("Renamed workspace from {name} to {new_name}"),
+        )?;
+        Ok(renamed)
     }
 
     pub fn discard(&self, name: &str) -> Result<Workspace> {
@@ -1404,6 +1283,12 @@ impl WorkspaceStore {
 
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| -> Result<()> {
+            self.record_workspace_event(
+                workspace.id,
+                &workspace.name,
+                "workspace.deleted",
+                "Deleted workspace metadata",
+            )?;
             self.delete_workspace_rows(workspace.id)?;
             Ok(())
         })();
@@ -1458,7 +1343,14 @@ impl WorkspaceStore {
             params![now, now, name],
         )?;
         anyhow::ensure!(changed > 0, "workspace {name} not found");
-        self.get_by_name(name)
+        let archived = self.get_by_name(name)?;
+        self.record_workspace_event(
+            archived.id,
+            &archived.name,
+            "workspace.archived",
+            "Archived workspace",
+        )?;
+        Ok(archived)
     }
 
     fn stop_workspace_processes(&self, workspace_id: i64) -> Result<()> {
@@ -1484,6 +1376,12 @@ impl WorkspaceStore {
                     SIGTERM_EXIT_CODE,
                     process.id
                 ],
+            )?;
+            self.record_workspace_event(
+                workspace_id,
+                &self.workspace_name_by_id(workspace_id)?,
+                "session.stopped",
+                &format!("Stopped session process #{}", process.id),
             )?;
         }
         Ok(())
@@ -1579,7 +1477,44 @@ impl WorkspaceStore {
             "UPDATE workspaces SET status = 'active', archived_at = NULL, updated_at = ?1 WHERE name = ?2",
             params![now, name],
         )?;
-        self.get_by_name(name)
+        let restored = self.get_by_name(name)?;
+        self.record_workspace_event(
+            restored.id,
+            &restored.name,
+            "workspace.restored",
+            "Restored workspace",
+        )?;
+        Ok(restored)
+    }
+
+    pub fn duplicate(
+        &self,
+        name: &str,
+        new_name: &str,
+        new_branch: Option<&str>,
+    ) -> Result<Workspace> {
+        validate_workspace_name(new_name)?;
+        let workspace = self.get_by_name(name)?;
+        let repository = self.load_repository_by_id(workspace.repository_id)?;
+        let branch = new_branch
+            .map(str::trim)
+            .filter(|branch| !branch.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("{}-copy", workspace.branch));
+        validate_branch_name(&branch)?;
+        let duplicated = self.create(CreateWorkspace {
+            repository_name: self.repository_name_by_id(repository.id)?,
+            name: new_name.to_owned(),
+            branch,
+            base_ref: Some(workspace.branch.clone()),
+        })?;
+        self.record_workspace_event(
+            duplicated.id,
+            &duplicated.name,
+            "workspace.duplicated",
+            &format!("Duplicated workspace {name}"),
+        )?;
+        Ok(duplicated)
     }
 
     pub fn run_workspace(&self, name: &str) -> Result<ProcessRecord> {
@@ -1724,7 +1659,14 @@ impl WorkspaceStore {
             "UPDATE processes SET status = ?1, ended_at = ?2, exit_code = ?3 WHERE id = ?4",
             params![ProcessStatus::Stopped.as_str(), now, exit_code, process_id,],
         )?;
-        self.get_process(process_id)
+        let process = self.get_process(process_id)?;
+        self.record_workspace_event(
+            process.workspace_id,
+            &self.workspace_name_by_id(process.workspace_id)?,
+            "session.stopped",
+            &format!("Stopped session process #{}", process.id),
+        )?;
+        Ok(process)
     }
 
     pub fn mark_session_process_exited(
@@ -1737,7 +1679,14 @@ impl WorkspaceStore {
             "UPDATE processes SET status = ?1, ended_at = ?2, exit_code = ?3 WHERE id = ?4",
             params![ProcessStatus::Exited.as_str(), now, exit_code, process_id,],
         )?;
-        self.get_process(process_id)
+        let process = self.get_process(process_id)?;
+        self.record_workspace_event(
+            process.workspace_id,
+            &self.workspace_name_by_id(process.workspace_id)?,
+            "session.exited",
+            &format!("Session process #{} exited", process.id),
+        )?;
+        Ok(process)
     }
 
     pub fn read_latest_session_log(&self, name: &str) -> Result<String> {
@@ -2011,7 +1960,16 @@ impl WorkspaceStore {
                 session.resume_id,
             ],
         )?;
-        self.get_process(self.conn.last_insert_rowid())
+        let process = self.get_process(self.conn.last_insert_rowid())?;
+        if process.kind == ProcessKind::Session {
+            self.record_workspace_event(
+                process.workspace_id,
+                &workspace.name,
+                "session.started",
+                &format!("Started {} session process #{}", command, process.id),
+            )?;
+        }
+        Ok(process)
     }
 
     pub fn mark_terminal_process_stopped(
@@ -2137,60 +2095,11 @@ impl WorkspaceStore {
     }
 
     pub fn search_terminal_logs(&self, name: &str, query: &str) -> Result<Vec<TerminalLogMatch>> {
-        let query = query.trim();
-        anyhow::ensure!(!query.is_empty(), "terminal log search query is required");
-        let needle = query.to_lowercase();
-        let mut matches = Vec::new();
-        for (process_index, process) in self.list_terminals(name)?.into_iter().enumerate() {
-            let contents = fs::read_to_string(&process.log_path)
-                .with_context(|| format!("read log {}", process.log_path.display()))?;
-            let lines = contents.lines().collect::<Vec<_>>();
-            for (index, line) in lines.iter().enumerate() {
-                if line.to_lowercase().contains(&needle) {
-                    let start = index.saturating_sub(TERMINAL_SEARCH_CONTEXT_LINES);
-                    let end = (index + TERMINAL_SEARCH_CONTEXT_LINES + 1).min(lines.len());
-                    let mut context_before = Vec::new();
-                    let mut context_after = Vec::new();
-
-                    for line in &lines[start..index] {
-                        if process_index == 0 {
-                            break;
-                        }
-                        context_before.push((*line).to_owned());
-                    }
-                    for line in &lines[index + 1..end] {
-                        context_after.push((*line).to_owned());
-                    }
-
-                    matches.push(TerminalLogMatch {
-                        process_id: process.id,
-                        command: process.command.clone(),
-                        log_path: process.log_path.clone(),
-                        line_number: index + 1,
-                        line: (*line).to_owned(),
-                        context_before,
-                        context_after,
-                    });
-                }
-            }
-        }
-        Ok(matches)
+        search_terminal_logs_in_processes(self.list_terminals(name)?, query)
     }
 
     pub fn list_terminal_summaries(&self, name: &str) -> Result<Vec<TerminalSessionSummary>> {
-        self.list_terminals(name)?
-            .into_iter()
-            .map(|process| {
-                let contents = fs::read_to_string(&process.log_path)
-                    .with_context(|| format!("read log {}", process.log_path.display()))?;
-                Ok(TerminalSessionSummary {
-                    process,
-                    line_count: contents.lines().count(),
-                    byte_count: contents.len(),
-                    preview: terminal_log_preview(&contents),
-                })
-            })
-            .collect()
+        summarize_terminal_sessions(self.list_terminals(name)?)
     }
 
     pub fn reconcile_terminal_processes(&self) -> Result<Vec<ProcessRecord>> {
@@ -2558,9 +2467,15 @@ impl WorkspaceStore {
 
     pub fn diff_file_summaries(&self, name: &str) -> Result<Vec<DiffFileSummary>> {
         let workspace = self.get_by_name(name)?;
-        let output = git_output(&workspace.path, ["diff", "--numstat", "--"])?;
-        let mut summaries = parse_diff_numstat(&output);
-        let known_paths = summaries
+        let unstaged = git_output(&workspace.path, ["diff", "--numstat", "--"])?;
+        let staged = git_output(&workspace.path, ["diff", "--cached", "--numstat", "--"])?;
+        let mut summaries = merge_diff_summaries(
+            parse_diff_numstat(&staged)
+                .into_iter()
+                .chain(parse_diff_numstat(&unstaged))
+                .collect(),
+        );
+        let mut known_paths = summaries
             .iter()
             .map(|summary| summary.path.clone())
             .collect::<BTreeSet<_>>();
@@ -2568,15 +2483,20 @@ impl WorkspaceStore {
             &workspace.path,
             ["status", "--porcelain", "--untracked-files=all"],
         )?;
+        apply_diff_file_status(&mut summaries, &status);
         for path in parse_untracked_status_paths(&status) {
             if known_paths.contains(&path) || is_conductor_context_path(&path) {
                 continue;
             }
             let counts = untracked_file_counts(&workspace.path.join(&path))?;
+            known_paths.insert(path.clone());
             summaries.push(DiffFileSummary {
                 path,
                 additions: Some(counts.0),
                 deletions: Some(0),
+                staged: false,
+                unstaged: false,
+                untracked: true,
             });
         }
         summaries.sort_by(|left, right| left.path.cmp(&right.path));
@@ -2602,10 +2522,17 @@ impl WorkspaceStore {
 
     pub fn push_branch(&self, name: &str) -> Result<String> {
         let workspace = self.get_by_name(name)?;
-        git_output_dynamic(
+        let output = git_output_dynamic(
             &workspace.path,
             &["push", "-u", "origin", workspace.branch.as_str()],
-        )
+        )?;
+        self.record_workspace_event(
+            workspace.id,
+            &workspace.name,
+            "branch.pushed",
+            &format!("Pushed branch {}", workspace.branch),
+        )?;
+        Ok(output)
     }
 
     pub fn create_pull_request(
@@ -2902,7 +2829,14 @@ impl WorkspaceStore {
     pub fn pull_request_checks(&self, name: &str) -> Result<String> {
         let workspace = self.get_by_name(name)?;
         let args = self.gh_pr_args_for_workspace(&workspace, "checks", &[])?;
-        command_output_owned(&workspace.path, "gh", &args)
+        let output = command_output_owned(&workspace.path, "gh", &args)?;
+        self.record_workspace_event(
+            workspace.id,
+            &workspace.name,
+            "checks.refreshed",
+            "Refreshed pull request checks",
+        )?;
+        Ok(output)
     }
 
     pub fn pull_request_check_runs(&self, name: &str) -> Result<Vec<PullRequestCheckRun>> {
@@ -3191,8 +3125,16 @@ mutation($threadId: ID!) {{
                 updated_at = excluded.updated_at",
             params![workspace_id, number, url, now, now],
         )?;
-        self.pull_request_by_workspace_id(workspace_id)?
-            .context("load recorded pull request")
+        let pull_request = self
+            .pull_request_by_workspace_id(workspace_id)?
+            .context("load recorded pull request")?;
+        self.record_workspace_event(
+            workspace_id,
+            &self.workspace_name_by_id(workspace_id)?,
+            "pr.created",
+            &format!("Recorded GitHub PR #{}", pull_request.number),
+        )?;
+        Ok(pull_request)
     }
 
     fn pull_request_by_workspace_id(&self, workspace_id: i64) -> Result<Option<PullRequest>> {
@@ -3219,35 +3161,31 @@ mutation($threadId: ID!) {{
             .with_context(|| format!("read {}", todos_path.display()))?;
 
         let mut imported = 0usize;
-        for line in contents.lines() {
-            let trimmed = line.trim();
-            let (done, text) = if let Some(rest) = trimmed
-                .strip_prefix("- [x] ")
-                .or_else(|| trimmed.strip_prefix("- [X] "))
-            {
-                (true, rest)
-            } else if let Some(rest) = trimmed.strip_prefix("- [ ] ") {
-                (false, rest)
+        for todo in parse_context_todos(&contents) {
+            let status = if todo.done { "done" } else { "open" };
+            let existing: Option<(i64, String)> = self
+                .conn
+                .query_row(
+                    "SELECT id, status FROM todos
+                     WHERE workspace_id = ?1 AND text = ?2 AND source = 'context'",
+                    params![workspace.id, todo.text],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()?;
+            if let Some((id, existing_status)) = existing {
+                if existing_status != status {
+                    let now = timestamp();
+                    self.conn.execute(
+                        "UPDATE todos SET status = ?1, updated_at = ?2 WHERE id = ?3",
+                        params![status, now, id],
+                    )?;
+                }
             } else {
-                continue;
-            };
-            let text = text.trim();
-            if text.is_empty() {
-                continue;
-            }
-            let already_exists: bool = self.conn.query_row(
-                "SELECT COUNT(*) FROM todos
-                 WHERE workspace_id = ?1 AND text = ?2 AND source = 'context'",
-                params![workspace.id, text],
-                |row| row.get::<_, i64>(0),
-            )? > 0;
-            if !already_exists {
                 let now = timestamp();
-                let status = if done { "done" } else { "open" };
                 self.conn.execute(
                     "INSERT INTO todos (workspace_id, text, status, source, created_at, updated_at)
                      VALUES (?1, ?2, ?3, 'context', ?4, ?5)",
-                    params![workspace.id, text, status, now, now],
+                    params![workspace.id, todo.text, status, now, now],
                 )?;
                 imported += 1;
             }
@@ -3466,6 +3404,123 @@ mutation($threadId: ID!) {{
             behind,
             has_upstream: true,
         })
+    }
+
+    pub fn create_branch(&self, name: &str, branch: &str) -> Result<()> {
+        let workspace = self.get_by_name(name)?;
+        validate_branch_name(branch)?;
+        git_dynamic(&workspace.path, &["branch", branch])?;
+        self.record_workspace_event(
+            workspace.id,
+            &workspace.name,
+            "branch.created",
+            &format!("Created branch {branch}"),
+        )?;
+        Ok(())
+    }
+
+    pub fn checkout_branch(&self, name: &str, branch: &str) -> Result<Workspace> {
+        let workspace = self.get_by_name(name)?;
+        validate_branch_name(branch)?;
+        ensure_clean_git_tree(&workspace.path, "checkout branch")?;
+        git_dynamic(&workspace.path, &["checkout", branch])?;
+        let now = timestamp();
+        self.conn.execute(
+            "UPDATE workspaces SET branch = ?1, updated_at = ?2 WHERE id = ?3",
+            params![branch, now, workspace.id],
+        )?;
+        let updated = self.get_by_name(name)?;
+        self.record_workspace_event(
+            updated.id,
+            &updated.name,
+            "branch.checked_out",
+            &format!("Checked out branch {branch}"),
+        )?;
+        Ok(updated)
+    }
+
+    pub fn rename_branch(&self, name: &str, new_branch: &str) -> Result<Workspace> {
+        let workspace = self.get_by_name(name)?;
+        validate_branch_name(new_branch)?;
+        ensure_clean_git_tree(&workspace.path, "rename branch")?;
+        git_dynamic(&workspace.path, &["branch", "-m", new_branch])?;
+        let old_branch = workspace.branch.clone();
+        let now = timestamp();
+        self.conn.execute(
+            "UPDATE workspaces SET branch = ?1, updated_at = ?2 WHERE id = ?3",
+            params![new_branch, now, workspace.id],
+        )?;
+        let updated = self.get_by_name(name)?;
+        self.record_workspace_event(
+            updated.id,
+            &updated.name,
+            "branch.renamed",
+            &format!("Renamed branch {old_branch} to {new_branch}"),
+        )?;
+        Ok(updated)
+    }
+
+    pub fn delete_branch(&self, name: &str, branch: &str) -> Result<()> {
+        let workspace = self.get_by_name(name)?;
+        validate_branch_name(branch)?;
+        anyhow::ensure!(
+            branch != workspace.branch,
+            "cannot delete current workspace branch {branch}"
+        );
+        ensure_clean_git_tree(&workspace.path, "delete branch")?;
+        git_dynamic(&workspace.path, &["branch", "-D", branch])?;
+        self.record_workspace_event(
+            workspace.id,
+            &workspace.name,
+            "branch.deleted",
+            &format!("Deleted branch {branch}"),
+        )?;
+        Ok(())
+    }
+
+    pub fn workspace_timeline(
+        &self,
+        name: &str,
+        kind: Option<&str>,
+    ) -> Result<Vec<WorkspaceTimelineEvent>> {
+        let workspace = self.get_by_name(name)?;
+        self.sync_workspace_commit_events(&workspace)?;
+        let mut events = self.workspace_timeline_by_id(workspace.id, kind)?;
+        events.sort_by_key(|event| event.id);
+        Ok(events)
+    }
+
+    fn workspace_timeline_by_id(
+        &self,
+        workspace_id: i64,
+        kind: Option<&str>,
+    ) -> Result<Vec<WorkspaceTimelineEvent>> {
+        match kind.map(str::trim).filter(|kind| !kind.is_empty()) {
+            Some(kind) => {
+                let mut stmt = self.conn.prepare(
+                    "SELECT id, workspace_id, workspace_name, kind, summary, created_at
+                     FROM workspace_timeline
+                     WHERE workspace_id = ?1 AND kind = ?2
+                     ORDER BY id ASC",
+                )?;
+                let events = stmt
+                    .query_map(params![workspace_id, kind], row_to_workspace_timeline_event)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(events)
+            }
+            None => {
+                let mut stmt = self.conn.prepare(
+                    "SELECT id, workspace_id, workspace_name, kind, summary, created_at
+                     FROM workspace_timeline
+                     WHERE workspace_id = ?1
+                     ORDER BY id ASC",
+                )?;
+                let events = stmt
+                    .query_map([workspace_id], row_to_workspace_timeline_event)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(events)
+            }
+        }
     }
 
     pub fn add_todo(&self, name: &str, text: &str) -> Result<Todo> {
@@ -3901,8 +3956,15 @@ mutation($threadId: ID!) {{
         let rows = self.local_chat_history_rows(workspace_path)?;
         rows.into_iter()
             .map(|row| {
-                let transcript = fs::read_to_string(&row.process.log_path).unwrap_or_default();
-                let messages = parse_local_chat_transcript(&transcript);
+                let event_messages = session_events_to_local_chat_messages(
+                    &self.list_session_events(row.process.id)?,
+                );
+                let (messages, transcript) = if event_messages.is_empty() {
+                    let transcript = fs::read_to_string(&row.process.log_path).unwrap_or_default();
+                    (parse_local_chat_transcript(&transcript), transcript)
+                } else {
+                    (event_messages, String::new())
+                };
                 let preview = messages
                     .iter()
                     .rev()
@@ -5324,6 +5386,98 @@ mutation($threadId: ID!) {{
             .with_context(|| format!("load process {id}"))
     }
 
+    fn workspace_name_by_id(&self, id: i64) -> Result<String> {
+        self.conn
+            .query_row("SELECT name FROM workspaces WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .with_context(|| format!("load workspace name for id {id}"))
+    }
+
+    fn repository_name_by_id(&self, id: i64) -> Result<String> {
+        self.conn
+            .query_row("SELECT name FROM repositories WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .with_context(|| format!("load repository name for id {id}"))
+    }
+
+    fn record_workspace_event(
+        &self,
+        workspace_id: i64,
+        workspace_name: &str,
+        kind: &str,
+        summary: &str,
+    ) -> Result<WorkspaceTimelineEvent> {
+        let now = timestamp();
+        self.conn.execute(
+            "INSERT INTO workspace_timeline (
+                workspace_id, workspace_name, kind, summary, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![workspace_id, workspace_name, kind, summary, now],
+        )?;
+        self.get_workspace_timeline_event(self.conn.last_insert_rowid())
+    }
+
+    fn get_workspace_timeline_event(&self, id: i64) -> Result<WorkspaceTimelineEvent> {
+        self.conn
+            .query_row(
+                "SELECT id, workspace_id, workspace_name, kind, summary, created_at
+                 FROM workspace_timeline WHERE id = ?1",
+                [id],
+                row_to_workspace_timeline_event,
+            )
+            .with_context(|| format!("load workspace timeline event {id}"))
+    }
+
+    fn sync_workspace_commit_events(&self, workspace: &Workspace) -> Result<()> {
+        let output = git_output_dynamic(
+            &workspace.path,
+            &[
+                "log",
+                "--date=iso-strict",
+                "--format=%H%x1f%h%x1f%ad%x1f%s",
+                "--max-count=50",
+                workspace.branch.as_str(),
+            ],
+        )?;
+        for line in output.lines().rev() {
+            let mut parts = line.splitn(4, '\x1f');
+            let Some(hash) = parts.next().filter(|value| !value.is_empty()) else {
+                continue;
+            };
+            let short = parts.next().unwrap_or(hash);
+            let committed_at = parts.next().unwrap_or("");
+            let subject = parts.next().unwrap_or("");
+            let summary = format!("Commit {short}: {subject}");
+            let exists = self.conn.query_row(
+                "SELECT 1 FROM workspace_timeline
+                 WHERE workspace_id = ?1 AND kind = 'commit.created' AND summary LIKE ?2
+                 LIMIT 1",
+                params![workspace.id, format!("Commit {short}:%")],
+                |_| Ok(()),
+            );
+            if matches!(exists, Err(rusqlite::Error::QueryReturnedNoRows)) {
+                self.conn.execute(
+                    "INSERT INTO workspace_timeline (
+                        workspace_id, workspace_name, kind, summary, created_at
+                     ) VALUES (?1, ?2, 'commit.created', ?3, ?4)",
+                    params![
+                        workspace.id,
+                        workspace.name,
+                        summary,
+                        if committed_at.is_empty() {
+                            timestamp()
+                        } else {
+                            committed_at.to_owned()
+                        },
+                    ],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     fn active_spotlight_for_repository(
         &self,
         repository_id: i64,
@@ -5368,254 +5522,8 @@ mutation($threadId: ID!) {{
     }
 
     fn migrate(&self) -> Result<()> {
-        self.conn.execute_batch(
-            "
-            CREATE TABLE IF NOT EXISTS repositories (
-              id INTEGER PRIMARY KEY,
-              name TEXT NOT NULL,
-              root_path TEXT NOT NULL UNIQUE,
-              default_branch TEXT NOT NULL,
-              remote_name TEXT NOT NULL DEFAULT 'origin',
-              workspace_parent_path TEXT NOT NULL,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS workspaces (
-              id INTEGER PRIMARY KEY,
-              repository_id INTEGER NOT NULL REFERENCES repositories(id),
-              name TEXT NOT NULL,
-              path TEXT NOT NULL UNIQUE,
-              branch TEXT NOT NULL,
-              base_ref TEXT NOT NULL,
-              port_base INTEGER NOT NULL,
-              status TEXT NOT NULL,
-              archived_at TEXT,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS processes (
-              id INTEGER PRIMARY KEY,
-              workspace_id INTEGER NOT NULL REFERENCES workspaces(id),
-              chat_thread_id INTEGER REFERENCES chat_threads(id),
-              kind TEXT NOT NULL,
-              command TEXT NOT NULL,
-              pid INTEGER NOT NULL,
-              log_path TEXT NOT NULL,
-              status TEXT NOT NULL,
-              started_at TEXT NOT NULL,
-              ended_at TEXT,
-              session_harness_metadata TEXT,
-              session_resume_id TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS pull_requests (
-              id INTEGER PRIMARY KEY,
-              workspace_id INTEGER NOT NULL UNIQUE REFERENCES workspaces(id),
-              provider TEXT NOT NULL,
-              number INTEGER NOT NULL,
-              url TEXT NOT NULL,
-              state TEXT NOT NULL,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS todos (
-              id INTEGER PRIMARY KEY,
-              workspace_id INTEGER NOT NULL REFERENCES workspaces(id),
-              text TEXT NOT NULL,
-              status TEXT NOT NULL,
-              source TEXT NOT NULL,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS review_comments (
-              id INTEGER PRIMARY KEY,
-              workspace_id INTEGER NOT NULL REFERENCES workspaces(id),
-              file_path TEXT NOT NULL,
-              line_number INTEGER,
-              body TEXT NOT NULL,
-              status TEXT NOT NULL,
-              github_thread_id TEXT,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS checkpoints (
-              id INTEGER PRIMARY KEY,
-              workspace_id INTEGER NOT NULL REFERENCES workspaces(id),
-              session_id INTEGER REFERENCES processes(id),
-              git_ref TEXT NOT NULL,
-              message TEXT NOT NULL,
-              created_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS spotlight_sessions (
-              id INTEGER PRIMARY KEY,
-              repository_id INTEGER NOT NULL REFERENCES repositories(id),
-              workspace_id INTEGER NOT NULL REFERENCES workspaces(id),
-              workspace_name TEXT NOT NULL,
-              patch_path TEXT NOT NULL,
-              status TEXT NOT NULL,
-              started_at TEXT NOT NULL,
-              ended_at TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS linked_directories (
-              id INTEGER PRIMARY KEY,
-              workspace_id INTEGER NOT NULL REFERENCES workspaces(id),
-              target_workspace_id INTEGER NOT NULL REFERENCES workspaces(id),
-              created_at TEXT NOT NULL,
-              UNIQUE(workspace_id, target_workspace_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS chat_threads (
-              id INTEGER PRIMARY KEY,
-              workspace_id INTEGER NOT NULL REFERENCES workspaces(id),
-              provider TEXT NOT NULL,
-              title TEXT NOT NULL,
-              status TEXT NOT NULL,
-              native_thread_id TEXT,
-              harness_metadata TEXT,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL,
-              archived_at TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS chat_messages (
-              id INTEGER PRIMARY KEY,
-              thread_id INTEGER NOT NULL REFERENCES chat_threads(id),
-              role TEXT NOT NULL,
-              content TEXT NOT NULL,
-              source TEXT NOT NULL,
-              timeline_seq INTEGER,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS chat_timeline_seq (
-              id INTEGER PRIMARY KEY AUTOINCREMENT
-            );
-
-            CREATE TABLE IF NOT EXISTS codex_parse_cursors (
-              process_id INTEGER PRIMARY KEY REFERENCES processes(id) ON DELETE CASCADE,
-              fingerprint TEXT,
-              updated_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS chat_events (
-              id INTEGER PRIMARY KEY,
-              thread_id INTEGER NOT NULL REFERENCES chat_threads(id) ON DELETE CASCADE,
-              process_id INTEGER NOT NULL REFERENCES processes(id) ON DELETE CASCADE,
-              kind TEXT NOT NULL,
-              title TEXT NOT NULL,
-              body TEXT NOT NULL DEFAULT '',
-              path TEXT,
-              payload_json TEXT NOT NULL,
-              timeline_seq INTEGER NOT NULL,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS session_events (
-              id INTEGER PRIMARY KEY,
-              process_id INTEGER NOT NULL REFERENCES processes(id) ON DELETE CASCADE,
-              sequence INTEGER NOT NULL,
-              occurred_at_ms INTEGER NOT NULL,
-              source TEXT NOT NULL,
-              raw_text TEXT,
-              payload_json TEXT NOT NULL,
-              created_at TEXT NOT NULL,
-              UNIQUE(process_id, sequence)
-            );
-
-            CREATE TABLE IF NOT EXISTS pty_chunks (
-              id INTEGER PRIMARY KEY,
-              process_id INTEGER NOT NULL REFERENCES processes(id) ON DELETE CASCADE,
-              sequence INTEGER NOT NULL,
-              occurred_at_ms INTEGER NOT NULL,
-              stream TEXT NOT NULL DEFAULT 'stdout_pty',
-              text TEXT NOT NULL,
-              created_at TEXT NOT NULL,
-              UNIQUE(process_id, sequence)
-            );
-            ",
-        )?;
-        self.remove_chat_events_exact_unique_constraint()?;
-        ensure_column(
-            &self.conn,
-            "processes",
-            "exit_code",
-            "ALTER TABLE processes ADD COLUMN exit_code INTEGER",
-        )?;
-        ensure_column(
-            &self.conn,
-            "processes",
-            "session_harness_metadata",
-            "ALTER TABLE processes ADD COLUMN session_harness_metadata TEXT",
-        )?;
-        ensure_column(
-            &self.conn,
-            "processes",
-            "session_resume_id",
-            "ALTER TABLE processes ADD COLUMN session_resume_id TEXT",
-        )?;
-        ensure_column(
-            &self.conn,
-            "processes",
-            "chat_thread_id",
-            "ALTER TABLE processes ADD COLUMN chat_thread_id INTEGER REFERENCES chat_threads(id)",
-        )?;
-        ensure_column(
-            &self.conn,
-            "chat_messages",
-            "timeline_seq",
-            "ALTER TABLE chat_messages ADD COLUMN timeline_seq INTEGER",
-        )?;
+        crate::storage::migrate_workspace_db(&self.conn)?;
         self.backfill_chat_message_timeline_seq()?;
-        Ok(())
-    }
-
-    fn remove_chat_events_exact_unique_constraint(&self) -> Result<()> {
-        let create_sql = self
-            .conn
-            .query_row(
-                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'chat_events'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?
-            .unwrap_or_default();
-        if !create_sql.contains("UNIQUE(thread_id, process_id, kind, title, body, payload_json)") {
-            return Ok(());
-        }
-
-        self.conn.execute_batch(
-            "
-            ALTER TABLE chat_events RENAME TO chat_events_with_exact_unique;
-            CREATE TABLE chat_events (
-              id INTEGER PRIMARY KEY,
-              thread_id INTEGER NOT NULL REFERENCES chat_threads(id) ON DELETE CASCADE,
-              process_id INTEGER NOT NULL REFERENCES processes(id) ON DELETE CASCADE,
-              kind TEXT NOT NULL,
-              title TEXT NOT NULL,
-              body TEXT NOT NULL DEFAULT '',
-              path TEXT,
-              payload_json TEXT NOT NULL,
-              timeline_seq INTEGER NOT NULL,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
-            );
-            INSERT INTO chat_events (
-              id, thread_id, process_id, kind, title, body, path, payload_json, timeline_seq, created_at, updated_at
-            )
-            SELECT id, thread_id, process_id, kind, title, body, path, payload_json, timeline_seq, created_at, updated_at
-            FROM chat_events_with_exact_unique;
-            DROP TABLE chat_events_with_exact_unique;
-            ",
-        )?;
         Ok(())
     }
 
@@ -5656,17 +5564,6 @@ mutation($threadId: ID!) {{
             }
         }
     }
-}
-
-fn ensure_column(conn: &Connection, table: &str, column: &str, alter_sql: &str) -> Result<()> {
-    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
-    let names = stmt
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    if !names.iter().any(|name| name == column) {
-        conn.execute(alter_sql, [])?;
-    }
-    Ok(())
 }
 
 fn spawn_process_monitor(db_path: PathBuf, process_id: i64, mut child: Child) {
@@ -6016,6 +5913,19 @@ fn row_to_chat_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatEventRecor
     })
 }
 
+fn row_to_workspace_timeline_event(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<WorkspaceTimelineEvent> {
+    Ok(WorkspaceTimelineEvent {
+        id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        workspace_name: row.get(2)?,
+        kind: row.get(3)?,
+        summary: row.get(4)?,
+        created_at: row.get(5)?,
+    })
+}
+
 fn row_to_pty_chunk(row: &rusqlite::Row<'_>) -> rusqlite::Result<PtyChunkRecord> {
     Ok(PtyChunkRecord {
         id: row.get(0)?,
@@ -6121,410 +6031,6 @@ fn count_git_rev_list(cwd: &Path, range: &str) -> usize {
         .unwrap_or(0)
 }
 
-fn extract_pull_request_url(output: &str) -> Option<String> {
-    output
-        .lines()
-        .rev()
-        .map(str::trim)
-        .find(|line| line.starts_with("https://"))
-        .map(str::to_owned)
-}
-
-fn parse_pull_request_number(url: &str) -> Option<i64> {
-    url.trim_end_matches('/')
-        .rsplit('/')
-        .next()
-        .and_then(|segment| segment.parse::<i64>().ok())
-}
-
-pub fn parse_github_numbered_stateful_choices(raw: &str) -> Vec<GitHubNumberedChoice> {
-    raw.lines()
-        .filter_map(|line| {
-            let mut parts = line.splitn(3, '\t');
-            let number = parts.next()?.trim().parse().ok()?;
-            let state = parts.next()?.trim().to_owned();
-            let title = parts.next()?.trim().to_owned();
-            Some(GitHubNumberedChoice {
-                number,
-                state,
-                title,
-            })
-        })
-        .collect()
-}
-
-fn parse_pull_request_check_runs(output: &str) -> Vec<PullRequestCheckRun> {
-    output
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            if line.is_empty() {
-                return None;
-            }
-            let parts = line.split('\t').map(str::trim).collect::<Vec<_>>();
-            if parts.len() >= 2 {
-                return Some(PullRequestCheckRun {
-                    name: parts[0].to_owned(),
-                    status: parts[1].to_owned(),
-                    detail: parts
-                        .iter()
-                        .skip(2)
-                        .rev()
-                        .find(|part| !part.is_empty())
-                        .map(|part| (*part).to_owned()),
-                });
-            }
-            let lower = line.to_ascii_lowercase();
-            let status = [
-                "fail",
-                "failed",
-                "failure",
-                "error",
-                "cancelled",
-                "timed_out",
-                "pass",
-                "pending",
-            ]
-            .iter()
-            .find(|status| lower.contains(**status))?;
-            Some(PullRequestCheckRun {
-                name: line.to_owned(),
-                status: (*status).to_owned(),
-                detail: None,
-            })
-        })
-        .collect()
-}
-
-fn parse_pull_request_readiness(output: &str) -> Result<PullRequestReadiness> {
-    let value: Value = serde_json::from_str(output).context("parse gh pull request JSON")?;
-    let latest_reviews = value
-        .get("latestReviews")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(parse_pull_request_review_entry)
-        .collect();
-    let comments = value
-        .get("comments")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(parse_pull_request_comment_entry)
-        .collect();
-    let mut checks = Vec::new();
-    let mut deployments = Vec::new();
-    for item in json_array_or_nodes(value.get("statusCheckRollup")) {
-        if is_deployment_rollup_item(item) {
-            if let Some(deployment) = parse_pull_request_deployment(item) {
-                deployments.push(deployment);
-            }
-        } else if let Some(check) = parse_pull_request_rollup_check(item) {
-            checks.push(check);
-        }
-    }
-    Ok(PullRequestReadiness {
-        review_decision: json_string(&value, "reviewDecision"),
-        latest_reviews,
-        comments,
-        review_threads: Vec::new(),
-        checks,
-        deployments,
-    })
-}
-
-fn parse_pull_request_review_threads(output: &str) -> Result<Vec<PullRequestReviewThread>> {
-    let value: Value = serde_json::from_str(output).context("parse GitHub review thread JSON")?;
-    let threads = value
-        .get("data")
-        .and_then(|data| data.get("node"))
-        .and_then(|node| node.get("reviewThreads"))
-        .and_then(|review_threads| review_threads.get("nodes"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(parse_pull_request_review_thread)
-        .collect();
-    Ok(threads)
-}
-
-fn parse_pull_request_review_thread_mutation(
-    output: &str,
-    mutation_name: &str,
-) -> Result<PullRequestReviewThread> {
-    let value: Value = serde_json::from_str(output).context("parse GitHub review thread JSON")?;
-    let thread = value
-        .get("data")
-        .and_then(|data| data.get(mutation_name))
-        .and_then(|mutation| mutation.get("thread"))
-        .and_then(parse_pull_request_review_thread)
-        .with_context(|| format!("parse GitHub {mutation_name} response"))?;
-    Ok(thread)
-}
-
-fn parse_pull_request_review_thread(value: &Value) -> Option<PullRequestReviewThread> {
-    let comments = value
-        .get("comments")
-        .and_then(|comments| comments.get("nodes"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(parse_pull_request_thread_comment)
-        .collect();
-    Some(PullRequestReviewThread {
-        id: json_string(value, "id"),
-        path: json_string(value, "path"),
-        line: json_i64(value, "line").or_else(|| json_i64(value, "startLine")),
-        resolved: value
-            .get("isResolved")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        comments,
-    })
-}
-
-fn parse_pull_request_thread_comment(value: &Value) -> Option<PullRequestThreadComment> {
-    Some(PullRequestThreadComment {
-        author: json_author_login(value).unwrap_or_else(|| "unknown".to_owned()),
-        body: json_string(value, "body")?,
-        url: json_string(value, "url"),
-        created_at: json_string(value, "createdAt"),
-    })
-}
-
-fn parse_pull_request_review_entry(value: &Value) -> Option<PullRequestReviewEntry> {
-    Some(PullRequestReviewEntry {
-        author: json_author_login(value).unwrap_or_else(|| "unknown".to_owned()),
-        state: json_string(value, "state")?,
-        body: json_string(value, "body"),
-        submitted_at: json_string(value, "submittedAt"),
-    })
-}
-
-fn parse_pull_request_comment_entry(value: &Value) -> Option<PullRequestCommentEntry> {
-    Some(PullRequestCommentEntry {
-        author: json_author_login(value).unwrap_or_else(|| "unknown".to_owned()),
-        body: json_string(value, "body")?,
-        created_at: json_string(value, "createdAt"),
-    })
-}
-
-fn parse_pull_request_rollup_check(value: &Value) -> Option<PullRequestCheckRun> {
-    let name = json_string(value, "name")
-        .or_else(|| json_string(value, "context"))
-        .or_else(|| json_string(value, "workflowName"))?;
-    let status = json_string(value, "conclusion")
-        .or_else(|| json_string(value, "state"))
-        .or_else(|| json_string(value, "status"))
-        .unwrap_or_else(|| "UNKNOWN".to_owned());
-    Some(PullRequestCheckRun {
-        name,
-        status,
-        detail: json_string(value, "detailsUrl")
-            .or_else(|| json_string(value, "targetUrl"))
-            .or_else(|| json_string(value, "url")),
-    })
-}
-
-fn parse_github_commit_status_checks(output: &str) -> Result<Vec<PullRequestCheckRun>> {
-    let value: Value = serde_json::from_str(output).context("parse GitHub commit status JSON")?;
-    Ok(value
-        .get("statuses")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(parse_github_commit_status_check)
-        .collect())
-}
-
-fn parse_github_commit_status_check(value: &Value) -> Option<PullRequestCheckRun> {
-    Some(PullRequestCheckRun {
-        name: json_string(value, "context")
-            .or_else(|| json_string(value, "name"))
-            .unwrap_or_else(|| "status".to_owned()),
-        status: json_string(value, "state")
-            .or_else(|| json_string(value, "status"))
-            .unwrap_or_else(|| "UNKNOWN".to_owned()),
-        detail: json_string(value, "target_url").or_else(|| json_string(value, "url")),
-    })
-}
-
-fn parse_pull_request_deployment(value: &Value) -> Option<PullRequestDeployment> {
-    let status = value
-        .get("latestStatus")
-        .and_then(|latest| json_string(latest, "state"))
-        .or_else(|| json_nested_string(value, "status", "state"))
-        .or_else(|| json_string(value, "conclusion"))
-        .or_else(|| json_string(value, "state"))
-        .or_else(|| json_string(value, "status"))
-        .unwrap_or_else(|| "UNKNOWN".to_owned());
-    Some(PullRequestDeployment {
-        environment: json_string(value, "environment")
-            .or_else(|| json_nested_string(value, "environment", "name"))
-            .or_else(|| json_string(value, "name"))
-            .unwrap_or_else(|| "deployment".to_owned()),
-        status,
-        url: json_string(value, "url")
-            .or_else(|| json_string(value, "latestEnvironmentUrl"))
-            .or_else(|| json_string(value, "targetUrl"))
-            .or_else(|| json_nested_string(value, "latestStatus", "environmentUrl"))
-            .or_else(|| json_nested_string(value, "latestStatus", "logUrl"))
-            .or_else(|| json_nested_string(value, "status", "targetUrl")),
-    })
-}
-
-fn parse_github_deployment_entries(output: &str) -> Result<Vec<GitHubDeploymentEntry>> {
-    let value: Value = serde_json::from_str(output).context("parse GitHub deployment JSON")?;
-    Ok(value
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(parse_github_deployment_entry)
-        .collect())
-}
-
-fn parse_github_deployment_entry(value: &Value) -> Option<GitHubDeploymentEntry> {
-    Some(GitHubDeploymentEntry {
-        id: json_i64(value, "id")?,
-        environment: json_string(value, "environment")
-            .or_else(|| json_nested_string(value, "environment", "name"))
-            .unwrap_or_else(|| "deployment".to_owned()),
-        status: json_string(value, "state").or_else(|| json_string(value, "status")),
-    })
-}
-
-fn parse_github_deployment_latest_status(output: &str) -> Result<Option<GitHubDeploymentStatus>> {
-    let value: Value =
-        serde_json::from_str(output).context("parse GitHub deployment status JSON")?;
-    Ok(value
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find_map(parse_github_deployment_status))
-}
-
-fn parse_github_deployment_status(value: &Value) -> Option<GitHubDeploymentStatus> {
-    Some(GitHubDeploymentStatus {
-        state: json_string(value, "state")?,
-        url: json_string(value, "environment_url")
-            .or_else(|| json_string(value, "log_url"))
-            .or_else(|| json_string(value, "target_url")),
-    })
-}
-
-fn is_deployment_rollup_item(value: &Value) -> bool {
-    json_string(value, "__typename")
-        .map(|name| name.eq_ignore_ascii_case("deployment"))
-        .unwrap_or(false)
-        || value.get("environment").is_some()
-}
-
-fn append_unique_checks(
-    checks: &mut Vec<PullRequestCheckRun>,
-    additional: Vec<PullRequestCheckRun>,
-) {
-    for check in additional {
-        if !checks.iter().any(|existing| {
-            existing.name.eq_ignore_ascii_case(&check.name)
-                && existing.status.eq_ignore_ascii_case(&check.status)
-                && normalized_optional_url(existing.detail.as_deref())
-                    == normalized_optional_url(check.detail.as_deref())
-        }) {
-            checks.push(check);
-        }
-    }
-}
-
-fn append_unique_deployments(
-    deployments: &mut Vec<PullRequestDeployment>,
-    additional: Vec<PullRequestDeployment>,
-) {
-    for deployment in additional {
-        if !deployments.iter().any(|existing| {
-            existing.environment == deployment.environment
-                && existing.status == deployment.status
-                && existing.url == deployment.url
-        }) {
-            deployments.push(deployment);
-        }
-    }
-}
-
-fn json_author_login(value: &Value) -> Option<String> {
-    value
-        .get("author")
-        .and_then(|author| json_string(author, "login"))
-}
-
-fn normalized_optional_url(value: Option<&str>) -> Option<String> {
-    value.map(|url| url.trim_end_matches('/').to_owned())
-}
-
-fn json_string(value: &Value, field: &str) -> Option<String> {
-    value
-        .get(field)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-}
-
-fn json_nested_string(value: &Value, parent: &str, field: &str) -> Option<String> {
-    value
-        .get(parent)
-        .and_then(|nested| json_string(nested, field))
-}
-
-fn json_array_or_nodes(value: Option<&Value>) -> Vec<&Value> {
-    if let Some(items) = value.and_then(Value::as_array) {
-        return items.iter().collect();
-    }
-    if let Some(items) = value
-        .and_then(|item| item.get("nodes"))
-        .and_then(Value::as_array)
-    {
-        return items.iter().collect();
-    }
-    if let Some(items) = value
-        .and_then(|item| item.get("contexts"))
-        .and_then(|contexts| contexts.get("nodes"))
-        .and_then(Value::as_array)
-    {
-        return items.iter().collect();
-    }
-    Vec::new()
-}
-
-fn json_i64(value: &Value, field: &str) -> Option<i64> {
-    value.get(field).and_then(Value::as_i64)
-}
-
-fn json_root_string(input: &str, field: &str) -> Result<Option<String>> {
-    let value: Value = serde_json::from_str(input).context("parse JSON")?;
-    Ok(json_string(&value, field))
-}
-
-fn extract_json_string_field(json: &str, field: &str) -> Option<String> {
-    let needle = format!("\"{field}\"");
-    let field_start = json.find(&needle)? + needle.len();
-    let after_colon = json[field_start..].trim_start();
-    let after_colon = after_colon.strip_prefix(':')?.trim_start();
-    let after_quote = after_colon.strip_prefix('"')?;
-    let end = after_quote.find('"')?;
-    Some(after_quote[..end].to_owned())
-}
-
-fn terminal_log_preview(contents: &str) -> String {
-    contents
-        .lines()
-        .rev()
-        .find_map(|line| {
-            let trimmed = line.trim();
-            (!trimmed.is_empty()).then(|| trimmed.to_owned())
-        })
-        .unwrap_or_else(|| "(empty transcript)".to_owned())
-}
-
 fn linked_directory_root(workspace_path: &Path) -> PathBuf {
     workspace_path.join(".context/linked-directories")
 }
@@ -6588,232 +6094,6 @@ fn create_directory_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
     std::os::windows::fs::symlink_dir(target, link)
 }
 
-fn parse_local_chat_transcript(transcript: &str) -> Vec<LocalChatHistoryMessage> {
-    let lines = transcript.lines().collect::<Vec<_>>();
-    let mut messages = Vec::new();
-    let mut codex_messages = Vec::<ScreenMessage>::new();
-    let mut index = 0usize;
-
-    while index < lines.len() {
-        let line = lines[index].trim_end();
-        if line.trim().is_empty() {
-            index += 1;
-            continue;
-        }
-
-        if line == "[codex screen]" {
-            let (screen, next) = collect_codex_screen_block(&lines, index + 1);
-            let parsed = parse_codex_screen_messages(&screen);
-            merge_screen_messages(&mut codex_messages, &parsed);
-            index = next;
-            continue;
-        }
-
-        if line == "[codex raw]" {
-            let (_, next) = collect_codex_raw_block(&lines, index + 1);
-            index = next;
-            continue;
-        }
-
-        if is_local_user_marker(line) {
-            let (content, next) = collect_local_user_input(&lines, index + 1);
-            push_local_chat_message(&mut messages, "user", content);
-            index = next;
-            continue;
-        }
-
-        if line == "[staged review prompt]" {
-            let (content, next) = collect_staged_review_prompt(&lines, index + 1);
-            push_local_chat_message(&mut messages, "review", content);
-            index = next;
-            continue;
-        }
-
-        if is_local_system_marker(line) {
-            push_local_chat_message(&mut messages, "system", line.to_owned());
-            index += 1;
-            continue;
-        }
-
-        let (content, next) = collect_until_local_marker(&lines, index);
-        push_local_chat_message(&mut messages, "agent", content);
-        index = next;
-    }
-
-    for message in codex_messages {
-        push_local_chat_message(&mut messages, message.role.as_str(), message.content);
-    }
-    messages
-}
-
-fn session_events_to_local_chat_messages(events: &[SessionEvent]) -> Vec<LocalChatHistoryMessage> {
-    let mut messages = Vec::new();
-    for event in events {
-        match &event.payload {
-            SessionEventPayload::UserInput { text, kind } => {
-                let role = match kind {
-                    crate::session_event::SessionInputKind::ReviewPrompt => "review",
-                    crate::session_event::SessionInputKind::ControlCommand => "system",
-                    crate::session_event::SessionInputKind::User => "user",
-                };
-                push_local_chat_message(&mut messages, role, text.clone());
-            }
-            SessionEventPayload::AssistantText { text } => {
-                push_local_chat_message(&mut messages, "agent", text.clone());
-            }
-            SessionEventPayload::CommandOutput { title, output, .. } => {
-                let content = if output.is_empty() {
-                    title.clone()
-                } else {
-                    format!("{title}\n{output}")
-                };
-                push_local_chat_message(&mut messages, "system", content);
-            }
-            SessionEventPayload::StatusChange { message, .. } => {
-                if let Some(message) = message {
-                    push_local_chat_message(&mut messages, "system", message.clone());
-                }
-            }
-            SessionEventPayload::Error { message, .. } => {
-                push_local_chat_message(&mut messages, "system", message.clone());
-            }
-            SessionEventPayload::Prompt { text, .. } => {
-                push_local_chat_message(&mut messages, "system", text.clone());
-            }
-            SessionEventPayload::Metadata { .. } => {}
-        }
-    }
-    messages
-}
-
-fn push_local_chat_message(
-    messages: &mut Vec<LocalChatHistoryMessage>,
-    role: &str,
-    content: String,
-) {
-    let content = content.trim().to_owned();
-    if !content.is_empty() {
-        messages.push(LocalChatHistoryMessage {
-            role: role.to_owned(),
-            content,
-        });
-    }
-}
-
-fn collect_until_local_marker(lines: &[&str], mut index: usize) -> (String, usize) {
-    let mut content = Vec::new();
-    while index < lines.len() {
-        let line = lines[index].trim_end();
-        if !content.is_empty() && is_local_chat_marker(line) {
-            break;
-        }
-        content.push(lines[index]);
-        index += 1;
-    }
-    (content.join("\n"), index)
-}
-
-fn collect_local_user_input(lines: &[&str], mut index: usize) -> (String, usize) {
-    let mut content = Vec::new();
-    while index < lines.len() {
-        let line = lines[index].trim_end();
-        if line == "[/user input]" {
-            return (content.join("\n"), index + 1);
-        }
-        if content.is_empty() && is_local_chat_marker(line) {
-            return (String::new(), index);
-        }
-        content.push(lines[index]);
-        index += 1;
-    }
-    (content.join("\n"), index)
-}
-
-fn collect_staged_review_prompt(lines: &[&str], mut index: usize) -> (String, usize) {
-    let mut content = Vec::new();
-    while index < lines.len() {
-        let line = lines[index].trim_end();
-        if line == "[/staged review prompt]" {
-            return (content.join("\n"), index + 1);
-        }
-        content.push(lines[index]);
-        index += 1;
-    }
-    (content.join("\n"), index)
-}
-
-fn collect_codex_screen_block(lines: &[&str], mut index: usize) -> (String, usize) {
-    let mut content = Vec::new();
-    while index < lines.len() {
-        let line = lines[index].trim_end();
-        if line == "[/codex screen]" {
-            return (content.join("\n"), index + 1);
-        }
-        content.push(lines[index]);
-        index += 1;
-    }
-    (content.join("\n"), index)
-}
-
-fn collect_codex_raw_block(lines: &[&str], mut index: usize) -> (String, usize) {
-    let mut content = Vec::new();
-    while index < lines.len() {
-        let line = lines[index].trim_end();
-        if line == "[/codex raw]" {
-            return (content.join("\n"), index + 1);
-        }
-        content.push(lines[index]);
-        index += 1;
-    }
-    (content.join("\n"), index)
-}
-
-fn is_local_chat_marker(line: &str) -> bool {
-    is_local_user_marker(line)
-        || line == "[/user input]"
-        || line == "[staged review prompt]"
-        || line == "[codex raw]"
-        || line == "[/codex raw]"
-        || line == "[codex screen]"
-        || line == "[/codex screen]"
-        || is_local_system_marker(line)
-}
-
-fn is_local_user_marker(line: &str) -> bool {
-    line.starts_with("[user input ") && line.ends_with(']')
-}
-
-fn is_local_system_marker(line: &str) -> bool {
-    line.starts_with("[session ")
-        || line.starts_with("[provider ")
-        || line.starts_with("[mcp ")
-        || line.starts_with("[harness ")
-        || line.starts_with("[tool ")
-        || line.starts_with("[skill ")
-        || line.starts_with("[archductor bootstrap")
-}
-
-fn local_chat_agent_type(command: &str) -> String {
-    let lower = command.to_ascii_lowercase();
-    if lower.contains("codex") {
-        "Codex".to_owned()
-    } else if lower.contains("claude") {
-        "Claude".to_owned()
-    } else if lower.contains("cursor") {
-        "Cursor".to_owned()
-    } else {
-        "Shell".to_owned()
-    }
-}
-
-fn truncate_chars(value: &str, max_chars: usize) -> String {
-    let mut truncated = value.chars().take(max_chars).collect::<String>();
-    if value.chars().count() > max_chars {
-        truncated.push_str("...");
-    }
-    truncated
-}
-
 fn parse_diff_numstat(output: &str) -> Vec<DiffFileSummary> {
     output
         .lines()
@@ -6826,9 +6106,79 @@ fn parse_diff_numstat(output: &str) -> Vec<DiffFileSummary> {
                 path,
                 additions,
                 deletions,
+                staged: false,
+                unstaged: false,
+                untracked: false,
             })
         })
         .collect()
+}
+
+fn merge_diff_summaries(summaries: Vec<DiffFileSummary>) -> Vec<DiffFileSummary> {
+    let mut merged = BTreeMap::<String, DiffFileSummary>::new();
+    for summary in summaries {
+        let entry = merged
+            .entry(summary.path.clone())
+            .or_insert_with(|| DiffFileSummary {
+                path: summary.path.clone(),
+                additions: Some(0),
+                deletions: Some(0),
+                staged: false,
+                unstaged: false,
+                untracked: false,
+            });
+        entry.additions = match (entry.additions, summary.additions) {
+            (Some(left), Some(right)) => Some(left + right),
+            _ => None,
+        };
+        entry.deletions = match (entry.deletions, summary.deletions) {
+            (Some(left), Some(right)) => Some(left + right),
+            _ => None,
+        };
+        entry.staged |= summary.staged;
+        entry.unstaged |= summary.unstaged;
+        entry.untracked |= summary.untracked;
+    }
+    merged.into_values().collect()
+}
+
+fn apply_diff_file_status(summaries: &mut [DiffFileSummary], output: &str) {
+    for line in output.lines() {
+        let Some((path, staged, unstaged, untracked)) = parse_status_summary_line(line) else {
+            continue;
+        };
+        for summary in summaries.iter_mut() {
+            if summary.path == path || summary.path.contains(&path) {
+                summary.staged |= staged;
+                summary.unstaged |= unstaged;
+                summary.untracked |= untracked;
+            }
+        }
+    }
+}
+
+fn parse_status_summary_line(line: &str) -> Option<(String, bool, bool, bool)> {
+    let bytes = line.as_bytes();
+    if bytes.len() < 4 {
+        return None;
+    }
+    let index = bytes[0] as char;
+    let worktree = bytes[1] as char;
+    let path = line.get(3..)?.trim();
+    if path.is_empty() {
+        return None;
+    }
+    let path = path
+        .rsplit_once(" -> ")
+        .map(|(_, new_path)| new_path)
+        .unwrap_or(path)
+        .to_owned();
+    Some((
+        path,
+        index != ' ' && index != '?',
+        worktree != ' ' && worktree != '?',
+        index == '?' && worktree == '?',
+    ))
 }
 
 fn parse_untracked_status_paths(output: &str) -> Vec<String> {
@@ -6874,340 +6224,6 @@ fn format_review_comments_agent_prompt(name: &str, comments: &[ReviewComment]) -
         ));
     }
     prompt
-}
-
-fn format_pull_request_checks_agent_prompt(name: &str, checks: &[PullRequestCheckRun]) -> String {
-    let failures = checks
-        .iter()
-        .filter(|check| check.is_failure())
-        .collect::<Vec<_>>();
-    let mut prompt = format!("Fix these failing PR checks for workspace {name}.\n");
-    if failures.is_empty() {
-        prompt.push_str("No failing PR checks.\n");
-        return prompt;
-    }
-    prompt.push_str("Make the smallest safe changes, then run relevant tests.\n\n");
-    for check in failures {
-        match check.detail.as_deref() {
-            Some(detail) => prompt.push_str(&format!(
-                "- {}: {} - {}\n",
-                check.name, check.status, detail
-            )),
-            None => prompt.push_str(&format!("- {}: {}\n", check.name, check.status)),
-        }
-    }
-    prompt
-}
-
-fn format_pull_request_review_agent_prompt(name: &str, review_state: &str) -> String {
-    let mut prompt = format!("Address this GitHub PR review/comment state for workspace {name}.\n");
-    let review_state = review_state.trim();
-    if review_state.is_empty() {
-        prompt.push_str("No GitHub PR review/comment output.\n");
-        return prompt;
-    }
-    prompt.push_str("Make the smallest safe changes, then run relevant tests.\n\n");
-    prompt.push_str(review_state);
-    prompt.push('\n');
-    prompt
-}
-
-fn format_pull_request_readiness(name: &str, readiness: &PullRequestReadiness) -> String {
-    let mut out = format!("PR readiness for workspace {name}.\n");
-    out.push_str(&format!(
-        "Review decision: {}\n",
-        readiness.review_decision.as_deref().unwrap_or("UNKNOWN")
-    ));
-    append_rollup_entries(&mut out, readiness);
-    append_attention_entries(&mut out, readiness);
-    append_review_entries(&mut out, &readiness.latest_reviews);
-    append_comment_entries(&mut out, &readiness.comments);
-    append_review_thread_entries(&mut out, &readiness.review_threads);
-    append_check_entries(&mut out, &readiness.checks);
-    append_deployment_entries(&mut out, &readiness.deployments);
-    out
-}
-
-fn format_pull_request_readiness_agent_prompt(
-    name: &str,
-    readiness: &PullRequestReadiness,
-) -> String {
-    let mut prompt = format!("Address this PR readiness state for workspace {name}.\n");
-    prompt.push_str("Prioritize failing checks, failed deployments, and requested changes. Make the smallest safe changes, then run relevant tests.\n\n");
-    prompt.push_str(&format_pull_request_readiness(name, readiness));
-    prompt
-}
-
-fn append_rollup_entries(out: &mut String, readiness: &PullRequestReadiness) {
-    let unresolved_threads = readiness
-        .review_threads
-        .iter()
-        .filter(|thread| !thread.resolved)
-        .count();
-    let check_counts = gate_counts(
-        readiness.checks.iter(),
-        PullRequestCheckRun::is_success,
-        PullRequestCheckRun::is_failure,
-        PullRequestCheckRun::is_pending,
-    );
-    let deployment_counts = gate_counts(
-        readiness.deployments.iter(),
-        PullRequestDeployment::is_success,
-        PullRequestDeployment::is_failure,
-        PullRequestDeployment::is_pending,
-    );
-
-    out.push_str("\nRollup:\n");
-    out.push_str(&format!(
-        "- Reviews: {} latest, {} top-level {}\n",
-        readiness.latest_reviews.len(),
-        readiness.comments.len(),
-        plural(readiness.comments.len(), "comment", "comments")
-    ));
-    out.push_str(&format!(
-        "- Review threads: {} unresolved / {} total\n",
-        unresolved_threads,
-        readiness.review_threads.len()
-    ));
-    out.push_str(&format!(
-        "- Checks: {} passing, {} failing, {} pending, {} other\n",
-        check_counts.passing, check_counts.failing, check_counts.pending, check_counts.other
-    ));
-    out.push_str(&format!(
-        "- Deployments: {} passing, {} failing, {} pending, {} other\n",
-        deployment_counts.passing,
-        deployment_counts.failing,
-        deployment_counts.pending,
-        deployment_counts.other
-    ));
-}
-
-#[derive(Debug, Default, PartialEq, Eq)]
-struct GateCounts {
-    passing: usize,
-    failing: usize,
-    pending: usize,
-    other: usize,
-}
-
-fn gate_counts<'a, T: 'a>(
-    items: impl Iterator<Item = &'a T>,
-    is_success: impl Fn(&T) -> bool,
-    is_failure: impl Fn(&T) -> bool,
-    is_pending: impl Fn(&T) -> bool,
-) -> GateCounts {
-    let mut counts = GateCounts::default();
-    for item in items {
-        if is_failure(item) {
-            counts.failing += 1;
-        } else if is_pending(item) {
-            counts.pending += 1;
-        } else if is_success(item) {
-            counts.passing += 1;
-        } else {
-            counts.other += 1;
-        }
-    }
-    counts
-}
-
-fn plural(count: usize, singular: &str, plural: &str) -> String {
-    if count == 1 {
-        singular.to_owned()
-    } else {
-        plural.to_owned()
-    }
-}
-
-fn append_attention_entries(out: &mut String, readiness: &PullRequestReadiness) {
-    let mut lines = Vec::new();
-    if matches!(
-        readiness
-            .review_decision
-            .as_deref()
-            .map(|decision| decision.to_ascii_uppercase())
-            .as_deref(),
-        Some("CHANGES_REQUESTED" | "REVIEW_REQUIRED")
-    ) {
-        lines.push(format!(
-            "- Review decision: {}",
-            readiness.review_decision.as_deref().unwrap_or("UNKNOWN")
-        ));
-    }
-    for thread in readiness
-        .review_threads
-        .iter()
-        .filter(|thread| !thread.resolved)
-    {
-        let id = thread.id.as_deref().unwrap_or("unknown thread");
-        lines.push(format!(
-            "- Unresolved review thread {id} at {}",
-            review_thread_location(thread)
-        ));
-    }
-    for check in readiness.checks.iter().filter(|check| check.is_failure()) {
-        lines.push(format_gate_attention(
-            "Failing check",
-            &check.name,
-            &check.status,
-            check.detail.as_deref(),
-        ));
-    }
-    for check in readiness.checks.iter().filter(|check| check.is_pending()) {
-        lines.push(format_gate_attention(
-            "Pending check",
-            &check.name,
-            &check.status,
-            check.detail.as_deref(),
-        ));
-    }
-    for deployment in readiness
-        .deployments
-        .iter()
-        .filter(|deployment| deployment.is_failure())
-    {
-        lines.push(format_gate_attention(
-            "Failing deployment",
-            &deployment.environment,
-            &deployment.status,
-            deployment.url.as_deref(),
-        ));
-    }
-    for deployment in readiness
-        .deployments
-        .iter()
-        .filter(|deployment| deployment.is_pending())
-    {
-        lines.push(format_gate_attention(
-            "Pending deployment",
-            &deployment.environment,
-            &deployment.status,
-            deployment.url.as_deref(),
-        ));
-    }
-
-    out.push_str("\nAttention needed:\n");
-    if lines.is_empty() {
-        out.push_str("- none\n");
-    } else {
-        for line in lines {
-            out.push_str(&line);
-            out.push('\n');
-        }
-    }
-}
-
-fn append_review_entries(out: &mut String, reviews: &[PullRequestReviewEntry]) {
-    out.push_str("\nLatest reviews:\n");
-    if reviews.is_empty() {
-        out.push_str("- none\n");
-        return;
-    }
-    for review in reviews {
-        match review.body.as_deref() {
-            Some(body) => out.push_str(&format!(
-                "- {}: {} - {}\n",
-                review.author, review.state, body
-            )),
-            None => out.push_str(&format!("- {}: {}\n", review.author, review.state)),
-        }
-    }
-}
-
-fn append_comment_entries(out: &mut String, comments: &[PullRequestCommentEntry]) {
-    out.push_str("\nComments:\n");
-    if comments.is_empty() {
-        out.push_str("- none\n");
-        return;
-    }
-    for comment in comments {
-        out.push_str(&format!("- {}: {}\n", comment.author, comment.body));
-    }
-}
-
-fn review_thread_location(thread: &PullRequestReviewThread) -> String {
-    match (thread.path.as_deref(), thread.line) {
-        (Some(path), Some(line)) => format!("{path}:{line}"),
-        (Some(path), None) => path.to_owned(),
-        (None, Some(line)) => format!("line {line}"),
-        (None, None) => "unknown location".to_owned(),
-    }
-}
-
-fn format_gate_attention(prefix: &str, name: &str, status: &str, detail: Option<&str>) -> String {
-    match detail {
-        Some(detail) => format!("- {prefix} {name}: {status} - {detail}"),
-        None => format!("- {prefix} {name}: {status}"),
-    }
-}
-
-fn append_review_thread_entries(out: &mut String, threads: &[PullRequestReviewThread]) {
-    out.push_str("\nReview threads:\n");
-    if threads.is_empty() {
-        out.push_str("- none\n");
-        return;
-    }
-    for thread in threads {
-        let location = review_thread_location(thread);
-        let state = if thread.resolved {
-            "resolved"
-        } else {
-            "unresolved"
-        };
-        match thread.id.as_deref() {
-            Some(id) => out.push_str(&format!("- {location} ({state}, {id})\n")),
-            None => out.push_str(&format!("- {location} ({state})\n")),
-        }
-        if thread.comments.is_empty() {
-            out.push_str("  - no comments\n");
-        }
-        for comment in &thread.comments {
-            match comment.url.as_deref() {
-                Some(url) => out.push_str(&format!(
-                    "  - {}: {} - {}\n",
-                    comment.author, comment.body, url
-                )),
-                None => out.push_str(&format!("  - {}: {}\n", comment.author, comment.body)),
-            }
-        }
-    }
-}
-
-fn append_check_entries(out: &mut String, checks: &[PullRequestCheckRun]) {
-    out.push_str("\nChecks:\n");
-    if checks.is_empty() {
-        out.push_str("- none\n");
-        return;
-    }
-    for check in checks {
-        match check.detail.as_deref() {
-            Some(detail) => out.push_str(&format!(
-                "- {}: {} - {}\n",
-                check.name, check.status, detail
-            )),
-            None => out.push_str(&format!("- {}: {}\n", check.name, check.status)),
-        }
-    }
-}
-
-fn append_deployment_entries(out: &mut String, deployments: &[PullRequestDeployment]) {
-    out.push_str("\nDeployments:\n");
-    if deployments.is_empty() {
-        out.push_str("- none\n");
-        return;
-    }
-    for deployment in deployments {
-        match deployment.url.as_deref() {
-            Some(url) => out.push_str(&format!(
-                "- {}: {} - {}\n",
-                deployment.environment, deployment.status, url
-            )),
-            None => out.push_str(&format!(
-                "- {}: {}\n",
-                deployment.environment, deployment.status
-            )),
-        }
-    }
 }
 
 fn parse_numstat_count(value: &str) -> Option<Option<usize>> {
@@ -7270,70 +6286,6 @@ fn slugify(text: &str) -> String {
     }
 }
 
-struct LinearIssue {
-    identifier: String,
-    title: String,
-    branch_name: Option<String>,
-    url: Option<String>,
-}
-
-fn fetch_linear_issue(issue_id: &str) -> Result<LinearIssue> {
-    let api_key = std::env::var("LINEAR_API_KEY")
-        .context("LINEAR_API_KEY is required to create a workspace from a Linear issue")?;
-    let payload = format!(
-        r#"{{"query":"query Issue($id: String!) {{ issue(id: $id) {{ identifier title branchName url }} }}","variables":{{"id":"{}"}}}}"#,
-        json_escape(issue_id)
-    );
-    let output = Command::new("curl")
-        .args([
-            "-fsS",
-            "https://api.linear.app/graphql",
-            "-H",
-            "Content-Type: application/json",
-            "-H",
-            &format!("Authorization: {api_key}"),
-            "--data",
-            &payload,
-        ])
-        .output()
-        .context("run curl for Linear API")?;
-    anyhow::ensure!(
-        output.status.success(),
-        "Linear API request failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let body = String::from_utf8_lossy(&output.stdout);
-    if body.contains("\"errors\"") {
-        anyhow::bail!("Linear API returned errors: {body}");
-    }
-    let identifier = extract_json_string_field(&body, "identifier")
-        .unwrap_or_else(|| issue_id.to_ascii_uppercase());
-    let title = extract_json_string_field(&body, "title")
-        .with_context(|| format!("Linear issue {issue_id} did not include a title"))?;
-    let branch_name = extract_json_string_field(&body, "branchName");
-    let url = extract_json_string_field(&body, "url");
-    Ok(LinearIssue {
-        identifier,
-        title,
-        branch_name,
-        url,
-    })
-}
-
-fn json_escape(value: &str) -> String {
-    value
-        .chars()
-        .flat_map(|ch| match ch {
-            '\\' => "\\\\".chars().collect::<Vec<_>>(),
-            '"' => "\\\"".chars().collect(),
-            '\n' => "\\n".chars().collect(),
-            '\r' => "\\r".chars().collect(),
-            '\t' => "\\t".chars().collect(),
-            _ => vec![ch],
-        })
-        .collect()
-}
-
 fn write_context_brief(workspace_path: &Path, content: &str) -> Result<()> {
     let brief_path = workspace_path.join(".context/brief.md");
     fs::write(&brief_path, content).with_context(|| format!("write {}", brief_path.display()))
@@ -7345,6 +6297,28 @@ fn validate_workspace_name(name: &str) -> Result<()> {
         name.chars()
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_')),
         "workspace name may only contain ASCII letters, numbers, '-' and '_'"
+    );
+    Ok(())
+}
+
+fn validate_branch_name(branch: &str) -> Result<()> {
+    let branch = branch.trim();
+    anyhow::ensure!(!branch.is_empty(), "branch name is required");
+    anyhow::ensure!(
+        !branch.starts_with('-'),
+        "branch name cannot start with '-'"
+    );
+    anyhow::ensure!(
+        !branch.contains("..")
+            && !branch.contains(' ')
+            && !branch.contains('~')
+            && !branch.contains('^')
+            && !branch.contains(':')
+            && !branch.contains('?')
+            && !branch.contains('*')
+            && !branch.contains('[')
+            && !branch.contains('\\'),
+        "branch name contains unsupported characters"
     );
     Ok(())
 }
@@ -7432,9 +6406,15 @@ fn git_output_dynamic(cwd: &Path, args: &[&str]) -> Result<String> {
 
 fn ensure_clean_git_tree(cwd: &Path, label: &str) -> Result<()> {
     let status = git_output_dynamic(cwd, &["status", "--porcelain"])?;
+    let dirty = status
+        .lines()
+        .map(|line| line.get(3..).unwrap_or(line).trim())
+        .filter(|path| !path.is_empty())
+        .filter(|path| !is_conductor_context_path(path))
+        .collect::<Vec<_>>();
     anyhow::ensure!(
-        status.trim().is_empty(),
-        "{label} must be clean before Spotlight testing"
+        dirty.is_empty(),
+        "{label} requires a clean working tree; commit, stash, or discard changes first"
     );
     Ok(())
 }
@@ -9237,6 +8217,25 @@ run = "printf 'started\n'; while true; do sleep 1; done"
         store
             .append_chat_message(thread.id, "user", "hi", "user_send")
             .unwrap();
+        let launch = store.session_launch("berlin", SessionKind::Codex).unwrap();
+        let process = store
+            .record_session_process_for_thread("berlin", thread.id, &launch, exited_child_pid())
+            .unwrap();
+        store
+            .append_pty_chunk(process.id, "stdout_pty", "raw codex output\n")
+            .unwrap();
+        store
+            .append_session_events(
+                process.id,
+                vec![crate::session_event::SessionEvent::new(
+                    crate::session_event::SessionEventSource::Assistant,
+                    Some("parsed output".to_owned()),
+                    crate::session_event::SessionEventPayload::AssistantText {
+                        text: "parsed output".to_owned(),
+                    },
+                )],
+            )
+            .unwrap();
 
         let deleted = store.delete("berlin", false, false).unwrap();
 
@@ -9253,6 +8252,16 @@ run = "printf 'started\n'; while true; do sleep 1; done"
             )
             .unwrap();
         assert_eq!(orphan_threads, 0);
+        let orphan_pty_chunks: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM pty_chunks", [], |row| row.get(0))
+            .unwrap();
+        let orphan_session_events: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM session_events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(orphan_pty_chunks, 0);
+        assert_eq!(orphan_session_events, 0);
     }
 
     #[test]
@@ -10133,6 +9142,9 @@ working_directory = "apps/web"
         let second = store
             .record_terminal_process("berlin", "shell", 4243)
             .unwrap();
+        let missing = store
+            .record_terminal_process("berlin", "missing log", 4244)
+            .unwrap();
         store
             .append_terminal_process_output(
                 first.id,
@@ -10145,6 +9157,7 @@ working_directory = "apps/web"
                 "before one\nNEEDLE second\nafter one\nafter two\nafter three\n",
             )
             .unwrap();
+        fs::remove_file(&missing.log_path).unwrap();
 
         let matches = store.search_terminal_logs("berlin", "needle").unwrap();
 
@@ -10152,7 +9165,7 @@ working_directory = "apps/web"
         assert_eq!(matches[0].process_id, second.id);
         assert_eq!(matches[0].line_number, 2);
         assert_eq!(matches[0].line, "NEEDLE second");
-        assert_eq!(matches[0].context_before, Vec::<String>::new());
+        assert_eq!(matches[0].context_before, vec!["before one".to_owned()]);
         assert_eq!(
             matches[0].context_after,
             vec![
@@ -10312,6 +9325,53 @@ working_directory = "apps/web"
     }
 
     #[test]
+    fn list_terminal_summaries_includes_missing_logs_without_failing_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let older = store
+            .record_terminal_process("berlin", "older shell", 4242)
+            .unwrap();
+        let newer_missing = store
+            .record_terminal_process("berlin", "missing shell", 4243)
+            .unwrap();
+        store
+            .append_terminal_process_output(older.id, "older transcript\n")
+            .unwrap();
+        fs::remove_file(&newer_missing.log_path).unwrap();
+
+        let summaries = store.list_terminal_summaries("berlin").unwrap();
+
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries[0].process.id, newer_missing.id);
+        assert_eq!(summaries[0].line_count, 0);
+        assert_eq!(summaries[0].byte_count, 0);
+        assert_eq!(summaries[0].preview, "(missing transcript)");
+        assert_eq!(summaries[1].process.id, older.id);
+        assert_eq!(summaries[1].preview, "older transcript");
+    }
+
+    #[test]
     fn local_chat_history_summaries_include_saved_agent_sessions_newest_first() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
@@ -10396,6 +9456,79 @@ working_directory = "apps/web"
         assert_eq!(all[1].harness, Some("plan=true".to_owned()));
         assert_eq!(berlin_only.len(), 1);
         assert_eq!(berlin_only[0].process_id, berlin.id);
+    }
+
+    #[test]
+    fn local_chat_history_summaries_prefer_structured_session_events() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let session = store
+            .record_session_process(
+                "berlin",
+                &SessionLaunch {
+                    kind: SessionKind::Codex,
+                    program: PathBuf::from("codex"),
+                    args: Vec::new(),
+                    cwd: temp.path().join("workspaces/demo/berlin"),
+                    env: Vec::new(),
+                    harness_metadata: None,
+                    session_resume_id: None,
+                },
+                exited_child_pid(),
+            )
+            .unwrap();
+        store
+            .append_session_events(
+                session.id,
+                vec![
+                    SessionEvent::new(
+                        SessionEventSource::User,
+                        None,
+                        SessionEventPayload::UserInput {
+                            text: "run tests".to_owned(),
+                            kind: crate::session_event::SessionInputKind::User,
+                        },
+                    ),
+                    SessionEvent::new(
+                        SessionEventSource::Assistant,
+                        None,
+                        SessionEventPayload::AssistantText {
+                            text: "tests passed".to_owned(),
+                        },
+                    ),
+                ],
+            )
+            .unwrap();
+
+        let summaries = store.list_local_chat_history(None).unwrap();
+        let messages = store.local_chat_history_messages(session.id).unwrap();
+
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].process_id, session.id);
+        assert_eq!(summaries[0].message_count, 2);
+        assert_eq!(summaries[0].preview, "tests passed");
+        assert_eq!(messages.len(), 2);
     }
 
     #[test]
@@ -12957,11 +12090,17 @@ general = "Keep changes focused."
                     path: "README.md".to_owned(),
                     additions: Some(1),
                     deletions: Some(0),
+                    staged: false,
+                    unstaged: true,
+                    untracked: false,
                 },
                 DiffFileSummary {
                     path: "notes.txt".to_owned(),
                     additions: Some(1),
                     deletions: Some(0),
+                    staged: false,
+                    unstaged: false,
+                    untracked: true,
                 },
             ]
         );
@@ -13142,6 +12281,75 @@ deploy\tpending\t10s\thttps://github.com/example/demo/actions/3
         assert!(text.contains("unit: FAILURE - https://github.com/example/demo/actions/runs/1"));
         assert!(text.contains("lint: SUCCESS - https://github.com/example/demo/actions/runs/2"));
         assert!(text.contains("Preview: SUCCESS - https://preview.example.com"));
+    }
+
+    #[test]
+    fn github_pull_request_parsing_is_extracted_from_workspace_store() {
+        let source = include_str!("workspace.rs");
+        let parser_fn = concat!("fn ", "parse_pull_request_readiness(");
+        let formatter_fn = concat!("fn ", "format_pull_request_readiness(");
+
+        assert!(
+            !source.contains(parser_fn),
+            "GitHub PR parsing should live outside the workspace store module"
+        );
+        assert!(
+            !source.contains(formatter_fn),
+            "GitHub PR readiness formatting should live outside the workspace store module"
+        );
+    }
+
+    #[test]
+    fn terminal_log_aggregation_is_extracted_from_workspace_store() {
+        let source = include_str!("workspace.rs");
+        let preview_fn = concat!("fn ", "terminal_log_preview(");
+        let search_context_const = concat!("const ", "TERMINAL_SEARCH_CONTEXT_LINES");
+        let match_struct = concat!("struct ", "TerminalLogMatch");
+
+        assert!(
+            !source.contains(preview_fn),
+            "terminal log preview formatting should live outside the workspace store module"
+        );
+        assert!(
+            !source.contains(search_context_const),
+            "terminal search context policy should live outside the workspace store module"
+        );
+        assert!(
+            !source.contains(match_struct),
+            "terminal search result types should live outside the workspace store module"
+        );
+    }
+
+    #[test]
+    fn local_chat_parsing_is_extracted_from_workspace_store() {
+        let source = include_str!("workspace.rs");
+        let transcript_parser = concat!("fn ", "parse_local_chat_transcript(");
+        let event_mapper = concat!("fn ", "session_events_to_local_chat_messages(");
+        let agent_classifier = concat!("fn ", "local_chat_agent_type(");
+
+        assert!(
+            !source.contains(transcript_parser),
+            "local chat transcript parsing should live outside the workspace store module"
+        );
+        assert!(
+            !source.contains(event_mapper),
+            "local chat event mapping should live outside the workspace store module"
+        );
+        assert!(
+            !source.contains(agent_classifier),
+            "local chat agent classification should live outside the workspace store module"
+        );
+    }
+
+    #[test]
+    fn context_todo_parsing_is_extracted_from_workspace_store() {
+        let source = include_str!("workspace.rs");
+        let parser_fn = concat!("fn ", "parse_context_todos(");
+
+        assert!(
+            !source.contains(parser_fn),
+            "context todo markdown parsing should live outside the workspace store module"
+        );
     }
 
     #[test]
@@ -14493,6 +13701,47 @@ exit 1
         let summary = store.checks_summary("berlin").unwrap();
         assert_eq!(summary.total_todos, 1);
         assert_eq!(summary.open_todos, 0);
+    }
+
+    #[test]
+    fn sync_todos_from_context_updates_existing_context_todo_status() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let todos_path = workspace.path.join(".context/todos.md");
+
+        fs::write(&todos_path, "- [ ] finish parser\n").unwrap();
+        assert_eq!(store.sync_todos_from_context("berlin").unwrap(), 1);
+        assert_eq!(store.checks_summary("berlin").unwrap().open_todos, 1);
+
+        fs::write(&todos_path, "- [x] finish parser\n").unwrap();
+        assert_eq!(store.sync_todos_from_context("berlin").unwrap(), 0);
+
+        let todos = store.list_todos("berlin").unwrap();
+        assert_eq!(todos.len(), 1);
+        assert_eq!(todos[0].status, "done");
+        assert_eq!(store.checks_summary("berlin").unwrap().open_todos, 0);
     }
 
     #[test]
@@ -15858,6 +15107,184 @@ spotlight_testing = true
     }
 
     #[test]
+    fn diff_file_summaries_include_staged_unstaged_and_untracked_changes() {
+        let (_temp, store) = test_workspace_store();
+        let workspace = store.get_by_name("berlin").unwrap();
+        fs::write(workspace.path.join("README.md"), "staged change\n").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&workspace.path)
+            .args(["add", "README.md"])
+            .status()
+            .unwrap();
+        fs::write(
+            workspace.path.join("README.md"),
+            "staged change\nunstaged change\n",
+        )
+        .unwrap();
+        fs::write(workspace.path.join("new.txt"), "untracked\n").unwrap();
+
+        let summaries = store.diff_file_summaries("berlin").unwrap();
+
+        assert!(summaries.iter().any(|summary| {
+            summary.path == "README.md" && summary.staged && summary.unstaged && !summary.untracked
+        }));
+        assert!(summaries.iter().any(|summary| {
+            summary.path == "new.txt" && !summary.staged && !summary.unstaged && summary.untracked
+        }));
+        let changed = store.changed_files("berlin").unwrap();
+        assert!(changed.iter().any(|path| path == "README.md"));
+        assert!(changed.iter().any(|path| path == "new.txt"));
+    }
+
+    #[test]
+    fn diff_file_summaries_include_deleted_and_renamed_changes() {
+        let (_temp, store) = test_workspace_store();
+        let workspace = store.get_by_name("berlin").unwrap();
+        fs::write(workspace.path.join("delete-me.txt"), "delete me\n").unwrap();
+        fs::write(workspace.path.join("rename-me.txt"), "rename me\n").unwrap();
+        let add_status = Command::new("git")
+            .arg("-C")
+            .arg(&workspace.path)
+            .args(["add", "delete-me.txt", "rename-me.txt"])
+            .status()
+            .unwrap();
+        assert!(add_status.success(), "git add failed: {add_status:?}");
+        let commit_status = Command::new("git")
+            .arg("-C")
+            .arg(&workspace.path)
+            .args([
+                "-c",
+                "user.name=Linux Archductor",
+                "-c",
+                "user.email=linux-archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "add tracked files",
+            ])
+            .status()
+            .unwrap();
+        assert!(
+            commit_status.success(),
+            "git commit failed: {commit_status:?}"
+        );
+        let rm_status = Command::new("git")
+            .arg("-C")
+            .arg(&workspace.path)
+            .args(["rm", "delete-me.txt"])
+            .status()
+            .unwrap();
+        assert!(rm_status.success(), "git rm failed: {rm_status:?}");
+        let mv_status = Command::new("git")
+            .arg("-C")
+            .arg(&workspace.path)
+            .args(["mv", "rename-me.txt", "renamed.txt"])
+            .status()
+            .unwrap();
+        assert!(mv_status.success(), "git mv failed: {mv_status:?}");
+
+        let summaries = store.diff_file_summaries("berlin").unwrap();
+        assert!(summaries.iter().any(|summary| {
+            summary.path == "delete-me.txt" && summary.deletions.unwrap_or_default() > 0
+        }));
+        assert!(summaries
+            .iter()
+            .any(|summary| summary.path.contains("rename-me.txt")
+                && summary.path.contains("renamed.txt")));
+        let changed = store.changed_files("berlin").unwrap();
+        assert!(changed.iter().any(|path| path == "delete-me.txt"));
+        assert!(changed
+            .iter()
+            .any(|path| path.contains("rename-me.txt") && path.contains("renamed.txt")));
+    }
+
+    #[test]
+    fn workspace_timeline_records_lifecycle_branch_session_and_pr_events() {
+        let (_temp, store) = test_workspace_store();
+        let launch = store.session_launch("berlin", SessionKind::Shell).unwrap();
+        let process = store
+            .record_session_process("berlin", &launch, exited_child_pid())
+            .unwrap();
+        store.stop_session_process("berlin", process.id).unwrap();
+        store.rename_branch("berlin", "lc/renamed").unwrap();
+        let workspace = store.archive("berlin", false).unwrap();
+        store
+            .record_pull_request(workspace.id, "https://github.com/example/demo/pull/42")
+            .unwrap();
+
+        let events = store.workspace_timeline("berlin", None).unwrap();
+        let kinds = events
+            .iter()
+            .map(|event| event.kind.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(kinds.contains(&"workspace.created"));
+        assert!(kinds.contains(&"session.started"));
+        assert!(kinds.contains(&"session.stopped"));
+        assert!(kinds.contains(&"branch.renamed"));
+        assert!(kinds.contains(&"workspace.archived"));
+        assert!(kinds.contains(&"pr.created"));
+        assert!(kinds.contains(&"commit.created"));
+        assert!(events.windows(2).all(|pair| pair[0].id < pair[1].id));
+        assert!(events.iter().all(|event| !event.created_at.is_empty()));
+
+        let commit_count = events
+            .iter()
+            .filter(|event| event.kind == "commit.created")
+            .count();
+        let reread_commit_count = store
+            .workspace_timeline("berlin", Some("commit.created"))
+            .unwrap()
+            .len();
+        assert_eq!(reread_commit_count, commit_count);
+    }
+
+    #[test]
+    fn duplicate_workspace_creates_new_worktree_from_selected_branch() {
+        let (_temp, store) = test_workspace_store();
+
+        let copy = store
+            .duplicate("berlin", "oslo", Some("lc/oslo-copy"))
+            .unwrap();
+
+        assert_eq!(copy.name, "oslo");
+        assert_eq!(copy.branch, "lc/oslo-copy");
+        assert!(copy.path.exists());
+        assert!(copy.path.join(".context/brief.md").exists());
+        let events = store.workspace_timeline("oslo", None).unwrap();
+        assert!(events
+            .iter()
+            .any(|event| event.kind == "workspace.duplicated"));
+    }
+
+    #[test]
+    fn branch_actions_are_scoped_to_workspace_and_preserve_metadata() {
+        let (_temp, store) = test_workspace_store();
+
+        store.create_branch("berlin", "lc/feature").unwrap();
+        store.create_branch("berlin", "lc/other").unwrap();
+        store.checkout_branch("berlin", "lc/feature").unwrap();
+        let checked_out = store.get_by_name("berlin").unwrap();
+        assert_eq!(checked_out.branch, "lc/feature");
+
+        store.rename_branch("berlin", "lc/feature-renamed").unwrap();
+        let renamed = store.get_by_name("berlin").unwrap();
+        assert_eq!(renamed.branch, "lc/feature-renamed");
+
+        let err = store
+            .delete_branch("berlin", "lc/feature-renamed")
+            .unwrap_err();
+        assert!(err.to_string().contains("current workspace branch"));
+
+        store.checkout_branch("berlin", "lc/other").unwrap();
+        store.delete_branch("berlin", "lc/feature-renamed").unwrap();
+        let branches = git_output(&renamed.path, ["branch", "--list", "lc/feature-renamed"]);
+        assert!(branches.trim().is_empty());
+    }
+
+    #[test]
     fn slugify_converts_to_kebab_case() {
         assert_eq!(slugify("Add search feature"), "add-search-feature");
         assert_eq!(slugify("Fix: weird  spaces"), "fix-weird-spaces");
@@ -16022,6 +15449,28 @@ spotlight_testing = true
         assert_eq!(
             format_codex_screen_snapshot("hello\n"),
             "[codex screen]\nhello\n[/codex screen]\n"
+        );
+    }
+
+    #[test]
+    fn workspace_store_delegates_schema_migration_to_storage_module() {
+        let source = include_str!("workspace.rs");
+        let create_table_marker = concat!("CREATE TABLE", " IF NOT EXISTS");
+
+        assert!(source.contains("crate::storage::migrate_workspace_db(&self.conn)"));
+        assert!(
+            !source.contains(create_table_marker),
+            "workspace store should not own schema DDL"
+        );
+    }
+
+    #[test]
+    fn git_review_service_boundary_exists_for_pr_review_flows() {
+        let git_review_service =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/git_review_service.rs");
+        assert!(
+            git_review_service.exists(),
+            "git/review flows need a narrow service boundary outside the WorkspaceStore monolith"
         );
     }
 }

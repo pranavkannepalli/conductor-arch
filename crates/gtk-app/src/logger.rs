@@ -180,12 +180,5 @@ pub(crate) fn write_pty_screen_snapshot(source: &str, process_id: i64, screen: &
 }
 
 fn pty_screen_snapshot_logging_enabled() -> bool {
-    std::env::var("ARCHDUCTOR_LOG_PTY_SCREENS")
-        .map(|value| {
-            matches!(
-                value.as_str(),
-                "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
-            )
-        })
-        .unwrap_or(false)
+    linux_archductor_core::env_flags::enabled("ARCHDUCTOR_LOG_PTY_SCREENS")
 }

@@ -94,6 +94,12 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] Confirm two workspaces in the same repository receive different
   `ARCHDUCTOR_PORT` ranges.
 - [ ] Confirm branch/worktree conflicts are surfaced clearly.
+- [ ] From the workspace Branch tab, create a new branch, check it out, rename
+  it, switch away from it, and delete it after checking Confirm delete.
+- [ ] Repeat the same branch flow through
+  `linux-archductor workspace branch <workspace> create|checkout|rename|delete`.
+- [ ] Confirm dirty working trees and branch collisions show actionable branch
+  errors in the GTK Branch tab and CLI.
 
 ## Agent Sessions And Terminal
 
@@ -202,6 +208,9 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] Make a small change in a workspace.
 - [ ] Confirm Changes shows git status, recent commits, changed-file list,
   additions/deletions, and a file diff.
+- [ ] Confirm Changes includes staged-only files, unstaged files, and untracked
+  files in the changed-file summary, with staged/unstaged/untracked state
+  labels.
 - [ ] Add a local review comment.
 - [ ] Resolve a local review comment.
 - [ ] Revert a tracked changed file from the UI.
@@ -247,6 +256,11 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] Merge the PR with squash, merge, or rebase.
 - [ ] Confirm `archive_on_merge = true` archives after merge.
 - [ ] Archive, restore, rename, and discard workspaces from the GUI.
+- [ ] Duplicate a workspace from the GUI and confirm the new workspace has its
+  own branch, worktree, `.context` files, and timeline entry.
+- [ ] Duplicate a workspace with
+  `linux-archductor workspace duplicate <source> <new-name> --branch <branch>`
+  and confirm it appears in active workspace lists.
 - [ ] Repeat the create-work-review-merge-archive loop for the same repository.
 
 ## History And Navigation
@@ -254,6 +268,11 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] Sidebar search finds repositories and workspaces.
 - [ ] Dashboard groups active and archived workspaces.
 - [ ] History shows archived workspaces.
+- [ ] Workspace Timeline tab shows creation, branch changes, session
+  start/stop, PR creation, archive/restore/delete, push, and check refresh
+  events in timestamp order.
+- [ ] Run `linux-archductor workspace timeline <workspace>` and confirm it
+  matches the GTK Timeline tab; repeat with `--kind branch.renamed`.
 - [ ] Start a local Shell/Codex/Claude/Cursor session, send at least one
   composer message, refresh History, and confirm the saved Linux session appears.
 - [ ] Run `linux-archductor history list --workspace <name>` and confirm the
