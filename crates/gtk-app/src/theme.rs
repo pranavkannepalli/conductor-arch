@@ -3,9 +3,23 @@ pub(crate) fn app_css() -> &'static str {
 }
 
 const APP_CSS: &str = r#"
+@define-color lc-bg #191919;
+@define-color lc-surface #1e1e1e;
+@define-color lc-surface-raised #202020;
+@define-color lc-surface-muted #181818;
+@define-color lc-hover #2a2a2a;
+@define-color lc-hover-soft #242424;
+@define-color lc-border #2a2a2a;
+@define-color lc-border-strong #3a3a3a;
+@define-color lc-text #e4e4e4;
+@define-color lc-text-strong #f8fafc;
+@define-color lc-text-muted #8a8a8a;
+@define-color lc-success #84e0a0;
+@define-color lc-danger #ff8a8a;
+
 window {
-    background-color: #191919;
-    color: #e4e4e4;
+    background-color: @lc-bg;
+    color: @lc-text;
     font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", "Cantarell", "Noto Sans", sans-serif;
 }
 
@@ -42,8 +56,8 @@ textview,
 .dashboard,
 .page-shell,
 .history-view {
-    background-color: #191919;
-    color: #e4e4e4;
+    background-color: @lc-bg;
+    color: @lc-text;
 }
 
 .page-header,
@@ -105,8 +119,8 @@ textview,
 }
 
 .sidebar {
-    background-color: #202020;
-    border-right: 1px solid #2a2a2a;
+    background-color: @lc-surface-raised;
+    border-right: 1px solid @lc-border;
     padding-top: 10px;
 }
 
@@ -254,13 +268,13 @@ textview:disabled {
 }
 
 .workspace-list row:hover {
-    background-color: #2c2c2c;
+    background-color: @lc-hover;
 }
 
 .workspace-list row:hover .workspace-row-shell {
-    background-color: #242424;
-    border-color: #3a3a3a;
-    padding-right: 4px;
+    background-color: @lc-hover-soft;
+    border-color: @lc-border-strong;
+    padding-right: 14px;
 }
 
 .workspace-row-shell,
@@ -277,16 +291,16 @@ textview:disabled {
 }
 
 .workspace-row-diff-added {
-    color: #84e0a0;
+    color: @lc-success;
 }
 
 .workspace-row-diff-removed {
-    color: #ff8a8a;
+    color: @lc-danger;
 }
 
 .workspace-row-branch-icon {
     min-width: 14px;
-    color: #7e7e7e;
+    color: @lc-text-muted;
 }
 
 .workspace-name {
@@ -688,15 +702,15 @@ separator {
 
 .repo-section-icon,
 .workspace-row-icon {
-    color: #8a8a8a;
+    color: @lc-text-muted;
 }
 
 .workspace-row-icon-active {
-    color: #aaaaaa;
+    color: @lc-text;
 }
 
 .repo-section-header {
-    color: #c8c8c8;
+    color: @lc-text;
     font-size: 13px;
     font-weight: 500;
     letter-spacing: 0;
@@ -704,7 +718,7 @@ separator {
 }
 
 .repo-section-count {
-    color: #8a8a8a;
+    color: @lc-text-muted;
     font-size: 13px;
 }
 
@@ -712,12 +726,12 @@ separator {
     min-width: 24px;
     min-height: 24px;
     padding: 0;
-    color: #8a8a8a;
+    color: @lc-text-muted;
     border: none;
 }
 
 .repo-header-add:hover {
-    color: #e4e4e4;
+    color: @lc-text;
 }
 
 .settings-cta {
@@ -1367,17 +1381,17 @@ window.lc-theme-dark,
 .repo-section-header {
     font-size: 12px;
     font-weight: 600;
-    color: #e4e4e4;
+    color: @lc-text;
     letter-spacing: 0;
 }
 .repo-section-icon {
     min-width: 14px;
-    color: #8a8a8a;
+    color: @lc-text-muted;
 }
 
 /* ── Updated workspace row shell ── */
 .workspace-row-shell {
-    padding: 7px 4px 7px 10px;
+    padding: 7px 14px 7px 10px;
 }
 
 .sidebar-icon-button {
@@ -2300,9 +2314,9 @@ window,
 .history-row,
 .project-row,
 .workspace-row-shell {
-    background-color: #181818;
-    border-color: #2b2b2b;
-    color: #f8fafc;
+    background-color: @lc-surface-muted;
+    border-color: @lc-border;
+    color: @lc-text-strong;
 }
 
 .chat-composer-box,
@@ -2407,8 +2421,8 @@ window,
 .nav-button:hover,
 .nav-row:hover,
 .chat-menu-item:hover {
-    background-color: #2a2a2a;
-    color: #f8fafc;
+    background-color: @lc-hover;
+    color: @lc-text-strong;
 }
 
 .nav-row-active,
@@ -2606,9 +2620,12 @@ textview:focus,
 .chat-menu-item-icon,
 .chat-focus-btn image,
 .chat-toolbar-btn image,
-.sidebar-nav-icon,
-.workspace-row-branch-icon {
+.sidebar-nav-icon {
     color: #93c5fd;
+}
+
+.workspace-row-branch-icon {
+    color: @lc-text-muted;
 }
 
 .ws-check-icon-active,
