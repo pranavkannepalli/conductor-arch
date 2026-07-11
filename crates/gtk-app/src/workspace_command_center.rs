@@ -426,10 +426,13 @@ fn ws_center_panel(
     let known_threads = Rc::new(RefCell::new(
         store.list_chat_threads(&ws.name).unwrap_or_default(),
     ));
-    let selected_thread =
-        Rc::new(RefCell::new(state.selected_chat_thread().or_else(|| {
-            known_threads.borrow().first().map(|thread| thread.id)
-        })));
+    let selected_thread = Rc::new(RefCell::new(state.selected_chat_thread().or_else(|| {
+        known_threads
+            .borrow()
+            .iter()
+            .find(|thread| workspace_chat_thread_is_visible(thread))
+            .map(|thread| thread.id)
+    })));
     if state.selected_chat_thread().is_none() {
         state.set_selected_chat_thread(*selected_thread.borrow());
     }
@@ -451,7 +454,11 @@ fn ws_center_panel(
             while let Some(child) = chat_tabs.first_child() {
                 chat_tabs.remove(&child);
             }
-            for thread in threads.iter().take(10) {
+            for thread in threads
+                .iter()
+                .filter(|thread| workspace_chat_thread_is_visible(thread))
+                .take(10)
+            {
                 let button = ws_tab_button(&workspace_chat_tab_label(thread));
                 if Some(thread.id) == selected {
                     button.add_css_class("ws-tab-active");
@@ -505,16 +512,21 @@ fn ws_center_panel(
         let content = content.clone();
         add_tab_btn.connect_clicked(move |_| {
             let existing = { known_threads.borrow().clone() };
-            if existing.len() >= 10 {
+            let visible_existing = existing
+                .iter()
+                .filter(|thread| workspace_chat_thread_is_visible(thread))
+                .cloned()
+                .collect::<Vec<_>>();
+            if visible_existing.len() >= 10 {
                 return;
             }
             let active_thread = *selected_thread.borrow();
-            let provider = existing
+            let provider = visible_existing
                 .iter()
                 .find(|thread| Some(thread.id) == active_thread)
                 .map(|thread| thread.provider.clone())
                 .unwrap_or_else(|| "codex".to_owned());
-            let title = workspace_chat_default_title(&existing);
+            let title = workspace_chat_default_title(&visible_existing);
             let Ok(store) = WorkspaceStore::open(db_path.clone()) else {
                 return;
             };
@@ -637,7 +649,11 @@ fn ws_tab_button(label: &str) -> Button {
 }
 
 fn workspace_chat_default_title(threads: &[ChatThreadRecord]) -> String {
-    let next = threads.len() + 1;
+    let next = threads
+        .iter()
+        .filter(|thread| workspace_chat_thread_is_visible(thread))
+        .count()
+        + 1;
     if next == 1 {
         "New Chat".to_owned()
     } else {
@@ -652,6 +668,10 @@ fn workspace_chat_tab_label(thread: &ChatThreadRecord) -> String {
     } else {
         title.to_owned()
     }
+}
+
+fn workspace_chat_thread_is_visible(thread: &ChatThreadRecord) -> bool {
+    matches!(thread.provider.as_str(), "codex" | "claude")
 }
 
 fn guarded_gtk_callback<T, F>(fallback: T, callback: F) -> T
@@ -5767,6 +5787,38 @@ mod tests {
             }]),
             "New Chat 2"
         );
+    }
+
+    #[test]
+    fn workspace_chat_tabs_hide_shell_threads() {
+        let shell = ChatThreadRecord {
+            id: 1,
+            workspace_id: 2,
+            provider: "shell".to_owned(),
+            title: "Shell Chat 1".to_owned(),
+            status: "active".to_owned(),
+            native_thread_id: None,
+            harness_metadata: None,
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+            archived_at: None,
+        };
+        let codex = ChatThreadRecord {
+            id: 2,
+            workspace_id: 2,
+            provider: "codex".to_owned(),
+            title: "New Chat".to_owned(),
+            status: "active".to_owned(),
+            native_thread_id: None,
+            harness_metadata: None,
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+            archived_at: None,
+        };
+
+        assert!(!workspace_chat_thread_is_visible(&shell));
+        assert!(workspace_chat_thread_is_visible(&codex));
+        assert_eq!(workspace_chat_default_title(&[shell]), "New Chat");
     }
 
     #[test]
