@@ -7,6 +7,7 @@ use gtk::{
     WrapMode,
 };
 use linux_archductor_core::archcar::protocol::{ArchcarInputKind, ArchcarRequest};
+use linux_archductor_core::doctor::SetupReadiness;
 use linux_archductor_core::paths::AppPaths;
 use linux_archductor_core::workspace::{
     ChatThreadRecord, DiffFileSummary, ProcessRecord, ProcessStatus, PullRequest,
@@ -734,7 +735,7 @@ fn ws_center_panel(
                 .iter()
                 .find(|thread| Some(thread.id) == active_thread)
                 .map(|thread| thread.provider.clone())
-                .unwrap_or_else(|| "codex".to_owned());
+                .unwrap_or_else(default_launchable_chat_provider);
             let title = workspace_chat_default_title(&visible_existing);
             let Ok(store) = WorkspaceStore::open(db_path.clone()) else {
                 return;
@@ -1056,6 +1057,13 @@ fn workspace_chat_thread_is_reopenable(thread: &ChatThreadRecord) -> bool {
 
 fn workspace_chat_thread_is_supported(thread: &ChatThreadRecord) -> bool {
     matches!(thread.provider.as_str(), "codex" | "claude")
+}
+
+fn default_launchable_chat_provider() -> String {
+    SetupReadiness::from_host()
+        .first_ready_launchable_provider()
+        .unwrap_or("codex")
+        .to_owned()
 }
 
 fn close_workspace_chat_thread(

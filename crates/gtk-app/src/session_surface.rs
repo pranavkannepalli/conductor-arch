@@ -12,6 +12,7 @@ use linux_archductor_core::codex_tui::{
     CodexFileReference as CoreCodexFileReference, CodexInlineEvent as CoreCodexInlineEvent,
     CodexTranscriptEvent, ScreenMessage, ScreenMessageRole,
 };
+use linux_archductor_core::doctor::SetupReadiness;
 #[cfg(test)]
 use linux_archductor_core::session_state::AgentSessionState;
 use linux_archductor_core::workspace::{
@@ -197,7 +198,8 @@ pub fn agent_session_panel(
         ));
     }
 
-    let selected_harness = Rc::new(RefCell::new(SessionKind::Codex));
+    let initial_harness = initial_chat_harness_from_setup();
+    let selected_harness = Rc::new(RefCell::new(initial_harness));
     let selected_model = Rc::new(RefCell::new(None::<String>));
     let reasoning_mode = Rc::new(RefCell::new(Some("high".to_owned())));
     let thread_state = Rc::new(RefCell::new(Vec::<ChatThreadRecord>::new()));
@@ -309,36 +311,42 @@ pub fn agent_session_panel(
     let left_group = GBox::new(Orientation::Horizontal, 8);
     left_group.set_hexpand(true);
 
-    let interface_btn = mode_menu_button("Codex", "code-symbolic", &["Codex", "Claude"], 0, {
-        let selected_harness = selected_harness.clone();
-        let reasoning_mode = reasoning_mode.clone();
-        let refresh_chat_surface = refresh_chat_surface.clone();
-        let switch_chat_harness = switch_chat_harness.clone();
-        let selected_model = selected_model.clone();
-        let pending_commands = pending_commands.clone();
-        let selected_thread = selected_thread.clone();
-        let sync_live_controls = sync_live_controls.clone();
-        Rc::new(move |index| {
-            let kind = session_kind_from_index(index);
-            select_harness_and_dispatch(
-                selected_harness.as_ref(),
-                reasoning_mode.as_ref(),
-                kind,
-                switch_chat_harness.borrow().as_ref(),
-                refresh_chat_surface.borrow().as_ref(),
-                None,
-            );
-            *selected_model.borrow_mut() = None;
-            if kind != SessionKind::Codex {
-                if let Some(thread_id) = *selected_thread.borrow() {
-                    pending_commands.borrow_mut().remove(&thread_id);
+    let interface_btn = mode_menu_button(
+        session_kind_name(initial_harness),
+        "code-symbolic",
+        &["Codex", "Claude"],
+        session_kind_index(initial_harness),
+        {
+            let selected_harness = selected_harness.clone();
+            let reasoning_mode = reasoning_mode.clone();
+            let refresh_chat_surface = refresh_chat_surface.clone();
+            let switch_chat_harness = switch_chat_harness.clone();
+            let selected_model = selected_model.clone();
+            let pending_commands = pending_commands.clone();
+            let selected_thread = selected_thread.clone();
+            let sync_live_controls = sync_live_controls.clone();
+            Rc::new(move |index| {
+                let kind = session_kind_from_index(index);
+                select_harness_and_dispatch(
+                    selected_harness.as_ref(),
+                    reasoning_mode.as_ref(),
+                    kind,
+                    switch_chat_harness.borrow().as_ref(),
+                    refresh_chat_surface.borrow().as_ref(),
+                    None,
+                );
+                *selected_model.borrow_mut() = None;
+                if kind != SessionKind::Codex {
+                    if let Some(thread_id) = *selected_thread.borrow() {
+                        pending_commands.borrow_mut().remove(&thread_id);
+                    }
                 }
-            }
-            if let Some(sync) = sync_live_controls.borrow().as_ref().cloned() {
-                sync();
-            }
-        })
-    });
+                if let Some(sync) = sync_live_controls.borrow().as_ref().cloned() {
+                    sync();
+                }
+            })
+        },
+    );
     let model_btn = mode_menu_button("Default", "M", &["Default", "gpt-5", "gpt-5-mini"], 0, {
         let selected_model = selected_model.clone();
         let selected_harness = selected_harness.clone();
@@ -1047,6 +1055,15 @@ pub fn agent_session_panel(
             }
         }
         let selected_kind = *selected_harness_for_send.borrow();
+        if let Some(message) = selected_provider_blocker_message(selected_kind) {
+            let error = Label::new(Some(&message));
+            error.add_css_class("chat-agent-text");
+            error.set_selectable(true);
+            error.set_wrap(true);
+            error.set_xalign(0.0);
+            append_revealed(&messages_for_send, &error);
+            return;
+        }
         info!(
             workspace = %workspace_for_send,
             harness = ?selected_kind,
@@ -1559,6 +1576,10 @@ pub fn agent_session_panel(
         let update_composer_state = update_composer_state.clone();
         move |_| {
             let kind = *selected_harness.borrow();
+            if selected_provider_blocker_message(kind).is_some() {
+                error!(workspace = %workspace_name, harness = ?kind, "refusing to create chat for unready provider");
+                return;
+            }
             let title = default_chat_thread_title(kind, &thread_state.borrow());
             match WorkspaceStore::open(database_path.clone()).and_then(|store| {
                 store.create_chat_thread(
@@ -2853,6 +2874,34 @@ fn session_kind_from_index(index: usize) -> SessionKind {
         1 => SessionKind::Claude,
         _ => SessionKind::Codex,
     }
+}
+
+fn session_kind_index(kind: SessionKind) -> usize {
+    match kind {
+        SessionKind::Claude => 1,
+        _ => 0,
+    }
+}
+
+fn initial_chat_harness_from_setup() -> SessionKind {
+    match SetupReadiness::from_host().first_ready_launchable_provider() {
+        Some("claude") => SessionKind::Claude,
+        _ => SessionKind::Codex,
+    }
+}
+
+fn selected_provider_blocker_message(kind: SessionKind) -> Option<String> {
+    if matches!(kind, SessionKind::Shell) {
+        return None;
+    }
+    let readiness = SetupReadiness::from_host();
+    let provider = session_kind_provider(kind);
+    (!readiness.provider_ready(provider)).then(|| {
+        format!(
+            "{} is not ready. Sign in or install it, then recheck setup before starting a chat.",
+            session_kind_name(kind)
+        )
+    })
 }
 
 fn session_reasoning_mode_from_index(index: usize) -> String {

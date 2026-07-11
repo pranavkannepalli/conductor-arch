@@ -1,7 +1,7 @@
 use adw::ApplicationWindow;
 use gtk::prelude::*;
 use gtk::{Box as GBox, Label, LinkButton, Orientation};
-use linux_archductor_core::doctor::{setup_blockers, SetupBlocker, SetupReadiness};
+use linux_archductor_core::doctor::{setup_blockers, SetupBlocker, SetupCheck, SetupReadiness};
 
 use crate::buttons::text_button;
 
@@ -107,34 +107,40 @@ fn render_setup_status(container: &GBox, readiness: &SetupReadiness) {
     }
     container.append(&setup_status_row(
         "GitHub CLI",
-        "Required for GitHub projects, PRs, and checks",
-        readiness.gh_installed,
+        &readiness.gh.detail,
+        &readiness.gh,
         true,
     ));
     container.append(&setup_status_row(
         "Codex",
-        "Agent option",
-        readiness.codex_installed,
+        &readiness.codex.detail,
+        &readiness.codex,
         false,
     ));
     container.append(&setup_status_row(
         "Claude",
-        "Agent option",
-        readiness.claude_installed,
+        &readiness.claude.detail,
+        &readiness.claude,
         false,
     ));
     container.append(&setup_status_row(
         "OpenCode",
-        "Agent option",
-        readiness.opencode_installed,
+        &readiness.opencode.detail,
+        &readiness.opencode,
         false,
+    ));
+    container.append(&setup_status_row(
+        "Selected provider",
+        &selected_provider_detail(readiness),
+        &selected_provider_check(readiness),
+        true,
     ));
 }
 
-fn setup_status_row(name: &str, detail: &str, installed: bool, required: bool) -> GBox {
+fn setup_status_row(name: &str, detail: &str, check: &SetupCheck, required: bool) -> GBox {
     let row = GBox::new(Orientation::Horizontal, 10);
     row.add_css_class("setup-status-row");
-    row.add_css_class(if installed {
+    row.add_css_class(if check.ready {
         "setup-status-ready"
     } else if required {
         "setup-status-missing-required"
@@ -142,7 +148,13 @@ fn setup_status_row(name: &str, detail: &str, installed: bool, required: bool) -
         "setup-status-missing"
     });
 
-    let state = Label::new(Some(if installed { "Ready" } else { "Missing" }));
+    let state = Label::new(Some(if check.ready {
+        "Ready"
+    } else if check.installed {
+        "Action"
+    } else {
+        "Missing"
+    }));
     state.add_css_class("setup-status-pill");
     row.append(&state);
 
@@ -165,12 +177,32 @@ fn setup_status_row(name: &str, detail: &str, installed: bool, required: bool) -
 fn setup_feedback(readiness: &SetupReadiness) -> String {
     match setup_blockers(readiness).as_slice() {
         [] => "Setup is complete.".to_owned(),
-        [SetupBlocker::MissingGithubCli] => "Install GitHub CLI, then press Recheck.".to_owned(),
-        [SetupBlocker::MissingAgent] => {
-            "Install Codex, Claude, or OpenCode, then press Recheck.".to_owned()
+        [SetupBlocker::GithubUnavailable] => {
+            "Authenticate GitHub CLI, then press Recheck.".to_owned()
         }
-        _ => "Install GitHub CLI and at least one agent, then press Recheck.".to_owned(),
+        [SetupBlocker::MissingAgent] => {
+            "Sign in to Codex, Claude, or OpenCode, then press Recheck.".to_owned()
+        }
+        [SetupBlocker::SelectedProviderUnavailable] => {
+            "Choose a ready provider or sign in to the selected provider, then press Recheck."
+                .to_owned()
+        }
+        _ => "Authenticate GitHub CLI and at least one agent, then press Recheck.".to_owned(),
     }
+}
+
+fn selected_provider_check(readiness: &SetupReadiness) -> SetupCheck {
+    match readiness.first_ready_launchable_provider() {
+        Some(provider) => SetupCheck::ready(format!("{provider} will be selected for new chats.")),
+        None if readiness.opencode.ready => SetupCheck::blocked(
+            "OpenCode is ready, but this build cannot launch OpenCode chat sessions yet.",
+        ),
+        None => SetupCheck::missing("No launchable chat provider is ready."),
+    }
+}
+
+fn selected_provider_detail(readiness: &SetupReadiness) -> String {
+    selected_provider_check(readiness).detail
 }
 
 #[cfg(test)]
@@ -180,30 +212,50 @@ mod tests {
     #[test]
     fn setup_feedback_summarizes_missing_github_cli() {
         let readiness = SetupReadiness {
-            gh_installed: false,
-            codex_installed: true,
-            claude_installed: false,
-            opencode_installed: false,
+            gh: SetupCheck::missing("missing"),
+            codex: SetupCheck::ready("ready"),
+            claude: SetupCheck::missing("missing"),
+            opencode: SetupCheck::missing("missing"),
         };
 
         assert_eq!(
             setup_feedback(&readiness),
-            "Install GitHub CLI, then press Recheck."
+            "Authenticate GitHub CLI, then press Recheck."
         );
     }
 
     #[test]
     fn setup_feedback_summarizes_missing_agent() {
         let readiness = SetupReadiness {
-            gh_installed: true,
-            codex_installed: false,
-            claude_installed: false,
-            opencode_installed: false,
+            gh: SetupCheck::ready("ready"),
+            codex: SetupCheck::missing("missing"),
+            claude: SetupCheck::missing("missing"),
+            opencode: SetupCheck::missing("missing"),
         };
 
         assert_eq!(
             setup_feedback(&readiness),
-            "Install Codex, Claude, or OpenCode, then press Recheck."
+            "Sign in to Codex, Claude, or OpenCode, then press Recheck."
         );
+    }
+
+    #[test]
+    fn selected_provider_prefers_ready_launchable_agent() {
+        let readiness = SetupReadiness {
+            gh: SetupCheck::ready("ready"),
+            codex: SetupCheck::missing("missing"),
+            claude: SetupCheck::ready("ready"),
+            opencode: SetupCheck::ready("ready"),
+        };
+
+        assert_eq!(
+            selected_provider_detail(&readiness),
+            "claude will be selected for new chats."
+        );
+        assert!(linux_archductor_core::doctor::setup_blockers_for_provider(
+            &readiness,
+            Some("claude")
+        )
+        .is_empty());
     }
 }

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::process::Command;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DependencyCheck {
@@ -18,16 +19,50 @@ pub struct DoctorReport {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetupReadiness {
-    pub gh_installed: bool,
-    pub codex_installed: bool,
-    pub claude_installed: bool,
-    pub opencode_installed: bool,
+    pub gh: SetupCheck,
+    pub codex: SetupCheck,
+    pub claude: SetupCheck,
+    pub opencode: SetupCheck,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SetupBlocker {
-    MissingGithubCli,
+    GithubUnavailable,
     MissingAgent,
+    SelectedProviderUnavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetupCheck {
+    pub installed: bool,
+    pub ready: bool,
+    pub detail: String,
+}
+
+impl SetupCheck {
+    pub fn missing(detail: impl Into<String>) -> Self {
+        Self {
+            installed: false,
+            ready: false,
+            detail: detail.into(),
+        }
+    }
+
+    pub fn ready(detail: impl Into<String>) -> Self {
+        Self {
+            installed: true,
+            ready: true,
+            detail: detail.into(),
+        }
+    }
+
+    pub fn blocked(detail: impl Into<String>) -> Self {
+        Self {
+            installed: true,
+            ready: false,
+            detail: detail.into(),
+        }
+    }
 }
 
 impl DoctorReport {
@@ -43,25 +78,57 @@ impl DoctorReport {
 impl SetupReadiness {
     pub fn from_host() -> Self {
         Self {
-            gh_installed: command_exists("gh"),
-            codex_installed: command_exists("codex"),
-            claude_installed: command_exists("claude"),
-            opencode_installed: command_exists("opencode"),
+            gh: gh_readiness(),
+            codex: codex_readiness(),
+            claude: claude_readiness(),
+            opencode: opencode_readiness(),
         }
     }
 
-    pub fn any_agent_installed(&self) -> bool {
-        self.codex_installed || self.claude_installed || self.opencode_installed
+    pub fn any_agent_ready(&self) -> bool {
+        self.codex.ready || self.claude.ready || self.opencode.ready
+    }
+
+    pub fn first_ready_launchable_provider(&self) -> Option<&'static str> {
+        if self.codex.ready {
+            Some("codex")
+        } else if self.claude.ready {
+            Some("claude")
+        } else {
+            None
+        }
+    }
+
+    pub fn provider_ready(&self, provider: &str) -> bool {
+        match normalize_provider(provider).as_str() {
+            "codex" => self.codex.ready,
+            "claude" | "claudecode" => self.claude.ready,
+            "opencode" => self.opencode.ready,
+            _ => false,
+        }
     }
 }
 
 pub fn setup_blockers(readiness: &SetupReadiness) -> Vec<SetupBlocker> {
     let mut blockers = Vec::new();
-    if !readiness.gh_installed {
-        blockers.push(SetupBlocker::MissingGithubCli);
+    if !readiness.gh.ready {
+        blockers.push(SetupBlocker::GithubUnavailable);
     }
-    if !readiness.any_agent_installed() {
+    if !readiness.any_agent_ready() {
         blockers.push(SetupBlocker::MissingAgent);
+    }
+    blockers
+}
+
+pub fn setup_blockers_for_provider(
+    readiness: &SetupReadiness,
+    provider: Option<&str>,
+) -> Vec<SetupBlocker> {
+    let mut blockers = setup_blockers(readiness);
+    if let Some(provider) = provider {
+        if !provider.trim().is_empty() && !readiness.provider_ready(provider) {
+            blockers.push(SetupBlocker::SelectedProviderUnavailable);
+        }
     }
     blockers
 }
@@ -132,6 +199,58 @@ fn dependency_checks() -> Vec<DependencyCheck> {
     .collect()
 }
 
+fn gh_readiness() -> SetupCheck {
+    if !command_exists("gh") {
+        return SetupCheck::missing("Install GitHub CLI.");
+    }
+    if command_succeeds("gh", &["auth", "status"]) {
+        SetupCheck::ready("Authenticated with GitHub.")
+    } else {
+        SetupCheck::blocked("Run `gh auth login`.")
+    }
+}
+
+fn codex_readiness() -> SetupCheck {
+    if !command_exists("codex") {
+        return SetupCheck::missing("Install Codex CLI.");
+    }
+    if command_succeeds("codex", &["login", "status"]) {
+        SetupCheck::ready("Signed in to Codex.")
+    } else {
+        SetupCheck::blocked("Run `codex login`.")
+    }
+}
+
+fn claude_readiness() -> SetupCheck {
+    if !command_exists("claude") {
+        return SetupCheck::missing("Install Claude Code.");
+    }
+    if command_succeeds("claude", &["auth", "status"]) {
+        SetupCheck::ready("Signed in to Claude Code.")
+    } else {
+        SetupCheck::blocked("Run `claude auth login`.")
+    }
+}
+
+fn opencode_readiness() -> SetupCheck {
+    if !command_exists("opencode") {
+        return SetupCheck::missing("Install OpenCode.");
+    }
+    if command_succeeds("opencode", &["--version"]) {
+        SetupCheck::ready("OpenCode CLI responds to version probe.")
+    } else {
+        SetupCheck::blocked("OpenCode CLI is installed but did not pass a version probe.")
+    }
+}
+
+fn command_succeeds(program: &str, args: &[&str]) -> bool {
+    Command::new(program)
+        .args(args)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
 fn command_exists(name: &str) -> bool {
     std::env::var_os("PATH")
         .map(|paths| {
@@ -141,6 +260,14 @@ fn command_exists(name: &str) -> bool {
             })
         })
         .unwrap_or(false)
+}
+
+fn normalize_provider(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 #[cfg(unix)]
@@ -198,25 +325,25 @@ ID_LIKE=arch
     #[test]
     fn setup_blockers_require_github_cli() {
         let readiness = SetupReadiness {
-            gh_installed: false,
-            codex_installed: true,
-            claude_installed: false,
-            opencode_installed: false,
+            gh: SetupCheck::missing("missing"),
+            codex: SetupCheck::ready("ready"),
+            claude: SetupCheck::missing("missing"),
+            opencode: SetupCheck::missing("missing"),
         };
 
         assert_eq!(
             setup_blockers(&readiness),
-            vec![SetupBlocker::MissingGithubCli]
+            vec![SetupBlocker::GithubUnavailable]
         );
     }
 
     #[test]
     fn setup_blockers_require_at_least_one_agent() {
         let readiness = SetupReadiness {
-            gh_installed: true,
-            codex_installed: false,
-            claude_installed: false,
-            opencode_installed: false,
+            gh: SetupCheck::ready("ready"),
+            codex: SetupCheck::missing("missing"),
+            claude: SetupCheck::missing("missing"),
+            opencode: SetupCheck::missing("missing"),
         };
 
         assert_eq!(setup_blockers(&readiness), vec![SetupBlocker::MissingAgent]);
@@ -225,13 +352,41 @@ ID_LIKE=arch
     #[test]
     fn setup_blockers_accept_opencode_as_agent() {
         let readiness = SetupReadiness {
-            gh_installed: true,
-            codex_installed: false,
-            claude_installed: false,
-            opencode_installed: true,
+            gh: SetupCheck::ready("ready"),
+            codex: SetupCheck::missing("missing"),
+            claude: SetupCheck::missing("missing"),
+            opencode: SetupCheck::ready("ready"),
         };
 
         assert!(setup_blockers(&readiness).is_empty());
+    }
+
+    #[test]
+    fn setup_blockers_include_selected_provider_readiness() {
+        let readiness = SetupReadiness {
+            gh: SetupCheck::ready("ready"),
+            codex: SetupCheck::missing("missing"),
+            claude: SetupCheck::ready("ready"),
+            opencode: SetupCheck::missing("missing"),
+        };
+
+        assert_eq!(
+            setup_blockers_for_provider(&readiness, Some("codex")),
+            vec![SetupBlocker::SelectedProviderUnavailable]
+        );
+        assert!(setup_blockers_for_provider(&readiness, Some("claude")).is_empty());
+    }
+
+    #[test]
+    fn first_ready_launchable_provider_prefers_codex_then_claude() {
+        let readiness = SetupReadiness {
+            gh: SetupCheck::ready("ready"),
+            codex: SetupCheck::missing("missing"),
+            claude: SetupCheck::ready("ready"),
+            opencode: SetupCheck::ready("ready"),
+        };
+
+        assert_eq!(readiness.first_ready_launchable_provider(), Some("claude"));
     }
 
     #[test]
