@@ -7,9 +7,10 @@ use gtk::{
 use linux_archductor_core::paths::AppPaths;
 use linux_archductor_core::repository::RepositoryStore;
 use linux_archductor_core::settings::{
-    customization_settings_from_toml, customization_settings_to_toml, inspect_repository_settings,
-    load_repository_settings, save_repository_settings, FilePatternSource, GitSettings,
-    PromptSettings, ProviderSettings, RepositorySettings, ScriptSettings, SettingsLayer,
+    customization_settings_from_toml, customization_settings_to_toml, ensure_repository_config,
+    inspect_repository_settings, load_repository_settings, save_repository_settings,
+    FilePatternSource, GitSettings, PromptSettings, ProviderSettings, RepositorySettings,
+    ScriptSettings, SettingsLayer,
 };
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -66,11 +67,13 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
     layer_select.append(Some("shared"), "Shared");
     layer_select.append(Some("local"), "Local");
     layer_select.set_active_id(Some("shared"));
+    let init_settings_btn = text_button("Initialize");
     let load_settings_btn = text_button("Load");
     let save_settings_btn = text_button("Save");
     save_settings_btn.add_css_class("suggested-action");
     settings_top.append(&settings_repo_entry);
     settings_top.append(&layer_select);
+    settings_top.append(&init_settings_btn);
     settings_top.append(&load_settings_btn);
     settings_top.append(&save_settings_btn);
     settings_toolbar.append(&settings_top);
@@ -394,6 +397,30 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
     ));
 
     let db_path_load_settings = paths.database_path.clone();
+    let db_path_init_settings = paths.database_path.clone();
+    let settings_repo_entry_init = settings_repo_entry.clone();
+    let settings_result_init = settings_result.clone();
+    init_settings_btn.connect_clicked(move |_| {
+        let repo_name = settings_repo_entry_init.text().trim().to_owned();
+        if repo_name.is_empty() {
+            settings_result_init.set_text("Repository name is required.");
+            return;
+        }
+        match repository_root(&db_path_init_settings, &repo_name).and_then(|repo_path| {
+            ensure_repository_config(&repo_path).map(|report| (repo_path, report))
+        }) {
+            Ok((repo_path, report)) => {
+                let status = match (report.conductor_dir_created, report.shared_settings_created) {
+                    (true, true) => "Created .archductor and shared settings.",
+                    (false, true) => "Created shared settings.",
+                    _ => "Config already exists and is valid.",
+                };
+                settings_result_init.set_text(&format!("{status} {}", repo_path.display()));
+            }
+            Err(err) => settings_result_init.set_text(&format!("Initialize failed: {err:#}")),
+        }
+    });
+
     let settings_repo_entry_load = settings_repo_entry.clone();
     let settings_result_load = settings_result.clone();
     let setup_entry_load = setup_entry.clone();

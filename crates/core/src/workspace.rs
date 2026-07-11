@@ -24,7 +24,9 @@ use crate::session_pipeline::{
     process_codex_pty_pipeline, PtyChunkInput, SessionPipelineInput, SessionPipelineOutput,
 };
 use crate::session_state::AgentSessionState;
-use crate::settings::{load_repository_settings, save_local_default_agent_provider};
+use crate::settings::{
+    ensure_repository_config, load_repository_settings, save_local_default_agent_provider,
+};
 use crate::terminal_logs::{
     search_terminal_logs as search_terminal_logs_in_processes, summarize_terminal_sessions,
     terminal_log_preview,
@@ -968,6 +970,7 @@ impl WorkspaceStore {
 
     pub fn create(&self, input: CreateWorkspace) -> Result<Workspace> {
         let repository = self.load_repository(&input.repository_name)?;
+        ensure_repository_config(&repository.root_path)?;
         let settings = load_repository_settings(&repository.root_path)?;
         let name = self.resolve_workspace_name(&repository, &settings, &input.name)?;
         validate_workspace_name(&name)?;
@@ -7337,6 +7340,38 @@ mod tests {
 
         let workspaces = store.list().unwrap();
         assert_eq!(workspaces, vec![workspace]);
+    }
+
+    #[test]
+    fn create_workspace_recovers_missing_repository_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        let workspace_parent = temp.path().join("workspaces/demo");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(workspace_parent.clone()),
+            })
+            .unwrap();
+        fs::remove_dir_all(repo_path.join(".archductor")).unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        assert!(repo_path.join(".archductor/settings.toml").exists());
     }
 
     #[test]

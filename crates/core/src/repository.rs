@@ -1,3 +1,4 @@
+use crate::settings::ensure_repository_config;
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
 use std::path::{Path, PathBuf};
@@ -49,6 +50,7 @@ impl RepositoryStore {
             .canonicalize()
             .with_context(|| format!("resolve repository path {}", input.root_path.display()))?;
         ensure_git_repository(&root_path)?;
+        ensure_repository_config(&root_path)?;
 
         let name = input.name.unwrap_or_else(|| {
             root_path
@@ -296,5 +298,30 @@ mod tests {
 
         let repositories = store.list().unwrap();
         assert_eq!(repositories, vec![saved]);
+    }
+
+    #[test]
+    fn add_repository_bootstraps_repository_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = temp.path().join("demo");
+        fs::create_dir(&repo_path).unwrap();
+        Command::new("git")
+            .args(["init", "--initial-branch", "main"])
+            .arg(&repo_path)
+            .status()
+            .unwrap();
+
+        RepositoryStore::open(temp.path().join("state.db"))
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo-app".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo-app")),
+            })
+            .unwrap();
+
+        assert!(repo_path.join(".archductor/settings.toml").exists());
     }
 }

@@ -6,6 +6,7 @@ use std::io::{ErrorKind, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::path::PathBuf;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -19,6 +20,18 @@ pub struct RepositorySettings {
     pub providers: ProviderSettings,
     pub git: GitSettings,
     pub customization: CustomizationSettings,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RepositoryConfigBootstrap {
+    pub conductor_dir_created: bool,
+    pub shared_settings_created: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositorySettingsLoadReport {
+    pub settings: RepositorySettings,
+    pub errors: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -154,7 +167,67 @@ pub struct ViewSettings {
 pub fn load_repository_settings(repo_path: &Path) -> Result<RepositorySettings> {
     let shared = load_optional_settings(&repo_path.join(".archductor/settings.toml"))?;
     let local = load_optional_settings(&repo_path.join(".archductor/settings.local.toml"))?;
-    Ok(shared.merge(local).into_settings())
+    let settings = shared.merge(local).into_settings();
+    validate_repository_settings(&settings)?;
+    Ok(settings)
+}
+
+pub fn load_repository_settings_recovering(repo_path: &Path) -> RepositorySettingsLoadReport {
+    let shared_path = repo_path.join(".archductor/settings.toml");
+    let local_path = repo_path.join(".archductor/settings.local.toml");
+    let mut errors = Vec::new();
+    let shared = match load_optional_settings(&shared_path) {
+        Ok(settings) => settings,
+        Err(err) => {
+            errors.push(err.to_string());
+            RawRepositorySettings::default()
+        }
+    };
+    let local = match load_optional_settings(&local_path) {
+        Ok(settings) => settings,
+        Err(err) => {
+            errors.push(err.to_string());
+            RawRepositorySettings::default()
+        }
+    };
+    let settings = shared.merge(local).into_settings();
+    match validate_repository_settings(&settings) {
+        Ok(()) => RepositorySettingsLoadReport { settings, errors },
+        Err(err) => {
+            errors.push(err.to_string());
+            RepositorySettingsLoadReport {
+                settings: RepositorySettings::default(),
+                errors,
+            }
+        }
+    }
+}
+
+pub fn ensure_repository_config(repo_path: &Path) -> Result<RepositoryConfigBootstrap> {
+    let (conductor_dir, conductor_dir_created) = ensure_settings_dir(repo_path)?;
+    let shared_path = conductor_dir.join("settings.toml");
+    reject_symlink_file(&shared_path)?;
+
+    let mut report = RepositoryConfigBootstrap {
+        conductor_dir_created,
+        shared_settings_created: false,
+    };
+
+    match fs::read_to_string(&shared_path) {
+        Ok(contents) => {
+            let settings = repository_settings_from_toml(&contents)
+                .with_context(|| format!("validate {}", shared_path.display()))?;
+            validate_repository_settings(&settings)?;
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            let contents = default_repository_settings_toml()?;
+            atomic_write_no_symlink(&shared_path, contents.as_bytes())?;
+            report.shared_settings_created = true;
+        }
+        Err(err) => return Err(err).with_context(|| format!("read {}", shared_path.display())),
+    }
+
+    Ok(report)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -224,16 +297,16 @@ pub fn save_repository_settings(
     settings: &RepositorySettings,
 ) -> Result<()> {
     validate_repository_settings(settings)?;
-    let conductor_dir = repo_path.join(".archductor");
-    std::fs::create_dir_all(&conductor_dir)
-        .with_context(|| format!("create {}", conductor_dir.display()))?;
+    let (conductor_dir, _) = ensure_settings_dir(repo_path)?;
     let path = match layer {
         SettingsLayer::RepositoryShared => conductor_dir.join("settings.toml"),
         SettingsLayer::LocalOverride => conductor_dir.join("settings.local.toml"),
     };
+    reject_symlink_file(&path)?;
+    backup_settings_file(&path)?;
     let raw = RawRepositorySettings::from_settings(settings);
     let contents = toml::to_string_pretty(&raw).context("serialize repository settings")?;
-    std::fs::write(&path, contents).with_context(|| format!("write {}", path.display()))
+    atomic_write_no_symlink(&path, contents.as_bytes())
 }
 
 pub fn save_local_default_agent_provider(repo_path: &Path, provider: &str) -> Result<()> {
@@ -270,6 +343,65 @@ pub fn customization_settings_from_toml(contents: &str) -> Result<CustomizationS
 pub fn repository_settings_to_toml(settings: &RepositorySettings) -> Result<String> {
     let raw = RawRepositorySettings::from_settings(settings);
     toml::to_string_pretty(&raw).context("serialize repository settings")
+}
+
+pub fn default_repository_settings_toml() -> Result<String> {
+    let settings = RepositorySettings {
+        file_include_globs: vec![".env*".to_owned()],
+        scripts: ScriptSettings {
+            run_mode: Some("concurrent".to_owned()),
+            ..ScriptSettings::default()
+        },
+        prompts: Some(PromptSettings {
+            general: Some(
+                "Prefer small, reviewable changes. Explain verification clearly.".to_owned(),
+            ),
+            code_review: Some(
+                "Focus on correctness, behavior changes, missing tests, and regressions."
+                    .to_owned(),
+            ),
+            create_pr: Some("Write a concise PR body with summary, tests, and risk.".to_owned()),
+            fix_errors: Some("Reproduce the failure, then make the smallest safe fix.".to_owned()),
+            resolve_merge_conflicts: Some(
+                "Preserve user changes and explain any conflict resolution choices.".to_owned(),
+            ),
+            rename_branch: Some("Use a short descriptive branch name.".to_owned()),
+            commit_generation: Some(
+                "Write a conventional commit message that matches the actual diff.".to_owned(),
+            ),
+            test_fixing: Some(
+                "Run the failing test first, fix the root cause, then rerun focused tests."
+                    .to_owned(),
+            ),
+            refactor_style: Some(
+                "Keep behavior-preserving refactors separate from feature changes.".to_owned(),
+            ),
+        }),
+        customization: CustomizationSettings {
+            automation: AutomationSettings {
+                auto_setup: Some(false),
+                ..AutomationSettings::default()
+            },
+            workspace_defaults: WorkspaceDefaultSettings {
+                base_branch: Some("main".to_owned()),
+                branch_prefix: Some("lc".to_owned()),
+                port_block_size: Some(10),
+                default_visible_tab: Some("changes".to_owned()),
+                ..WorkspaceDefaultSettings::default()
+            },
+            view: ViewSettings {
+                theme: Some("system".to_owned()),
+                accent_color: Some("green".to_owned()),
+                density: Some("compact".to_owned()),
+                diff_preference: Some("unified".to_owned()),
+                transcript_display: Some("structured".to_owned()),
+                ..ViewSettings::default()
+            },
+            ..CustomizationSettings::default()
+        },
+        ..RepositorySettings::default()
+    };
+    repository_settings_to_toml(&settings)
 }
 
 pub fn repository_settings_from_toml(contents: &str) -> Result<RepositorySettings> {
@@ -1184,8 +1316,18 @@ fn merge_profile_maps(
 }
 
 fn load_optional_settings(path: &Path) -> Result<RawRepositorySettings> {
-    if !path.exists() {
-        return Ok(RawRepositorySettings::default());
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            anyhow::ensure!(
+                !metadata.file_type().is_symlink(),
+                "{} must not be a symlink",
+                path.display()
+            );
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            return Ok(RawRepositorySettings::default());
+        }
+        Err(err) => return Err(err).with_context(|| format!("inspect {}", path.display())),
     }
 
     let contents = std::fs::read_to_string(path)
@@ -1265,8 +1407,13 @@ fn validate_agent_provider(provider: &str) -> Result<()> {
     Ok(())
 }
 
-fn ensure_local_settings_dir(repo_path: &Path) -> Result<std::path::PathBuf> {
+fn ensure_local_settings_dir(repo_path: &Path) -> Result<PathBuf> {
+    ensure_settings_dir(repo_path).map(|(path, _)| path)
+}
+
+fn ensure_settings_dir(repo_path: &Path) -> Result<(PathBuf, bool)> {
     let conductor_dir = repo_path.join(".archductor");
+    let mut created = false;
     match fs::symlink_metadata(&conductor_dir) {
         Ok(metadata) => {
             let file_type = metadata.file_type();
@@ -1279,6 +1426,7 @@ fn ensure_local_settings_dir(repo_path: &Path) -> Result<std::path::PathBuf> {
         Err(err) if err.kind() == ErrorKind::NotFound => {
             fs::create_dir(&conductor_dir)
                 .with_context(|| format!("create {}", conductor_dir.display()))?;
+            created = true;
         }
         Err(err) => {
             return Err(err).with_context(|| format!("inspect {}", conductor_dir.display()))
@@ -1292,7 +1440,7 @@ fn ensure_local_settings_dir(repo_path: &Path) -> Result<std::path::PathBuf> {
         "{} must be a real directory",
         conductor_dir.display()
     );
-    Ok(conductor_dir)
+    Ok((conductor_dir, created))
 }
 
 fn reject_symlink_file(path: &Path) -> Result<()> {
@@ -1337,9 +1485,13 @@ fn atomic_write_no_symlink(path: &Path, contents: &[u8]) -> Result<()> {
     let parent = path
         .parent()
         .with_context(|| format!("resolve parent for {}", path.display()))?;
-    let tmp_path = parent.join(format!(".{}.{}.tmp", "settings.local.toml", Uuid::new_v4()));
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("settings.toml");
+    let tmp_path = parent.join(format!(".{filename}.{}.tmp", Uuid::new_v4()));
     let write_result = (|| -> Result<()> {
-        let permissions = local_settings_write_permissions(path)?;
+        let permissions = settings_write_permissions(path)?;
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -1365,16 +1517,22 @@ fn atomic_write_no_symlink(path: &Path, contents: &[u8]) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn local_settings_write_permissions(path: &Path) -> Result<fs::Permissions> {
+fn settings_write_permissions(path: &Path) -> Result<fs::Permissions> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => Ok(metadata.permissions()),
-        Err(err) if err.kind() == ErrorKind::NotFound => Ok(fs::Permissions::from_mode(0o600)),
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            if path.file_name().and_then(|name| name.to_str()) == Some("settings.local.toml") {
+                Ok(fs::Permissions::from_mode(0o600))
+            } else {
+                Ok(fs::Permissions::from_mode(0o644))
+            }
+        }
         Err(err) => Err(err).with_context(|| format!("inspect {}", path.display())),
     }
 }
 
 #[cfg(not(unix))]
-fn local_settings_write_permissions(_path: &Path) -> Result<()> {
+fn settings_write_permissions(_path: &Path) -> Result<()> {
     Ok(())
 }
 
@@ -1387,6 +1545,18 @@ fn set_permissions_if_supported(path: &Path, permissions: fs::Permissions) -> Re
 #[cfg(not(unix))]
 fn set_permissions_if_supported(_path: &Path, _permissions: ()) -> Result<()> {
     Ok(())
+}
+
+fn backup_settings_file(path: &Path) -> Result<Option<PathBuf>> {
+    reject_symlink_file(path)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let backup_path = path.with_extension("toml.bak");
+    reject_symlink_file(&backup_path)?;
+    fs::copy(path, &backup_path)
+        .with_context(|| format!("backup {} to {}", path.display(), backup_path.display()))?;
+    Ok(Some(backup_path))
 }
 
 fn normalize_workspace_tab(value: &str) -> String {
@@ -1557,6 +1727,169 @@ LOCAL_ONLY = "1"
         assert_eq!(loaded, settings);
         assert!(temp.path().join(".archductor/settings.toml").exists());
         assert!(!temp.path().join(".archductor/settings.local.toml").exists());
+    }
+
+    #[test]
+    fn ensure_repository_config_creates_shared_defaults() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let report = ensure_repository_config(temp.path()).unwrap();
+
+        assert!(report.conductor_dir_created);
+        assert!(report.shared_settings_created);
+        let shared_path = temp.path().join(".archductor/settings.toml");
+        assert!(shared_path.exists());
+        let settings = load_repository_settings(temp.path()).unwrap();
+        assert_eq!(settings.file_include_globs, [".env*"]);
+        assert_eq!(settings.scripts.run_mode.as_deref(), Some("concurrent"));
+        assert_eq!(
+            settings.customization.workspace_defaults.port_block_size,
+            Some(10)
+        );
+    }
+
+    #[test]
+    fn ensure_repository_config_keeps_existing_valid_settings() {
+        let temp = tempfile::tempdir().unwrap();
+        let conductor_dir = temp.path().join(".archductor");
+        fs::create_dir(&conductor_dir).unwrap();
+        fs::write(
+            conductor_dir.join("settings.toml"),
+            "[scripts]\nrun = \"cargo run\"\n",
+        )
+        .unwrap();
+
+        let report = ensure_repository_config(temp.path()).unwrap();
+
+        assert!(!report.conductor_dir_created);
+        assert!(!report.shared_settings_created);
+        let contents = fs::read_to_string(conductor_dir.join("settings.toml")).unwrap();
+        assert!(contents.contains("cargo run"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_repository_config_rejects_archductor_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let external = temp.path().join("outside");
+        fs::create_dir(&external).unwrap();
+        std::os::unix::fs::symlink(&external, temp.path().join(".archductor")).unwrap();
+
+        let err = ensure_repository_config(temp.path()).unwrap_err();
+
+        assert!(err.to_string().contains("must be a real directory"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_repository_config_rejects_shared_settings_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let conductor_dir = temp.path().join(".archductor");
+        fs::create_dir(&conductor_dir).unwrap();
+        let external = temp.path().join("outside.toml");
+        fs::write(&external, "outside = true\n").unwrap();
+        std::os::unix::fs::symlink(&external, conductor_dir.join("settings.toml")).unwrap();
+
+        let err = ensure_repository_config(temp.path()).unwrap_err();
+
+        assert!(err.to_string().contains("must not be a symlink"));
+    }
+
+    #[test]
+    fn load_repository_settings_recovering_reports_invalid_local_settings() {
+        let temp = tempfile::tempdir().unwrap();
+        let conductor_dir = temp.path().join(".archductor");
+        fs::create_dir(&conductor_dir).unwrap();
+        fs::write(
+            conductor_dir.join("settings.toml"),
+            "[scripts]\nrun = \"cargo run\"\n",
+        )
+        .unwrap();
+        fs::write(conductor_dir.join("settings.local.toml"), "[scripts\n").unwrap();
+
+        let report = load_repository_settings_recovering(temp.path());
+
+        assert_eq!(report.settings.scripts.run.as_deref(), Some("cargo run"));
+        assert_eq!(report.errors.len(), 1);
+        assert!(report.errors[0].contains("parse settings"));
+    }
+
+    #[test]
+    fn load_repository_settings_recovering_uses_defaults_for_invalid_merged_settings() {
+        let temp = tempfile::tempdir().unwrap();
+        let conductor_dir = temp.path().join(".archductor");
+        fs::create_dir(&conductor_dir).unwrap();
+        fs::write(
+            conductor_dir.join("settings.toml"),
+            "[scripts]\nrun_mode = \"parallel\"\n",
+        )
+        .unwrap();
+
+        let report = load_repository_settings_recovering(temp.path());
+
+        assert_eq!(report.settings, RepositorySettings::default());
+        assert_eq!(report.errors.len(), 1);
+        assert!(report.errors[0].contains("scripts.run_mode"));
+        assert!(load_repository_settings(temp.path()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_repository_settings_rejects_settings_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let conductor_dir = temp.path().join(".archductor");
+        fs::create_dir(&conductor_dir).unwrap();
+        let external = temp.path().join("outside.toml");
+        fs::write(&external, "[scripts]\nrun = \"outside\"\n").unwrap();
+        std::os::unix::fs::symlink(&external, conductor_dir.join("settings.toml")).unwrap();
+
+        let err = load_repository_settings(temp.path()).unwrap_err();
+
+        assert!(err.to_string().contains("must not be a symlink"));
+    }
+
+    #[test]
+    fn save_repository_settings_backs_up_existing_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let conductor_dir = temp.path().join(".archductor");
+        fs::create_dir(&conductor_dir).unwrap();
+        let shared_path = conductor_dir.join("settings.toml");
+        fs::write(&shared_path, "[scripts]\nrun = \"old\"\n").unwrap();
+
+        let settings = RepositorySettings {
+            scripts: ScriptSettings {
+                run: Some("new".to_owned()),
+                ..ScriptSettings::default()
+            },
+            ..RepositorySettings::default()
+        };
+        save_repository_settings(temp.path(), SettingsLayer::RepositoryShared, &settings).unwrap();
+
+        assert!(fs::read_to_string(&shared_path).unwrap().contains("new"));
+        assert!(fs::read_to_string(conductor_dir.join("settings.toml.bak"))
+            .unwrap()
+            .contains("old"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_repository_settings_rejects_symlink_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let conductor_dir = temp.path().join(".archductor");
+        fs::create_dir(&conductor_dir).unwrap();
+        let external = temp.path().join("outside.toml");
+        fs::write(&external, "outside = true\n").unwrap();
+        std::os::unix::fs::symlink(&external, conductor_dir.join("settings.toml")).unwrap();
+
+        let err = save_repository_settings(
+            temp.path(),
+            SettingsLayer::RepositoryShared,
+            &RepositorySettings::default(),
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("must not be a symlink"));
+        assert_eq!(fs::read_to_string(external).unwrap(), "outside = true\n");
     }
 
     #[test]
