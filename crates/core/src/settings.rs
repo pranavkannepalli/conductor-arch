@@ -175,6 +175,7 @@ pub struct WorkspaceDefaultSettings {
 pub struct ViewSettings {
     pub theme: Option<String>,
     pub accent_color: Option<String>,
+    pub colors: BTreeMap<String, String>,
     pub density: Option<String>,
     pub sidebar_layout: Option<String>,
     pub diff_preference: Option<String>,
@@ -410,6 +411,7 @@ pub fn default_repository_settings_toml() -> Result<String> {
             view: ViewSettings {
                 theme: Some("system".to_owned()),
                 accent_color: Some("green".to_owned()),
+                colors: default_view_colors(),
                 density: Some("compact".to_owned()),
                 diff_preference: Some("unified".to_owned()),
                 transcript_display: Some("structured".to_owned()),
@@ -472,6 +474,30 @@ fn default_prompt_settings() -> PromptSettings {
             "Infer the local development run command and include port/env requirements.".to_owned(),
         ),
     }
+}
+
+fn default_view_colors() -> BTreeMap<String, String> {
+    [
+        ("background", "#191919"),
+        ("surface", "#1e1e1e"),
+        ("surface_raised", "#202020"),
+        ("surface_muted", "#181818"),
+        ("hover", "#2a2a2a"),
+        ("hover_soft", "#242424"),
+        ("border", "#2a2a2a"),
+        ("border_strong", "#3a3a3a"),
+        ("text", "#e4e4e4"),
+        ("text_strong", "#f8fafc"),
+        ("text_muted", "#8a8a8a"),
+        ("accent", "#22c55e"),
+        ("accent_fg", "#052e16"),
+        ("success", "#84e0a0"),
+        ("warning", "#f59e0b"),
+        ("danger", "#ff8a8a"),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.to_owned(), value.to_owned()))
+    .collect()
 }
 
 pub fn repository_settings_from_toml(contents: &str) -> Result<RepositorySettings> {
@@ -577,6 +603,16 @@ pub fn validate_repository_settings(settings: &RepositorySettings) -> Result<()>
         anyhow::ensure!(
             matches!(method, "squash" | "merge" | "rebase"),
             "customization.naming.default_merge_method must be squash, merge, or rebase"
+        );
+    }
+    for (key, value) in &settings.customization.view.colors {
+        anyhow::ensure!(
+            is_valid_view_color_key(key),
+            "customization.view.colors.{key} is not a supported color key"
+        );
+        anyhow::ensure!(
+            is_valid_hex_color(value),
+            "customization.view.colors.{key} must be a hex color like #22c55e"
         );
     }
     Ok(())
@@ -843,6 +879,8 @@ struct RawViewSettings {
     theme: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     accent_color: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    colors: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     density: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1469,6 +1507,7 @@ impl RawViewSettings {
         Self {
             theme: local.theme.or(self.theme),
             accent_color: local.accent_color.or(self.accent_color),
+            colors: merge_maps(self.colors, local.colors),
             density: local.density.or(self.density),
             sidebar_layout: local.sidebar_layout.or(self.sidebar_layout),
             diff_preference: local.diff_preference.or(self.diff_preference),
@@ -1499,6 +1538,7 @@ impl RawViewSettings {
         ViewSettings {
             theme: self.theme,
             accent_color: self.accent_color,
+            colors: self.colors,
             density: self.density,
             sidebar_layout: self.sidebar_layout,
             diff_preference: self.diff_preference,
@@ -1517,6 +1557,7 @@ impl RawViewSettings {
         Self {
             theme: settings.theme.clone(),
             accent_color: settings.accent_color.clone(),
+            colors: settings.colors.clone(),
             density: settings.density.clone(),
             sidebar_layout: settings.sidebar_layout.clone(),
             diff_preference: settings.diff_preference.clone(),
@@ -1588,6 +1629,35 @@ fn is_valid_environment_key(key: &str) -> bool {
     let mut chars = key.chars();
     matches!(chars.next(), Some(first) if first == '_' || first.is_ascii_alphabetic())
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn is_valid_view_color_key(key: &str) -> bool {
+    matches!(
+        key,
+        "background"
+            | "surface"
+            | "surface_raised"
+            | "surface_muted"
+            | "hover"
+            | "hover_soft"
+            | "border"
+            | "border_strong"
+            | "text"
+            | "text_strong"
+            | "text_muted"
+            | "accent"
+            | "accent_fg"
+            | "success"
+            | "warning"
+            | "danger"
+    )
+}
+
+fn is_valid_hex_color(value: &str) -> bool {
+    let Some(hex) = value.strip_prefix('#') else {
+        return false;
+    };
+    matches!(hex.len(), 3 | 6) && hex.chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
 fn is_safe_relative_path(path: &str) -> bool {
@@ -2406,7 +2476,7 @@ theme = "dark"
         fs::create_dir(&conductor_dir).unwrap();
         fs::write(
             conductor_dir.join("settings.toml"),
-            r#"
+            r##"
 [prompts]
 new_workspace = "Plan the workspace."
 continue_work = "Continue carefully."
@@ -2487,12 +2557,18 @@ notification_rules = ["checks_failed", "review_requested"]
 keybindings = "vim"
 command_palette_presets = ["ci", "review"]
 settings_import_export = "toml"
-"#,
+
+[customization.view.colors]
+accent = "#22c55e"
+accent_fg = "#052e16"
+background = "#191919"
+text = "#e4e4e4"
+"##,
         )
         .unwrap();
         fs::write(
             conductor_dir.join("settings.local.toml"),
-            r#"
+            r##"
 [customization.automation]
 auto_start_agent = "claude"
 
@@ -2501,7 +2577,11 @@ reasoning_mode = "high"
 
 [customization.view]
 density = "comfortable"
-"#,
+
+[customization.view.colors]
+accent = "#0ea5e9"
+surface = "#102030"
+"##,
         )
         .unwrap();
 
@@ -2565,6 +2645,18 @@ density = "comfortable"
             settings.customization.view.density,
             Some("comfortable".to_owned())
         );
+        assert_eq!(
+            settings.customization.view.colors.get("accent"),
+            Some(&"#0ea5e9".to_owned())
+        );
+        assert_eq!(
+            settings.customization.view.colors.get("surface"),
+            Some(&"#102030".to_owned())
+        );
+        assert_eq!(
+            settings.customization.view.colors.get("background"),
+            Some(&"#191919".to_owned())
+        );
 
         save_repository_settings(temp.path(), SettingsLayer::RepositoryShared, &settings).unwrap();
         assert_eq!(load_repository_settings(temp.path()).unwrap(), settings);
@@ -2585,6 +2677,7 @@ density = "comfortable"
             },
             view: ViewSettings {
                 theme: Some("dark".to_owned()),
+                colors: BTreeMap::from([("accent".to_owned(), "#0ea5e9".to_owned())]),
                 density: Some("compact".to_owned()),
                 ..ViewSettings::default()
             },
@@ -2595,6 +2688,31 @@ density = "comfortable"
 
         assert!(text.contains("[customization.naming]"));
         assert_eq!(customization_settings_from_toml(&text).unwrap(), settings);
+    }
+
+    #[test]
+    fn rejects_invalid_view_colors() {
+        let invalid_color = repository_settings_from_toml(
+            r##"
+[customization.view.colors]
+accent = "alert(1)"
+"##,
+        )
+        .unwrap_err();
+        assert!(invalid_color
+            .to_string()
+            .contains("customization.view.colors.accent must be a hex color"));
+
+        let invalid_key = repository_settings_from_toml(
+            r##"
+[customization.view.colors]
+totally_custom = "#ffffff"
+"##,
+        )
+        .unwrap_err();
+        assert!(invalid_key
+            .to_string()
+            .contains("customization.view.colors.totally_custom is not a supported color key"));
     }
 
     #[test]

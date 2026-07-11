@@ -732,6 +732,7 @@ pub struct WorkspaceViewDefaults {
     pub default_visible_tab: Option<String>,
     pub theme: Option<String>,
     pub accent_color: Option<String>,
+    pub colors: std::collections::BTreeMap<String, String>,
     pub density: Option<String>,
     pub keybindings: Option<String>,
     pub terminal_font: Option<String>,
@@ -4543,6 +4544,7 @@ mutation($threadId: ID!) {{
                 .clone(),
             theme: settings.customization.view.theme.clone(),
             accent_color: settings.customization.view.accent_color.clone(),
+            colors: settings.customization.view.colors.clone(),
             density: settings.customization.view.density.clone(),
             keybindings: settings.customization.view.keybindings.clone(),
             terminal_font: settings.customization.view.terminal_font.clone(),
@@ -10366,7 +10368,7 @@ working_directory = "apps/web"
         fs::create_dir(repo_path.join(".archductor")).unwrap();
         fs::write(
             repo_path.join(".archductor/settings.toml"),
-            r#"
+            r##"
 [customization.workspace_defaults]
 default_visible_tab = "checks"
 
@@ -10382,7 +10384,10 @@ keybindings = "vim"
 terminal_font = "JetBrains Mono 13"
 terminal_scrollback = 5000
 command_palette_presets = ["test", "Preview=pnpm dev"]
-"#,
+
+[customization.view.colors]
+accent = "#0ea5e9"
+"##,
         )
         .unwrap();
         git(&repo_path, ["add", ".archductor/settings.toml"]).unwrap();
@@ -10428,6 +10433,7 @@ command_palette_presets = ["test", "Preview=pnpm dev"]
         assert_eq!(defaults.default_visible_tab.as_deref(), Some("checks"));
         assert_eq!(defaults.theme.as_deref(), Some("dark"));
         assert_eq!(defaults.accent_color.as_deref(), Some("green"));
+        assert_eq!(defaults.colors.get("accent"), Some(&"#0ea5e9".to_owned()));
         assert_eq!(defaults.density.as_deref(), Some("compact"));
         assert_eq!(defaults.keybindings.as_deref(), Some("vim"));
         assert_eq!(defaults.terminal_font.as_deref(), Some("JetBrains Mono 13"));
