@@ -398,16 +398,18 @@ pub(crate) fn build_app_sidebar(
                 list.append(&ListBoxRow::builder().child(&empty).build());
             }
 
-            let names_ref = names.borrow();
-            let target_idx = prev_selected.as_deref().and_then(|name| {
-                names_ref
-                    .iter()
-                    .find_map(|(&idx, row_name)| (row_name == name).then_some(idx))
-            });
-            drop(names_ref);
-            if let Some(idx) = target_idx {
-                if let Some(row) = list.row_at_index(idx) {
-                    list.select_row(Some(&row));
+            if sidebar_should_restore_workspace_selection(&state.snapshot().active_page) {
+                let names_ref = names.borrow();
+                let target_idx = prev_selected.as_deref().and_then(|name| {
+                    names_ref
+                        .iter()
+                        .find_map(|(&idx, row_name)| (row_name == name).then_some(idx))
+                });
+                drop(names_ref);
+                if let Some(idx) = target_idx {
+                    if let Some(row) = list.row_at_index(idx) {
+                        list.select_row(Some(&row));
+                    }
                 }
             }
         }
@@ -751,6 +753,10 @@ fn primary_sidebar_nav_labels(debug_mode: bool) -> Vec<&'static str> {
     labels
 }
 
+fn sidebar_should_restore_workspace_selection(page: &AppPage) -> bool {
+    matches!(page, AppPage::Workspace | AppPage::Review)
+}
+
 fn section_header_row(
     name: &str,
     _workspace_count: usize,
@@ -864,7 +870,11 @@ fn relative_time(ts: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{primary_sidebar_nav_labels, spawn_background_job, workspace_badge_text};
+    use super::{
+        primary_sidebar_nav_labels, sidebar_should_restore_workspace_selection,
+        spawn_background_job, workspace_badge_text,
+    };
+    use crate::state::AppPage;
     use std::time::{Duration, Instant};
 
     #[test]
@@ -889,6 +899,14 @@ mod tests {
             primary_sidebar_nav_labels(true),
             vec!["Dashboard", "History", "PTY Inspector"]
         );
+    }
+
+    #[test]
+    fn sidebar_restores_workspace_selection_only_on_workspace_pages() {
+        assert!(sidebar_should_restore_workspace_selection(&AppPage::Workspace));
+        assert!(sidebar_should_restore_workspace_selection(&AppPage::Review));
+        assert!(!sidebar_should_restore_workspace_selection(&AppPage::Dashboard));
+        assert!(!sidebar_should_restore_workspace_selection(&AppPage::History));
     }
 
     #[test]

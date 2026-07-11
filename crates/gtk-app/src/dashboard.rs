@@ -1,9 +1,13 @@
 use gtk::prelude::*;
-use gtk::{Box as GBox, Label, Orientation, PolicyType, ScrolledWindow};
+use gtk::{Box as GBox, Button, Label, Orientation, PolicyType, ScrolledWindow};
 use linux_archductor_core::paths::AppPaths;
 use linux_archductor_core::workspace::WorkspaceStatusLine;
 use linux_archductor_core::workspace::WorkspaceStore;
+use std::cell::RefCell;
+use std::path::Path;
+use std::rc::Rc;
 
+use crate::buttons::text_button;
 use crate::motion::{append_revealed, clear_box};
 use crate::title_case_workspace;
 use crate::workspace_command_center::workspace_pull_request_status_summary;
@@ -38,61 +42,121 @@ pub(crate) fn build_dashboard_panel(paths: &AppPaths) -> (GBox, impl Fn() + Clon
     root.append(&scroll);
 
     let db_path = paths.database_path.clone();
+    let selected_project = Rc::new(RefCell::new(None::<String>));
     let refresh = move || {
-        clear_box(&project_tabs);
-        clear_box(&board);
-
-        let Ok(store) = WorkspaceStore::open(db_path.clone()) else {
-            append_empty_dashboard(&project_tabs, &board, "No workspace database yet.");
-            return;
-        };
-        let Ok(statuses) = store.list_status() else {
-            append_empty_dashboard(&project_tabs, &board, "Could not read workspace state.");
-            return;
-        };
-
-        let mut repo_names = statuses
-            .iter()
-            .map(|line| line.repository_name.clone())
-            .filter(|name| !name.is_empty())
-            .collect::<Vec<_>>();
-        repo_names.sort();
-        repo_names.dedup();
-
-        let all_tab = Label::new(Some("All projects"));
-        all_tab.add_css_class("project-tab-active");
-        project_tabs.append(&all_tab);
-        for repo in repo_names.iter().take(5) {
-            let tab = Label::new(Some(repo));
-            tab.add_css_class("project-tab");
-            project_tabs.append(&tab);
-        }
-
-        let mut backlog = Vec::new();
-        let mut in_progress = Vec::new();
-        let mut in_review = Vec::new();
-        let mut done = Vec::new();
-
-        for line in &statuses {
-            if line.workspace.status == "archived" {
-                done.push(line);
-            } else if line.pull_request.is_some() {
-                in_review.push(line);
-            } else if line.run_running || line.active_sessions > 0 {
-                in_progress.push(line);
-            } else {
-                backlog.push(line);
-            }
-        }
-
-        append_dashboard_column(&board, "Backlog", &backlog, &store);
-        append_dashboard_column(&board, "In progress", &in_progress, &store);
-        append_dashboard_column(&board, "In review", &in_review, &store);
-        append_dashboard_column(&board, "Done", &done, &store);
+        render_dashboard(
+            &db_path,
+            &project_tabs,
+            &board,
+            selected_project.clone(),
+        );
     };
 
     refresh();
     (root, refresh)
+}
+
+fn render_dashboard(
+    db_path: &Path,
+    project_tabs: &GBox,
+    board: &GBox,
+    selected_project: Rc<RefCell<Option<String>>>,
+) {
+    clear_box(project_tabs);
+    clear_box(board);
+
+    let Ok(store) = WorkspaceStore::open(db_path.to_path_buf()) else {
+        append_empty_dashboard(project_tabs, board, "No workspace database yet.");
+        return;
+    };
+    let Ok(statuses) = store.list_status() else {
+        append_empty_dashboard(project_tabs, board, "Could not read workspace state.");
+        return;
+    };
+
+    let mut repo_names = statuses
+        .iter()
+        .map(|line| line.repository_name.clone())
+        .filter(|name| !name.is_empty())
+        .collect::<Vec<_>>();
+    repo_names.sort();
+    repo_names.dedup();
+
+    if selected_project
+        .borrow()
+        .as_ref()
+        .is_some_and(|selected| !repo_names.iter().any(|repo| repo == selected))
+    {
+        *selected_project.borrow_mut() = None;
+    }
+    let selected = selected_project.borrow().clone();
+
+    let all_tab = dashboard_project_tab("All projects", selected.is_none(), {
+        let db_path = db_path.to_path_buf();
+        let project_tabs = project_tabs.clone();
+        let board = board.clone();
+        let selected_project = selected_project.clone();
+        move || {
+            *selected_project.borrow_mut() = None;
+            render_dashboard(&db_path, &project_tabs, &board, selected_project.clone());
+        }
+    });
+    project_tabs.append(&all_tab);
+    for repo in repo_names.iter().take(5) {
+        let tab = dashboard_project_tab(repo, selected.as_deref() == Some(repo.as_str()), {
+            let db_path = db_path.to_path_buf();
+            let project_tabs = project_tabs.clone();
+            let board = board.clone();
+            let selected_project = selected_project.clone();
+            let repo = repo.clone();
+            move || {
+                *selected_project.borrow_mut() = Some(repo.clone());
+                render_dashboard(&db_path, &project_tabs, &board, selected_project.clone());
+            }
+        });
+        project_tabs.append(&tab);
+    }
+
+    let visible_statuses = statuses
+        .iter()
+        .filter(|line| dashboard_project_matches(&line.repository_name, selected.as_deref()))
+        .collect::<Vec<_>>();
+
+    let mut backlog = Vec::new();
+    let mut in_progress = Vec::new();
+    let mut in_review = Vec::new();
+    let mut done = Vec::new();
+
+    for line in visible_statuses {
+        if line.workspace.status == "archived" {
+            done.push(line);
+        } else if line.pull_request.is_some() {
+            in_review.push(line);
+        } else if line.run_running || line.active_sessions > 0 {
+            in_progress.push(line);
+        } else {
+            backlog.push(line);
+        }
+    }
+
+    append_dashboard_column(board, "Backlog", &backlog, &store);
+    append_dashboard_column(board, "In progress", &in_progress, &store);
+    append_dashboard_column(board, "In review", &in_review, &store);
+    append_dashboard_column(board, "Done", &done, &store);
+}
+
+fn dashboard_project_tab(label: &str, active: bool, on_click: impl Fn() + 'static) -> Button {
+    let tab = text_button(label);
+    tab.add_css_class("project-tab");
+    if active {
+        tab.add_css_class("project-tab-active");
+    }
+    tab.connect_clicked(move |_| on_click());
+    tab
+}
+
+fn dashboard_project_matches(repository_name: &str, selected_project: Option<&str>) -> bool {
+    selected_project.is_none_or(|project| repository_name == project)
 }
 
 fn append_empty_dashboard(project_tabs: &GBox, board: &GBox, message: &str) {
@@ -237,7 +301,7 @@ fn build_dashboard_card(line: &WorkspaceStatusLine, store: &WorkspaceStore) -> G
 
 #[cfg(test)]
 mod tests {
-    use super::dashboard_pr_meta;
+    use super::{dashboard_project_matches, dashboard_pr_meta};
 
     #[test]
     fn dashboard_meta_includes_pr_attention_state() {
@@ -249,5 +313,12 @@ mod tests {
     fn dashboard_meta_falls_back_to_pr_state_when_attention_missing() {
         let meta = dashboard_pr_meta("demo", 42, None);
         assert_eq!(meta, "demo · PR #42");
+    }
+
+    #[test]
+    fn dashboard_project_filter_matches_selected_repository() {
+        assert!(dashboard_project_matches("demo", None));
+        assert!(dashboard_project_matches("demo", Some("demo")));
+        assert!(!dashboard_project_matches("demo", Some("other")));
     }
 }
