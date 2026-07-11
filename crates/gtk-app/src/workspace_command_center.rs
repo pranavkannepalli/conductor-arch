@@ -733,6 +733,7 @@ fn ws_center_panel(
             if !workspace_chat_can_add_tab(&visible_existing) {
                 return;
             }
+            add_tab_btn_for_feedback.set_label("+");
             let active_thread = *selected_thread.borrow();
             let provider = visible_existing
                 .iter()
@@ -749,6 +750,7 @@ fn ws_center_panel(
                     )
                 });
             let Some(provider) = provider else {
+                add_tab_btn_for_feedback.set_label("Setup required");
                 add_tab_btn_for_feedback.set_tooltip_text(Some(
                     "Install and sign in to Codex or Claude before adding a chat.",
                 ));
@@ -1049,6 +1051,7 @@ fn workspace_chat_can_add_tab(visible_threads: &[ChatThreadRecord]) -> bool {
 
 fn sync_workspace_chat_add_button(button: &Button, visible_threads: &[ChatThreadRecord]) {
     let can_add = workspace_chat_can_add_tab(visible_threads);
+    button.set_label("+");
     button.set_sensitive(can_add);
     button.set_tooltip_text(Some(if can_add {
         "Add chat"
@@ -1093,8 +1096,11 @@ fn provider_is_ready_launchable(provider: &str, readiness: &SetupReadiness) -> b
 }
 
 fn persist_default_chat_provider(db_path: &Path, workspace_name: &str, provider: &str) {
-    let result = WorkspaceStore::open(db_path)
-        .and_then(|store| store.save_local_default_agent_provider(workspace_name, provider));
+    let result = WorkspaceStore::save_local_default_agent_provider_for_database(
+        db_path,
+        workspace_name,
+        provider,
+    );
     if let Err(err) = result {
         error!("failed to persist chat provider {provider} for {workspace_name}: {err:#}");
     }

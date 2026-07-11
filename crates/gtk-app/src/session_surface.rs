@@ -2970,8 +2970,11 @@ fn persist_selected_provider(database_path: &Path, workspace_name: &str, provide
     let Some(provider) = launchable_provider_name(provider) else {
         return;
     };
-    let result = WorkspaceStore::open(database_path)
-        .and_then(|store| store.save_local_default_agent_provider(workspace_name, provider));
+    let result = WorkspaceStore::save_local_default_agent_provider_for_database(
+        database_path,
+        workspace_name,
+        provider,
+    );
     if let Err(err) = result {
         warn!(workspace = %workspace_name, provider, error = %err, "failed to persist selected provider");
     }

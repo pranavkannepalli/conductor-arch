@@ -4410,6 +4410,14 @@ mutation($threadId: ID!) {{
         save_local_default_agent_provider(&repo_path, provider)
     }
 
+    pub fn save_local_default_agent_provider_for_database(
+        database_path: &Path,
+        workspace_name: &str,
+        provider: &str,
+    ) -> Result<()> {
+        Self::open(database_path)?.save_local_default_agent_provider(workspace_name, provider)
+    }
+
     pub fn workspace_view_defaults(&self, name: &str) -> Result<WorkspaceViewDefaults> {
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
