@@ -15,7 +15,6 @@ use linux_archductor_core::codex_tui::{
 use linux_archductor_core::doctor::SetupReadiness;
 #[cfg(test)]
 use linux_archductor_core::session_state::AgentSessionState;
-use linux_archductor_core::settings::save_local_default_agent_provider;
 use linux_archductor_core::workspace::{
     ChatEventRecord, ChatMessageRecord, ChatThreadRecord, ProcessRecord, ProcessStatus,
     SessionHarnessOptions, SessionKind, WorkspaceStore,
@@ -199,7 +198,11 @@ pub fn agent_session_panel(
         ));
     }
 
-    let initial_harness = initial_chat_harness_from_setup(&database_path, _workspace_name);
+    let setup_readiness = Rc::new(RefCell::new(SetupReadiness::from_host()));
+    let initial_harness = {
+        let readiness = setup_readiness.borrow();
+        initial_chat_harness_from_setup(&database_path, _workspace_name, &readiness)
+    };
     let selected_harness = Rc::new(RefCell::new(initial_harness));
     let selected_model = Rc::new(RefCell::new(None::<String>));
     let reasoning_mode = Rc::new(RefCell::new(Some("high".to_owned())));
@@ -1029,6 +1032,7 @@ pub fn agent_session_panel(
     let codex_ready_for_send = codex_ready.clone();
     let codex_startup_states_for_send = codex_startup_states.clone();
     let update_composer_for_send = update_composer_state.clone();
+    let setup_readiness_for_send = setup_readiness.clone();
     let send_text = Rc::new(move |text: String, staged_review: bool| {
         let command = text.trim().to_owned();
         if command.is_empty() {
@@ -1063,7 +1067,9 @@ pub fn agent_session_panel(
             }
         }
         let selected_kind = *selected_harness_for_send.borrow();
-        if let Some(message) = selected_provider_blocker_message(selected_kind) {
+        if let Some(message) =
+            selected_provider_blocker_message(selected_kind, &setup_readiness_for_send.borrow())
+        {
             let error = Label::new(Some(&message));
             error.add_css_class("chat-agent-text");
             error.set_selectable(true);
@@ -1582,9 +1588,10 @@ pub fn agent_session_panel(
         let app_state = app_state.clone();
         let refresh_view = refresh_view.clone();
         let update_composer_state = update_composer_state.clone();
+        let setup_readiness = setup_readiness.clone();
         move |_| {
             let kind = *selected_harness.borrow();
-            if selected_provider_blocker_message(kind).is_some() {
+            if selected_provider_blocker_message(kind, &setup_readiness.borrow()).is_some() {
                 error!(workspace = %workspace_name, harness = ?kind, "refusing to create chat for unready provider");
                 return;
             }
@@ -2891,9 +2898,12 @@ fn session_kind_index(kind: SessionKind) -> usize {
     }
 }
 
-fn initial_chat_harness_from_setup(database_path: &Path, workspace_name: &str) -> SessionKind {
-    let readiness = SetupReadiness::from_host();
-    if let Some(provider) = configured_ready_provider(database_path, workspace_name, &readiness) {
+fn initial_chat_harness_from_setup(
+    database_path: &Path,
+    workspace_name: &str,
+    readiness: &SetupReadiness,
+) -> SessionKind {
+    if let Some(provider) = configured_ready_provider(database_path, workspace_name, readiness) {
         return session_kind_from_provider(provider);
     }
     let provider = readiness
@@ -2903,13 +2913,15 @@ fn initial_chat_harness_from_setup(database_path: &Path, workspace_name: &str) -
     session_kind_from_provider(provider)
 }
 
-fn selected_provider_blocker_message(kind: SessionKind) -> Option<String> {
+fn selected_provider_blocker_message(
+    kind: SessionKind,
+    readiness: &SetupReadiness,
+) -> Option<String> {
     if matches!(kind, SessionKind::Shell) {
         return None;
     }
-    let readiness = SetupReadiness::from_host();
     let provider = session_kind_provider(kind);
-    (!readiness.provider_ready(provider)).then(|| {
+    (!readiness.launchable_provider_ready(provider)).then(|| {
         format!(
             "{} is not ready. Sign in or install it, then recheck setup before starting a chat.",
             session_kind_name(kind)
@@ -2928,7 +2940,9 @@ fn configured_ready_provider(
         .and_then(|settings| settings.customization.automation.auto_start_agent);
     let provider = configured.as_deref()?;
     let provider = launchable_provider_name(provider)?;
-    readiness.provider_ready(provider).then_some(provider)
+    readiness
+        .launchable_provider_ready(provider)
+        .then_some(provider)
 }
 
 fn launchable_provider_name(provider: &str) -> Option<&'static str> {
@@ -2957,8 +2971,7 @@ fn persist_selected_provider(database_path: &Path, workspace_name: &str, provide
         return;
     };
     let result = WorkspaceStore::open(database_path)
-        .and_then(|store| store.workspace_repository_root(workspace_name))
-        .and_then(|repo_path| save_local_default_agent_provider(&repo_path, provider));
+        .and_then(|store| store.save_local_default_agent_provider(workspace_name, provider));
     if let Err(err) = result {
         warn!(workspace = %workspace_name, provider, error = %err, "failed to persist selected provider");
     }

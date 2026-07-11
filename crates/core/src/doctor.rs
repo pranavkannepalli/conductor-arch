@@ -1,6 +1,10 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+
+const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DependencyCheck {
@@ -77,11 +81,24 @@ impl DoctorReport {
 
 impl SetupReadiness {
     pub fn from_host() -> Self {
+        let gh = thread::spawn(gh_readiness);
+        let codex = thread::spawn(codex_readiness);
+        let claude = thread::spawn(claude_readiness);
+        let opencode = thread::spawn(opencode_readiness);
+
         Self {
-            gh: gh_readiness(),
-            codex: codex_readiness(),
-            claude: claude_readiness(),
-            opencode: opencode_readiness(),
+            gh: gh
+                .join()
+                .unwrap_or_else(|_| SetupCheck::blocked("GitHub CLI check failed.")),
+            codex: codex
+                .join()
+                .unwrap_or_else(|_| SetupCheck::blocked("Codex check failed.")),
+            claude: claude
+                .join()
+                .unwrap_or_else(|_| SetupCheck::blocked("Claude check failed.")),
+            opencode: opencode
+                .join()
+                .unwrap_or_else(|_| SetupCheck::blocked("OpenCode check failed.")),
         }
     }
 
@@ -107,6 +124,14 @@ impl SetupReadiness {
             _ => false,
         }
     }
+
+    pub fn launchable_provider_ready(&self, provider: &str) -> bool {
+        match normalize_provider(provider).as_str() {
+            "codex" => self.codex.ready,
+            "claude" | "claudecode" => self.claude.ready,
+            _ => false,
+        }
+    }
 }
 
 pub fn setup_blockers(readiness: &SetupReadiness) -> Vec<SetupBlocker> {
@@ -114,7 +139,7 @@ pub fn setup_blockers(readiness: &SetupReadiness) -> Vec<SetupBlocker> {
     if !readiness.gh.ready {
         blockers.push(SetupBlocker::GithubUnavailable);
     }
-    if !readiness.any_agent_ready() {
+    if readiness.first_ready_launchable_provider().is_none() {
         blockers.push(SetupBlocker::MissingAgent);
     }
     blockers
@@ -126,7 +151,7 @@ pub fn setup_blockers_for_provider(
 ) -> Vec<SetupBlocker> {
     let mut blockers = setup_blockers(readiness);
     if let Some(provider) = provider {
-        if !provider.trim().is_empty() && !readiness.provider_ready(provider) {
+        if !provider.trim().is_empty() && !readiness.launchable_provider_ready(provider) {
             blockers.push(SetupBlocker::SelectedProviderUnavailable);
         }
     }
@@ -203,11 +228,40 @@ fn gh_readiness() -> SetupCheck {
     if !command_exists("gh") {
         return SetupCheck::missing("Install GitHub CLI.");
     }
-    if command_succeeds("gh", &["auth", "status"]) {
+    if gh_active_account_ready() {
         SetupCheck::ready("Authenticated with GitHub.")
     } else {
-        SetupCheck::blocked("Run `gh auth login`.")
+        SetupCheck::blocked(
+            "Run `gh auth login --hostname github.com` or `gh auth switch --hostname github.com`.",
+        )
     }
+}
+
+fn gh_active_account_ready() -> bool {
+    let Some(output) = command_output("gh", &["auth", "status", "--json", "hosts"]) else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    gh_status_has_active_github_account(&output.stdout)
+}
+
+fn gh_status_has_active_github_account(stdout: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(stdout) else {
+        return false;
+    };
+    value
+        .get("hosts")
+        .and_then(|hosts| hosts.get("github.com"))
+        .and_then(serde_json::Value::as_array)
+        .map(|accounts| {
+            accounts.iter().any(|account| {
+                account.get("active").and_then(serde_json::Value::as_bool) == Some(true)
+                    && account.get("state").and_then(serde_json::Value::as_str) == Some("success")
+            })
+        })
+        .unwrap_or(false)
 }
 
 fn codex_readiness() -> SetupCheck {
@@ -244,11 +298,73 @@ fn opencode_readiness() -> SetupCheck {
 }
 
 fn command_succeeds(program: &str, args: &[&str]) -> bool {
-    Command::new(program)
-        .args(args)
-        .output()
+    command_status(program, args)
         .map(|output| output.status.success())
         .unwrap_or(false)
+}
+
+fn command_output(program: &str, args: &[&str]) -> Option<Output> {
+    run_command_with_timeout(program, args, false)
+}
+
+fn command_status(program: &str, args: &[&str]) -> Option<Output> {
+    run_command_with_timeout(program, args, true)
+}
+
+fn run_command_with_timeout(program: &str, args: &[&str], discard_output: bool) -> Option<Output> {
+    let mut command = Command::new(program);
+    command.args(args);
+    if discard_output {
+        command.stdout(Stdio::null()).stderr(Stdio::null());
+    }
+    let mut child = command.spawn().ok()?;
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return child.wait_with_output().ok(),
+            Ok(None) if started.elapsed() >= PROBE_TIMEOUT => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(20)),
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn path_version_probe_succeeds(path: &Path) -> bool {
+    let mut child = match Command::new(path)
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if started.elapsed() >= PROBE_TIMEOUT => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(20)),
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
 }
 
 fn command_exists(name: &str) -> bool {
@@ -281,11 +397,7 @@ fn is_executable(path: &Path) -> bool {
 
 #[cfg(not(unix))]
 fn is_executable(path: &Path) -> bool {
-    path.is_file()
-        || std::process::Command::new(path)
-            .arg("--version")
-            .output()
-            .is_ok()
+    path.is_file() || path_version_probe_succeeds(path)
 }
 
 #[cfg(test)]
@@ -350,7 +462,7 @@ ID_LIKE=arch
     }
 
     #[test]
-    fn setup_blockers_accept_opencode_as_agent() {
+    fn setup_blockers_require_launchable_agent_even_when_opencode_ready() {
         let readiness = SetupReadiness {
             gh: SetupCheck::ready("ready"),
             codex: SetupCheck::missing("missing"),
@@ -358,7 +470,7 @@ ID_LIKE=arch
             opencode: SetupCheck::ready("ready"),
         };
 
-        assert!(setup_blockers(&readiness).is_empty());
+        assert_eq!(setup_blockers(&readiness), vec![SetupBlocker::MissingAgent]);
     }
 
     #[test]
@@ -375,6 +487,10 @@ ID_LIKE=arch
             vec![SetupBlocker::SelectedProviderUnavailable]
         );
         assert!(setup_blockers_for_provider(&readiness, Some("claude")).is_empty());
+        assert_eq!(
+            setup_blockers_for_provider(&readiness, Some("opencode")),
+            vec![SetupBlocker::SelectedProviderUnavailable]
+        );
     }
 
     #[test]
@@ -387,6 +503,37 @@ ID_LIKE=arch
         };
 
         assert_eq!(readiness.first_ready_launchable_provider(), Some("claude"));
+    }
+
+    #[test]
+    fn gh_status_requires_active_successful_github_account() {
+        let status = br#"
+{
+  "hosts": {
+    "github.com": [
+      {"state": "success", "active": false, "host": "github.com", "login": "old"},
+      {"state": "success", "active": true, "host": "github.com", "login": "current"}
+    ],
+    "github.example.com": [
+      {"state": "success", "active": true, "host": "github.example.com", "login": "enterprise"}
+    ]
+  }
+}
+"#;
+
+        assert!(gh_status_has_active_github_account(status));
+
+        let stale = br#"
+{
+  "hosts": {
+    "github.com": [
+      {"state": "failure", "active": true, "host": "github.com", "login": "current"}
+    ]
+  }
+}
+"#;
+
+        assert!(!gh_status_has_active_github_account(stale));
     }
 
     #[test]

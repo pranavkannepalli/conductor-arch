@@ -9,7 +9,6 @@ use gtk::{
 use linux_archductor_core::archcar::protocol::{ArchcarInputKind, ArchcarRequest};
 use linux_archductor_core::doctor::SetupReadiness;
 use linux_archductor_core::paths::AppPaths;
-use linux_archductor_core::settings::save_local_default_agent_provider;
 use linux_archductor_core::workspace::{
     ChatThreadRecord, DiffFileSummary, ProcessRecord, ProcessStatus, PullRequest,
     PullRequestReviewThread, ReviewComment, SessionKind, Workspace, WorkspaceStore,
@@ -693,6 +692,7 @@ fn ws_center_panel(
             chat_tabs.append(&add_tab_btn);
         })
     };
+    let setup_readiness = Rc::new(SetupReadiness::from_host());
     let chat_widget = session_surface::agent_session_panel(
         db_path.to_path_buf(),
         &ws.name,
@@ -721,6 +721,8 @@ fn ws_center_panel(
         let external_thread_selection = external_thread_selection.clone();
         let on_threads_changed = on_threads_changed.clone();
         let content = content.clone();
+        let setup_readiness = setup_readiness.clone();
+        let add_tab_btn_for_feedback = add_tab_btn.clone();
         add_tab_btn.connect_clicked(move |_| {
             let existing = { known_threads.borrow().clone() };
             let visible_existing = existing
@@ -735,11 +737,24 @@ fn ws_center_panel(
             let provider = visible_existing
                 .iter()
                 .find(|thread| Some(thread.id) == active_thread)
-                .filter(|thread| provider_is_ready_launchable(&thread.provider))
+                .filter(|thread| {
+                    provider_is_ready_launchable(&thread.provider, setup_readiness.as_ref())
+                })
                 .map(|thread| thread.provider.clone())
-                .unwrap_or_else(|| {
-                    default_launchable_chat_provider_for_workspace(&db_path, &workspace_name)
+                .or_else(|| {
+                    default_launchable_chat_provider_for_workspace(
+                        &db_path,
+                        &workspace_name,
+                        setup_readiness.as_ref(),
+                    )
                 });
+            let Some(provider) = provider else {
+                add_tab_btn_for_feedback.set_tooltip_text(Some(
+                    "Install and sign in to Codex or Claude before adding a chat.",
+                ));
+                error!(workspace = %workspace_name, "refusing to create chat without a ready launchable provider");
+                return;
+            };
             let title = workspace_chat_default_title(&visible_existing);
             let Ok(store) = WorkspaceStore::open(db_path.clone()) else {
                 return;
@@ -1063,23 +1078,23 @@ fn workspace_chat_thread_is_supported(thread: &ChatThreadRecord) -> bool {
     matches!(thread.provider.as_str(), "codex" | "claude")
 }
 
-fn default_launchable_chat_provider_for_workspace(db_path: &Path, workspace_name: &str) -> String {
-    let provider = SetupReadiness::from_host()
-        .first_ready_launchable_provider()
-        .unwrap_or("codex")
-        .to_owned();
+fn default_launchable_chat_provider_for_workspace(
+    db_path: &Path,
+    workspace_name: &str,
+    readiness: &SetupReadiness,
+) -> Option<String> {
+    let provider = readiness.first_ready_launchable_provider()?.to_owned();
     persist_default_chat_provider(db_path, workspace_name, &provider);
-    provider
+    Some(provider)
 }
 
-fn provider_is_ready_launchable(provider: &str) -> bool {
-    SetupReadiness::from_host().provider_ready(provider) && matches!(provider, "codex" | "claude")
+fn provider_is_ready_launchable(provider: &str, readiness: &SetupReadiness) -> bool {
+    readiness.launchable_provider_ready(provider) && matches!(provider, "codex" | "claude")
 }
 
 fn persist_default_chat_provider(db_path: &Path, workspace_name: &str, provider: &str) {
     let result = WorkspaceStore::open(db_path)
-        .and_then(|store| store.workspace_repository_root(workspace_name))
-        .and_then(|repo_path| save_local_default_agent_provider(&repo_path, provider));
+        .and_then(|store| store.save_local_default_agent_provider(workspace_name, provider));
     if let Err(err) = result {
         error!("failed to persist chat provider {provider} for {workspace_name}: {err:#}");
     }

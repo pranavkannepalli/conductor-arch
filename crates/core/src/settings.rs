@@ -1,7 +1,10 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fs::{self, OpenOptions};
+use std::io::{ErrorKind, Write};
 use std::path::Path;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RepositorySettings {
@@ -233,18 +236,19 @@ pub fn save_repository_settings(
 
 pub fn save_local_default_agent_provider(repo_path: &Path, provider: &str) -> Result<()> {
     validate_agent_provider(provider)?;
-    let conductor_dir = repo_path.join(".archductor");
-    std::fs::create_dir_all(&conductor_dir)
-        .with_context(|| format!("create {}", conductor_dir.display()))?;
+    let conductor_dir = ensure_local_settings_dir(repo_path)?;
     let path = conductor_dir.join("settings.local.toml");
-    let mut raw = load_optional_settings(&path)?;
-    let customization = raw.customization.get_or_insert_with(Default::default);
-    let automation = customization
-        .automation
-        .get_or_insert_with(Default::default);
-    automation.auto_start_agent = Some(provider.to_owned());
-    let contents = toml::to_string_pretty(&raw).context("serialize local settings")?;
-    std::fs::write(&path, contents).with_context(|| format!("write {}", path.display()))
+    reject_symlink_file(&path)?;
+    let mut value = match fs::read_to_string(&path) {
+        Ok(contents) if contents.trim().is_empty() => toml::Value::Table(toml::map::Map::new()),
+        Ok(contents) => toml::from_str::<toml::Value>(&contents)
+            .with_context(|| format!("parse {}", path.display()))?,
+        Err(err) if err.kind() == ErrorKind::NotFound => toml::Value::Table(toml::map::Map::new()),
+        Err(err) => return Err(err).with_context(|| format!("read {}", path.display())),
+    };
+    set_local_default_agent_provider(&mut value, provider)?;
+    let contents = toml::to_string_pretty(&value).context("serialize local settings")?;
+    atomic_write_no_symlink(&path, contents.as_bytes())
 }
 
 pub fn customization_settings_to_toml(settings: &CustomizationSettings) -> Result<String> {
@@ -1259,6 +1263,99 @@ fn validate_agent_provider(provider: &str) -> Result<()> {
     Ok(())
 }
 
+fn ensure_local_settings_dir(repo_path: &Path) -> Result<std::path::PathBuf> {
+    let conductor_dir = repo_path.join(".archductor");
+    match fs::symlink_metadata(&conductor_dir) {
+        Ok(metadata) => {
+            let file_type = metadata.file_type();
+            anyhow::ensure!(
+                !file_type.is_symlink() && file_type.is_dir(),
+                "{} must be a real directory",
+                conductor_dir.display()
+            );
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            fs::create_dir(&conductor_dir)
+                .with_context(|| format!("create {}", conductor_dir.display()))?;
+        }
+        Err(err) => {
+            return Err(err).with_context(|| format!("inspect {}", conductor_dir.display()))
+        }
+    }
+    let metadata = fs::symlink_metadata(&conductor_dir)
+        .with_context(|| format!("inspect {}", conductor_dir.display()))?;
+    let file_type = metadata.file_type();
+    anyhow::ensure!(
+        !file_type.is_symlink() && file_type.is_dir(),
+        "{} must be a real directory",
+        conductor_dir.display()
+    );
+    Ok(conductor_dir)
+}
+
+fn reject_symlink_file(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            anyhow::ensure!(
+                !metadata.file_type().is_symlink(),
+                "{} must not be a symlink",
+                path.display()
+            );
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => {}
+        Err(err) => return Err(err).with_context(|| format!("inspect {}", path.display())),
+    }
+    Ok(())
+}
+
+fn set_local_default_agent_provider(value: &mut toml::Value, provider: &str) -> Result<()> {
+    let root = value
+        .as_table_mut()
+        .context("local settings root must be a TOML table")?;
+    let customization = root
+        .entry("customization".to_owned())
+        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+    let customization = customization
+        .as_table_mut()
+        .context("customization settings must be a TOML table")?;
+    let automation = customization
+        .entry("automation".to_owned())
+        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+    let automation = automation
+        .as_table_mut()
+        .context("customization.automation settings must be a TOML table")?;
+    automation.insert(
+        "auto_start_agent".to_owned(),
+        toml::Value::String(provider.to_owned()),
+    );
+    Ok(())
+}
+
+fn atomic_write_no_symlink(path: &Path, contents: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .with_context(|| format!("resolve parent for {}", path.display()))?;
+    let tmp_path = parent.join(format!(".{}.{}.tmp", "settings.local.toml", Uuid::new_v4()));
+    let write_result = (|| -> Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)
+            .with_context(|| format!("create {}", tmp_path.display()))?;
+        file.write_all(contents)
+            .with_context(|| format!("write {}", tmp_path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("sync {}", tmp_path.display()))?;
+        reject_symlink_file(path)?;
+        fs::rename(&tmp_path, path).with_context(|| format!("replace {}", path.display()))?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = fs::remove_file(&tmp_path);
+    }
+    write_result
+}
+
 fn normalize_workspace_tab(value: &str) -> String {
     value
         .chars()
@@ -1445,6 +1542,11 @@ setup = "pnpm install"
         fs::write(
             conductor_dir.join("settings.local.toml"),
             r#"
+unknown_root = "keep"
+
+[future.provider]
+experimental = true
+
 [customization.view]
 theme = "dark"
 "#,
@@ -1456,7 +1558,26 @@ theme = "dark"
         let local = fs::read_to_string(conductor_dir.join("settings.local.toml")).unwrap();
         assert!(local.contains("auto_start_agent = \"claude\""));
         assert!(local.contains("theme = \"dark\""));
+        assert!(local.contains("unknown_root = \"keep\""));
+        assert!(local.contains("[future.provider]"));
+        assert!(local.contains("experimental = true"));
         assert!(!local.contains("pnpm install"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_local_default_agent_provider_rejects_symlink_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let conductor_dir = temp.path().join(".archductor");
+        fs::create_dir(&conductor_dir).unwrap();
+        let external = temp.path().join("outside.toml");
+        fs::write(&external, "outside = true\n").unwrap();
+        std::os::unix::fs::symlink(&external, conductor_dir.join("settings.local.toml")).unwrap();
+
+        let err = save_local_default_agent_provider(temp.path(), "codex").unwrap_err();
+
+        assert!(err.to_string().contains("must not be a symlink"));
+        assert_eq!(fs::read_to_string(external).unwrap(), "outside = true\n");
     }
 
     #[test]

@@ -24,7 +24,7 @@ use crate::session_pipeline::{
     process_codex_pty_pipeline, PtyChunkInput, SessionPipelineInput, SessionPipelineOutput,
 };
 use crate::session_state::AgentSessionState;
-use crate::settings::load_repository_settings;
+use crate::settings::{load_repository_settings, save_local_default_agent_provider};
 use crate::terminal_logs::{
     search_terminal_logs as search_terminal_logs_in_processes, summarize_terminal_sessions,
     terminal_log_preview,
@@ -4399,6 +4399,15 @@ mutation($threadId: ID!) {{
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
         Ok(repository.root_path)
+    }
+
+    pub fn save_local_default_agent_provider(
+        &self,
+        workspace_name: &str,
+        provider: &str,
+    ) -> Result<()> {
+        let repo_path = self.workspace_repository_root(workspace_name)?;
+        save_local_default_agent_provider(&repo_path, provider)
     }
 
     pub fn workspace_view_defaults(&self, name: &str) -> Result<WorkspaceViewDefaults> {

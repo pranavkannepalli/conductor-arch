@@ -33,7 +33,7 @@ pub(crate) fn show_blocking_setup_if_needed(parent: &ApplicationWindow) {
     body.append(&title);
 
     let copy = Label::new(Some(
-        "Linux Archductor needs GitHub CLI plus at least one local agent before workspace features can run.",
+        "Linux Archductor needs GitHub CLI plus a signed-in Codex or Claude CLI before chat features can run.",
     ));
     copy.add_css_class("setup-copy");
     copy.set_wrap(true);
@@ -177,17 +177,25 @@ fn setup_status_row(name: &str, detail: &str, check: &SetupCheck, required: bool
 fn setup_feedback(readiness: &SetupReadiness) -> String {
     match setup_blockers(readiness).as_slice() {
         [] => "Setup is complete.".to_owned(),
-        [SetupBlocker::GithubUnavailable] => {
+        [SetupBlocker::GithubUnavailable] if readiness.gh.installed => {
             "Authenticate GitHub CLI, then press Recheck.".to_owned()
         }
+        [SetupBlocker::GithubUnavailable] => {
+            "Install and authenticate GitHub CLI, then press Recheck.".to_owned()
+        }
+        [SetupBlocker::MissingAgent] if readiness.codex.installed || readiness.claude.installed => {
+            "Sign in to Codex or Claude, then press Recheck.".to_owned()
+        }
         [SetupBlocker::MissingAgent] => {
-            "Sign in to Codex, Claude, or OpenCode, then press Recheck.".to_owned()
+            "Install and sign in to Codex or Claude, then press Recheck.".to_owned()
         }
         [SetupBlocker::SelectedProviderUnavailable] => {
             "Choose a ready provider or sign in to the selected provider, then press Recheck."
                 .to_owned()
         }
-        _ => "Authenticate GitHub CLI and at least one agent, then press Recheck.".to_owned(),
+        _ => {
+            "Install or authenticate GitHub CLI and Codex or Claude, then press Recheck.".to_owned()
+        }
     }
 }
 
@@ -220,7 +228,7 @@ mod tests {
 
         assert_eq!(
             setup_feedback(&readiness),
-            "Authenticate GitHub CLI, then press Recheck."
+            "Install and authenticate GitHub CLI, then press Recheck."
         );
     }
 
@@ -235,7 +243,22 @@ mod tests {
 
         assert_eq!(
             setup_feedback(&readiness),
-            "Sign in to Codex, Claude, or OpenCode, then press Recheck."
+            "Install and sign in to Codex or Claude, then press Recheck."
+        );
+    }
+
+    #[test]
+    fn setup_feedback_summarizes_installed_but_blocked_agent() {
+        let readiness = SetupReadiness {
+            gh: SetupCheck::ready("ready"),
+            codex: SetupCheck::blocked("blocked"),
+            claude: SetupCheck::missing("missing"),
+            opencode: SetupCheck::ready("ready"),
+        };
+
+        assert_eq!(
+            setup_feedback(&readiness),
+            "Sign in to Codex or Claude, then press Recheck."
         );
     }
 
