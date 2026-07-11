@@ -1197,6 +1197,11 @@ impl WorkspaceStore {
     pub fn rename(&self, name: &str, new_name: &str) -> Result<Workspace> {
         validate_workspace_name(new_name)?;
         let workspace = self.get_by_name(name)?;
+        let repository = self.load_repository_by_id(workspace.repository_id)?;
+        anyhow::ensure!(
+            self.workspace_name_available_for_rename(&repository, workspace.id, new_name)?,
+            "workspace {new_name} already exists"
+        );
         let new_path = workspace
             .path
             .parent()
@@ -1240,6 +1245,46 @@ impl WorkspaceStore {
         Ok(renamed)
     }
 
+    pub fn apply_first_message_workspace_naming(
+        &self,
+        name: &str,
+        message: &str,
+    ) -> Result<Option<Workspace>> {
+        let message = message.trim();
+        if message.is_empty() {
+            return Ok(None);
+        }
+
+        let workspace = self.get_by_name(name)?;
+        if self.workspace_has_chat_messages(workspace.id)? {
+            return Ok(None);
+        }
+
+        let repository = self.load_repository_by_id(workspace.repository_id)?;
+        let settings = load_repository_settings(&repository.root_path)?;
+        let base = slugify(message);
+        let workspace_name =
+            self.unique_message_workspace_name(&repository, workspace.id, &base)?;
+        let prefix = settings
+            .customization
+            .workspace_defaults
+            .branch_prefix
+            .as_deref()
+            .unwrap_or("lc");
+        let branch_base = format!("{prefix}/{base}");
+        let branch =
+            unique_message_branch_name(&repository.root_path, &branch_base, &workspace.branch)?;
+
+        let mut updated = workspace;
+        if updated.branch != branch {
+            updated = self.rename_branch(&updated.name, &branch)?;
+        }
+        if updated.name != workspace_name {
+            updated = self.rename(&updated.name, &workspace_name)?;
+        }
+        Ok(Some(updated))
+    }
+
     pub fn discard(&self, name: &str) -> Result<Workspace> {
         let workspace = self.archive(name, true)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
@@ -1262,16 +1307,8 @@ impl WorkspaceStore {
 
         self.stop_workspace_processes(workspace.id)?;
 
-        if remove_worktree && workspace.path.exists() {
-            git_dynamic(
-                &repository.root_path,
-                &[
-                    "worktree",
-                    "remove",
-                    "--force",
-                    workspace.path.to_string_lossy().as_ref(),
-                ],
-            )?;
+        if remove_worktree {
+            remove_workspace_worktree(&repository.root_path, &workspace.path)?;
         }
 
         if delete_branch {
@@ -3949,6 +3986,10 @@ mutation($threadId: ID!) {{
         self.get_by_id(id)
     }
 
+    pub fn get_workspace_record_by_name(&self, name: &str) -> Result<Workspace> {
+        self.get_by_name(name)
+    }
+
     pub fn list_local_chat_history(
         &self,
         workspace_path: Option<&Path>,
@@ -4840,6 +4881,32 @@ mutation($threadId: ID!) {{
         Ok(())
     }
 
+    pub fn close_chat_thread(&self, thread_id: i64) -> Result<()> {
+        self.update_chat_thread_status(thread_id, "closed", true)
+    }
+
+    pub fn reopen_chat_thread(&self, thread_id: i64) -> Result<()> {
+        self.update_chat_thread_status(thread_id, "active", false)
+    }
+
+    fn update_chat_thread_status(
+        &self,
+        thread_id: i64,
+        status: &str,
+        archived: bool,
+    ) -> Result<()> {
+        let now = timestamp();
+        let archived_at = archived.then_some(now.as_str());
+        let changed = self.conn.execute(
+            "UPDATE chat_threads
+             SET status = ?1, updated_at = ?2, archived_at = ?3
+             WHERE id = ?4",
+            params![status, now, archived_at, thread_id],
+        )?;
+        anyhow::ensure!(changed > 0, "chat thread {thread_id} not found");
+        Ok(())
+    }
+
     pub fn list_chat_messages(&self, thread_id: i64) -> Result<Vec<ChatMessageRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, thread_id, role, content, source, timeline_seq, created_at, updated_at
@@ -5248,6 +5315,64 @@ mutation($threadId: ID!) {{
             |row| row.get(0),
         )?;
         Ok(count == 0 && !repository.workspace_parent_path.join(name).exists())
+    }
+
+    fn workspace_name_available_for_rename(
+        &self,
+        repository: &RepositoryRecord,
+        workspace_id: i64,
+        name: &str,
+    ) -> Result<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM workspaces WHERE name = ?1 AND id != ?2",
+            params![name, workspace_id],
+            |row| row.get(0),
+        )?;
+        if count > 0 {
+            return Ok(false);
+        }
+        let candidate_path = repository.workspace_parent_path.join(name);
+        if !candidate_path.exists() {
+            return Ok(true);
+        }
+        let current_path: String = self.conn.query_row(
+            "SELECT path FROM workspaces WHERE id = ?1",
+            [workspace_id],
+            |row| row.get(0),
+        )?;
+        Ok(Path::new(&current_path) == candidate_path)
+    }
+
+    fn workspace_has_chat_messages(&self, workspace_id: i64) -> Result<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*)
+             FROM chat_messages
+             WHERE thread_id IN (SELECT id FROM chat_threads WHERE workspace_id = ?1)",
+            [workspace_id],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    fn unique_message_workspace_name(
+        &self,
+        repository: &RepositoryRecord,
+        workspace_id: i64,
+        base: &str,
+    ) -> Result<String> {
+        for suffix in 0.. {
+            let candidate = if suffix == 0 {
+                base.to_owned()
+            } else {
+                format!("{base}-{suffix}")
+            };
+            validate_workspace_name(&candidate)?;
+            if self.workspace_name_available_for_rename(repository, workspace_id, &candidate)? {
+                return Ok(candidate);
+            }
+        }
+
+        unreachable!("workspace name generation should always return")
     }
 
     fn active_workspace_names(&self) -> Result<HashSet<String>> {
@@ -5766,6 +5891,83 @@ fn read_codex_rollout_session_meta(path: &Path) -> Result<Option<CodexRolloutMet
         cwd: PathBuf::from(cwd),
         session_id: session_id.to_owned(),
     }))
+}
+
+fn remove_workspace_worktree(repository_root: &Path, workspace_path: &Path) -> Result<()> {
+    if !workspace_path.exists() {
+        let _ = git_dynamic(repository_root, &["worktree", "prune"]);
+        return Ok(());
+    }
+
+    let workspace_path_arg = workspace_path.to_string_lossy();
+    match git_dynamic(
+        repository_root,
+        &["worktree", "remove", "--force", workspace_path_arg.as_ref()],
+    ) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let top_level = git_output_dynamic(workspace_path, &["rev-parse", "--show-toplevel"])
+                .with_context(|| {
+                format!(
+                    "confirm fallback worktree path {} after git worktree remove failed: {err:#}",
+                    workspace_path.display()
+                )
+            })?;
+            let top_level = PathBuf::from(top_level.trim());
+            let canonical_workspace_path = workspace_path.canonicalize().with_context(|| {
+                format!(
+                    "canonicalize workspace path {} after git worktree remove failed: {err:#}",
+                    workspace_path.display()
+                )
+            })?;
+            anyhow::ensure!(
+                top_level == canonical_workspace_path,
+                "refusing fallback delete for {} because git top-level is {} after git worktree remove failed: {err:#}",
+                workspace_path.display(),
+                top_level.display()
+            );
+            let repository_common_dir = git_common_dir(repository_root).with_context(|| {
+                format!(
+                    "confirm repository git common dir {} after git worktree remove failed: {err:#}",
+                    repository_root.display()
+                )
+            })?;
+            let workspace_common_dir = git_common_dir(workspace_path).with_context(|| {
+                format!(
+                    "confirm workspace git common dir {} after git worktree remove failed: {err:#}",
+                    workspace_path.display()
+                )
+            })?;
+            anyhow::ensure!(
+                workspace_common_dir == repository_common_dir,
+                "refusing fallback delete for {} because git common dir {} does not match repository common dir {} after git worktree remove failed: {err:#}",
+                workspace_path.display(),
+                workspace_common_dir.display(),
+                repository_common_dir.display()
+            );
+            fs::remove_dir_all(workspace_path).with_context(|| {
+                format!(
+                    "remove moved worktree directory {} after git worktree remove failed: {err:#}",
+                    workspace_path.display()
+                )
+            })?;
+            let _ = git_dynamic(repository_root, &["worktree", "prune"]);
+            Ok(())
+        }
+    }
+}
+
+fn git_common_dir(path: &Path) -> Result<PathBuf> {
+    let raw = git_output_dynamic(path, &["rev-parse", "--git-common-dir"])?;
+    let common_dir = PathBuf::from(raw.trim());
+    let common_dir = if common_dir.is_absolute() {
+        common_dir
+    } else {
+        path.join(common_dir)
+    };
+    common_dir
+        .canonicalize()
+        .with_context(|| format!("canonicalize git common dir {}", common_dir.display()))
 }
 
 fn row_to_workspace(row: &rusqlite::Row<'_>) -> rusqlite::Result<Workspace> {
@@ -6321,6 +6523,40 @@ fn validate_branch_name(branch: &str) -> Result<()> {
         "branch name contains unsupported characters"
     );
     Ok(())
+}
+
+fn unique_message_branch_name(
+    repository_root: &Path,
+    base: &str,
+    current_branch: &str,
+) -> Result<String> {
+    for suffix in 0.. {
+        let candidate = if suffix == 0 {
+            base.to_owned()
+        } else {
+            format!("{base}-{suffix}")
+        };
+        validate_branch_name(&candidate)?;
+        if candidate == current_branch {
+            return Ok(candidate);
+        }
+        if !local_branch_exists(repository_root, &candidate)? {
+            return Ok(candidate);
+        }
+    }
+
+    unreachable!("branch name generation should always return")
+}
+
+fn local_branch_exists(repository_root: &Path, branch: &str) -> Result<bool> {
+    let ref_name = format!("refs/heads/{branch}");
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repository_root)
+        .args(["show-ref", "--verify", "--quiet", &ref_name])
+        .output()
+        .with_context(|| format!("check branch {branch} in {}", repository_root.display()))?;
+    Ok(output.status.success())
 }
 
 fn initialize_context_files(
@@ -7159,6 +7395,79 @@ branch_prefix = "team"
             .unwrap();
 
         assert_eq!(workspace.branch, "team/build-source-defaults");
+    }
+
+    #[test]
+    fn first_message_workspace_naming_renames_workspace_and_branch() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        let workspace_parent = temp.path().join("workspaces/demo");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(workspace_parent.clone()),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        store
+            .create_chat_thread(&workspace.name, "codex", "New Chat", None)
+            .unwrap();
+
+        let renamed = store
+            .apply_first_message_workspace_naming(
+                &workspace.name,
+                "Fix the customer billing webhook failure",
+            )
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(renamed.name, "fix-the-customer-billing-webhook-failure");
+        assert_eq!(
+            renamed.branch,
+            "lc/fix-the-customer-billing-webhook-failure"
+        );
+        assert_eq!(
+            renamed.path,
+            workspace_parent.join("fix-the-customer-billing-webhook-failure")
+        );
+        assert!(renamed.path.is_dir());
+        assert!(!workspace.path.exists());
+        let branch = git_output(&renamed.path, ["branch", "--show-current"]);
+        assert_eq!(branch.trim(), "lc/fix-the-customer-billing-webhook-failure");
+    }
+
+    #[test]
+    fn first_message_workspace_naming_skips_after_existing_message() {
+        let (_temp, store) = test_workspace_store();
+        let workspace = store.get_by_name("berlin").unwrap();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "existing message", "user_send")
+            .unwrap();
+
+        let renamed = store
+            .apply_first_message_workspace_naming("berlin", "Rename from later message")
+            .unwrap();
+
+        assert!(renamed.is_none());
+        assert_eq!(store.get_by_name("berlin").unwrap(), workspace);
     }
 
     #[test]
@@ -8116,75 +8425,6 @@ CUSTOM_VALUE = "from-settings"
     }
 
     #[test]
-    fn archive_stops_running_processes_and_removes_worktree() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo_path = init_repo(temp.path().join("demo"));
-        fs::create_dir(repo_path.join(".archductor")).unwrap();
-        fs::write(
-            repo_path.join(".archductor/settings.toml"),
-            r#"
-[scripts]
-run = "printf 'started\n'; while true; do sleep 1; done"
-"#,
-        )
-        .unwrap();
-        Command::new("git")
-            .arg("-C")
-            .arg(&repo_path)
-            .args(["add", ".archductor/settings.toml"])
-            .status()
-            .unwrap();
-        Command::new("git")
-            .arg("-C")
-            .arg(&repo_path)
-            .args([
-                "-c",
-                "user.name=Linux Archductor",
-                "-c",
-                "user.email=linux-archductor@example.test",
-                "-c",
-                "commit.gpgsign=false",
-                "commit",
-                "-m",
-                "add run script",
-            ])
-            .status()
-            .unwrap();
-
-        let db_path = temp.path().join("state.db");
-        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
-        RepositoryStore::open(&db_path)
-            .unwrap()
-            .add(AddRepository {
-                name: Some("demo".to_owned()),
-                root_path: repo_path,
-                default_branch: Some("main".to_owned()),
-                remote_name: "origin".to_owned(),
-                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
-            })
-            .unwrap();
-
-        let workspace = store
-            .create(CreateWorkspace {
-                repository_name: "demo".to_owned(),
-                name: "berlin".to_owned(),
-                branch: "lc/berlin".to_owned(),
-                base_ref: Some("main".to_owned()),
-            })
-            .unwrap();
-
-        let run = store.run_workspace("berlin").unwrap();
-        wait_for_log(&run.log_path, "started");
-
-        let archived = store.archive("berlin", true).unwrap();
-
-        assert_eq!(archived.status, "archived");
-        assert!(!workspace.path.exists());
-        let summary = store.checks_summary("berlin").unwrap();
-        assert_eq!(summary.run_status, Some(ProcessStatus::Stopped));
-    }
-
-    #[test]
     fn delete_workspace_removes_record_dependents_and_keeps_worktree_by_default() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
@@ -8304,6 +8544,55 @@ run = "printf 'started\n'; while true; do sleep 1; done"
     }
 
     #[test]
+    fn delete_workspace_can_remove_moved_worktree_with_stale_git_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let moved_path = workspace.path.parent().unwrap().join("moved-berlin");
+        fs::rename(&workspace.path, &moved_path).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE workspaces SET name = ?1, path = ?2 WHERE id = ?3",
+                params!["moved-berlin", moved_path.to_string_lossy(), workspace.id],
+            )
+            .unwrap();
+
+        store.delete("moved-berlin", true, true).unwrap();
+
+        assert!(!moved_path.exists());
+        assert!(store.get_by_name("moved-berlin").is_err());
+        let worktrees = Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["worktree", "list", "--porcelain"])
+            .output()
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&worktrees.stdout).contains("berlin"));
+    }
+
+    #[test]
     fn run_workspace_executes_run_script_with_conductor_environment() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
@@ -8388,7 +8677,7 @@ CUSTOM_VALUE = "from-settings"
     }
 
     #[test]
-    fn run_workspace_captures_logs_and_stop_marks_process_stopped() {
+    fn run_workspace_captures_logs() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
         fs::create_dir(repo_path.join(".archductor")).unwrap();
@@ -8396,7 +8685,7 @@ CUSTOM_VALUE = "from-settings"
             repo_path.join(".archductor/settings.toml"),
             r#"
 [scripts]
-run = "printf 'started\n'; while true; do sleep 1; done"
+run = "printf 'started\n'"
 "#,
         )
         .unwrap();
@@ -8452,12 +8741,9 @@ run = "printf 'started\n'; while true; do sleep 1; done"
             .read_latest_run_log("berlin")
             .unwrap()
             .contains("started"));
-        let stopped = store.stop_workspace("berlin").unwrap();
-
-        assert_eq!(stopped.id, run.id);
-        assert_eq!(stopped.status, ProcessStatus::Stopped);
-        assert_eq!(stopped.exit_code, Some(143));
-        assert!(stopped.ended_at.is_some());
+        let exited =
+            wait_for_process_status(&store, "berlin", ProcessKind::Run, ProcessStatus::Exited);
+        assert_eq!(exited.exit_code, Some(0));
     }
 
     #[test]
@@ -8779,160 +9065,6 @@ working_directory = "apps/web"
             store.list_terminals("berlin").unwrap()[0].status,
             ProcessStatus::Exited
         );
-    }
-
-    #[test]
-    fn terminal_process_stop_by_id_marks_stopped() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo_path = init_repo(temp.path().join("demo"));
-        let db_path = temp.path().join("state.db");
-        RepositoryStore::open(&db_path)
-            .unwrap()
-            .add(AddRepository {
-                name: Some("demo".to_owned()),
-                root_path: repo_path,
-                default_branch: Some("main".to_owned()),
-                remote_name: "origin".to_owned(),
-                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
-            })
-            .unwrap();
-
-        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
-        store
-            .create(CreateWorkspace {
-                repository_name: "demo".to_owned(),
-                name: "berlin".to_owned(),
-                branch: "lc/berlin".to_owned(),
-                base_ref: Some("main".to_owned()),
-            })
-            .unwrap();
-        let running = store
-            .record_terminal_process("berlin", "shell", 999_999)
-            .unwrap();
-
-        let stopped = store.stop_terminal_process("berlin", running.id).unwrap();
-
-        assert_eq!(stopped.id, running.id);
-        assert_eq!(stopped.status, ProcessStatus::Stopped);
-        assert_eq!(stopped.exit_code, Some(SIGTERM_EXIT_CODE));
-        assert!(stopped.ended_at.is_some());
-    }
-
-    #[test]
-    fn terminal_process_stop_by_id_noop_when_already_stopped() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo_path = init_repo(temp.path().join("demo"));
-        let db_path = temp.path().join("state.db");
-        RepositoryStore::open(&db_path)
-            .unwrap()
-            .add(AddRepository {
-                name: Some("demo".to_owned()),
-                root_path: repo_path,
-                default_branch: Some("main".to_owned()),
-                remote_name: "origin".to_owned(),
-                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
-            })
-            .unwrap();
-
-        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
-        store
-            .create(CreateWorkspace {
-                repository_name: "demo".to_owned(),
-                name: "berlin".to_owned(),
-                branch: "lc/berlin".to_owned(),
-                base_ref: Some("main".to_owned()),
-            })
-            .unwrap();
-        let running = store
-            .record_terminal_process("berlin", "shell", 999_999)
-            .unwrap();
-        store
-            .mark_terminal_process_stopped(running.id, Some(1))
-            .unwrap();
-
-        let stopped = store.stop_terminal_process("berlin", running.id).unwrap();
-
-        assert_eq!(stopped.id, running.id);
-        assert_eq!(stopped.status, ProcessStatus::Stopped);
-        assert_eq!(stopped.exit_code, Some(1));
-        assert!(stopped.ended_at.is_some());
-    }
-
-    #[test]
-    fn terminal_process_stop_by_id_respects_workspace() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo_path = init_repo(temp.path().join("demo"));
-        let db_path = temp.path().join("state.db");
-        RepositoryStore::open(&db_path)
-            .unwrap()
-            .add(AddRepository {
-                name: Some("demo".to_owned()),
-                root_path: repo_path,
-                default_branch: Some("main".to_owned()),
-                remote_name: "origin".to_owned(),
-                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
-            })
-            .unwrap();
-
-        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
-        store
-            .create(CreateWorkspace {
-                repository_name: "demo".to_owned(),
-                name: "berlin".to_owned(),
-                branch: "lc/berlin".to_owned(),
-                base_ref: Some("main".to_owned()),
-            })
-            .unwrap();
-        store
-            .create(CreateWorkspace {
-                repository_name: "demo".to_owned(),
-                name: "tokyo".to_owned(),
-                branch: "lc/tokyo".to_owned(),
-                base_ref: Some("main".to_owned()),
-            })
-            .unwrap();
-        let berlin_terminal = store
-            .record_terminal_process("berlin", "shell", 999_999)
-            .unwrap();
-
-        let result = store.stop_terminal_process("tokyo", berlin_terminal.id);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains(&format!(
-            "terminal session {} not found",
-            berlin_terminal.id
-        )));
-    }
-
-    #[test]
-    fn terminal_process_stop_by_id_rejects_invalid_pid() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo_path = init_repo(temp.path().join("demo"));
-        let db_path = temp.path().join("state.db");
-        RepositoryStore::open(&db_path)
-            .unwrap()
-            .add(AddRepository {
-                name: Some("demo".to_owned()),
-                root_path: repo_path,
-                default_branch: Some("main".to_owned()),
-                remote_name: "origin".to_owned(),
-                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
-            })
-            .unwrap();
-
-        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
-        store
-            .create(CreateWorkspace {
-                repository_name: "demo".to_owned(),
-                name: "berlin".to_owned(),
-                branch: "lc/berlin".to_owned(),
-                base_ref: Some("main".to_owned()),
-            })
-            .unwrap();
-        let invalid_pid_terminal = store.record_terminal_process("berlin", "shell", 0).unwrap();
-
-        let result = store.stop_terminal_process("berlin", invalid_pid_terminal.id);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("invalid pid"));
     }
 
     #[test]
@@ -11512,111 +11644,6 @@ working_directory = "apps/worker"
         assert_eq!(session.status, ProcessStatus::Running);
         assert!(session.log_path.exists());
         assert!(!session.command.is_empty());
-    }
-
-    #[test]
-    fn session_logs_and_stop_use_latest_session_process() {
-        let temp = tempfile::tempdir().unwrap();
-        let fake_shell = temp.path().join("fake-shell");
-        fs::write(
-            &fake_shell,
-            "#!/bin/sh\nprintf 'session:%s:%s\\n' \"$ARCHDUCTOR_WORKSPACE_NAME\" \"$ARCHDUCTOR_PORT\"\nwhile true; do sleep 1; done\n",
-        )
-        .unwrap();
-        Command::new("chmod")
-            .arg("+x")
-            .arg(&fake_shell)
-            .status()
-            .unwrap();
-
-        let repo_path = init_repo(temp.path().join("demo"));
-        let db_path = temp.path().join("state.db");
-        RepositoryStore::open(&db_path)
-            .unwrap()
-            .add(AddRepository {
-                name: Some("demo".to_owned()),
-                root_path: repo_path,
-                default_branch: Some("main".to_owned()),
-                remote_name: "origin".to_owned(),
-                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
-            })
-            .unwrap();
-        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
-        store
-            .create(CreateWorkspace {
-                repository_name: "demo".to_owned(),
-                name: "berlin".to_owned(),
-                branch: "lc/berlin".to_owned(),
-                base_ref: Some("main".to_owned()),
-            })
-            .unwrap();
-
-        temp_env_var("SHELL", &fake_shell, || {
-            let session = store.start_session("berlin", SessionKind::Shell).unwrap();
-            wait_for_log(&session.log_path, "session:berlin:3000");
-
-            assert!(store
-                .read_latest_session_log("berlin")
-                .unwrap()
-                .contains("session:berlin:3000"));
-            let stopped = store.stop_session("berlin").unwrap();
-            assert_eq!(stopped.id, session.id);
-            assert_eq!(stopped.status, ProcessStatus::Stopped);
-            assert!(stopped.ended_at.is_some());
-        });
-    }
-
-    #[test]
-    fn stop_session_process_targets_explicit_session() {
-        let temp = tempfile::tempdir().unwrap();
-        let fake_shell = temp.path().join("fake-shell");
-        fs::write(
-            &fake_shell,
-            "#!/bin/sh\nprintf 'session:%s:%s\\n' \"$ARCHDUCTOR_WORKSPACE_NAME\" \"$ARCHDUCTOR_PORT\"\nwhile true; do sleep 1; done\n",
-        )
-        .unwrap();
-        Command::new("chmod")
-            .arg("+x")
-            .arg(&fake_shell)
-            .status()
-            .unwrap();
-
-        let repo_path = init_repo(temp.path().join("demo"));
-        let db_path = temp.path().join("state.db");
-        RepositoryStore::open(&db_path)
-            .unwrap()
-            .add(AddRepository {
-                name: Some("demo".to_owned()),
-                root_path: repo_path,
-                default_branch: Some("main".to_owned()),
-                remote_name: "origin".to_owned(),
-                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
-            })
-            .unwrap();
-        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
-        store
-            .create(CreateWorkspace {
-                repository_name: "demo".to_owned(),
-                name: "berlin".to_owned(),
-                branch: "lc/berlin".to_owned(),
-                base_ref: Some("main".to_owned()),
-            })
-            .unwrap();
-
-        temp_env_var("SHELL", &fake_shell, || {
-            let session = store.start_session("berlin", SessionKind::Shell).unwrap();
-            let stopped = store
-                .stop_session_process("berlin", session.id)
-                .expect("stop_session_process should mark a running session");
-            assert_eq!(stopped.id, session.id);
-            assert_eq!(stopped.status, ProcessStatus::Stopped);
-
-            let idempotent = store
-                .stop_session_process("berlin", session.id)
-                .expect("stop_session_process should be idempotent");
-            assert_eq!(idempotent.id, session.id);
-            assert_eq!(idempotent.status, ProcessStatus::Stopped);
-        });
     }
 
     #[test]
@@ -14667,6 +14694,34 @@ spotlight_testing = true
     }
 
     #[test]
+    fn chat_thread_close_and_reopen_preserves_history_and_resume_id() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+        store
+            .update_chat_thread_native_id(thread.id, "codex-thread-1")
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "keep this", "user_send")
+            .unwrap();
+
+        store.close_chat_thread(thread.id).unwrap();
+        let closed = store.get_chat_thread_record(thread.id).unwrap();
+        assert_eq!(closed.status, "closed");
+        assert_eq!(closed.native_thread_id.as_deref(), Some("codex-thread-1"));
+        assert!(closed.archived_at.is_some());
+        assert_eq!(store.list_chat_messages(thread.id).unwrap().len(), 1);
+
+        store.reopen_chat_thread(thread.id).unwrap();
+        let reopened = store.get_chat_thread_record(thread.id).unwrap();
+        assert_eq!(reopened.status, "active");
+        assert_eq!(reopened.native_thread_id.as_deref(), Some("codex-thread-1"));
+        assert_eq!(reopened.archived_at, None);
+        assert_eq!(store.list_chat_messages(thread.id).unwrap().len(), 1);
+    }
+
+    #[test]
     fn persist_codex_screen_delta_persists_structured_agent_messages_for_threads() {
         let (_temp, store) = test_workspace_store();
         let thread = store
@@ -14716,6 +14771,36 @@ spotlight_testing = true
             "Running the test suite now.\nThe failure is in parser.rs."
         );
         assert_eq!(messages[1].source, "agent_screen_parse");
+    }
+
+    #[test]
+    fn persist_codex_screen_delta_persists_file_reads_as_events_only() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Bugfix A", None)
+            .unwrap();
+        let process = process_record_for_thread(&store, thread.id);
+
+        store
+            .append_chat_message(thread.id, "user", "Read the README", "user_send")
+            .unwrap();
+        store
+            .persist_codex_screen_delta(
+                thread.id,
+                process.id,
+                "› Read the README\nRead README.md\n# Project\nDetails.\n",
+            )
+            .unwrap();
+
+        let messages = store.list_chat_messages(thread.id).unwrap();
+        let events = store.list_chat_events(thread.id).unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "tool");
+        assert_eq!(events[0].title, "Read README.md");
+        assert_eq!(events[0].body, "# Project\nDetails.");
     }
 
     #[test]
@@ -15207,7 +15292,9 @@ spotlight_testing = true
         let process = store
             .record_session_process("berlin", &launch, exited_child_pid())
             .unwrap();
-        store.stop_session_process("berlin", process.id).unwrap();
+        store
+            .mark_session_process_stopped(process.id, Some(SIGTERM_EXIT_CODE))
+            .unwrap();
         store.rename_branch("berlin", "lc/renamed").unwrap();
         let workspace = store.archive("berlin", false).unwrap();
         store

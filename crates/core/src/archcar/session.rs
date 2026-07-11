@@ -9,14 +9,18 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use tracing::{info, warn};
 
-use crate::archcar::harness::{controller_for_kind, ensure_thread_for_kind, HarnessController};
+use crate::archcar::harness::{
+    controller_for_kind, ensure_thread_for_kind, provider_name, HarnessController,
+};
 use crate::archcar::protocol::{ArchcarEvent, ArchcarInputKind};
 use crate::codex_tui::{codex_persistent_screen_fingerprint, ScreenMessage};
 use crate::pty::PtySession;
 use crate::runtime_session_store::RuntimeSessionStore;
 use crate::session_pipeline::PtyChunkInput;
 use crate::session_state::{AgentSessionState, SessionStateMachine};
-use crate::workspace::{ProcessStatus, SessionHarnessOptions, SessionKind, WorkspaceStore};
+use crate::workspace::{
+    ProcessStatus, SessionHarnessOptions, SessionKind, SessionLaunch, WorkspaceStore,
+};
 
 #[derive(Debug)]
 pub enum SessionCommand {
@@ -161,67 +165,188 @@ pub fn spawn_managed_session(
     let store = WorkspaceStore::open_with_logs(db_path.clone(), logs_dir.clone())?;
     let controller = controller_for_kind(kind);
     if let Some((connection, snapshot_state)) = adopt_running_session(&store, &workspace, kind)? {
-        let snapshot = Arc::new(Mutex::new(snapshot_state));
-        let (command_tx, command_rx) = mpsc::channel();
-        let snapshot_for_thread = snapshot.clone();
-        thread::spawn(move || {
-            run_session_loop(
-                db_path,
-                logs_dir,
-                snapshot_for_thread,
-                controller,
-                connection,
-                command_rx,
-                event_tx,
-            )
-        });
-        return Ok(SessionHandle {
-            snapshot,
-            command_tx,
-        });
+        return Ok(start_session_handle(
+            db_path,
+            logs_dir,
+            snapshot_state,
+            controller,
+            connection,
+            event_tx,
+        ));
     }
     let thread_record = ensure_thread_for_kind(&store, &workspace, kind)?;
     let launch = controller.build_launch(&store, &workspace, harness)?;
+    spawn_live_managed_session(LiveSessionStart {
+        db_path,
+        logs_dir,
+        store: &store,
+        workspace,
+        thread_id: thread_record.id,
+        kind,
+        launch,
+        controller,
+        event_tx,
+    })
+}
+
+struct LiveSessionStart<'a> {
+    db_path: PathBuf,
+    logs_dir: PathBuf,
+    store: &'a WorkspaceStore,
+    workspace: String,
+    thread_id: i64,
+    kind: SessionKind,
+    launch: SessionLaunch,
+    controller: Box<dyn HarnessController>,
+    event_tx: Sender<ArchcarEvent>,
+}
+
+fn spawn_live_managed_session(start: LiveSessionStart<'_>) -> Result<SessionHandle> {
     let pty = PtySession::spawn(
-        launch.program.clone(),
-        launch.args.clone(),
-        &launch.cwd,
-        launch.env.clone(),
+        start.launch.program.clone(),
+        start.launch.args.clone(),
+        &start.launch.cwd,
+        start.launch.env.clone(),
         24,
         80,
     )
-    .with_context(|| format!("spawn managed {:?} pty", kind))?;
+    .with_context(|| format!("spawn managed {:?} pty", start.kind))?;
     let pid = pty.process_id().context("pty has no process id")?;
-    let process =
-        store.record_session_process_for_thread(&workspace, thread_record.id, &launch, pid)?;
-    let snapshot = Arc::new(Mutex::new(SessionSnapshot {
-        session_id: process.id,
-        thread_id: thread_record.id,
-        workspace: workspace.clone(),
-        kind,
+    let process = start.store.record_session_process_for_thread(
+        &start.workspace,
+        start.thread_id,
+        &start.launch,
         pid,
-        status: ProcessStatus::Running,
-        runtime_state: AgentSessionState::Running,
-        ready: false,
-        screen: String::new(),
-    }));
+    )?;
+    let snapshot = running_session_snapshot(
+        process.id,
+        start.thread_id,
+        start.workspace,
+        start.kind,
+        pid,
+        false,
+    );
+    Ok(start_session_handle(
+        start.db_path,
+        start.logs_dir,
+        snapshot,
+        start.controller,
+        ManagedSessionConnection::Live(pty),
+        start.event_tx,
+    ))
+}
+
+fn start_session_handle(
+    db_path: PathBuf,
+    logs_dir: PathBuf,
+    snapshot_state: SessionSnapshot,
+    controller: Box<dyn HarnessController>,
+    connection: ManagedSessionConnection,
+    event_tx: Sender<ArchcarEvent>,
+) -> SessionHandle {
+    let snapshot = Arc::new(Mutex::new(snapshot_state));
     let (command_tx, command_rx) = mpsc::channel();
-    let snapshot_for_thread = snapshot.clone();
+    let snapshot_for_thread = Arc::clone(&snapshot);
     thread::spawn(move || {
         run_session_loop(
             db_path,
             logs_dir,
             snapshot_for_thread,
             controller,
-            ManagedSessionConnection::Live(pty),
+            connection,
             command_rx,
             event_tx,
         )
     });
-    Ok(SessionHandle {
+    SessionHandle {
         snapshot,
         command_tx,
+    }
+}
+
+fn running_session_snapshot(
+    session_id: i64,
+    thread_id: i64,
+    workspace: String,
+    kind: SessionKind,
+    pid: u32,
+    ready: bool,
+) -> SessionSnapshot {
+    SessionSnapshot {
+        session_id,
+        thread_id,
+        workspace,
+        kind,
+        pid,
+        status: ProcessStatus::Running,
+        runtime_state: AgentSessionState::Running,
+        ready,
+        screen: String::new(),
+    }
+}
+
+pub fn spawn_managed_session_for_thread(
+    db_path: std::path::PathBuf,
+    logs_dir: std::path::PathBuf,
+    workspace: String,
+    thread_id: i64,
+    kind: SessionKind,
+    harness: SessionHarnessOptions,
+    event_tx: Sender<ArchcarEvent>,
+) -> Result<SessionHandle> {
+    let store = WorkspaceStore::open_with_logs(db_path.clone(), logs_dir.clone())?;
+    let thread_record = store.get_chat_thread_record(thread_id)?;
+    let workspace_record = store.get_workspace_record_by_name(&workspace)?;
+    anyhow::ensure!(
+        thread_record.workspace_id == workspace_record.id,
+        "chat thread {thread_id} does not belong to workspace {workspace}"
+    );
+    anyhow::ensure!(
+        thread_record.provider == provider_name(kind),
+        "chat thread {thread_id} is not a {:?} thread",
+        kind
+    );
+    let controller = controller_for_kind(kind);
+    let launch = build_thread_session_launch(
+        &store,
+        &workspace,
+        kind,
+        harness,
+        thread_record.native_thread_id.as_deref(),
+        controller.as_ref(),
+    )?;
+    spawn_live_managed_session(LiveSessionStart {
+        db_path,
+        logs_dir,
+        store: &store,
+        workspace,
+        thread_id,
+        kind,
+        launch,
+        controller,
+        event_tx,
     })
+}
+
+fn build_thread_session_launch(
+    store: &WorkspaceStore,
+    workspace: &str,
+    kind: SessionKind,
+    harness: SessionHarnessOptions,
+    native_thread_id: Option<&str>,
+    controller: &dyn HarnessController,
+) -> Result<crate::workspace::SessionLaunch> {
+    if kind == SessionKind::Codex {
+        if let Some(native_thread_id) = native_thread_id {
+            return store.session_launch_with_options_and_resume(
+                workspace,
+                SessionKind::Codex,
+                harness,
+                Some(native_thread_id),
+            );
+        }
+    }
+    controller.build_launch(store, workspace, harness)
 }
 
 fn adopt_running_session(
@@ -259,17 +384,14 @@ fn adopt_running_session(
                 continue;
             }
         };
-        let snapshot = SessionSnapshot {
-            session_id: process.id,
+        let snapshot = running_session_snapshot(
+            process.id,
             thread_id,
-            workspace: workspace.to_owned(),
+            workspace.to_owned(),
             kind,
-            pid: process.pid,
-            status: ProcessStatus::Running,
-            runtime_state: AgentSessionState::Running,
-            ready: true,
-            screen: String::new(),
-        };
+            process.pid,
+            true,
+        );
         return Ok(Some((connection, snapshot)));
     }
     Ok(None)
@@ -318,34 +440,17 @@ pub fn restore_managed_session(
     let workspace = store.get_workspace_record(process.workspace_id)?.name;
     let controller = controller_for_kind(kind);
     let connection = ManagedSessionConnection::try_reattach_running(process.pid)?;
-    let snapshot = Arc::new(Mutex::new(SessionSnapshot {
-        session_id: process.id,
+    let snapshot = running_session_snapshot(
+        process.id,
         thread_id,
         workspace,
         kind,
-        pid: process.pid,
-        status: ProcessStatus::Running,
-        runtime_state: AgentSessionState::Running,
-        ready: kind == SessionKind::Codex,
-        screen: String::new(),
-    }));
-    let (command_tx, command_rx) = mpsc::channel();
-    let snapshot_for_thread = Arc::clone(&snapshot);
-    thread::spawn(move || {
-        run_session_loop(
-            db_path,
-            logs_dir,
-            snapshot_for_thread,
-            controller,
-            connection,
-            command_rx,
-            event_tx,
-        )
-    });
-    Ok(Some(SessionHandle {
-        snapshot,
-        command_tx,
-    }))
+        process.pid,
+        kind == SessionKind::Codex,
+    );
+    Ok(Some(start_session_handle(
+        db_path, logs_dir, snapshot, controller, connection, event_tx,
+    )))
 }
 
 fn format_input_audit_log(
@@ -670,6 +775,7 @@ fn run_session_loop(
                 let current = snapshot.lock().unwrap().clone();
                 let _ = event_tx.send(ArchcarEvent::SessionError {
                     session_id: Some(current.session_id),
+                    thread_id: Some(current.thread_id),
                     message: err.to_string(),
                 });
                 break;
@@ -876,6 +982,51 @@ mod tests {
             SessionKind::Shell,
             false
         ));
+    }
+
+    #[test]
+    fn codex_thread_launch_without_native_id_starts_clean_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = seeded_workspace_store(temp.path());
+        let controller = controller_for_kind(SessionKind::Codex);
+
+        let launch = build_thread_session_launch(
+            &store,
+            "berlin",
+            SessionKind::Codex,
+            SessionHarnessOptions::default(),
+            None,
+            controller.as_ref(),
+        )
+        .unwrap();
+
+        assert!(!launch.args.iter().any(|arg| arg == "resume"));
+        assert!(!launch.args.iter().any(|arg| arg == "--last"));
+        assert!(launch.session_resume_id.is_none());
+    }
+
+    #[test]
+    fn codex_thread_launch_with_native_id_resumes_that_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = seeded_workspace_store(temp.path());
+        let controller = controller_for_kind(SessionKind::Codex);
+
+        let launch = build_thread_session_launch(
+            &store,
+            "berlin",
+            SessionKind::Codex,
+            SessionHarnessOptions::default(),
+            Some("codex-native-thread"),
+            controller.as_ref(),
+        )
+        .unwrap();
+
+        assert!(launch.args.iter().any(|arg| arg == "resume"));
+        assert!(launch.args.iter().any(|arg| arg == "codex-native-thread"));
+        assert_eq!(
+            launch.session_resume_id.as_deref(),
+            Some("codex-native-thread")
+        );
     }
 
     #[test]

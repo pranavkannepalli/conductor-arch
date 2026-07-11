@@ -1,6 +1,9 @@
 use anyhow::{anyhow, Result};
 
-use crate::codex_tui::{detect_directory_trust_prompt, parse_codex_screen_messages, ScreenMessage};
+use crate::codex_tui::{
+    codex_screen_ready_for_input, detect_directory_trust_prompt, parse_codex_screen_messages,
+    ScreenMessage,
+};
 use crate::workspace::{SessionHarnessOptions, SessionKind, WorkspaceStore};
 
 pub trait HarnessController: Send + Sync {
@@ -46,13 +49,7 @@ impl HarnessController for CodexHarnessController {
     }
 
     fn detect_ready(&self, screen: &str) -> bool {
-        let trimmed = screen.trim();
-        !trimmed.is_empty()
-            && trimmed.contains('›')
-            && !detect_directory_trust_prompt(screen)
-            && !screen.contains("Booting MCP server")
-            && !screen.contains("Starting MCP servers")
-            && !screen.contains("model:       loading")
+        codex_screen_ready_for_input(screen)
     }
 
     fn startup_input(&self, screen: &str) -> Option<String> {

@@ -28,6 +28,22 @@ impl ArchcarClient {
     }
 
     pub fn send(&self, request: ArchcarRequest) -> Result<ArchcarResponse> {
+        let retryable = request_retry_safe_after_response_loss(&request);
+        match self.send_once(request.clone()) {
+            Ok(response) => Ok(response),
+            Err(err) if retryable && response_decode_or_eof_error(&err) => {
+                warn!(
+                    socket_path = %self.socket_path.display(),
+                    error = %err,
+                    "archcar response decode failed; retrying idempotent request"
+                );
+                self.send_once(request)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    fn send_once(&self, request: ArchcarRequest) -> Result<ArchcarResponse> {
         let mut stream = self.connect_or_spawn()?;
         let request_summary = archcar_request_summary(&request);
         let envelope = RpcEnvelope {
@@ -50,6 +66,10 @@ impl ArchcarClient {
         let mut reader = BufReader::new(stream);
         let mut line = String::new();
         reader.read_line(&mut line)?;
+        anyhow::ensure!(
+            !line.trim().is_empty(),
+            "empty response from archcar sidecar"
+        );
         let response: RpcEnvelope<ArchcarResponse> = serde_json::from_str(&line)?;
         log_archcar_rpc(
             &self.socket_path,
@@ -171,6 +191,24 @@ impl ArchcarClient {
     }
 }
 
+fn response_decode_or_eof_error(err: &anyhow::Error) -> bool {
+    err.to_string()
+        .contains("empty response from archcar sidecar")
+        || err
+            .downcast_ref::<serde_json::Error>()
+            .is_some_and(serde_json::Error::is_eof)
+}
+
+fn request_retry_safe_after_response_loss(request: &ArchcarRequest) -> bool {
+    matches!(
+        request,
+        ArchcarRequest::GetSessionStatus { .. }
+            | ArchcarRequest::GetSessionScreen { .. }
+            | ArchcarRequest::GetSessionMessages { .. }
+            | ArchcarRequest::ResizeSession { .. }
+    )
+}
+
 fn log_archcar_rpc(
     socket_path: &Path,
     rpc_id: &str,
@@ -214,7 +252,10 @@ fn archcar_rpc_log_payload_for_flag(raw_payload: &str, enabled: bool) -> Option<
 
 #[cfg(test)]
 mod tests {
-    use super::archcar_rpc_log_payload_for_flag;
+    use super::{
+        archcar_rpc_log_payload_for_flag, request_retry_safe_after_response_loss,
+        response_decode_or_eof_error,
+    };
     use crate::archcar::protocol::{ArchcarInputKind, ArchcarRequest, RpcEnvelope};
 
     #[test]
@@ -235,5 +276,42 @@ mod tests {
         assert!(!payload.contains("sk-secret"));
         assert!(!payload.contains("ghp_secret"));
         assert!(!payload.contains("swordfish"));
+    }
+
+    #[test]
+    fn response_loss_retry_is_limited_to_idempotent_requests() {
+        assert!(request_retry_safe_after_response_loss(
+            &ArchcarRequest::GetSessionStatus { session_id: 42 }
+        ));
+        assert!(request_retry_safe_after_response_loss(
+            &ArchcarRequest::ResizeSession {
+                session_id: 42,
+                rows: 24,
+                cols: 80,
+            }
+        ));
+        assert!(!request_retry_safe_after_response_loss(
+            &ArchcarRequest::SendInput {
+                session_id: 42,
+                input: "hello".to_owned(),
+                kind: ArchcarInputKind::User,
+            }
+        ));
+        assert!(!request_retry_safe_after_response_loss(
+            &ArchcarRequest::SpawnSession {
+                workspace: "berlin".to_owned(),
+                kind: crate::workspace::SessionKind::Codex,
+                harness: None,
+            }
+        ));
+    }
+
+    #[test]
+    fn response_loss_detects_any_json_eof_decode_error() {
+        let err: anyhow::Error = serde_json::from_str::<serde_json::Value>(r#"{"payload":["#)
+            .unwrap_err()
+            .into();
+
+        assert!(response_decode_or_eof_error(&err));
     }
 }

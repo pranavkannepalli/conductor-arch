@@ -64,7 +64,7 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Test workspace
-        run: xvfb-run -a cargo test --workspace --locked
+        run: xvfb-run -a cargo test --workspace --locked -- --test-threads=1
 
       - name: Build workspace
         run: cargo build --workspace --locked

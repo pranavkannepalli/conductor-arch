@@ -15,7 +15,9 @@ use crate::archcar::protocol::{
     archcar_event_summary, archcar_request_summary, archcar_response_summary, ArchcarEvent,
     ArchcarMessage, ArchcarRequest, ArchcarResponse, RpcEnvelope,
 };
-use crate::archcar::session::{restore_managed_session, spawn_managed_session, SessionHandle};
+use crate::archcar::session::{
+    restore_managed_session, spawn_managed_session, spawn_managed_session_for_thread, SessionHandle,
+};
 use crate::paths::AppPaths;
 use crate::workspace::{SessionKind, WorkspaceStore};
 
@@ -28,6 +30,7 @@ struct ServerState {
     db_path: PathBuf,
     logs_dir: PathBuf,
     queued_defaults: HashSet<String>,
+    queued_threads: HashSet<i64>,
     sessions: HashMap<i64, SessionHandle>,
     subscribers: Vec<Sender<ArchcarEvent>>,
 }
@@ -73,6 +76,7 @@ impl ArchcarServer {
             db_path: paths.database_path,
             logs_dir: paths.logs_dir,
             queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
         }));
@@ -196,6 +200,18 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             kind,
             harness,
         } => ensure_default_session(state, workspace, kind, harness.unwrap_or_default()),
+        ArchcarRequest::EnsureChatThreadSession {
+            workspace,
+            thread_id,
+            kind,
+            harness,
+        } => ensure_chat_thread_session(
+            state,
+            workspace,
+            thread_id,
+            kind,
+            harness.unwrap_or_default(),
+        ),
         ArchcarRequest::SpawnSession {
             workspace,
             kind,
@@ -438,6 +454,140 @@ fn ensure_default_session(
                     &mut guard,
                     ArchcarEvent::SessionError {
                         session_id: None,
+                        thread_id: None,
+                        message: detail,
+                    },
+                );
+            }
+        }
+    });
+
+    ArchcarResponse::SessionSpawnQueued { workspace, kind }
+}
+
+fn ensure_chat_thread_session(
+    state: &Arc<Mutex<ServerState>>,
+    workspace: String,
+    thread_id: i64,
+    kind: SessionKind,
+    harness: crate::workspace::SessionHarnessOptions,
+) -> ArchcarResponse {
+    if kind != SessionKind::Codex {
+        return ArchcarResponse::Error {
+            message: "only codex chat-thread auto-spawn is implemented".to_owned(),
+        };
+    }
+    let mut guard = state.lock().unwrap();
+    let db_path = guard.db_path.clone();
+    let logs_dir = guard.logs_dir.clone();
+    if let Some((session_id, pid, ready)) = guard
+        .sessions
+        .values()
+        .filter_map(|handle| {
+            let snapshot = handle.snapshot.lock().ok()?.clone();
+            (snapshot.workspace == workspace
+                && snapshot.kind == kind
+                && snapshot.thread_id == thread_id
+                && snapshot.status == crate::workspace::ProcessStatus::Running)
+                .then_some((snapshot.session_id, snapshot.pid, snapshot.ready))
+        })
+        .max_by_key(|(session_id, _, _)| *session_id)
+    {
+        if ready {
+            broadcast(
+                &mut guard,
+                ArchcarEvent::SessionReady {
+                    session_id,
+                    thread_id,
+                },
+            );
+        }
+        return ArchcarResponse::SessionSpawned {
+            session_id,
+            thread_id,
+            workspace,
+            kind,
+            pid,
+        };
+    }
+    drop(guard);
+
+    if let Err(err) = validate_chat_thread_workspace(&db_path, &workspace, thread_id, kind) {
+        let message = format!("{err:#}");
+        let mut guard = state.lock().unwrap();
+        broadcast(
+            &mut guard,
+            ArchcarEvent::SessionError {
+                session_id: None,
+                thread_id: Some(thread_id),
+                message: message.clone(),
+            },
+        );
+        return ArchcarResponse::Error { message };
+    }
+
+    let mut guard = state.lock().unwrap();
+    if !guard.queued_threads.insert(thread_id) {
+        return ArchcarResponse::SessionSpawnQueued { workspace, kind };
+    }
+    drop(guard);
+
+    if let Some(response) = restore_thread_session_from_store(state, &workspace, thread_id, kind) {
+        if let Ok(mut guard) = state.lock() {
+            guard.queued_threads.remove(&thread_id);
+        }
+        return response;
+    }
+
+    let mut guard = state.lock().unwrap();
+    let state_for_spawn = state.clone();
+    broadcast(
+        &mut guard,
+        ArchcarEvent::SessionSpawnQueued {
+            workspace: workspace.clone(),
+            kind,
+        },
+    );
+    info!(%workspace, thread_id, ?kind, "archcar queued chat-thread session spawn");
+    drop(guard);
+
+    let workspace_for_spawn = workspace.clone();
+    std::thread::spawn(move || {
+        let (event_tx, event_rx) = mpsc::channel();
+        match spawn_managed_session_for_thread(
+            db_path,
+            logs_dir,
+            workspace_for_spawn.clone(),
+            thread_id,
+            kind,
+            harness,
+            event_tx,
+        ) {
+            Ok(handle) => {
+                let session_id = handle.snapshot.lock().unwrap().session_id;
+                info!(%workspace_for_spawn, thread_id, session_id, ?kind, "archcar spawned chat-thread managed session");
+                let mut guard = state_for_spawn.lock().unwrap();
+                guard.sessions.insert(session_id, handle);
+                guard.queued_threads.remove(&thread_id);
+                drop(guard);
+                while let Ok(event) = event_rx.recv() {
+                    let mut guard = state_for_spawn.lock().unwrap();
+                    if let ArchcarEvent::SessionExited { session_id, .. } = &event {
+                        guard.sessions.remove(session_id);
+                    }
+                    broadcast(&mut guard, event);
+                }
+            }
+            Err(err) => {
+                let detail = format!("{err:#}");
+                error!(%workspace_for_spawn, thread_id, ?kind, error = %detail, "archcar failed to spawn chat-thread managed session");
+                let mut guard = state_for_spawn.lock().unwrap();
+                guard.queued_threads.remove(&thread_id);
+                broadcast(
+                    &mut guard,
+                    ArchcarEvent::SessionError {
+                        session_id: None,
+                        thread_id: Some(thread_id),
                         message: detail,
                     },
                 );
@@ -538,6 +688,121 @@ fn restore_workspace_session_from_store(
     None
 }
 
+fn restore_thread_session_from_store(
+    state: &Arc<Mutex<ServerState>>,
+    workspace: &str,
+    thread_id: i64,
+    kind: SessionKind,
+) -> Option<ArchcarResponse> {
+    let db_path = state.lock().ok()?.db_path.clone();
+    let store = match WorkspaceStore::open(&db_path) {
+        Ok(store) => store,
+        Err(err) => {
+            warn!(
+                workspace,
+                thread_id,
+                ?kind,
+                error = %format!("{err:#}"),
+                "archcar failed to open workspace store for persisted thread restore"
+            );
+            return None;
+        }
+    };
+    let records = match store.list_thread_processes(thread_id) {
+        Ok(records) => records,
+        Err(err) => {
+            warn!(
+                workspace,
+                thread_id,
+                ?kind,
+                error = %format!("{err:#}"),
+                "archcar failed to list persisted thread sessions for restore"
+            );
+            return None;
+        }
+    };
+
+    for record in persisted_running_session_candidates(&records, kind) {
+        match load_or_restore_session_handle(state, record.id) {
+            Ok(Some(handle)) => {
+                let snapshot = match handle.snapshot.lock() {
+                    Ok(snapshot) => snapshot.clone(),
+                    Err(_) => continue,
+                };
+                if snapshot.workspace != workspace
+                    || snapshot.kind != kind
+                    || snapshot.thread_id != thread_id
+                    || snapshot.status != crate::workspace::ProcessStatus::Running
+                {
+                    continue;
+                }
+
+                let mut guard = match state.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => return None,
+                };
+                if snapshot.ready {
+                    broadcast(
+                        &mut guard,
+                        ArchcarEvent::SessionReady {
+                            session_id: snapshot.session_id,
+                            thread_id: snapshot.thread_id,
+                        },
+                    );
+                }
+                info!(
+                    workspace,
+                    thread_id,
+                    ?kind,
+                    session_id = snapshot.session_id,
+                    pid = snapshot.pid,
+                    "archcar restored persisted chat-thread session"
+                );
+                return Some(ArchcarResponse::SessionSpawned {
+                    session_id: snapshot.session_id,
+                    thread_id: snapshot.thread_id,
+                    workspace: snapshot.workspace,
+                    kind: snapshot.kind,
+                    pid: snapshot.pid,
+                });
+            }
+            Ok(None) => {}
+            Err(err) => {
+                warn!(
+                    workspace,
+                    thread_id,
+                    ?kind,
+                    session_id = record.id,
+                    error = %format!("{err:#}"),
+                    "archcar failed to restore persisted thread session candidate"
+                );
+            }
+        }
+    }
+    None
+}
+
+fn validate_chat_thread_workspace(
+    db_path: &std::path::Path,
+    workspace: &str,
+    thread_id: i64,
+    kind: SessionKind,
+) -> Result<()> {
+    let store = WorkspaceStore::open(db_path)?;
+    let workspace_record = store.get_workspace_record_by_name(workspace)?;
+    let thread_record = store.get_chat_thread_record(thread_id)?;
+    anyhow::ensure!(
+        thread_record.workspace_id == workspace_record.id,
+        "chat thread {thread_id} does not belong to workspace {workspace}"
+    );
+    anyhow::ensure!(
+        thread_record.provider == crate::archcar::harness::provider_name(kind),
+        "chat thread {thread_id} is not a {:?} thread",
+        kind
+    );
+    Ok(())
+}
+
 fn persisted_running_session_candidates(
     records: &[crate::workspace::ProcessRecord],
     kind: SessionKind,
@@ -627,6 +892,7 @@ fn spawn_session(
                     &mut guard,
                     ArchcarEvent::SessionError {
                         session_id: None,
+                        thread_id: None,
                         message: detail,
                     },
                 );
@@ -710,6 +976,7 @@ mod tests {
             db_path: PathBuf::from("/tmp/does-not-matter.db"),
             logs_dir: PathBuf::from("/tmp/does-not-matter-logs"),
             queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
         }));
@@ -750,6 +1017,7 @@ mod tests {
             db_path,
             logs_dir,
             queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
         }));
@@ -835,6 +1103,7 @@ mod tests {
             db_path: PathBuf::from("/tmp/does-not-matter.db"),
             logs_dir: PathBuf::from("/tmp/does-not-matter-logs"),
             queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
             sessions,
             subscribers: Vec::new(),
         }));
@@ -857,6 +1126,136 @@ mod tests {
             }
         );
         assert!(state.lock().unwrap().queued_defaults.is_empty());
+    }
+
+    #[test]
+    fn ensure_chat_thread_session_does_not_reuse_other_thread() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        let workspace_parent = temp.path().join("workspaces/demo");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(workspace_parent),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let requested_thread = store
+            .create_chat_thread("berlin", "codex", "Codex Chat 2", None)
+            .unwrap();
+        let snapshot = crate::archcar::session::SessionSnapshot {
+            session_id: 9,
+            thread_id: requested_thread.id + 1,
+            workspace: "berlin".to_owned(),
+            kind: SessionKind::Codex,
+            pid: 12345,
+            status: crate::workspace::ProcessStatus::Running,
+            runtime_state: crate::session_state::AgentSessionState::WaitingForInput,
+            ready: true,
+            screen: String::new(),
+        };
+        let (command_tx, _command_rx) = mpsc::channel();
+        let mut sessions = HashMap::new();
+        sessions.insert(
+            snapshot.session_id,
+            crate::archcar::session::SessionHandle {
+                snapshot: Arc::new(Mutex::new(snapshot)),
+                command_tx,
+            },
+        );
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path,
+            logs_dir: temp.path().join("logs"),
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            sessions,
+            subscribers: Vec::new(),
+        }));
+
+        let response = ensure_chat_thread_session(
+            &state,
+            "berlin".to_owned(),
+            requested_thread.id,
+            SessionKind::Codex,
+            crate::workspace::SessionHarnessOptions::default(),
+        );
+
+        assert_eq!(
+            response,
+            ArchcarResponse::SessionSpawnQueued {
+                workspace: "berlin".to_owned(),
+                kind: SessionKind::Codex,
+            }
+        );
+    }
+
+    #[test]
+    fn ensure_chat_thread_session_validates_workspace_before_queue_dedupe() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        let workspace_parent = temp.path().join("workspaces/demo");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(workspace_parent),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "tokyo".to_owned(),
+                branch: "lc/tokyo".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let requested_thread = store
+            .create_chat_thread("berlin", "codex", "Codex Chat", None)
+            .unwrap();
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path,
+            logs_dir: temp.path().join("logs"),
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::from([requested_thread.id]),
+            sessions: HashMap::new(),
+            subscribers: Vec::new(),
+        }));
+
+        let response = ensure_chat_thread_session(
+            &state,
+            "tokyo".to_owned(),
+            requested_thread.id,
+            SessionKind::Codex,
+            crate::workspace::SessionHarnessOptions::default(),
+        );
+
+        assert!(matches!(response, ArchcarResponse::Error { .. }));
     }
 
     #[test]
@@ -938,6 +1337,39 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![4]
         );
+    }
+
+    fn init_repo(path: PathBuf) -> PathBuf {
+        fs::create_dir(&path).unwrap();
+        Command::new("git")
+            .args(["init", "--initial-branch", "main"])
+            .arg(&path)
+            .status()
+            .unwrap();
+        fs::write(path.join("README.md"), "demo\n").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&path)
+            .args(["add", "."])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&path)
+            .args([
+                "-c",
+                "user.name=Linux Archductor",
+                "-c",
+                "user.email=linux-archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "initial",
+            ])
+            .status()
+            .unwrap();
+        path
     }
 
     #[test]
@@ -1072,39 +1504,6 @@ mod tests {
             })
             .unwrap();
         store
-    }
-
-    fn init_repo(path: PathBuf) -> PathBuf {
-        fs::create_dir(&path).unwrap();
-        Command::new("git")
-            .args(["init", "--initial-branch", "main"])
-            .arg(&path)
-            .status()
-            .unwrap();
-        fs::write(path.join("README.md"), "demo\n").unwrap();
-        Command::new("git")
-            .arg("-C")
-            .arg(&path)
-            .args(["add", "."])
-            .status()
-            .unwrap();
-        Command::new("git")
-            .arg("-C")
-            .arg(&path)
-            .args([
-                "-c",
-                "user.name=Linux Archductor",
-                "-c",
-                "user.email=linux-archductor@example.test",
-                "-c",
-                "commit.gpgsign=false",
-                "commit",
-                "-m",
-                "initial",
-            ])
-            .status()
-            .unwrap();
-        path
     }
 
     fn spawn_fake_managed_codex_process() -> std::process::Child {
