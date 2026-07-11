@@ -66,6 +66,29 @@ Use Superpowers:
 There are enough credits. Optimize for throughput while keeping the codebase
 coherent.
 
+## Always-on Project Rules
+
+Linear:
+
+- Use the Linear tool freely.
+- Archductor work lives in the `Archductor` project.
+- When pulling tasks from Linear, query the `Archductor` project specifically.
+- Be specific with Linear queries: project, status, assignee, issue key, labels,
+  and relevant text.
+- When starting a Linear task, move it to `In Progress`.
+- When finishing a Linear task, move it to `In Review` so the user can review
+  and push.
+
+Cubic:
+
+- Use the Cubic wiki freely.
+- Pull project context from Cubic because it is current and useful.
+
+Superpowers and communication:
+
+- Use relevant Superpowers skills before work when available.
+- Use caveman mode by default: short plan, short updates, short summary.
+
 ## Current Project State
 
 Current state as of the latest progress log:
