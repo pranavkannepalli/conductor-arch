@@ -1504,10 +1504,16 @@ window.lc-theme-dark,
     background: transparent;
     color: #c6c6c6;
 }
-.ws-tab-active {
+.ws-tab-btn.ws-tab-active,
+button.ws-tab-btn.ws-tab-active {
+    background-color: #242424;
     color: #e8e8e8;
-    border-bottom-color: #e8e8e8;
+    border-bottom-color: #f0c36a;
     font-weight: 600;
+}
+.ws-tab-btn.ws-tab-active label,
+button.ws-tab-btn.ws-tab-active label {
+    color: #f4f4f4;
 }
 .ws-mode-switcher button {
     font-size: 12px;

@@ -820,6 +820,7 @@ pub fn agent_session_panel(
     );
     let refresh_session_surface = refresh_view.clone();
     refresh_session_surface();
+    start_chat_surface_refresh_poll(&root, refresh_view.clone());
 
     let db_for_send = database_path.clone();
     let workspace_for_send = _workspace_name.to_owned();
@@ -1414,6 +1415,20 @@ fn append_chat_refresh_row<W: IsA<Widget>>(container: &GBox, child: &W) {
 
 fn reveal_existing_chat_refresh_rows() -> bool {
     REVEAL_EXISTING_CHAT_REFRESH_ROWS
+}
+
+fn start_chat_surface_refresh_poll(root: &GBox, refresh_view: Rc<dyn Fn()>) {
+    let root_ref = root.downgrade();
+    // PER-190: temporary chat-surface poll for archcar sidecar events and
+    // persisted transcript updates; remove when archcar events wake GTK
+    // through a GLib main-context channel.
+    gtk::glib::timeout_add_local(Duration::from_millis(500), move || {
+        if root_ref.upgrade().is_none() {
+            return gtk::glib::ControlFlow::Break;
+        }
+        refresh_view();
+        gtk::glib::ControlFlow::Continue
+    });
 }
 
 fn session_transcript_event_widget(event: &SessionTranscriptEvent) -> Widget {
