@@ -14719,6 +14719,36 @@ spotlight_testing = true
     }
 
     #[test]
+    fn persist_codex_screen_delta_persists_file_reads_as_events_only() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Bugfix A", None)
+            .unwrap();
+        let process = process_record_for_thread(&store, thread.id);
+
+        store
+            .append_chat_message(thread.id, "user", "Read the README", "user_send")
+            .unwrap();
+        store
+            .persist_codex_screen_delta(
+                thread.id,
+                process.id,
+                "› Read the README\nRead README.md\n# Project\nDetails.\n",
+            )
+            .unwrap();
+
+        let messages = store.list_chat_messages(thread.id).unwrap();
+        let events = store.list_chat_events(thread.id).unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "tool");
+        assert_eq!(events[0].title, "Read README.md");
+        assert_eq!(events[0].body, "# Project\nDetails.");
+    }
+
+    #[test]
     fn codex_screen_delta_does_not_replay_old_messages_after_new_user_input() {
         let (_temp, store) = test_workspace_store();
         let thread = store

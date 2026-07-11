@@ -1839,14 +1839,19 @@ fn codex_inline_event_from_transcript_event(
     event: &CodexTranscriptEvent,
 ) -> Option<CodexInlineEvent> {
     match event {
-        CodexTranscriptEvent::Tool { title, body } => Some(CodexInlineEvent {
-            kind: CodexInlineEventKind::Tool,
-            title: title.clone(),
-            subtitle: Some("Command result".to_owned()),
-            body: Some(body.clone()),
-            path: None,
-            status: codex_event_status_from_line(body),
-        }),
+        CodexTranscriptEvent::Tool { title, body } => {
+            if let Some(event) = read_file_inline_event(SessionTranscriptRole::Tool, title, body) {
+                return Some(event);
+            }
+            Some(CodexInlineEvent {
+                kind: CodexInlineEventKind::Tool,
+                title: title.clone(),
+                subtitle: Some("Command result".to_owned()),
+                body: Some(body.clone()),
+                path: None,
+                status: codex_event_status_from_line(body),
+            })
+        }
         CodexTranscriptEvent::Skill { title, body } => Some(CodexInlineEvent {
             kind: CodexInlineEventKind::Skill,
             title: title.clone(),
@@ -5932,6 +5937,32 @@ I summarized the result.
             .as_deref()
             .unwrap()
             .contains("fn new() {}"));
+    }
+
+    #[test]
+    fn stored_chat_event_inline_event_renders_file_read_payloads_as_previews() {
+        let read_event = ChatEventRecord {
+            id: 102,
+            thread_id: 7,
+            process_id: Some(5),
+            kind: "tool".to_owned(),
+            title: "Read README.md".to_owned(),
+            body: "# Project".to_owned(),
+            path: None,
+            payload_json: r##"{"type":"tool","title":"Read README.md","body":"# Project"}"##
+                .to_owned(),
+            timeline_seq: 3,
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+        };
+
+        let inline = stored_chat_event_inline_event(&read_event).unwrap();
+
+        assert_eq!(inline.kind, CodexInlineEventKind::Tool);
+        assert_eq!(inline.title, "Read README.md");
+        assert_eq!(inline.subtitle.as_deref(), Some("File preview"));
+        assert_eq!(inline.path.as_deref(), Some(Path::new("README.md")));
+        assert_eq!(inline.body.as_deref(), Some("# Project"));
     }
 
     #[test]

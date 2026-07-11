@@ -186,12 +186,19 @@ pub fn parse_codex_event_blocks(text: &str) -> Vec<CodexTranscriptEvent> {
             continue;
         }
 
-        if header.starts_with("Read SKILL.md ") {
+        if is_skill_read_event_line(header) {
             let (body, next) = collect_event_body(&lines, index + 1);
             events.push(CodexTranscriptEvent::Skill {
                 title: skill_titles_from_read_header(header),
                 body,
             });
+            index = next;
+            continue;
+        }
+
+        if let Some(title) = read_file_event_title(header) {
+            let (body, next) = collect_event_body(&lines, index + 1);
+            events.push(CodexTranscriptEvent::Tool { title, body });
             index = next;
             continue;
         }
@@ -563,13 +570,24 @@ fn parse_codex_event_spans(lines: &[String], start: usize) -> Vec<CodexEventSpan
             continue;
         }
 
-        if header.starts_with("Read SKILL.md ") {
+        if is_skill_read_event_line(header) {
             let (body, next) = collect_event_body(&line_refs, index + 1);
             spans.push(CodexEventSpan {
                 event: CodexTranscriptEvent::Skill {
                     title: skill_titles_from_read_header(header),
                     body,
                 },
+                start_index: index,
+                end_index: next,
+            });
+            index = next;
+            continue;
+        }
+
+        if let Some(title) = read_file_event_title(header) {
+            let (body, next) = collect_event_body(&line_refs, index + 1);
+            spans.push(CodexEventSpan {
+                event: CodexTranscriptEvent::Tool { title, body },
                 start_index: index,
                 end_index: next,
             });
@@ -611,7 +629,10 @@ fn latest_message_span_end_index(
 fn skip_codex_event_block(lines: &[&str], index: usize) -> Option<usize> {
     let line = lines[index].trim_end();
 
-    if line.starts_with("Ran ") || line.starts_with("Read SKILL.md ") {
+    if line.starts_with("Ran ")
+        || is_skill_read_event_line(line)
+        || read_file_event_title(line).is_some()
+    {
         return Some(skip_codex_event_body(lines, index + 1));
     }
 
@@ -631,7 +652,7 @@ fn skip_codex_event_body(lines: &[&str], mut index: usize) -> usize {
             || is_live_bullet_user_prompt(line, lines.get(index + 1).copied())
             || parse_live_agent_bullet(line).is_some()
             || line.starts_with("Ran ")
-            || line.starts_with("Read SKILL.md ")
+            || is_skill_read_event_line(line)
             || is_raw_file_change_event_line(line)
             || is_separator_rule_line(line)
         {
@@ -824,6 +845,7 @@ fn collect_event_body(lines: &[&str], start: usize) -> (String, usize) {
         }
         if line.starts_with("Ran ")
             || line.starts_with("Read SKILL.md ")
+            || read_file_event_title(line).is_some()
             || is_raw_file_change_event_line(line)
             || is_box_header_line(line)
             || is_live_user_prompt_line(line)
@@ -851,6 +873,7 @@ fn collect_event_body_including_header(lines: &[&str], start: usize) -> (String,
 }
 
 fn skill_titles_from_read_header(header: &str) -> String {
+    let header = normalize_codex_bullet_line(header);
     let skills = header
         .split('(')
         .skip(1)
@@ -863,6 +886,32 @@ fn skill_titles_from_read_header(header: &str) -> String {
     } else {
         skills.join(", ")
     }
+}
+
+fn is_skill_read_event_line(line: &str) -> bool {
+    normalize_codex_bullet_line(line).starts_with("Read SKILL.md ")
+}
+
+fn read_file_event_title(line: &str) -> Option<String> {
+    let trimmed = normalize_codex_bullet_line(line);
+    if is_skill_read_event_line(trimmed) {
+        return None;
+    }
+    let rest = trimmed.strip_prefix("Read ")?;
+    let raw_path = rest.split_whitespace().next()?.trim_matches(|ch: char| {
+        matches!(ch, '`' | '"' | '\'' | ',' | ';' | '(' | ')' | '[' | ']')
+    });
+    is_probable_read_file_path(raw_path).then(|| trimmed.to_owned())
+}
+
+fn is_probable_read_file_path(path: &str) -> bool {
+    !path.is_empty()
+        && (path.starts_with('/')
+            || path.starts_with("./")
+            || path.starts_with("../")
+            || path.contains('/')
+            || path.contains('\\')
+            || path.contains('.'))
 }
 
 fn is_raw_file_change_event_line(line: &str) -> bool {
@@ -1784,6 +1833,17 @@ Edited crates/core/src/codex_tui.rs (+2 -1)
     }
 
     #[test]
+    fn parse_codex_screen_messages_skips_file_read_blocks() {
+        let screen = "\
+Read README.md
+# Project
+This is the read body.
+";
+
+        assert!(parse_codex_screen_messages(screen).is_empty());
+    }
+
+    #[test]
     fn parse_codex_screen_messages_ignores_hollow_working_spinner_status() {
         let screen = "\
 › Explain this codebase
@@ -1931,6 +1991,30 @@ test codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok"
                     ],
                 })),
             ]
+        );
+    }
+
+    #[test]
+    fn screen_delta_emits_file_reads_as_events_not_messages() {
+        let screen = "\
+› latest question
+Read README.md
+# Project
+This is the read body.
+";
+        let benchmark = CodexParseBenchmark {
+            last_user_message: Some("latest question".to_owned()),
+            last_agent_message: None,
+        };
+
+        let delta = parse_codex_screen_delta(screen, &benchmark, None);
+
+        assert_eq!(
+            delta.items,
+            vec![CodexParsedItem::Event(CodexTranscriptEvent::Tool {
+                title: "Read README.md".to_owned(),
+                body: "# Project\nThis is the read body.".to_owned(),
+            })]
         );
     }
 
