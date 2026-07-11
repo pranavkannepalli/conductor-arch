@@ -273,6 +273,16 @@ textview:disabled {
     border-radius: 7px;
 }
 
+.workspace-row-menu-button {
+    opacity: 0;
+}
+
+.workspace-row-shell:hover .workspace-row-menu-button,
+.workspace-row-menu-button:hover,
+.workspace-row-menu-button:focus {
+    opacity: 1;
+}
+
 .workspace-row-branch-icon,
 .workspace-row-branch-icon-active {
     min-width: 14px;
@@ -1971,6 +1981,12 @@ row:hover .ws-folder-name {
     border: 1px solid #313131;
     border-radius: 14px;
 }
+popover.chat-menu-popover contents {
+    background-color: #1e1e1e;
+    border: none;
+    border-radius: 10px;
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.32);
+}
 .context-menu-popover {
     background-color: transparent;
     border: none;
@@ -1987,16 +2003,17 @@ popover.context-menu-popover arrow {
     border: none;
 }
 .chat-menu-list {
-    padding: 8px;
+    padding: 4px;
 }
 .chat-menu-item {
     background: transparent;
     border: none;
     box-shadow: none;
     text-shadow: none;
-    border-radius: 10px;
-    padding: 9px 10px;
+    border-radius: 7px;
+    padding: 6px 8px;
     color: #d8d8d8;
+    min-height: 30px;
 }
 .chat-menu-item:hover,
 .chat-menu-item-selected {
@@ -2004,6 +2021,7 @@ popover.context-menu-popover arrow {
 }
 .chat-menu-item-label {
     color: inherit;
+    text-align: left;
 }
 .chat-menu-shortcut {
     min-width: 22px;

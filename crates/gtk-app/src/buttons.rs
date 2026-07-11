@@ -1,9 +1,24 @@
 use gtk::prelude::*;
-use gtk::{Button, Widget};
+use gtk::{Align, Button, Label, Widget};
 
 pub(crate) fn text_button(label: &str) -> Button {
     let button = Button::with_label(label);
     style_text_button(&button);
+    button
+}
+
+pub(crate) fn menu_text_button(label: &str) -> Button {
+    let button = Button::new();
+    style_text_button(&button);
+    button.add_css_class("chat-menu-item");
+
+    let label = Label::new(Some(label));
+    label.add_css_class("chat-menu-item-label");
+    label.set_xalign(0.0);
+    label.set_halign(Align::Fill);
+    label.set_hexpand(true);
+    button.set_child(Some(&label));
+
     button
 }
 

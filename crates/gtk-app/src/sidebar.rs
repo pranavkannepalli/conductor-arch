@@ -16,7 +16,7 @@ use std::time::Duration;
 use tracing::error;
 
 use crate::archcar_async::spawn_archcar_request;
-use crate::buttons::{icon_button, resolve_icon_name, text_button};
+use crate::buttons::{icon_button, menu_text_button, resolve_icon_name, text_button};
 use crate::projects::show_project_creation_popover;
 use crate::refresh::{RefreshHub, RefreshScope};
 use crate::state::{AppPage, AppState, WorkspaceTab};
@@ -738,12 +738,11 @@ fn attach_workspace_row_context_menu(
 ) {
     let popover = Popover::new();
     popover.add_css_class("context-menu-popover");
-    popover.set_parent(row);
+    popover.set_position(gtk::PositionType::Bottom);
     let menu = GBox::new(Orientation::Vertical, 4);
     menu.add_css_class("chat-menu-list");
 
-    let rename_btn = text_button("Rename");
-    rename_btn.add_css_class("chat-menu-item");
+    let rename_btn = menu_text_button("Rename");
     {
         let workspace_name = workspace_name.clone();
         let state = state.clone();
@@ -790,8 +789,7 @@ fn attach_workspace_row_context_menu(
     }
     menu.append(&rename_btn);
 
-    let duplicate_btn = text_button("Duplicate");
-    duplicate_btn.add_css_class("chat-menu-item");
+    let duplicate_btn = menu_text_button("Duplicate");
     {
         let workspace_name = workspace_name.clone();
         let refresh_hub = refresh_hub.clone();
@@ -885,8 +883,7 @@ fn attach_workspace_row_context_menu(
 
     for (label, destructive, action) in [("Archive", false, "archive"), ("Delete", true, "delete")]
     {
-        let item = text_button(label);
-        item.add_css_class("chat-menu-item");
+        let item = menu_text_button(label);
         if destructive {
             item.add_css_class("destructive-action");
         }
@@ -1021,10 +1018,12 @@ fn attach_workspace_row_context_menu(
     popover.set_child(Some(&menu));
     let menu_btn = icon_button("open-menu-symbolic", "Workspace actions");
     menu_btn.add_css_class("workspace-row-menu-button");
+    popover.set_parent(&menu_btn);
     {
         let popover = popover.downgrade();
         menu_btn.connect_clicked(move |_| {
             if let Some(popover) = popover.upgrade() {
+                popover.set_pointing_to(None);
                 popover.popup();
             }
         });
@@ -1036,12 +1035,11 @@ fn attach_workspace_row_context_menu(
     let gesture = GestureClick::new();
     gesture.set_button(3);
     let popover_for_click = popover.downgrade();
-    gesture.connect_pressed(move |_, _, x, y| {
+    gesture.connect_pressed(move |_, _, _x, _y| {
         let Some(popover_for_click) = popover_for_click.upgrade() else {
             return;
         };
-        let rect = gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1);
-        popover_for_click.set_pointing_to(Some(&rect));
+        popover_for_click.set_pointing_to(None);
         popover_for_click.popup();
     });
     row.add_controller(gesture);
@@ -1057,6 +1055,7 @@ fn attach_workspace_row_context_menu(
             return gtk::glib::Propagation::Proceed;
         }
         if let Some(popover) = popover_for_key.upgrade() {
+            popover.set_pointing_to(None);
             popover.popup();
         }
         gtk::glib::Propagation::Stop

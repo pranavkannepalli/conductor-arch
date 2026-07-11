@@ -35,7 +35,7 @@ use crate::state::{AppState, WorkspaceTab};
 use crate::toast::{show_toast as emit_toast, ToastMessage};
 use crate::{
     archcar_async::spawn_archcar_request,
-    buttons::{resolve_icon_name, text_button},
+    buttons::{menu_text_button, resolve_icon_name, text_button},
     cli_binary, detail_row, history, session_surface, shell_quote, spawn_terminal_command,
     terminal, title_case_workspace,
 };
@@ -567,8 +567,7 @@ fn ws_center_panel(
                 reopen_menu.remove(&child);
             }
             for thread in closed_threads {
-                let item = text_button(&workspace_chat_tab_label(&thread));
-                item.add_css_class("chat-menu-item");
+                let item = menu_text_button(&workspace_chat_tab_label(&thread));
                 let db_path = db_path.clone();
                 let workspace_name = workspace_name.clone();
                 let known_threads = known_threads.clone();
@@ -1017,8 +1016,7 @@ fn attach_context_menu<W: IsA<gtk::Widget>>(anchor: &W, items: Vec<ContextMenuIt
     let menu = GBox::new(Orientation::Vertical, 4);
     menu.add_css_class("chat-menu-list");
     for (label, action) in items {
-        let item = text_button(label);
-        item.add_css_class("chat-menu-item");
+        let item = menu_text_button(label);
         let popover_for_item = popover.clone();
         item.connect_clicked(move |_| {
             action();
@@ -3706,6 +3704,7 @@ fn workspace_changes_panel(
     panel.append(&body_stack);
 
     let popover = gtk::Popover::new();
+    popover.add_css_class("context-menu-popover");
     popover.set_parent(&menu_btn);
     let menu = GBox::new(Orientation::Vertical, 4);
     menu.add_css_class("chat-menu-list");
@@ -3717,8 +3716,7 @@ fn workspace_changes_panel(
         ("By commit", "commits", "Changes by commit"),
         ("Checks", "checks", "Checks"),
     ] {
-        let item = text_button(label);
-        item.add_css_class("chat-menu-item");
+        let item = menu_text_button(label);
         let body_stack_for_item = body_stack.clone();
         let scope_label_for_item = scope_label.clone();
         let popover_for_item = popover.clone();
