@@ -1,11 +1,13 @@
 use adw::ToastOverlay;
 use gtk::prelude::*;
 use gtk::{
-    Align, Box as GBox, Button, CheckButton, ComboBoxText, Entry, Label, ListBox, ListBoxRow,
-    Orientation, Paned, PolicyType, ScrolledWindow, Separator, Stack, StackSwitcher, TextTag,
-    TextView, WrapMode,
+    Align, Box as GBox, Button, CheckButton, ComboBoxText, Entry, EventControllerScroll,
+    EventControllerScrollFlags, GestureClick, Image, Label, ListBox, ListBoxRow, Orientation,
+    Paned, PolicyType, Popover, ScrolledWindow, Separator, Stack, StackSwitcher, TextTag, TextView,
+    WrapMode,
 };
 use linux_archductor_core::archcar::protocol::{ArchcarInputKind, ArchcarRequest};
+use linux_archductor_core::paths::AppPaths;
 use linux_archductor_core::workspace::{
     ChatThreadRecord, DiffFileSummary, ProcessRecord, ProcessStatus, PullRequest,
     PullRequestReviewThread, ReviewComment, SessionKind, Workspace, WorkspaceStore,
@@ -23,14 +25,18 @@ const WORKSPACE_SPLIT_START_WEIGHT: i32 = 5;
 const WORKSPACE_SPLIT_END_WEIGHT: i32 = 3;
 const WORKSPACE_SPLIT_MIN_START: i32 = 360;
 const WORKSPACE_SPLIT_MIN_END: i32 = 280;
+const WS_CHAT_TAB_LIMIT: usize = 10;
 type WorkspaceTabSelector = Rc<dyn Fn(&str)>;
+type ContextMenuItem = (&'static str, Rc<dyn Fn()>);
 
 use crate::refresh::{RefreshHub, RefreshScope};
 use crate::state::{AppState, WorkspaceTab};
 use crate::toast::{show_toast as emit_toast, ToastMessage};
 use crate::{
-    buttons::text_button, cli_binary, detail_row, history, session_surface, shell_quote,
-    spawn_terminal_command, terminal, title_case_workspace,
+    archcar_async::spawn_archcar_request,
+    buttons::{resolve_icon_name, text_button},
+    cli_binary, detail_row, history, session_surface, shell_quote, spawn_terminal_command,
+    terminal, title_case_workspace,
 };
 
 fn workspace_repository_name(store: &WorkspaceStore, workspace_name: &str) -> String {
@@ -151,6 +157,15 @@ fn simple_workspace_shell(
         WORKSPACE_SPLIT_MIN_END,
     ));
     split.set_vexpand(true);
+    let right_panel_handle = Rc::new(RefCell::new(None::<GBox>));
+    let collapse_right_panel: Rc<dyn Fn()> = {
+        let right_panel_handle = right_panel_handle.clone();
+        Rc::new(move || {
+            if let Some(panel) = right_panel_handle.borrow().as_ref() {
+                panel.set_visible(!panel.is_visible());
+            }
+        })
+    };
 
     // Center: custom tab bar + chat/terminal/file content
     let (center, open_file) = ws_center_panel(
@@ -159,7 +174,7 @@ fn simple_workspace_shell(
         ws,
         state,
         refresh_hub.clone(),
-        collapse_sidebar.clone(),
+        collapse_right_panel,
     );
     split.set_start_child(Some(&center));
 
@@ -176,6 +191,7 @@ fn simple_workspace_shell(
         open_file,
         collapse_sidebar,
     );
+    *right_panel_handle.borrow_mut() = Some(right.clone());
     split.set_end_child(Some(&right));
 
     shell.append(&split);
@@ -403,13 +419,61 @@ fn ws_center_panel(
 
     let tab_bar = GBox::new(Orientation::Horizontal, 8);
     tab_bar.add_css_class("ws-tab-bar");
+    tab_bar.set_hexpand(true);
     let chat_tabs = GBox::new(Orientation::Horizontal, 6);
-    let spacer = GBox::new(Orientation::Horizontal, 0);
-    spacer.set_hexpand(true);
+    chat_tabs.add_css_class("ws-chat-tabs");
+    chat_tabs.set_hexpand(true);
+    let chat_tabs_scroll = ScrolledWindow::new();
+    chat_tabs_scroll.add_css_class("ws-chat-tabs-scroll");
+    chat_tabs_scroll.set_policy(PolicyType::Automatic, PolicyType::Never);
+    chat_tabs_scroll.set_hexpand(true);
+    chat_tabs_scroll.set_propagate_natural_width(false);
+    chat_tabs_scroll.set_child(Some(&chat_tabs));
+    install_horizontal_wheel_scroll(&chat_tabs_scroll);
     let file_tabs = GBox::new(Orientation::Horizontal, 6);
-    tab_bar.append(&chat_tabs);
-    tab_bar.append(&spacer);
+    let reopen_tab_btn = text_button("Reopen");
+    reopen_tab_btn.add_css_class("ws-tab-add-btn");
+    reopen_tab_btn.set_visible(false);
+    let reopen_popover = Popover::new();
+    reopen_popover.add_css_class("context-menu-popover");
+    reopen_popover.set_parent(&reopen_tab_btn);
+    let reopen_menu = GBox::new(Orientation::Vertical, 4);
+    reopen_menu.add_css_class("chat-menu-list");
+    reopen_popover.set_child(Some(&reopen_menu));
+    {
+        let reopen_popover = reopen_popover.clone();
+        reopen_tab_btn.connect_clicked(move |_| reopen_popover.popup());
+    }
+    tab_bar.append(&chat_tabs_scroll);
     tab_bar.append(&file_tabs);
+    let pr_status = workspace_pr_status_snapshot(store, &ws.name);
+    let create_pr_btn = text_button(workspace_pr_primary_action_label(&pr_status));
+    create_pr_btn.add_css_class("ws-pr-action-button");
+    if let Some(status) = pr_status.status.as_ref() {
+        create_pr_btn.add_css_class(status.css_class);
+    } else {
+        create_pr_btn.add_css_class("suggested-action");
+    }
+    create_pr_btn.set_tooltip_text(Some(workspace_pr_primary_action_tooltip(&pr_status)));
+    match pr_status.pr.as_ref() {
+        Some(pr) => {
+            let url = pr.url.clone();
+            create_pr_btn.connect_clicked(move |_| open_external_url(&url));
+        }
+        None => {
+            let db_path = db_path.to_path_buf();
+            let workspace_name = ws.name.clone();
+            let state = state.clone();
+            let refresh_hub = refresh_hub.clone();
+            create_pr_btn.connect_clicked(move |_| {
+                let prompt = workspace_create_pr_chat_prompt(&db_path, &workspace_name);
+                state.queue_pending_chat_prompt(prompt);
+                state.set_active_workspace_tab(WorkspaceTab::Chats);
+                refresh_hub.refresh(RefreshScope::Workspace);
+            });
+        }
+    }
+    tab_bar.append(&create_pr_btn);
     panel.append(&tab_bar);
 
     // Separator below tab bar
@@ -426,51 +490,205 @@ fn ws_center_panel(
     let known_threads = Rc::new(RefCell::new(
         store.list_chat_threads(&ws.name).unwrap_or_default(),
     ));
-    let selected_thread =
-        Rc::new(RefCell::new(state.selected_chat_thread().or_else(|| {
-            known_threads.borrow().first().map(|thread| thread.id)
-        })));
+    let selected_thread = Rc::new(RefCell::new(state.selected_chat_thread().or_else(|| {
+        known_threads
+            .borrow()
+            .iter()
+            .find(|thread| workspace_chat_thread_is_visible(thread))
+            .map(|thread| thread.id)
+    })));
     if state.selected_chat_thread().is_none() {
         state.set_selected_chat_thread(*selected_thread.borrow());
     }
     let external_thread_selection: session_surface::ExternalThreadSelectionController =
         Rc::new(RefCell::new(None));
+    let closed_chat_tabs = Rc::new(RefCell::new(HashSet::<i64>::new()));
+    let chat_tab_buttons = Rc::new(RefCell::new(HashMap::<i64, GBox>::new()));
+    let file_tab_buttons = Rc::new(RefCell::new(HashMap::<String, GBox>::new()));
 
+    let add_tab_btn = text_button("+");
+    add_tab_btn.add_css_class("ws-tab-add-btn");
+    sync_workspace_chat_add_button(
+        &add_tab_btn,
+        &known_threads
+            .borrow()
+            .iter()
+            .filter(|thread| workspace_chat_thread_is_visible(thread))
+            .cloned()
+            .collect::<Vec<_>>(),
+    );
     let refresh_sessions = refresh_hub.clone();
     let on_threads_changed: Rc<dyn Fn(Vec<ChatThreadRecord>, Option<i64>)> = {
         let chat_tabs = chat_tabs.clone();
         let known_threads = known_threads.clone();
         let selected_thread = selected_thread.clone();
+        let closed_chat_tabs = closed_chat_tabs.clone();
+        let chat_tab_buttons = chat_tab_buttons.clone();
+        let file_tab_buttons = file_tab_buttons.clone();
+        let reopen_tab_btn = reopen_tab_btn.clone();
+        let reopen_menu = reopen_menu.clone();
+        let reopen_popover = reopen_popover.clone();
+        let add_tab_btn = add_tab_btn.clone();
+        let db_path = db_path.to_path_buf();
+        let workspace_name = ws.name.clone();
+        let archcar_paths = state.paths.clone();
         let state = state.clone();
         let external_thread_selection = external_thread_selection.clone();
         let content = content.clone();
         Rc::new(move |threads, selected| {
             *known_threads.borrow_mut() = threads.clone();
+            if let Some(selected) = selected {
+                closed_chat_tabs.borrow_mut().remove(&selected);
+            }
+            let visible_threads = threads
+                .iter()
+                .filter(|thread| workspace_chat_thread_is_visible(thread))
+                .filter(|thread| !closed_chat_tabs.borrow().contains(&thread.id))
+                .take(WS_CHAT_TAB_LIMIT)
+                .cloned()
+                .collect::<Vec<_>>();
+            sync_workspace_chat_add_button(&add_tab_btn, &visible_threads);
+            let closed_threads = threads
+                .iter()
+                .filter(|thread| workspace_chat_thread_is_reopenable(thread))
+                .cloned()
+                .collect::<Vec<_>>();
+            reopen_tab_btn.set_visible(!closed_threads.is_empty());
+            while let Some(child) = reopen_menu.first_child() {
+                reopen_menu.remove(&child);
+            }
+            for thread in closed_threads {
+                let item = text_button(&workspace_chat_tab_label(&thread));
+                item.add_css_class("chat-menu-item");
+                let db_path = db_path.clone();
+                let workspace_name = workspace_name.clone();
+                let known_threads = known_threads.clone();
+                let selected_thread = selected_thread.clone();
+                let closed_chat_tabs = closed_chat_tabs.clone();
+                let state = state.clone();
+                let external_thread_selection = external_thread_selection.clone();
+                let content = content.clone();
+                let reopen_popover = reopen_popover.clone();
+                let thread_id = thread.id;
+                item.connect_clicked(move |_| {
+                    let Ok(store) = WorkspaceStore::open(db_path.clone()) else {
+                        return;
+                    };
+                    if store.reopen_chat_thread(thread_id).is_err() {
+                        return;
+                    }
+                    let threads = store.list_chat_threads(&workspace_name).unwrap_or_default();
+                    *known_threads.borrow_mut() = threads;
+                    closed_chat_tabs.borrow_mut().remove(&thread_id);
+                    *selected_thread.borrow_mut() = Some(thread_id);
+                    state.set_selected_chat_thread(Some(thread_id));
+                    content.set_visible_child_name("chat");
+                    if let Some(select_thread) =
+                        external_thread_selection.borrow().as_ref().cloned()
+                    {
+                        select_thread(Some(thread_id));
+                    }
+                    reopen_popover.popdown();
+                });
+                reopen_menu.append(&item);
+            }
+            let selected = selected
+                .filter(|thread_id| visible_threads.iter().any(|thread| thread.id == *thread_id))
+                .or_else(|| visible_threads.first().map(|thread| thread.id));
             *selected_thread.borrow_mut() = selected;
             state.set_selected_chat_thread(selected);
             while let Some(child) = chat_tabs.first_child() {
                 chat_tabs.remove(&child);
             }
-            for thread in threads.iter().take(10) {
-                let button = ws_tab_button(&workspace_chat_tab_label(thread));
-                if Some(thread.id) == selected {
-                    button.add_css_class("ws-tab-active");
-                }
-                let controller = external_thread_selection.clone();
-                let content = content.clone();
-                let selected_thread = selected_thread.clone();
-                let state = state.clone();
+            chat_tab_buttons.borrow_mut().clear();
+            for thread in visible_threads {
+                let (tab_shell, close_button) = ws_tab_surface(&workspace_chat_tab_label(&thread));
+                let controller_for_click = external_thread_selection.clone();
+                let content_for_click = content.clone();
+                let selected_thread_for_click = selected_thread.clone();
+                let closed_chat_tabs_for_click = closed_chat_tabs.clone();
+                let chat_tab_buttons_for_click = chat_tab_buttons.clone();
+                let file_tab_buttons_for_click = file_tab_buttons.clone();
+                let state_for_click = state.clone();
                 let thread_id = thread.id;
-                button.connect_clicked(move |_| {
-                    *selected_thread.borrow_mut() = Some(thread_id);
-                    state.set_selected_chat_thread(Some(thread_id));
-                    content.set_visible_child_name("chat");
-                    if let Some(select_thread) = controller.borrow().as_ref().cloned() {
+                let select_tab: Rc<dyn Fn()> = Rc::new(move || {
+                    closed_chat_tabs_for_click.borrow_mut().remove(&thread_id);
+                    *selected_thread_for_click.borrow_mut() = Some(thread_id);
+                    state_for_click.set_selected_chat_thread(Some(thread_id));
+                    content_for_click.set_visible_child_name("chat");
+                    sync_workspace_chat_tabs(chat_tab_buttons_for_click.as_ref(), Some(thread_id));
+                    sync_workspace_file_tabs(file_tab_buttons_for_click.as_ref(), None);
+                    if let Some(select_thread) = controller_for_click.borrow().as_ref().cloned() {
                         select_thread(Some(thread_id));
                     }
                 });
-                chat_tabs.append(&button);
+                let close_tab: Rc<dyn Fn()> = Rc::new({
+                    let db_path = db_path.clone();
+                    let workspace_name = workspace_name.clone();
+                    let archcar_paths = archcar_paths.clone();
+                    let chat_tabs = chat_tabs.clone();
+                    let tab_shell = tab_shell.clone();
+                    let closed_chat_tabs = closed_chat_tabs.clone();
+                    let known_threads = known_threads.clone();
+                    let selected_thread = selected_thread.clone();
+                    let state = state.clone();
+                    let external_thread_selection = external_thread_selection.clone();
+                    let chat_tab_buttons = chat_tab_buttons.clone();
+                    let file_tab_buttons = file_tab_buttons.clone();
+                    let content = content.clone();
+                    let add_tab_btn = add_tab_btn.clone();
+                    move || {
+                        close_workspace_chat_thread(
+                            &db_path,
+                            &workspace_name,
+                            thread_id,
+                            archcar_paths.clone(),
+                        );
+                        closed_chat_tabs.borrow_mut().insert(thread_id);
+                        chat_tabs.remove(&tab_shell);
+                        let visible_threads = known_threads
+                            .borrow()
+                            .iter()
+                            .filter(|thread| workspace_chat_thread_is_visible(thread))
+                            .filter(|thread| !closed_chat_tabs.borrow().contains(&thread.id))
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        sync_workspace_chat_add_button(&add_tab_btn, &visible_threads);
+                        let next = known_threads
+                            .borrow()
+                            .iter()
+                            .filter(|thread| workspace_chat_thread_is_visible(thread))
+                            .find(|thread| !closed_chat_tabs.borrow().contains(&thread.id))
+                            .map(|thread| thread.id);
+                        *selected_thread.borrow_mut() = next;
+                        state.set_selected_chat_thread(next);
+                        content.set_visible_child_name("chat");
+                        sync_workspace_chat_tabs(chat_tab_buttons.as_ref(), next);
+                        sync_workspace_file_tabs(file_tab_buttons.as_ref(), None);
+                        if let Some(select_thread) =
+                            external_thread_selection.borrow().as_ref().cloned()
+                        {
+                            select_thread(next);
+                        }
+                    }
+                });
+                connect_ws_tab_surface_clicks(&tab_shell, select_tab.clone());
+                let close_tab_for_button = close_tab.clone();
+                close_button.connect_clicked(move |_| close_tab_for_button());
+                attach_context_menu(
+                    &tab_shell,
+                    vec![("Select", select_tab), ("Close tab", close_tab)],
+                );
+                if Some(thread.id) == selected {
+                    tab_shell.add_css_class("ws-tab-active");
+                }
+                chat_tab_buttons
+                    .borrow_mut()
+                    .insert(thread.id, tab_shell.clone());
+                chat_tabs.append(&tab_shell);
             }
+            chat_tabs.append(&reopen_tab_btn);
+            chat_tabs.append(&add_tab_btn);
         })
     };
     let chat_widget = session_surface::agent_session_panel(
@@ -492,8 +710,6 @@ fn ws_center_panel(
         }),
     );
     content.add_named(&chat_widget, Some("chat"));
-    let add_tab_btn = text_button("+");
-    add_tab_btn.add_css_class("ws-tab-add-btn");
     {
         let db_path = db_path.to_path_buf();
         let workspace_name = ws.name.clone();
@@ -505,16 +721,21 @@ fn ws_center_panel(
         let content = content.clone();
         add_tab_btn.connect_clicked(move |_| {
             let existing = { known_threads.borrow().clone() };
-            if existing.len() >= 10 {
+            let visible_existing = existing
+                .iter()
+                .filter(|thread| workspace_chat_thread_is_visible(thread))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !workspace_chat_can_add_tab(&visible_existing) {
                 return;
             }
             let active_thread = *selected_thread.borrow();
-            let provider = existing
+            let provider = visible_existing
                 .iter()
                 .find(|thread| Some(thread.id) == active_thread)
                 .map(|thread| thread.provider.clone())
                 .unwrap_or_else(|| "codex".to_owned());
-            let title = workspace_chat_default_title(&existing);
+            let title = workspace_chat_default_title(&visible_existing);
             let Ok(store) = WorkspaceStore::open(db_path.clone()) else {
                 return;
             };
@@ -527,6 +748,7 @@ fn ws_center_panel(
                 threads.insert(0, thread.clone());
             }
             *selected_thread.borrow_mut() = Some(thread.id);
+            closed_chat_tabs.borrow_mut().remove(&thread.id);
             state.set_selected_chat_thread(Some(thread.id));
             content.set_visible_child_name("chat");
             (on_threads_changed)(threads, Some(thread.id));
@@ -535,8 +757,6 @@ fn ws_center_panel(
             }
         });
     }
-    tab_bar.append(&add_tab_btn);
-
     // Sync active tab state
     let state_tabs = state.clone();
     content.connect_visible_child_name_notify(move |stack| {
@@ -555,6 +775,11 @@ fn ws_center_panel(
     let ws_path = ws.path.clone();
     let content_ref = content.clone();
     let file_tabs_ref = file_tabs.clone();
+    let chat_tab_buttons_for_files = chat_tab_buttons.clone();
+    let file_tab_buttons_ref = file_tab_buttons.clone();
+    let selected_thread_for_files = selected_thread.clone();
+    let external_thread_selection_for_files = external_thread_selection.clone();
+    let state_for_files = state.clone();
 
     let open_file: Rc<dyn Fn(&str)> = Rc::new(move |rel_path: &str| {
         let tab_key = format!("file:{rel_path}");
@@ -612,15 +837,61 @@ fn ws_center_panel(
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or(rel_path);
-            let file_btn = ws_tab_button(short_name);
-            let cr = content_ref.clone();
-            let tk = tab_key.clone();
-            file_btn.connect_clicked(move |_| {
-                cr.set_visible_child_name(&tk);
+            let (tab_shell, close_button) = ws_tab_surface(short_name);
+            let select_file_tab: Rc<dyn Fn()> = Rc::new({
+                let content_ref = content_ref.clone();
+                let tab_key = tab_key.clone();
+                let chat_tab_buttons = chat_tab_buttons_for_files.clone();
+                let file_tab_buttons = file_tab_buttons_ref.clone();
+                move || {
+                    content_ref.set_visible_child_name(&tab_key);
+                    sync_workspace_chat_tabs(chat_tab_buttons.as_ref(), None);
+                    sync_workspace_file_tabs(file_tab_buttons.as_ref(), Some(&tab_key));
+                }
             });
-            file_tabs_ref.append(&file_btn);
+            let close_file_tab: Rc<dyn Fn()> = Rc::new({
+                let content_ref = content_ref.clone();
+                let file_tabs_ref = file_tabs_ref.clone();
+                let tab_shell = tab_shell.clone();
+                let tab_key = tab_key.clone();
+                let file_tab_buttons = file_tab_buttons_ref.clone();
+                let chat_tab_buttons = chat_tab_buttons_for_files.clone();
+                let selected_thread = selected_thread_for_files.clone();
+                let external_thread_selection = external_thread_selection_for_files.clone();
+                let state = state_for_files.clone();
+                move || {
+                    if let Some(child) = content_ref.child_by_name(&tab_key) {
+                        content_ref.remove(&child);
+                    }
+                    file_tabs_ref.remove(&tab_shell);
+                    file_tab_buttons.borrow_mut().remove(&tab_key);
+                    content_ref.set_visible_child_name("chat");
+                    let selected = *selected_thread.borrow();
+                    state.set_selected_chat_thread(selected);
+                    sync_workspace_chat_tabs(chat_tab_buttons.as_ref(), selected);
+                    sync_workspace_file_tabs(file_tab_buttons.as_ref(), None);
+                    if let Some(select_thread) =
+                        external_thread_selection.borrow().as_ref().cloned()
+                    {
+                        select_thread(selected);
+                    }
+                }
+            });
+            connect_ws_tab_surface_clicks(&tab_shell, select_file_tab.clone());
+            let close_file_tab_for_button = close_file_tab.clone();
+            close_button.connect_clicked(move |_| close_file_tab_for_button());
+            attach_context_menu(
+                &tab_shell,
+                vec![("Select", select_file_tab), ("Close tab", close_file_tab)],
+            );
+            file_tab_buttons_ref
+                .borrow_mut()
+                .insert(tab_key.clone(), tab_shell.clone());
+            file_tabs_ref.append(&tab_shell);
         }
         content_ref.set_visible_child_name(&tab_key);
+        sync_workspace_chat_tabs(chat_tab_buttons_for_files.as_ref(), None);
+        sync_workspace_file_tabs(file_tab_buttons_ref.as_ref(), Some(&tab_key));
     });
 
     let initial_threads = known_threads.borrow().clone();
@@ -630,19 +901,140 @@ fn ws_center_panel(
     (panel, open_file)
 }
 
-fn ws_tab_button(label: &str) -> Button {
-    let btn = text_button(label);
-    btn.add_css_class("ws-tab-btn");
-    btn
+fn ws_tab_surface(label: &str) -> (GBox, Button) {
+    let shell = GBox::new(Orientation::Horizontal, 6);
+    shell.add_css_class("ws-tab-shell");
+    shell.set_valign(Align::Center);
+
+    let label = Label::new(Some(label));
+    label.add_css_class("ws-tab-label");
+    label.set_valign(Align::Center);
+    label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    shell.append(&label);
+
+    let close = Button::new();
+    close.add_css_class("ws-tab-close-button");
+    close.set_valign(Align::Center);
+    close.set_tooltip_text(Some("Close tab"));
+    let close_icon = Image::from_icon_name(resolve_icon_name("window-close-symbolic"));
+    close_icon.add_css_class("ws-tab-close-icon");
+    close_icon.set_valign(Align::Center);
+    close.set_child(Some(&close_icon));
+    shell.append(&close);
+
+    (shell, close)
+}
+
+fn install_horizontal_wheel_scroll(scroll: &ScrolledWindow) {
+    let controller = EventControllerScroll::new(
+        EventControllerScrollFlags::VERTICAL | EventControllerScrollFlags::HORIZONTAL,
+    );
+    let scroll_for_event = scroll.clone();
+    controller.connect_scroll(move |_, dx, dy| {
+        let adjustment = scroll_for_event.hadjustment();
+        let delta = if dx.abs() > dy.abs() { dx } else { dy };
+        if delta.abs() <= f64::EPSILON {
+            return gtk::glib::Propagation::Proceed;
+        }
+
+        let upper = (adjustment.upper() - adjustment.page_size()).max(adjustment.lower());
+        let next = (adjustment.value() + delta * 48.0).clamp(adjustment.lower(), upper);
+        adjustment.set_value(next);
+        gtk::glib::Propagation::Stop
+    });
+    scroll.add_controller(controller);
+}
+
+fn open_external_url(url: &str) {
+    if url.trim().is_empty() {
+        return;
+    }
+    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+}
+
+fn connect_ws_tab_surface_clicks(tab: &GBox, select: Rc<dyn Fn()>) {
+    let click = GestureClick::new();
+    click.set_button(1);
+    click.connect_released(move |_, _, _, _| {
+        select();
+    });
+    tab.add_controller(click);
+}
+
+fn sync_workspace_chat_tabs(buttons: &RefCell<HashMap<i64, GBox>>, selected: Option<i64>) {
+    for (thread_id, button) in buttons.borrow().iter() {
+        if Some(*thread_id) == selected {
+            button.add_css_class("ws-tab-active");
+        } else {
+            button.remove_css_class("ws-tab-active");
+        }
+    }
+}
+
+fn sync_workspace_file_tabs(buttons: &RefCell<HashMap<String, GBox>>, selected: Option<&str>) {
+    for (tab_key, button) in buttons.borrow().iter() {
+        if Some(tab_key.as_str()) == selected {
+            button.add_css_class("ws-tab-active");
+        } else {
+            button.remove_css_class("ws-tab-active");
+        }
+    }
+}
+
+fn attach_context_menu<W: IsA<gtk::Widget>>(anchor: &W, items: Vec<ContextMenuItem>) {
+    let popover = Popover::new();
+    popover.add_css_class("context-menu-popover");
+    popover.set_parent(anchor);
+    let menu = GBox::new(Orientation::Vertical, 4);
+    menu.add_css_class("chat-menu-list");
+    for (label, action) in items {
+        let item = text_button(label);
+        item.add_css_class("chat-menu-item");
+        let popover_for_item = popover.clone();
+        item.connect_clicked(move |_| {
+            action();
+            popover_for_item.popdown();
+        });
+        menu.append(&item);
+    }
+    popover.set_child(Some(&menu));
+
+    let gesture = GestureClick::new();
+    gesture.set_button(3);
+    let popover_for_click = popover.clone();
+    gesture.connect_pressed(move |_, _, x, y| {
+        let rect = gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1);
+        popover_for_click.set_pointing_to(Some(&rect));
+        popover_for_click.popup();
+    });
+    anchor.add_controller(gesture);
 }
 
 fn workspace_chat_default_title(threads: &[ChatThreadRecord]) -> String {
-    let next = threads.len() + 1;
+    let next = threads
+        .iter()
+        .filter(|thread| workspace_chat_thread_is_visible(thread))
+        .count()
+        + 1;
     if next == 1 {
         "New Chat".to_owned()
     } else {
         format!("New Chat {next}")
     }
+}
+
+fn workspace_chat_can_add_tab(visible_threads: &[ChatThreadRecord]) -> bool {
+    visible_threads.len() < WS_CHAT_TAB_LIMIT
+}
+
+fn sync_workspace_chat_add_button(button: &Button, visible_threads: &[ChatThreadRecord]) {
+    let can_add = workspace_chat_can_add_tab(visible_threads);
+    button.set_sensitive(can_add);
+    button.set_tooltip_text(Some(if can_add {
+        "Add chat"
+    } else {
+        "Chat limit reached"
+    }));
 }
 
 fn workspace_chat_tab_label(thread: &ChatThreadRecord) -> String {
@@ -651,6 +1043,43 @@ fn workspace_chat_tab_label(thread: &ChatThreadRecord) -> String {
         "New Chat".to_owned()
     } else {
         title.to_owned()
+    }
+}
+
+fn workspace_chat_thread_is_visible(thread: &ChatThreadRecord) -> bool {
+    workspace_chat_thread_is_supported(thread) && thread.status == "active"
+}
+
+fn workspace_chat_thread_is_reopenable(thread: &ChatThreadRecord) -> bool {
+    workspace_chat_thread_is_supported(thread) && thread.status == "closed"
+}
+
+fn workspace_chat_thread_is_supported(thread: &ChatThreadRecord) -> bool {
+    matches!(thread.provider.as_str(), "codex" | "claude")
+}
+
+fn close_workspace_chat_thread(
+    db_path: &Path,
+    workspace_name: &str,
+    thread_id: i64,
+    archcar_paths: AppPaths,
+) {
+    let Ok(store) = WorkspaceStore::open(db_path) else {
+        return;
+    };
+    let records = store.list_thread_processes(thread_id).unwrap_or_default();
+    let _ = store.close_chat_thread(thread_id);
+    for record in records
+        .into_iter()
+        .filter(|record| record.status == ProcessStatus::Running)
+    {
+        spawn_archcar_request(
+            archcar_paths.clone(),
+            ArchcarRequest::KillSession {
+                session_id: record.id,
+            },
+        );
+        let _ = store.stop_session_process(workspace_name, record.id);
     }
 }
 
@@ -687,15 +1116,9 @@ fn ws_right_panel(
     panel.set_hexpand(true);
     panel.set_overflow(gtk::Overflow::Hidden);
 
-    panel.append(&workspace_checks_panel(
-        db_path,
-        store,
-        &ws.name,
-        state.clone(),
-        refresh_hub.clone(),
-        toast_overlay.clone(),
-    ));
+    panel.append(&workspace_pr_status_panel(store, &ws.name));
     panel.append(&Separator::new(Orientation::Horizontal));
+
     let tab_strip = GBox::new(Orientation::Horizontal, 4);
     tab_strip.add_css_class("command-center-strip");
     tab_strip.set_spacing(6);
@@ -3497,6 +3920,7 @@ fn workspace_todos_text(store: &WorkspaceStore, name: &str) -> String {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PullRequestStateKind {
     Open,
+    Pending,
     Ready,
     Failed,
     Merged,
@@ -3513,7 +3937,8 @@ impl PullRequestStatusSummary {
     pub(crate) fn attention_label(&self) -> Option<&str> {
         match self.kind {
             PullRequestStateKind::Open => None,
-            PullRequestStateKind::Ready
+            PullRequestStateKind::Pending
+            | PullRequestStateKind::Ready
             | PullRequestStateKind::Failed
             | PullRequestStateKind::Merged => Some(self.label.as_str()),
         }
@@ -3522,11 +3947,18 @@ impl PullRequestStatusSummary {
     pub(crate) fn attention_css_class(&self) -> Option<&'static str> {
         match self.kind {
             PullRequestStateKind::Open => None,
-            PullRequestStateKind::Ready
+            PullRequestStateKind::Pending
+            | PullRequestStateKind::Ready
             | PullRequestStateKind::Failed
             | PullRequestStateKind::Merged => Some(self.css_class),
         }
     }
+}
+
+#[derive(Clone, Debug)]
+struct WorkspacePrStatusSnapshot {
+    pr: Option<PullRequest>,
+    status: Option<PullRequestStatusSummary>,
 }
 
 pub(crate) fn pull_request_status_summary(
@@ -3548,6 +3980,13 @@ pub(crate) fn pull_request_status_summary(
                 label: "checks failed".to_owned(),
                 css_class: "ws-pr-status-failed",
                 kind: PullRequestStateKind::Failed,
+            };
+        }
+        if pull_request_is_pending(readiness) {
+            return PullRequestStatusSummary {
+                label: "checks pending".to_owned(),
+                css_class: "ws-pr-status-pending",
+                kind: PullRequestStateKind::Pending,
             };
         }
         if pull_request_is_ready(readiness, summary) {
@@ -3583,6 +4022,108 @@ pub(crate) fn workspace_pull_request_status_summary(
     }
 }
 
+fn workspace_pr_status_snapshot(
+    store: &WorkspaceStore,
+    workspace_name: &str,
+) -> WorkspacePrStatusSnapshot {
+    let pr = store.pull_request(workspace_name).ok().flatten();
+    let status = pr
+        .as_ref()
+        .map(|pr| workspace_pull_request_status_summary(store, workspace_name, pr));
+    WorkspacePrStatusSnapshot { pr, status }
+}
+
+fn workspace_pr_primary_action_label(snapshot: &WorkspacePrStatusSnapshot) -> &'static str {
+    if snapshot.pr.is_some() {
+        "View PR"
+    } else {
+        "Create PR"
+    }
+}
+
+fn workspace_pr_primary_action_tooltip(snapshot: &WorkspacePrStatusSnapshot) -> &'static str {
+    match snapshot.status.as_ref().map(|status| status.kind) {
+        Some(PullRequestStateKind::Pending) => "Open pull request with pending checks",
+        Some(PullRequestStateKind::Ready) => "Open pull request ready to merge",
+        Some(PullRequestStateKind::Failed) => "Open pull request with failing checks",
+        Some(PullRequestStateKind::Merged) => "Open merged pull request",
+        Some(PullRequestStateKind::Open) => "Open pull request",
+        None => "Ask the current chat to create a pull request",
+    }
+}
+
+fn workspace_pr_status_panel(store: &WorkspaceStore, workspace_name: &str) -> GBox {
+    let snapshot = workspace_pr_status_snapshot(store, workspace_name);
+    let panel = GBox::new(Orientation::Vertical, 8);
+    panel.add_css_class("ws-pr-compact-panel");
+    if let Some(status) = snapshot.status.as_ref() {
+        panel.add_css_class(status.css_class);
+    } else {
+        panel.add_css_class("ws-pr-status-missing");
+    }
+
+    let top = GBox::new(Orientation::Horizontal, 8);
+    top.set_hexpand(true);
+    let title = Label::new(Some(workspace_pr_status_title(&snapshot)));
+    title.add_css_class("ws-pr-compact-title");
+    title.set_xalign(0.0);
+    title.set_hexpand(true);
+    top.append(&title);
+
+    if let Some(status) = snapshot.status.as_ref() {
+        let badge = Label::new(Some(&status.label));
+        badge.add_css_class("ws-pr-status");
+        badge.add_css_class(status.css_class);
+        top.append(&badge);
+    }
+    panel.append(&top);
+
+    let detail_text = workspace_pr_status_detail(&snapshot);
+    let detail = Label::new(Some(&detail_text));
+    detail.add_css_class("card-meta");
+    detail.set_xalign(0.0);
+    detail.set_wrap(true);
+    panel.append(&detail);
+
+    if let Some(pr) = snapshot.pr.as_ref() {
+        let row = make_action_row();
+        let view_btn = secondary_button("View PR");
+        let url = pr.url.clone();
+        view_btn.connect_clicked(move |_| open_external_url(&url));
+        row.append(&view_btn);
+        panel.append(&row);
+    }
+
+    panel
+}
+
+fn workspace_pr_status_title(snapshot: &WorkspacePrStatusSnapshot) -> &'static str {
+    match snapshot.status.as_ref().map(|status| status.kind) {
+        Some(PullRequestStateKind::Pending) => "Checks pending",
+        Some(PullRequestStateKind::Ready) => "Ready to merge",
+        Some(PullRequestStateKind::Failed) => "Checks failed",
+        Some(PullRequestStateKind::Merged) => "Pull request merged",
+        Some(PullRequestStateKind::Open) => "Pull request open",
+        None => "No pull request yet",
+    }
+}
+
+fn workspace_pr_status_detail(snapshot: &WorkspacePrStatusSnapshot) -> String {
+    match (snapshot.pr.as_ref(), snapshot.status.as_ref()) {
+        (Some(pr), Some(status)) => match status.kind {
+            PullRequestStateKind::Pending => {
+                format!("PR #{} is waiting on GitHub checks.", pr.number)
+            }
+            PullRequestStateKind::Ready => format!("PR #{} is clear to merge.", pr.number),
+            PullRequestStateKind::Failed => format!("PR #{} needs fixes.", pr.number),
+            PullRequestStateKind::Merged => format!("PR #{} has been merged.", pr.number),
+            PullRequestStateKind::Open => format!("PR #{} is open.", pr.number),
+        },
+        (Some(pr), None) => format!("PR #{} is recorded.", pr.number),
+        (None, _) => "Use Create PR when the branch is ready.".to_owned(),
+    }
+}
+
 fn pull_request_status_summary_without_checks_summary(
     pr: &PullRequest,
     readiness: Option<&linux_archductor_core::workspace::PullRequestReadiness>,
@@ -3603,6 +4144,13 @@ fn pull_request_status_summary_without_checks_summary(
                 kind: PullRequestStateKind::Failed,
             };
         }
+        if pull_request_is_pending(readiness) {
+            return PullRequestStatusSummary {
+                label: "checks pending".to_owned(),
+                css_class: "ws-pr-status-pending",
+                kind: PullRequestStateKind::Pending,
+            };
+        }
     }
 
     PullRequestStatusSummary {
@@ -3615,12 +4163,21 @@ fn pull_request_status_summary_without_checks_summary(
 fn pull_request_is_failed(
     readiness: &linux_archductor_core::workspace::PullRequestReadiness,
 ) -> bool {
-    readiness.review_decision.as_deref() == Some("CHANGES_REQUESTED")
-        || readiness.checks.iter().any(|check| check.is_failure())
+    readiness.checks.iter().any(|check| check.is_failure())
         || readiness
             .deployments
             .iter()
             .any(|deployment| deployment.is_failure())
+}
+
+fn pull_request_is_pending(
+    readiness: &linux_archductor_core::workspace::PullRequestReadiness,
+) -> bool {
+    readiness.checks.iter().any(|check| check.is_pending())
+        || readiness
+            .deployments
+            .iter()
+            .any(|deployment| deployment.is_pending())
 }
 
 fn pull_request_is_ready(
@@ -3662,6 +4219,50 @@ fn workspace_continue_prompt(db_path: &Path, name: &str) -> String {
                  Check remaining todos, decide the next branch or follow-up PR, and keep going."
             )
         })
+}
+
+fn workspace_create_pr_chat_prompt(db_path: &Path, name: &str) -> String {
+    let mut repo_prompt = None;
+    let mut context_brief = None;
+    if let Ok(store) = WorkspaceStore::open(db_path) {
+        repo_prompt = store
+            .workspace_repo_settings(name)
+            .ok()
+            .and_then(|settings| settings.prompts.and_then(|prompts| prompts.create_pr));
+        context_brief = store.read_context_brief(name).ok().flatten();
+    }
+    workspace_create_pr_chat_prompt_from_parts(
+        name,
+        repo_prompt.as_deref(),
+        context_brief.as_deref(),
+    )
+}
+
+fn workspace_create_pr_chat_prompt_from_parts(
+    name: &str,
+    repo_prompt: Option<&str>,
+    context_brief: Option<&str>,
+) -> String {
+    let mut prompt = format!(
+        "Create a GitHub pull request for workspace {name}.\n\n\
+         Push the branch if needed. Write a clear PR title and full PR body, then create the PR. \
+         Include a concise summary and testing/verification section in the body."
+    );
+    if let Some(repo_prompt) = repo_prompt
+        .map(str::trim)
+        .filter(|prompt| !prompt.is_empty())
+    {
+        prompt.push_str("\n\nRepository PR instructions:\n");
+        prompt.push_str(repo_prompt);
+    }
+    if let Some(context_brief) = context_brief
+        .map(str::trim)
+        .filter(|context| !context.is_empty())
+    {
+        prompt.push_str("\n\nContext brief for the PR body:\n");
+        prompt.push_str(context_brief);
+    }
+    prompt
 }
 
 fn workspace_script_prompt(db_path: &Path, name: &str, script_key: &str, label: &str) -> String {
@@ -4014,7 +4615,7 @@ fn workspace_checks_panel(
 
             let actions = make_action_stack();
             match status_summary.kind {
-                PullRequestStateKind::Open => {
+                PullRequestStateKind::Open | PullRequestStateKind::Pending => {
                     let top_row = make_action_row();
                     let summary_btn = secondary_button(action_labels[0]);
                     let review_btn = secondary_button(action_labels[1]);
@@ -4455,6 +5056,7 @@ fn pull_request_action_labels(kind: Option<PullRequestStateKind>) -> Vec<&'stati
     match kind {
         None => vec!["Push branch", "Create PR"],
         Some(PullRequestStateKind::Open) => vec!["PR summary", "Reviews", "Refresh"],
+        Some(PullRequestStateKind::Pending) => vec!["PR summary", "Reviews", "Refresh"],
         Some(PullRequestStateKind::Ready) => vec!["Merge", "PR summary", "Refresh"],
         Some(PullRequestStateKind::Failed) => vec!["Fix checks", "PR summary", "Refresh"],
         Some(PullRequestStateKind::Merged) => vec!["Continue", "Archive"],
@@ -5770,6 +6372,176 @@ mod tests {
     }
 
     #[test]
+    fn workspace_chat_tabs_hide_shell_threads() {
+        let shell = ChatThreadRecord {
+            id: 1,
+            workspace_id: 2,
+            provider: "shell".to_owned(),
+            title: "Shell Chat 1".to_owned(),
+            status: "active".to_owned(),
+            native_thread_id: None,
+            harness_metadata: None,
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+            archived_at: None,
+        };
+        let codex = ChatThreadRecord {
+            id: 2,
+            workspace_id: 2,
+            provider: "codex".to_owned(),
+            title: "New Chat".to_owned(),
+            status: "active".to_owned(),
+            native_thread_id: None,
+            harness_metadata: None,
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+            archived_at: None,
+        };
+        let closed = ChatThreadRecord {
+            id: 3,
+            workspace_id: 2,
+            provider: "codex".to_owned(),
+            title: "Closed Chat".to_owned(),
+            status: "closed".to_owned(),
+            native_thread_id: None,
+            harness_metadata: None,
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+            archived_at: Some("now".to_owned()),
+        };
+
+        assert!(!workspace_chat_thread_is_visible(&shell));
+        assert!(workspace_chat_thread_is_visible(&codex));
+        assert!(!workspace_chat_thread_is_visible(&closed));
+        assert!(workspace_chat_thread_is_reopenable(&closed));
+        assert_eq!(workspace_chat_default_title(&[shell, closed]), "New Chat");
+    }
+
+    #[test]
+    fn workspace_chat_add_is_disabled_at_limit() {
+        let threads = (0..WS_CHAT_TAB_LIMIT)
+            .map(|index| ChatThreadRecord {
+                id: index as i64,
+                workspace_id: 2,
+                provider: "codex".to_owned(),
+                title: format!("New Chat {}", index + 1),
+                status: "active".to_owned(),
+                native_thread_id: None,
+                harness_metadata: None,
+                created_at: "now".to_owned(),
+                updated_at: "now".to_owned(),
+                archived_at: None,
+            })
+            .collect::<Vec<_>>();
+
+        assert!(!workspace_chat_can_add_tab(&threads));
+        assert!(workspace_chat_can_add_tab(
+            &threads[..WS_CHAT_TAB_LIMIT - 1]
+        ));
+    }
+
+    #[test]
+    fn create_pr_chat_prompt_includes_body_instructions_and_context() {
+        let prompt = workspace_create_pr_chat_prompt_from_parts(
+            "berlin",
+            Some("Use the repo PR template."),
+            Some("Changed chat tabs."),
+        );
+
+        assert!(prompt.contains("Create a GitHub pull request for workspace berlin."));
+        assert!(prompt.contains("full PR body"));
+        assert!(prompt.contains("summary and testing/verification section"));
+        assert!(prompt.contains("Use the repo PR template."));
+        assert!(prompt.contains("Changed chat tabs."));
+    }
+
+    #[test]
+    fn pr_primary_action_switches_to_view_when_pr_exists() {
+        let snapshot = WorkspacePrStatusSnapshot {
+            pr: Some(linux_archductor_core::workspace::PullRequest {
+                id: 1,
+                workspace_id: 2,
+                provider: "github".to_owned(),
+                number: 42,
+                url: "https://github.com/example/demo/pull/42".to_owned(),
+                state: "OPEN".to_owned(),
+                created_at: "then".to_owned(),
+                updated_at: "now".to_owned(),
+            }),
+            status: Some(PullRequestStatusSummary {
+                label: "checks pending".to_owned(),
+                css_class: "ws-pr-status-pending",
+                kind: PullRequestStateKind::Pending,
+            }),
+        };
+
+        assert_eq!(workspace_pr_primary_action_label(&snapshot), "View PR");
+        assert_eq!(workspace_pr_status_title(&snapshot), "Checks pending");
+        assert_eq!(
+            workspace_pr_primary_action_tooltip(&snapshot),
+            "Open pull request with pending checks"
+        );
+    }
+
+    #[test]
+    fn pull_request_status_summary_marks_pending_checks() {
+        let status = pull_request_status_summary(
+            &linux_archductor_core::workspace::PullRequest {
+                id: 1,
+                workspace_id: 2,
+                provider: "github".to_owned(),
+                number: 42,
+                url: "https://github.com/example/demo/pull/42".to_owned(),
+                state: "OPEN".to_owned(),
+                created_at: "then".to_owned(),
+                updated_at: "now".to_owned(),
+            },
+            Some(&linux_archductor_core::workspace::PullRequestReadiness {
+                review_decision: None,
+                latest_reviews: Vec::new(),
+                comments: Vec::new(),
+                review_threads: Vec::new(),
+                checks: vec![linux_archductor_core::workspace::PullRequestCheckRun {
+                    name: "ci".to_owned(),
+                    status: "in_progress".to_owned(),
+                    detail: None,
+                }],
+                deployments: Vec::new(),
+            }),
+            &linux_archductor_core::workspace::ChecksSummary {
+                workspace: Workspace {
+                    id: 1,
+                    repository_id: 2,
+                    name: "berlin".to_owned(),
+                    path: std::path::PathBuf::from("/tmp/berlin"),
+                    branch: "lc/berlin".to_owned(),
+                    base_ref: "main".to_owned(),
+                    port_base: 4200,
+                    status: "active".to_owned(),
+                    archived_at: None,
+                    created_at: "then".to_owned(),
+                    updated_at: "now".to_owned(),
+                },
+                changed_files: 0,
+                run_status: None,
+                session_status: None,
+                active_sessions: 0,
+                pull_request: None,
+                open_todos: 0,
+                total_todos: 0,
+                branch_push_state: None,
+                open_review_comments: 0,
+                conflicting_workspaces: Vec::new(),
+            },
+        );
+
+        assert_eq!(status.label, "checks pending");
+        assert_eq!(status.css_class, "ws-pr-status-pending");
+        assert_eq!(status.kind, PullRequestStateKind::Pending);
+        assert_eq!(status.attention_label(), Some("checks pending"));
+    }
+
+    #[test]
     fn run_console_terminal_state_appends_command_output() {
         let mut terminal = WorkspaceRunConsoleTerminalState::new(3);
         terminal.append_command("cargo test");
@@ -6015,11 +6787,15 @@ mod tests {
                 updated_at: "now".to_owned(),
             },
             Some(&linux_archductor_core::workspace::PullRequestReadiness {
-                review_decision: Some("CHANGES_REQUESTED".to_owned()),
+                review_decision: None,
                 latest_reviews: Vec::new(),
                 comments: Vec::new(),
                 review_threads: Vec::new(),
-                checks: Vec::new(),
+                checks: vec![linux_archductor_core::workspace::PullRequestCheckRun {
+                    name: "ci".to_owned(),
+                    status: "failure".to_owned(),
+                    detail: None,
+                }],
                 deployments: Vec::new(),
             }),
             &linux_archductor_core::workspace::ChecksSummary {
@@ -6114,11 +6890,15 @@ mod tests {
             updated_at: "now".to_owned(),
         };
         let readiness = linux_archductor_core::workspace::PullRequestReadiness {
-            review_decision: Some("CHANGES_REQUESTED".to_owned()),
+            review_decision: None,
             latest_reviews: Vec::new(),
             comments: Vec::new(),
             review_threads: Vec::new(),
-            checks: Vec::new(),
+            checks: vec![linux_archductor_core::workspace::PullRequestCheckRun {
+                name: "ci".to_owned(),
+                status: "failure".to_owned(),
+                detail: None,
+            }],
             deployments: Vec::new(),
         };
 
@@ -6128,6 +6908,59 @@ mod tests {
         assert_eq!(status.css_class, "ws-pr-status-failed");
         assert_eq!(status.kind, PullRequestStateKind::Failed);
         assert_eq!(status.attention_label(), Some("checks failed"));
+    }
+
+    #[test]
+    fn pull_request_status_summary_keeps_review_blocked_state_grey() {
+        let status = pull_request_status_summary(
+            &linux_archductor_core::workspace::PullRequest {
+                id: 1,
+                workspace_id: 2,
+                provider: "github".to_owned(),
+                number: 42,
+                url: "https://github.com/example/demo/pull/42".to_owned(),
+                state: "OPEN".to_owned(),
+                created_at: "then".to_owned(),
+                updated_at: "now".to_owned(),
+            },
+            Some(&linux_archductor_core::workspace::PullRequestReadiness {
+                review_decision: Some("CHANGES_REQUESTED".to_owned()),
+                latest_reviews: Vec::new(),
+                comments: Vec::new(),
+                review_threads: Vec::new(),
+                checks: Vec::new(),
+                deployments: Vec::new(),
+            }),
+            &linux_archductor_core::workspace::ChecksSummary {
+                workspace: Workspace {
+                    id: 1,
+                    repository_id: 2,
+                    name: "berlin".to_owned(),
+                    path: std::path::PathBuf::from("/tmp/berlin"),
+                    branch: "lc/berlin".to_owned(),
+                    base_ref: "main".to_owned(),
+                    port_base: 4200,
+                    status: "active".to_owned(),
+                    archived_at: None,
+                    created_at: "then".to_owned(),
+                    updated_at: "now".to_owned(),
+                },
+                changed_files: 0,
+                run_status: None,
+                session_status: None,
+                active_sessions: 0,
+                pull_request: None,
+                open_todos: 0,
+                total_todos: 0,
+                branch_push_state: None,
+                open_review_comments: 0,
+                conflicting_workspaces: Vec::new(),
+            },
+        );
+
+        assert_eq!(status.label, "OPEN");
+        assert_eq!(status.css_class, "ws-pr-status-muted");
+        assert_eq!(status.kind, PullRequestStateKind::Open);
     }
 
     #[test]

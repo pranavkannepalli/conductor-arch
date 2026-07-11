@@ -1,8 +1,8 @@
 use adw::ApplicationWindow;
 use gtk::prelude::*;
 use gtk::{
-    Box as GBox, Button, Entry, Image, Label, ListBox, ListBoxRow, Orientation, PolicyType,
-    ScrolledWindow, Stack,
+    Box as GBox, Button, Entry, EventControllerKey, GestureClick, Image, Label, ListBox,
+    ListBoxRow, Orientation, PolicyType, Popover, ScrolledWindow, Stack,
 };
 use linux_archductor_core::archcar::protocol::ArchcarRequest;
 use linux_archductor_core::repository::RepositoryStore;
@@ -383,6 +383,16 @@ pub(crate) fn build_app_sidebar(
                                 .unwrap_or(0),
                             &ws.updated_at,
                         );
+                        attach_workspace_row_context_menu(
+                            &row,
+                            ws.name.clone(),
+                            app_state.clone(),
+                            stack.clone(),
+                            window.clone(),
+                            refresh_hub.clone(),
+                            refresh_workspace.clone(),
+                            refresh_view_preferences.clone(),
+                        );
                         list.append(&row);
                         names.borrow_mut().insert(row_idx, ws.name.clone());
                         row_idx += 1;
@@ -398,16 +408,18 @@ pub(crate) fn build_app_sidebar(
                 list.append(&ListBoxRow::builder().child(&empty).build());
             }
 
-            let names_ref = names.borrow();
-            let target_idx = prev_selected.as_deref().and_then(|name| {
-                names_ref
-                    .iter()
-                    .find_map(|(&idx, row_name)| (row_name == name).then_some(idx))
-            });
-            drop(names_ref);
-            if let Some(idx) = target_idx {
-                if let Some(row) = list.row_at_index(idx) {
-                    list.select_row(Some(&row));
+            if sidebar_should_restore_workspace_selection(&state.snapshot().active_page) {
+                let names_ref = names.borrow();
+                let target_idx = prev_selected.as_deref().and_then(|name| {
+                    names_ref
+                        .iter()
+                        .find_map(|(&idx, row_name)| (row_name == name).then_some(idx))
+                });
+                drop(names_ref);
+                if let Some(idx) = target_idx {
+                    if let Some(row) = list.row_at_index(idx) {
+                        list.select_row(Some(&row));
+                    }
                 }
             }
         }
@@ -714,6 +726,510 @@ fn build_workspace_row(
     ListBoxRow::builder().child(&row_box).build()
 }
 
+fn attach_workspace_row_context_menu(
+    row: &ListBoxRow,
+    workspace_name: String,
+    state: AppState,
+    stack: Stack,
+    window: ApplicationWindow,
+    refresh_hub: RefreshHub,
+    refresh_workspace: impl Fn() + Clone + 'static,
+    refresh_view_preferences: Rc<dyn Fn()>,
+) {
+    let popover = Popover::new();
+    popover.add_css_class("context-menu-popover");
+    popover.set_parent(row);
+    let menu = GBox::new(Orientation::Vertical, 4);
+    menu.add_css_class("chat-menu-list");
+
+    let rename_btn = text_button("Rename");
+    rename_btn.add_css_class("chat-menu-item");
+    {
+        let workspace_name = workspace_name.clone();
+        let state = state.clone();
+        let refresh_hub = refresh_hub.clone();
+        let refresh_workspace = refresh_workspace.clone();
+        let refresh_view_preferences = refresh_view_preferences.clone();
+        let popover_for_item = popover.downgrade();
+        let window = window.downgrade();
+        rename_btn.connect_clicked(move |_| {
+            if let Some(popover) = popover_for_item.upgrade() {
+                popover.popdown();
+            }
+            let Some(window) = window.upgrade() else {
+                return;
+            };
+            show_workspace_text_dialog(
+                &window,
+                "Rename workspace",
+                "Workspace name",
+                &workspace_name,
+                "Rename",
+                Rc::new({
+                    let workspace_name = workspace_name.clone();
+                    let state = state.clone();
+                    let refresh_hub = refresh_hub.clone();
+                    let refresh_workspace = refresh_workspace.clone();
+                    let refresh_view_preferences = refresh_view_preferences.clone();
+                    move |new_name| {
+                        if new_name.is_empty() || new_name == workspace_name {
+                            return Ok(());
+                        }
+                        let workspace = WorkspaceStore::open(state.workspace_database_path())
+                            .and_then(|store| store.rename(&workspace_name, &new_name))
+                            .map_err(|err| format!("{err:#}"))?;
+                        state.rename_workspace_in_navigation(&workspace_name, &workspace.name);
+                        refresh_view_preferences();
+                        refresh_workspace();
+                        refresh_hub.refresh(RefreshScope::All);
+                        Ok(())
+                    }
+                }),
+            );
+        });
+    }
+    menu.append(&rename_btn);
+
+    let duplicate_btn = text_button("Duplicate");
+    duplicate_btn.add_css_class("chat-menu-item");
+    {
+        let workspace_name = workspace_name.clone();
+        let refresh_hub = refresh_hub.clone();
+        let refresh_workspace = refresh_workspace.clone();
+        let refresh_view_preferences = refresh_view_preferences.clone();
+        let state = state.clone();
+        let stack = stack.clone();
+        let popover_for_item = popover.downgrade();
+        let window = window.downgrade();
+        duplicate_btn.connect_clicked(move |_| {
+            if let Some(popover) = popover_for_item.upgrade() {
+                popover.popdown();
+            }
+            let Some(window) = window.upgrade() else {
+                return;
+            };
+            show_workspace_text_dialog(
+                &window,
+                "Duplicate workspace",
+                "New workspace name",
+                "",
+                "Duplicate",
+                Rc::new({
+                    let workspace_name = workspace_name.clone();
+                    let refresh_hub = refresh_hub.clone();
+                    let refresh_workspace = refresh_workspace.clone();
+                    let refresh_view_preferences = refresh_view_preferences.clone();
+                    let state = state.clone();
+                    let stack = stack.clone();
+                    let window = window.clone();
+                    move |new_name| {
+                        if new_name.is_empty() {
+                            return Ok(());
+                        }
+                        let rx = spawn_background_job({
+                            let db_path = state.workspace_database_path().to_path_buf();
+                            let workspace_name = workspace_name.clone();
+                            let new_name = new_name.clone();
+                            move || {
+                                WorkspaceStore::open(db_path)
+                                    .and_then(|store| {
+                                        store.duplicate(&workspace_name, &new_name, None)
+                                    })
+                                    .map_err(|err| format!("{err:#}"))
+                            }
+                        });
+                        let refresh_hub = refresh_hub.clone();
+                        let refresh_workspace = refresh_workspace.clone();
+                        let refresh_view_preferences = refresh_view_preferences.clone();
+                        let state = state.clone();
+                        let stack = stack.clone();
+                        let window = window.clone();
+                        // PER-190: temporary worker-result poll for workspace lifecycle actions;
+                        // remove when sidebar jobs return through a GLib main-context future.
+                        glib::timeout_add_local(Duration::from_millis(100), move || {
+                            match rx.try_recv() {
+                                Ok(Ok(workspace)) => {
+                                    state.navigate_to_workspace(Some(workspace.name));
+                                    stack.set_visible_child_name("workspace");
+                                    refresh_view_preferences();
+                                    refresh_workspace();
+                                    refresh_hub.refresh(RefreshScope::All);
+                                    glib::ControlFlow::Break
+                                }
+                                Ok(Err(err)) => {
+                                    show_workspace_error_dialog(
+                                        &window,
+                                        "Workspace action failed",
+                                        &err,
+                                    );
+                                    glib::ControlFlow::Break
+                                }
+                                Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                                Err(mpsc::TryRecvError::Disconnected) => {
+                                    show_workspace_error_dialog(
+                                        &window,
+                                        "Workspace action failed",
+                                        "Background worker disconnected.",
+                                    );
+                                    glib::ControlFlow::Break
+                                }
+                            }
+                        });
+                        Ok(())
+                    }
+                }),
+            );
+        });
+    }
+    menu.append(&duplicate_btn);
+
+    for (label, destructive, action) in [("Archive", false, "archive"), ("Delete", true, "delete")]
+    {
+        let item = text_button(label);
+        item.add_css_class("chat-menu-item");
+        if destructive {
+            item.add_css_class("destructive-action");
+        }
+        let workspace_name = workspace_name.clone();
+        let refresh_hub = refresh_hub.clone();
+        let refresh_workspace = refresh_workspace.clone();
+        let refresh_view_preferences = refresh_view_preferences.clone();
+        let state = state.clone();
+        let stack = stack.downgrade();
+        let row = row.downgrade();
+        let popover_for_item = popover.downgrade();
+        let window = window.downgrade();
+        item.connect_clicked(move |_| {
+            if let Some(popover) = popover_for_item.upgrade() {
+                popover.popdown();
+            }
+            let (Some(window), Some(row), Some(stack)) =
+                (window.upgrade(), row.upgrade(), stack.upgrade())
+            else {
+                return;
+            };
+            let title = if action == "archive" {
+                "Archive workspace"
+            } else {
+                "Delete workspace"
+            };
+            let message = if action == "archive" {
+                format!("Archive {workspace_name}?")
+            } else {
+                format!(
+                    "Delete {workspace_name}? This removes the worktree, deletes the local branch, and can discard unmerged commits."
+                )
+            };
+            show_workspace_confirm_dialog(
+                &window,
+                title,
+                &message,
+                label,
+                destructive,
+                Rc::new({
+                    let workspace_name = workspace_name.clone();
+                    let refresh_hub = refresh_hub.clone();
+                    let refresh_workspace = refresh_workspace.clone();
+                    let refresh_view_preferences = refresh_view_preferences.clone();
+                    let state = state.clone();
+                    let stack = stack.clone();
+                    let row = row.clone();
+                    let window = window.clone();
+                    move || {
+                        let rx = spawn_background_job({
+                            let db_path = state.workspace_database_path().to_path_buf();
+                            let workspace_name = workspace_name.clone();
+                            move || {
+                                WorkspaceStore::open(db_path).and_then(|store| match action {
+                                    "archive" => store.archive(&workspace_name, false).map(|_| ()),
+                                    "delete" => {
+                                        store.delete(&workspace_name, true, true).map(|_| ())
+                                    }
+                                    _ => unreachable!(),
+                                })
+                            }
+                        });
+                        let workspace_name = workspace_name.clone();
+                        let refresh_hub = refresh_hub.clone();
+                        let refresh_workspace = refresh_workspace.clone();
+                        let refresh_view_preferences = refresh_view_preferences.clone();
+                        let state = state.clone();
+                        let stack = stack.clone();
+                        let row = row.clone();
+                        let window = window.clone();
+                        // PER-190: temporary worker-result poll for workspace lifecycle actions;
+                        // remove when sidebar jobs return through a GLib main-context future.
+                        glib::timeout_add_local(Duration::from_millis(100), move || {
+                            match rx.try_recv() {
+                                Ok(result) => {
+                                    match result {
+                                        Ok(()) => {
+                                            if action == "delete" {
+                                                let snapshot = state.snapshot();
+                                                let was_selected_workspace = snapshot
+                                                    .selected_workspace
+                                                    .as_deref()
+                                                    == Some(workspace_name.as_str())
+                                                    && matches!(
+                                                        snapshot.active_page,
+                                                        AppPage::Workspace | AppPage::Review
+                                                    );
+                                                state.remove_workspace_from_navigation(
+                                                    &workspace_name,
+                                                    AppPage::Dashboard,
+                                                );
+                                                if was_selected_workspace {
+                                                    stack.set_visible_child_name("dashboard");
+                                                }
+                                                if let Some(list) =
+                                                    row.parent().and_downcast::<ListBox>()
+                                                {
+                                                    list.remove(&row);
+                                                }
+                                            }
+                                            refresh_view_preferences();
+                                            refresh_workspace();
+                                            refresh_hub.refresh(RefreshScope::All);
+                                        }
+                                        Err(err) => show_workspace_error_dialog(
+                                            &window,
+                                            "Workspace action failed",
+                                            &format!("{err:#}"),
+                                        ),
+                                    }
+                                    glib::ControlFlow::Break
+                                }
+                                Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                                Err(mpsc::TryRecvError::Disconnected) => {
+                                    show_workspace_error_dialog(
+                                        &window,
+                                        "Workspace action failed",
+                                        "Background worker disconnected.",
+                                    );
+                                    glib::ControlFlow::Break
+                                }
+                            }
+                        });
+                        Ok(())
+                    }
+                }),
+            );
+        });
+        menu.append(&item);
+    }
+
+    popover.set_child(Some(&menu));
+    let menu_btn = icon_button("open-menu-symbolic", "Workspace actions");
+    menu_btn.add_css_class("workspace-row-menu-button");
+    {
+        let popover = popover.downgrade();
+        menu_btn.connect_clicked(move |_| {
+            if let Some(popover) = popover.upgrade() {
+                popover.popup();
+            }
+        });
+    }
+    if let Some(row_box) = row.child().and_downcast::<GBox>() {
+        row_box.append(&menu_btn);
+    }
+
+    let gesture = GestureClick::new();
+    gesture.set_button(3);
+    let popover_for_click = popover.downgrade();
+    gesture.connect_pressed(move |_, _, x, y| {
+        let Some(popover_for_click) = popover_for_click.upgrade() else {
+            return;
+        };
+        let rect = gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1);
+        popover_for_click.set_pointing_to(Some(&rect));
+        popover_for_click.popup();
+    });
+    row.add_controller(gesture);
+
+    row.set_focusable(true);
+    let key_controller = EventControllerKey::new();
+    let popover_for_key = popover.downgrade();
+    key_controller.connect_key_pressed(move |_, key, _, modifiers| {
+        let menu_key = key == gtk::gdk::Key::Menu;
+        let shift_f10 =
+            key == gtk::gdk::Key::F10 && modifiers.contains(gtk::gdk::ModifierType::SHIFT_MASK);
+        if !(menu_key || shift_f10) {
+            return gtk::glib::Propagation::Proceed;
+        }
+        if let Some(popover) = popover_for_key.upgrade() {
+            popover.popup();
+        }
+        gtk::glib::Propagation::Stop
+    });
+    row.add_controller(key_controller);
+}
+fn show_workspace_text_dialog(
+    window: &ApplicationWindow,
+    title: &str,
+    placeholder: &str,
+    initial: &str,
+    action_label: &str,
+    on_submit: Rc<dyn Fn(String) -> Result<(), String>>,
+) {
+    let dialog = gtk::Window::builder()
+        .title(title)
+        .modal(true)
+        .default_width(360)
+        .build();
+    dialog.set_transient_for(Some(window));
+
+    let body = GBox::new(Orientation::Vertical, 10);
+    body.add_css_class("modal-body");
+    body.set_margin_top(14);
+    body.set_margin_bottom(14);
+    body.set_margin_start(14);
+    body.set_margin_end(14);
+
+    let entry = Entry::new();
+    entry.set_placeholder_text(Some(placeholder));
+    entry.set_text(initial);
+    entry.set_hexpand(true);
+    body.append(&entry);
+
+    let error_label = Label::new(None);
+    error_label.add_css_class("status-error");
+    error_label.set_xalign(0.0);
+    error_label.set_wrap(true);
+    error_label.set_visible(false);
+    body.append(&error_label);
+
+    let buttons = GBox::new(Orientation::Horizontal, 8);
+    buttons.set_halign(gtk::Align::End);
+    let cancel_btn = text_button("Cancel");
+    let action_btn = text_button(action_label);
+    action_btn.add_css_class("suggested-action");
+    {
+        let dialog = dialog.clone();
+        cancel_btn.connect_clicked(move |_| dialog.close());
+    }
+    {
+        let dialog = dialog.clone();
+        let entry = entry.clone();
+        let error_label = error_label.clone();
+        action_btn.connect_clicked(move |_| match on_submit(entry.text().trim().to_owned()) {
+            Ok(()) => dialog.close(),
+            Err(message) => {
+                error_label.set_text(&message);
+                error_label.set_visible(true);
+            }
+        });
+    }
+    buttons.append(&cancel_btn);
+    buttons.append(&action_btn);
+    body.append(&buttons);
+
+    dialog.set_child(Some(&body));
+    dialog.present();
+    entry.grab_focus();
+}
+
+fn show_workspace_confirm_dialog(
+    window: &ApplicationWindow,
+    title: &str,
+    message: &str,
+    action_label: &str,
+    destructive: bool,
+    on_confirm: Rc<dyn Fn() -> Result<(), String>>,
+) {
+    let dialog = gtk::Window::builder()
+        .title(title)
+        .modal(true)
+        .default_width(360)
+        .build();
+    dialog.set_transient_for(Some(window));
+
+    let body = GBox::new(Orientation::Vertical, 10);
+    body.add_css_class("modal-body");
+    body.set_margin_top(14);
+    body.set_margin_bottom(14);
+    body.set_margin_start(14);
+    body.set_margin_end(14);
+
+    let label = Label::new(Some(message));
+    label.set_xalign(0.0);
+    label.set_wrap(true);
+    body.append(&label);
+
+    let error_label = Label::new(None);
+    error_label.add_css_class("status-error");
+    error_label.set_xalign(0.0);
+    error_label.set_wrap(true);
+    error_label.set_visible(false);
+    body.append(&error_label);
+
+    let buttons = GBox::new(Orientation::Horizontal, 8);
+    buttons.set_halign(gtk::Align::End);
+    let cancel_btn = text_button("Cancel");
+    let action_btn = text_button(action_label);
+    action_btn.add_css_class(if destructive {
+        "destructive-action"
+    } else {
+        "suggested-action"
+    });
+    {
+        let dialog = dialog.clone();
+        cancel_btn.connect_clicked(move |_| dialog.close());
+    }
+    {
+        let dialog = dialog.clone();
+        let error_label = error_label.clone();
+        action_btn.connect_clicked(move |_| match on_confirm() {
+            Ok(()) => dialog.close(),
+            Err(message) => {
+                error_label.set_text(&message);
+                error_label.set_visible(true);
+            }
+        });
+    }
+    buttons.append(&cancel_btn);
+    buttons.append(&action_btn);
+    body.append(&buttons);
+
+    dialog.set_child(Some(&body));
+    dialog.present();
+}
+
+fn show_workspace_error_dialog(window: &ApplicationWindow, title: &str, message: &str) {
+    let dialog = gtk::Window::builder()
+        .title(title)
+        .modal(true)
+        .default_width(380)
+        .build();
+    dialog.set_transient_for(Some(window));
+
+    let body = GBox::new(Orientation::Vertical, 10);
+    body.add_css_class("modal-body");
+    body.set_margin_top(14);
+    body.set_margin_bottom(14);
+    body.set_margin_start(14);
+    body.set_margin_end(14);
+
+    let label = Label::new(Some(message));
+    label.add_css_class("status-error");
+    label.set_xalign(0.0);
+    label.set_wrap(true);
+    label.set_selectable(true);
+    body.append(&label);
+
+    let buttons = GBox::new(Orientation::Horizontal, 8);
+    buttons.set_halign(gtk::Align::End);
+    let close_btn = text_button("Close");
+    {
+        let dialog = dialog.clone();
+        close_btn.connect_clicked(move |_| dialog.close());
+    }
+    buttons.append(&close_btn);
+    body.append(&buttons);
+
+    dialog.set_child(Some(&body));
+    dialog.present();
+}
+
 fn workspace_badge_text(
     pr_number: Option<i64>,
     pr_attention: Option<&str>,
@@ -749,6 +1265,10 @@ fn primary_sidebar_nav_labels(debug_mode: bool) -> Vec<&'static str> {
         labels.push("PTY Inspector");
     }
     labels
+}
+
+fn sidebar_should_restore_workspace_selection(page: &AppPage) -> bool {
+    matches!(page, AppPage::Workspace | AppPage::Review)
 }
 
 fn section_header_row(
@@ -864,7 +1384,11 @@ fn relative_time(ts: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{primary_sidebar_nav_labels, spawn_background_job, workspace_badge_text};
+    use super::{
+        primary_sidebar_nav_labels, sidebar_should_restore_workspace_selection,
+        spawn_background_job, workspace_badge_text,
+    };
+    use crate::state::AppPage;
     use std::time::{Duration, Instant};
 
     #[test]
@@ -889,6 +1413,20 @@ mod tests {
             primary_sidebar_nav_labels(true),
             vec!["Dashboard", "History", "PTY Inspector"]
         );
+    }
+
+    #[test]
+    fn sidebar_restores_workspace_selection_only_on_workspace_pages() {
+        assert!(sidebar_should_restore_workspace_selection(
+            &AppPage::Workspace
+        ));
+        assert!(sidebar_should_restore_workspace_selection(&AppPage::Review));
+        assert!(!sidebar_should_restore_workspace_selection(
+            &AppPage::Dashboard
+        ));
+        assert!(!sidebar_should_restore_workspace_selection(
+            &AppPage::History
+        ));
     }
 
     #[test]

@@ -176,22 +176,31 @@ pub fn parse_codex_event_blocks(text: &str) -> Vec<CodexTranscriptEvent> {
             continue;
         }
 
-        if let Some(command) = header.strip_prefix("Ran ") {
-            let (body, next) = collect_event_body(&lines, index + 1);
+        if let Some((command, body_start, body_prefix)) =
+            parse_run_command_event_header(&lines, index)
+        {
+            let (body, next) = collect_event_body_with_prefix(&lines, body_start, body_prefix);
             events.push(CodexTranscriptEvent::Tool {
-                title: command.trim().to_owned(),
+                title: command,
                 body,
             });
             index = next;
             continue;
         }
 
-        if header.starts_with("Read SKILL.md ") {
+        if is_skill_read_event_line(header) {
             let (body, next) = collect_event_body(&lines, index + 1);
             events.push(CodexTranscriptEvent::Skill {
                 title: skill_titles_from_read_header(header),
                 body,
             });
+            index = next;
+            continue;
+        }
+
+        if let Some(title) = read_file_event_title(header) {
+            let (body, next) = collect_event_body(&lines, index + 1);
+            events.push(CodexTranscriptEvent::Tool { title, body });
             index = next;
             continue;
         }
@@ -237,6 +246,27 @@ pub fn parse_codex_screen_messages(screen: &str) -> Vec<ScreenMessage> {
         .into_iter()
         .map(|span| span.message)
         .collect()
+}
+
+pub fn codex_screen_ready_for_input(screen: &str) -> bool {
+    let trimmed = screen.trim();
+    if trimmed.is_empty()
+        || !trimmed.contains('›')
+        || detect_directory_trust_prompt(screen)
+        || has_loading_model_status(screen)
+    {
+        return false;
+    }
+
+    if has_live_working_status(screen) {
+        return false;
+    }
+
+    if has_loaded_live_footer(screen) {
+        return true;
+    }
+
+    !screen.contains("Booting MCP server") && !screen.contains("Starting MCP servers")
 }
 
 pub fn codex_persistent_screen_fingerprint(screen: &str) -> Option<String> {
@@ -326,6 +356,10 @@ fn parse_codex_screen_message_spans(lines: &[String]) -> Vec<ScreenMessageSpan> 
                 {
                     break;
                 }
+                if let Some(next_index) = skip_codex_event_block(&lines, index) {
+                    index = next_index;
+                    continue;
+                }
                 let agent_start = index;
                 if let Some(first_line) = parse_live_agent_bullet(lines[index]) {
                     let mut body = vec![first_line];
@@ -377,6 +411,10 @@ fn parse_codex_screen_message_spans(lines: &[String]) -> Vec<ScreenMessageSpan> 
                     || is_box_header_line(lines[index])
                 {
                     break;
+                }
+                if let Some(next_index) = skip_codex_event_block(&lines, index) {
+                    index = next_index;
+                    continue;
                 }
                 let agent_start = index;
                 if let Some(first_line) = parse_live_agent_prompt(lines[index]) {
@@ -549,11 +587,13 @@ fn parse_codex_event_spans(lines: &[String], start: usize) -> Vec<CodexEventSpan
             continue;
         }
 
-        if let Some(command) = header.strip_prefix("Ran ") {
-            let (body, next) = collect_event_body(&line_refs, index + 1);
+        if let Some((command, body_start, body_prefix)) =
+            parse_run_command_event_header(&line_refs, index)
+        {
+            let (body, next) = collect_event_body_with_prefix(&line_refs, body_start, body_prefix);
             spans.push(CodexEventSpan {
                 event: CodexTranscriptEvent::Tool {
-                    title: command.trim().to_owned(),
+                    title: command,
                     body,
                 },
                 start_index: index,
@@ -563,13 +603,24 @@ fn parse_codex_event_spans(lines: &[String], start: usize) -> Vec<CodexEventSpan
             continue;
         }
 
-        if header.starts_with("Read SKILL.md ") {
+        if is_skill_read_event_line(header) {
             let (body, next) = collect_event_body(&line_refs, index + 1);
             spans.push(CodexEventSpan {
                 event: CodexTranscriptEvent::Skill {
                     title: skill_titles_from_read_header(header),
                     body,
                 },
+                start_index: index,
+                end_index: next,
+            });
+            index = next;
+            continue;
+        }
+
+        if let Some(title) = read_file_event_title(header) {
+            let (body, next) = collect_event_body(&line_refs, index + 1);
+            spans.push(CodexEventSpan {
+                event: CodexTranscriptEvent::Tool { title, body },
                 start_index: index,
                 end_index: next,
             });
@@ -611,8 +662,14 @@ fn latest_message_span_end_index(
 fn skip_codex_event_block(lines: &[&str], index: usize) -> Option<usize> {
     let line = lines[index].trim_end();
 
-    if line.starts_with("Ran ") || line.starts_with("Read SKILL.md ") {
-        return Some(skip_codex_event_body(lines, index + 1));
+    if is_run_command_event_line(line)
+        || is_skill_read_event_line(line)
+        || read_file_event_title(line).is_some()
+    {
+        let start = parse_run_command_event_header(lines, index)
+            .map(|(_, body_start, _)| body_start)
+            .unwrap_or(index + 1);
+        return Some(skip_codex_event_body(lines, start));
     }
 
     if is_raw_file_change_event_line(line) {
@@ -630,8 +687,8 @@ fn skip_codex_event_body(lines: &[&str], mut index: usize) -> usize {
             || is_live_agent_prompt_line(line)
             || is_live_bullet_user_prompt(line, lines.get(index + 1).copied())
             || parse_live_agent_bullet(line).is_some()
-            || line.starts_with("Ran ")
-            || line.starts_with("Read SKILL.md ")
+            || is_run_command_event_line(line)
+            || is_skill_read_event_line(line)
             || is_raw_file_change_event_line(line)
             || is_separator_rule_line(line)
         {
@@ -822,8 +879,9 @@ fn collect_event_body(lines: &[&str], start: usize) -> (String, usize) {
             }
             continue;
         }
-        if line.starts_with("Ran ")
+        if is_run_command_event_line(line)
             || line.starts_with("Read SKILL.md ")
+            || read_file_event_title(line).is_some()
             || is_raw_file_change_event_line(line)
             || is_box_header_line(line)
             || is_live_user_prompt_line(line)
@@ -833,11 +891,25 @@ fn collect_event_body(lines: &[&str], start: usize) -> (String, usize) {
         {
             break;
         }
-        body.push(line);
+        if let Some(line) = normalize_event_body_line(line) {
+            body.push(line);
+        }
         index += 1;
     }
 
     (body.join("\n").trim().to_owned(), index)
+}
+
+fn collect_event_body_with_prefix(
+    lines: &[&str],
+    start: usize,
+    mut prefix: Vec<String>,
+) -> (String, usize) {
+    let (body, next) = collect_event_body(lines, start);
+    if !body.is_empty() {
+        prefix.push(body);
+    }
+    (prefix.join("\n").trim().to_owned(), next)
 }
 
 fn collect_event_body_including_header(lines: &[&str], start: usize) -> (String, usize) {
@@ -850,7 +922,72 @@ fn collect_event_body_including_header(lines: &[&str], start: usize) -> (String,
     (block, next)
 }
 
+fn parse_run_command_event_header(
+    lines: &[&str],
+    index: usize,
+) -> Option<(String, usize, Vec<String>)> {
+    let header = lines.get(index)?.trim_end();
+    let command = normalize_codex_bullet_line(header)
+        .strip_prefix("Ran ")?
+        .trim()
+        .to_owned();
+    let mut command_parts = vec![command];
+    let mut body_prefix = Vec::new();
+    let mut next = index + 1;
+
+    if header.trim_start().starts_with('•') {
+        while next < lines.len() {
+            if let Some(content) = parse_box_content(lines[next]) {
+                if !content.is_empty() {
+                    command_parts.push(content);
+                }
+                next += 1;
+                continue;
+            }
+            if let Some(content) = parse_box_bottom_content(lines[next]) {
+                if let Some(content) = normalize_event_body_line(&content) {
+                    if !content.is_empty() {
+                        body_prefix.push(content);
+                    }
+                }
+                next += 1;
+            }
+            break;
+        }
+    }
+
+    Some((command_parts.join(" "), next, body_prefix))
+}
+
+fn is_run_command_event_line(line: &str) -> bool {
+    normalize_codex_bullet_line(line).starts_with("Ran ")
+}
+
+fn parse_box_bottom_content(line: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    let border = trimmed.chars().next()?;
+    if !matches!(border, '└' | '╰') {
+        return None;
+    }
+    let content = trimmed[border.len_utf8()..].trim_start();
+    if content.is_empty() || is_separator_rule_line(content) {
+        Some(String::new())
+    } else {
+        Some(content.to_owned())
+    }
+}
+
+fn normalize_event_body_line(line: &str) -> Option<String> {
+    (!is_codex_transcript_hint_line(line)).then(|| line.to_owned())
+}
+
+fn is_codex_transcript_hint_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.contains("ctrl + t to view transcript") || trimmed.contains("ctrl+t to view transcript")
+}
+
 fn skill_titles_from_read_header(header: &str) -> String {
+    let header = normalize_codex_bullet_line(header);
     let skills = header
         .split('(')
         .skip(1)
@@ -863,6 +1000,86 @@ fn skill_titles_from_read_header(header: &str) -> String {
     } else {
         skills.join(", ")
     }
+}
+
+fn is_skill_read_event_line(line: &str) -> bool {
+    normalize_codex_bullet_line(line).starts_with("Read SKILL.md ")
+}
+
+fn read_file_event_title(line: &str) -> Option<String> {
+    let trimmed = normalize_codex_bullet_line(line);
+    if is_skill_read_event_line(trimmed) {
+        return None;
+    }
+    let rest = trimmed.strip_prefix("Read ")?;
+    read_file_event_paths_are_complete(rest).then(|| trimmed.to_owned())
+}
+
+fn read_file_event_paths_are_complete(rest: &str) -> bool {
+    let mut saw_path = false;
+    for raw_part in rest.split(',') {
+        let part = raw_part.trim();
+        if part.is_empty() {
+            return false;
+        }
+        let token = part.trim_matches(|ch: char| {
+            matches!(
+                ch,
+                '`' | '"' | '\'' | ',' | ';' | ':' | '(' | ')' | '[' | ']'
+            )
+        });
+        if token.is_empty() || token.split_whitespace().count() != 1 {
+            return false;
+        }
+        if !is_probable_read_file_path(token) {
+            return false;
+        }
+        saw_path = true;
+    }
+    saw_path
+}
+
+fn is_probable_read_file_path(path: &str) -> bool {
+    !path.is_empty()
+        && (path.starts_with('/')
+            || path.starts_with("./")
+            || path.starts_with("../")
+            || path.contains('/')
+            || path.contains('\\')
+            || path.contains('.')
+            || is_probable_extensionless_root_file(path))
+}
+
+fn is_probable_extensionless_root_file(path: &str) -> bool {
+    if path.is_empty()
+        || path.starts_with('-')
+        || path.len() > 128
+        || path.chars().any(char::is_whitespace)
+        || !path
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+    {
+        return false;
+    }
+    let normalized = path.to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "makefile"
+            | "dockerfile"
+            | "containerfile"
+            | "procfile"
+            | "rakefile"
+            | "gemfile"
+            | "brewfile"
+            | "justfile"
+            | "license"
+            | "readme"
+            | "agents"
+            | "claude"
+            | "contributing"
+            | "changelog"
+            | "todo"
+    )
 }
 
 fn is_raw_file_change_event_line(line: &str) -> bool {
@@ -1177,7 +1394,28 @@ fn is_box_header_line(line: &str) -> bool {
 
 fn is_box_bottom(line: &str) -> bool {
     let trimmed = line.trim_start();
-    trimmed.starts_with('╰') || trimmed.starts_with('└')
+    let Some(border) = trimmed.chars().next() else {
+        return false;
+    };
+    if !matches!(border, '╰' | '└') {
+        return false;
+    }
+    if border == '└' && !line.starts_with('└') {
+        return false;
+    }
+    let rest = trimmed[border.len_utf8()..]
+        .trim_start()
+        .strip_suffix('╯')
+        .unwrap_or_else(|| trimmed[border.len_utf8()..].trim_start())
+        .trim_end();
+    rest.is_empty() || is_box_rule_content(rest)
+}
+
+fn is_box_rule_content(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|ch| matches!(ch, '─' | '━' | '═' | '-' | '—'))
 }
 
 fn parse_box_content(line: &str) -> Option<String> {
@@ -1207,6 +1445,9 @@ fn is_live_agent_prompt_line(line: &str) -> bool {
 fn is_live_bullet_user_prompt(line: &str, next_line: Option<&str>) -> bool {
     let trimmed = line.trim_start();
     if !trimmed.starts_with('•') {
+        return false;
+    }
+    if transient_bullet_content(trimmed).is_some_and(is_transient_status_bullet) {
         return false;
     }
     next_line
@@ -1283,6 +1524,7 @@ fn is_transient_status_bullet(content: &str) -> bool {
     content.starts_with("Starting MCP servers")
         || content.starts_with("Working (")
         || content.starts_with("Thinking (")
+        || content == "Explored"
 }
 
 fn transient_bullet_content(line: &str) -> Option<&str> {
@@ -1375,6 +1617,32 @@ fn live_footer_start_index(lines: &[&str]) -> Option<usize> {
     has_transcript_before_prompt.then_some(prompt_index)
 }
 
+fn has_loaded_live_footer(screen: &str) -> bool {
+    screen.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed.contains(" · ") && trimmed.contains("gpt-")
+    })
+}
+
+fn has_loading_model_status(screen: &str) -> bool {
+    screen.lines().any(|line| {
+        line.split_whitespace()
+            .collect::<Vec<_>>()
+            .windows(2)
+            .any(|words| words == ["model:", "loading"])
+    })
+}
+
+fn has_live_working_status(screen: &str) -> bool {
+    screen.lines().rev().take(8).any(|line| {
+        transient_bullet_content(line).is_some_and(|content| {
+            content.starts_with("Starting MCP servers")
+                || content.starts_with("Working (")
+                || content.starts_with("Thinking (")
+        })
+    })
+}
+
 fn is_ignorable_transcript_line(line: &str) -> bool {
     let trimmed = line.trim();
     trimmed.is_empty()
@@ -1444,14 +1712,14 @@ fn trim_blank_edges(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        detect_directory_trust_prompt, encode_send_line, is_trust_prompt_visible,
-        merge_screen_messages, parse_codex_context_usage, parse_codex_event_blocks,
-        parse_codex_file_change_block, parse_codex_inline_event, parse_codex_screen_delta,
-        parse_codex_screen_messages, parse_codex_structured_lines, CodexContextUsage,
-        CodexFileChange, CodexFileChangeAction, CodexFileChangeLine, CodexFileChangeLineKind,
-        CodexFileReference, CodexInlineEvent, CodexParseBenchmark, CodexParsedItem,
-        CodexParsedLine, CodexSkillAnnouncement, CodexToolCall, CodexTranscriptEvent,
-        ScreenMessage, ScreenMessageRole,
+        codex_screen_ready_for_input, detect_directory_trust_prompt, encode_send_line,
+        is_trust_prompt_visible, merge_screen_messages, parse_codex_context_usage,
+        parse_codex_event_blocks, parse_codex_file_change_block, parse_codex_inline_event,
+        parse_codex_screen_delta, parse_codex_screen_messages, parse_codex_structured_lines,
+        CodexContextUsage, CodexFileChange, CodexFileChangeAction, CodexFileChangeLine,
+        CodexFileChangeLineKind, CodexFileReference, CodexInlineEvent, CodexParseBenchmark,
+        CodexParsedItem, CodexParsedLine, CodexSkillAnnouncement, CodexToolCall,
+        CodexTranscriptEvent, ScreenMessage, ScreenMessageRole,
     };
 
     #[test]
@@ -1572,6 +1840,33 @@ mod tests {
                 message: "Read SKILL.md".to_owned(),
             }))
         );
+    }
+
+    #[test]
+    fn read_file_event_requires_complete_path_list() {
+        let events = parse_codex_event_blocks("Read README.md, crates/core/src/lib.rs\nbody");
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            CodexTranscriptEvent::Tool { title, .. }
+                if title == "Read README.md, crates/core/src/lib.rs"
+        ));
+
+        assert!(parse_codex_event_blocks("Read README.md before changing the parser").is_empty());
+    }
+
+    #[test]
+    fn read_file_event_accepts_extensionless_root_files() {
+        let events = parse_codex_event_blocks("Read LICENSE, Makefile\nbody");
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            CodexTranscriptEvent::Tool { title, .. } if title == "Read LICENSE, Makefile"
+        ));
+
+        assert!(parse_codex_event_blocks("Read more before editing").is_empty());
+        assert!(parse_codex_event_blocks("Read More\nbody").is_empty());
+        assert!(parse_codex_event_blocks("Read Carefully\nbody").is_empty());
     }
 
     #[test]
@@ -1784,6 +2079,17 @@ Edited crates/core/src/codex_tui.rs (+2 -1)
     }
 
     #[test]
+    fn parse_codex_screen_messages_skips_file_read_blocks() {
+        let screen = "\
+Read README.md
+# Project
+This is the read body.
+";
+
+        assert!(parse_codex_screen_messages(screen).is_empty());
+    }
+
+    #[test]
     fn parse_codex_screen_messages_ignores_hollow_working_spinner_status() {
         let screen = "\
 › Explain this codebase
@@ -1931,6 +2237,58 @@ test codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok"
                     ],
                 })),
             ]
+        );
+    }
+
+    #[test]
+    fn screen_delta_emits_file_reads_as_events_not_messages() {
+        let screen = "\
+› latest question
+Read README.md
+# Project
+This is the read body.
+";
+        let benchmark = CodexParseBenchmark {
+            last_user_message: Some("latest question".to_owned()),
+            last_agent_message: None,
+        };
+
+        let delta = parse_codex_screen_delta(screen, &benchmark, None);
+
+        assert_eq!(
+            delta.items,
+            vec![CodexParsedItem::Event(CodexTranscriptEvent::Tool {
+                title: "Read README.md".to_owned(),
+                body: "# Project\nThis is the read body.".to_owned(),
+            })]
+        );
+    }
+
+    #[test]
+    fn screen_delta_parses_bulleted_wrapped_ran_tool_events() {
+        let screen = "\
+› latest question
+• Ran npm pkg get scripts dependencies.next dependencies.react
+│ dependencies.stripe dependencies.\"@supabase/supabase-js\"
+└ {
+\"scripts\": {
+… +9 lines (ctrl + t to view transcript)
+\"dependencies.@supabase/supabase-js\": \"^2.108.1\"
+}
+";
+        let benchmark = CodexParseBenchmark {
+            last_user_message: Some("latest question".to_owned()),
+            last_agent_message: None,
+        };
+
+        let delta = parse_codex_screen_delta(screen, &benchmark, None);
+
+        assert_eq!(
+            delta.items,
+            vec![CodexParsedItem::Event(CodexTranscriptEvent::Tool {
+                title: "npm pkg get scripts dependencies.next dependencies.react dependencies.stripe dependencies.\"@supabase/supabase-js\"".to_owned(),
+                body: "{\n\"scripts\": {\n\"dependencies.@supabase/supabase-js\": \"^2.108.1\"\n}".to_owned(),
+            })]
         );
     }
 
@@ -2319,6 +2677,8 @@ test codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok
 › User prompt
 • Starting MCP servers
 • Working (4s)
+• Explored
+  └ Read package.json, README.md
 • Search complete";
 
         assert_eq!(
@@ -2449,6 +2809,70 @@ test codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok
                 content: "Improve documentation in @filename".to_owned(),
             }]
         );
+    }
+
+    #[test]
+    fn ready_detection_ignores_stale_boot_noise_with_loaded_footer() {
+        let screen = "\
+╭──────────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.142.3)                       │
+│                                                  │
+│ model:       gpt-5.4 medium   /model to change   │
+│ directory:   ~/archductor/…/chandelier/islamabad │
+│ permissions: YOLO mode                           │
+╰──────────────────────────────────────────────────╯
+
+• Booting MCP server: codex_apps (0s • esc to interrupt)
+
+
+› Improve documentation in @filename
+
+  gpt-5.4 medium · ~/archductor/workspaces/chandelier/islamabad";
+
+        assert!(codex_screen_ready_for_input(screen));
+    }
+
+    #[test]
+    fn ready_detection_waits_when_loaded_footer_still_shows_working() {
+        let screen = "\
+› Fix this bug
+
+• Working (12s • esc to interrupt)
+
+  gpt-5.4 medium · ~/archductor/workspaces/chandelier/islamabad";
+
+        assert!(!codex_screen_ready_for_input(screen));
+    }
+
+    #[test]
+    fn ready_detection_waits_for_loading_model_with_variable_spacing() {
+        let screen = "\
+│ model: loading   /model to change │
+
+› Fix this bug
+
+  gpt-5.4 medium · ~/archductor/workspaces/demo";
+
+        assert!(!codex_screen_ready_for_input(screen));
+    }
+
+    #[test]
+    fn ready_detection_waits_when_loaded_footer_still_starts_mcp_servers() {
+        let screen = "\
+› Fix this bug
+
+• Starting MCP servers (2s • esc to interrupt)
+
+  gpt-5.4 medium · ~/archductor/workspaces/demo";
+
+        assert!(!codex_screen_ready_for_input(screen));
+    }
+
+    #[test]
+    fn ready_detection_waits_when_boot_noise_has_no_loaded_footer() {
+        assert!(!codex_screen_ready_for_input(
+            "• Booting MCP server\n\n› Improve documentation"
+        ));
     }
 
     #[test]

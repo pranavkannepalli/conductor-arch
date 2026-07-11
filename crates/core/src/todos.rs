@@ -18,10 +18,9 @@ fn parse_context_todo_line(line: &str) -> Option<ContextTodo> {
         .or_else(|| trimmed.strip_prefix("- [X] "))
     {
         (true, rest)
-    } else if let Some(rest) = trimmed.strip_prefix("- [ ] ") {
-        (false, rest)
     } else {
-        return None;
+        let rest = trimmed.strip_prefix("- [ ] ")?;
+        (false, rest)
     };
     let text = text.trim();
     if text.is_empty() {

@@ -26,6 +26,12 @@ pub enum ArchcarRequest {
         kind: SessionKind,
         harness: Option<SessionHarnessOptions>,
     },
+    EnsureChatThreadSession {
+        workspace: String,
+        thread_id: i64,
+        kind: SessionKind,
+        harness: Option<SessionHarnessOptions>,
+    },
     SpawnSession {
         workspace: String,
         kind: SessionKind,
@@ -109,6 +115,17 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         } => {
             format!(
                 "ensure_workspace_default_session workspace={workspace} kind={}",
+                session_kind_label(*kind)
+            )
+        }
+        ArchcarRequest::EnsureChatThreadSession {
+            workspace,
+            thread_id,
+            kind,
+            ..
+        } => {
+            format!(
+                "ensure_chat_thread_session workspace={workspace} thread_id={thread_id} kind={}",
                 session_kind_label(*kind)
             )
         }
@@ -222,9 +239,10 @@ pub fn archcar_event_summary(event: &ArchcarEvent) -> String {
         } => format!("session_exited session_id={session_id} exit_code={exit_code:?}"),
         ArchcarEvent::SessionError {
             session_id,
+            thread_id,
             message,
         } => format!(
-            "session_error session_id={session_id:?} chars={}",
+            "session_error session_id={session_id:?} thread_id={thread_id:?} chars={}",
             message.chars().count()
         ),
     }
@@ -276,6 +294,8 @@ pub enum ArchcarEvent {
     },
     SessionError {
         session_id: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thread_id: Option<i64>,
         message: String,
     },
 }

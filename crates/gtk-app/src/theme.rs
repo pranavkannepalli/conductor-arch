@@ -22,6 +22,9 @@ textview,
 .history-row,
 .nav-button,
 .nav-row,
+.ws-tab-shell,
+.ws-tab-label,
+.ws-tab-close-icon,
 .chat-menu-item,
 .chat-composer-box,
 .chat-inline-event-chip,
@@ -545,6 +548,9 @@ checkbutton {
 }
 .card-meta.ws-pr-status-ready {
     color: #84e0a0;
+}
+.card-meta.ws-pr-status-pending {
+    color: #a8a8a8;
 }
 .card-meta.ws-pr-status-failed {
     color: #ff8a8a;
@@ -1358,6 +1364,10 @@ window.lc-theme-dark,
     background-color: #163522;
     color: #84e0a0;
 }
+.workspace-badge.ws-pr-status-pending {
+    background-color: #262626;
+    color: #a8a8a8;
+}
 .workspace-badge.ws-pr-status-failed {
     background-color: #3a1a1a;
     color: #ff8a8a;
@@ -1484,29 +1494,65 @@ window.lc-theme-dark,
     padding: 0 18px;
     background-color: #191919;
 }
+.ws-chat-tabs-scroll {
+    background-color: transparent;
+    border: none;
+    box-shadow: none;
+    min-height: 46px;
+}
+.ws-chat-tabs-scroll scrollbar {
+    min-height: 0;
+    min-width: 0;
+}
+.ws-chat-tabs {
+    background-color: transparent;
+}
 .ws-tab-sep {
     min-height: 1px;
     background-color: #282828;
 }
-.ws-tab-btn {
-    background: transparent;
-    border: none;
-    border-radius: 0;
+.ws-tab-shell {
+    min-width: 132px;
+    min-height: 46px;
+    padding: 0 6px;
     border-bottom: 2px solid transparent;
-    padding: 0 4px;
-    margin: 0;
+    background-color: transparent;
+}
+.ws-tab-label {
+    min-width: 84px;
     font-size: 14px;
     font-weight: 400;
     color: #8a8a8a;
-    min-height: 46px;
 }
-.ws-tab-btn:hover {
+.ws-tab-close-button {
     background: transparent;
+    border: none;
+    box-shadow: none;
+    text-shadow: none;
+    border-radius: 5px;
+    padding: 0;
+    min-width: 24px;
+    min-height: 24px;
+}
+.ws-tab-close-button:hover {
+    background-color: rgba(255, 255, 255, 0.06);
+}
+.ws-tab-close-icon {
+    color: #747474;
+    min-width: 14px;
+    min-height: 14px;
+}
+.ws-tab-shell:hover .ws-tab-label,
+.ws-tab-shell:hover .ws-tab-close-icon {
     color: #c6c6c6;
 }
-.ws-tab-active {
+.ws-tab-shell.ws-tab-active {
+    background-color: #242424;
+    border-bottom-color: #f0c36a;
+}
+.ws-tab-shell.ws-tab-active .ws-tab-label,
+.ws-tab-shell.ws-tab-active .ws-tab-close-icon {
     color: #e8e8e8;
-    border-bottom-color: #e8e8e8;
     font-weight: 600;
 }
 .ws-mode-switcher button {
@@ -1573,11 +1619,60 @@ window.lc-theme-dark,
     background-color: #163522;
     color: #84e0a0;
 }
+.ws-pr-status-pending {
+    background-color: #262626;
+    color: #a8a8a8;
+}
 .ws-pr-status-failed {
     background-color: #3a1a1a;
     color: #ff8a8a;
 }
 .ws-pr-status-merged {
+    background-color: #311d46;
+    color: #c6a3ff;
+}
+.ws-pr-status-missing {
+    background-color: #1b1b1b;
+    color: #a8a8a8;
+}
+.ws-pr-compact-panel {
+    padding: 10px 12px;
+    border-bottom: 1px solid #232323;
+    background-color: #181818;
+}
+.ws-pr-compact-panel.ws-pr-status-missing {
+    border-left: 3px solid #3a3a3a;
+}
+.ws-pr-compact-panel.ws-pr-status-pending {
+    border-left: 3px solid #3a3a3a;
+}
+.ws-pr-compact-panel.ws-pr-status-ready {
+    border-left: 3px solid #84e0a0;
+}
+.ws-pr-compact-panel.ws-pr-status-failed {
+    border-left: 3px solid #ff8a8a;
+}
+.ws-pr-compact-panel.ws-pr-status-merged {
+    border-left: 3px solid #c6a3ff;
+}
+.ws-pr-compact-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: #e6e6e6;
+}
+.ws-pr-action-button.ws-pr-status-pending {
+    background-color: #262626;
+    color: #a8a8a8;
+}
+.ws-pr-action-button.ws-pr-status-ready {
+    background-color: #163522;
+    color: #84e0a0;
+}
+.ws-pr-action-button.ws-pr-status-failed {
+    background-color: #3a1a1a;
+    color: #ff8a8a;
+}
+.ws-pr-action-button.ws-pr-status-merged {
     background-color: #311d46;
     color: #c6a3ff;
 }
@@ -1876,6 +1971,21 @@ row:hover .ws-folder-name {
     border: 1px solid #313131;
     border-radius: 14px;
 }
+.context-menu-popover {
+    background-color: transparent;
+    border: none;
+    box-shadow: none;
+}
+popover.context-menu-popover contents {
+    background-color: #1e1e1e;
+    border: none;
+    border-radius: 10px;
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.32);
+}
+popover.context-menu-popover arrow {
+    background-color: #1e1e1e;
+    border: none;
+}
 .chat-menu-list {
     padding: 8px;
 }
@@ -1904,8 +2014,11 @@ row:hover .ws-folder-name {
     font-size: 11px;
     font-weight: 700;
 }
+.chat-content-overlay {
+    background-color: #151515;
+}
 .chat-messages {
-    padding: 22px 24px 8px;
+    padding: 22px 24px 180px;
 }
 .chat-user-row {
     margin-bottom: 22px;
@@ -1963,7 +2076,7 @@ row:hover .ws-folder-name {
 }
 .chat-composer {
     padding: 0 16px 16px;
-    background-color: #151515;
+    background-color: transparent;
 }
 .chat-composer-box {
     border: 1px solid #2a2a2a;
@@ -1972,7 +2085,7 @@ row:hover .ws-folder-name {
 }
 .chat-placeholder {
     color: #7f7f7f;
-    font-size: 14px;
+    font-size: 13px;
 }
 .chat-input-scroll {
     background-color: transparent;
@@ -1985,7 +2098,7 @@ row:hover .ws-folder-name {
     color: #e4e4e4;
     border: none;
     box-shadow: none;
-    font-size: 14px;
+    font-size: 13px;
     min-height: 0;
 }
 .chat-toolbar {
@@ -2182,7 +2295,6 @@ window,
 .page-header,
 .dashboard-header,
 .sidebar,
-.chat-composer,
 .chat-composer-box,
 .settings-toolbar,
 .settings-rail,
@@ -2378,12 +2490,22 @@ combobox box,
 .workspace-modal-field,
 .settings-machine-entry,
 .settings-editor,
-.settings-editor text,
-.chat-input-scroll,
-.chat-input-view,
-.chat-input-view text {
+.settings-editor text {
     background-color: #0d0d0d;
     border-color: #343434;
+    color: #f8fafc;
+}
+
+.chat-composer {
+    background-color: transparent;
+}
+
+.chat-composer-box .chat-input-scroll,
+.chat-composer-box .chat-input-view,
+.chat-composer-box .chat-input-view text {
+    background-color: transparent;
+    border: none;
+    box-shadow: none;
     color: #f8fafc;
 }
 
@@ -2421,14 +2543,19 @@ entry:focus,
 combobox:focus,
 combobox button:focus,
 textview:focus,
-.chat-input-view:focus,
-.chat-input-view text:focus,
-.chat-input-scroll:focus-within,
 .chat-composer-box:focus-within {
     border-color: #8a8a8a;
     box-shadow: 0 0 0 1px rgba(180, 180, 180, 0.34);
     outline: 1px solid transparent;
     outline-offset: 2px;
+}
+
+.chat-composer-box .chat-input-scroll:focus-within,
+.chat-composer-box .chat-input-view:focus,
+.chat-composer-box .chat-input-view text:focus {
+    border: none;
+    box-shadow: none;
+    outline: none;
 }
 
 .workspace-modal-field:focus,

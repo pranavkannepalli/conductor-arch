@@ -1,4 +1,7 @@
-use crate::codex_tui::{detect_directory_trust_prompt, CodexParseBenchmark, CodexParseCursor};
+use crate::codex_tui::{
+    codex_screen_ready_for_input, detect_directory_trust_prompt, CodexParseBenchmark,
+    CodexParseCursor,
+};
 use crate::session_event::{
     parse_codex_screen_event_delta, SessionCommandOutputStatus, SessionEvent, SessionEventPayload,
     SessionEventSource, SessionEventStatus, SessionPromptOption, SessionPromptStyle,
@@ -96,13 +99,7 @@ fn is_running_tool_event(event: &SessionEvent) -> bool {
 }
 
 fn codex_ready_for_input(screen: &str) -> bool {
-    let trimmed = screen.trim();
-    !trimmed.is_empty()
-        && trimmed.contains('›')
-        && !detect_directory_trust_prompt(screen)
-        && !screen.contains("Booting MCP server")
-        && !screen.contains("Starting MCP servers")
-        && !screen.contains("model:       loading")
+    codex_screen_ready_for_input(screen)
 }
 
 fn codex_trust_prompt_event(screen: &str) -> SessionEvent {
