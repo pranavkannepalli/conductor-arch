@@ -260,7 +260,7 @@ textview:disabled {
 .workspace-list row:hover .workspace-row-shell {
     background-color: #242424;
     border-color: #3a3a3a;
-    padding-right: 6px;
+    padding-right: 4px;
 }
 
 .workspace-row-shell,
@@ -1377,7 +1377,7 @@ window.lc-theme-dark,
 
 /* ── Updated workspace row shell ── */
 .workspace-row-shell {
-    padding: 7px 0 7px 10px;
+    padding: 7px 4px 7px 10px;
 }
 
 .sidebar-icon-button {
