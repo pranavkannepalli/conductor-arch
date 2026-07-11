@@ -8746,7 +8746,7 @@ CUSTOM_VALUE = "from-settings"
     }
 
     #[test]
-    fn run_workspace_captures_logs_and_stop_marks_process_stopped() {
+    fn run_workspace_captures_logs() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
         fs::create_dir(repo_path.join(".archductor")).unwrap();
@@ -8754,7 +8754,7 @@ CUSTOM_VALUE = "from-settings"
             repo_path.join(".archductor/settings.toml"),
             r#"
 [scripts]
-run = "printf 'started\n'; while true; do sleep 1; done"
+run = "printf 'started\n'"
 "#,
         )
         .unwrap();
@@ -8810,6 +8810,57 @@ run = "printf 'started\n'; while true; do sleep 1; done"
             .read_latest_run_log("berlin")
             .unwrap()
             .contains("started"));
+        let exited =
+            wait_for_process_status(&store, "berlin", ProcessKind::Run, ProcessStatus::Exited);
+        assert_eq!(exited.exit_code, Some(0));
+    }
+
+    #[test]
+    fn stop_workspace_marks_running_record_stopped_without_live_process() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let now = timestamp();
+        let log_path = temp.path().join("logs/run-fake.log");
+        store
+            .conn
+            .execute(
+                "INSERT INTO processes (
+                    workspace_id, chat_thread_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata, session_resume_id
+                ) VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, NULL, NULL)",
+                rusqlite::params![
+                    workspace.id,
+                    ProcessKind::Run.as_str(),
+                    "fake run process",
+                    i64::from(u32::MAX),
+                    log_path.to_string_lossy().to_string(),
+                    ProcessStatus::Running.as_str(),
+                    now,
+                ],
+            )
+            .unwrap();
+        let run = store
+            .latest_running_process(workspace.id, ProcessKind::Run)
+            .unwrap();
         let stopped = store.stop_workspace("berlin").unwrap();
 
         assert_eq!(stopped.id, run.id);
