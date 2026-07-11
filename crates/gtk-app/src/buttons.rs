@@ -105,7 +105,10 @@ mod tests {
     fn preserves_standard_icon_names() {
         assert_eq!(resolve_icon_name("folder-symbolic"), "folder-symbolic");
         assert_eq!(resolve_icon_name("go-next-symbolic"), "go-next-symbolic");
-        assert_eq!(resolve_icon_name("open-menu-symbolic"), "open-menu-symbolic");
+        assert_eq!(
+            resolve_icon_name("open-menu-symbolic"),
+            "open-menu-symbolic"
+        );
         assert_eq!(
             resolve_icon_name("utilities-terminal-symbolic"),
             "utilities-terminal-symbolic"

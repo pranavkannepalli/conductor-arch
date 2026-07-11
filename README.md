@@ -472,6 +472,9 @@ feeds workspace terminal preset buttons; entries can be known aliases or custom
 `scripts.lint`, `scripts.typecheck`, and `scripts.build` are also exposed as
 terminal command presets. Prompt pack metadata is file-backed in settings today;
 pack import/export and switching are tracked TODOs until that workflow exists.
+Config bootstrap seeds `.archductor/prompt-packs/default.toml` for new projects
+and backfills it for existing projects when missing, so prompt loading always has
+a safe fallback file.
 The CLI can export or import shared and local repository settings bundles. The
 other customization fields are saved, merged, and preserved for workflow
 surfaces that consume them.

@@ -575,7 +575,16 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
                     (false, true) => "Created shared settings.",
                     _ => "Config already exists and is valid.",
                 };
-                settings_result_init.set_text(&format!("{status} {}", repo_path.display()));
+                let prompt_pack_status =
+                    if report.default_prompt_pack_created || report.active_prompt_pack_created {
+                        " Seeded prompt pack defaults."
+                    } else {
+                        ""
+                    };
+                settings_result_init.set_text(&format!(
+                    "{status}{prompt_pack_status} {}",
+                    repo_path.display()
+                ));
             }
             Err(err) => settings_result_init.set_text(&format!("Initialize failed: {err:#}")),
         }

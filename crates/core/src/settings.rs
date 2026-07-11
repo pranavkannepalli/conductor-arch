@@ -27,6 +27,9 @@ pub struct RepositorySettings {
 pub struct RepositoryConfigBootstrap {
     pub conductor_dir_created: bool,
     pub shared_settings_created: bool,
+    pub prompt_pack_dir_created: bool,
+    pub default_prompt_pack_created: bool,
+    pub active_prompt_pack_created: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -231,21 +234,32 @@ pub fn ensure_repository_config(repo_path: &Path) -> Result<RepositoryConfigBoot
     let mut report = RepositoryConfigBootstrap {
         conductor_dir_created,
         shared_settings_created: false,
+        prompt_pack_dir_created: false,
+        default_prompt_pack_created: false,
+        active_prompt_pack_created: false,
     };
 
-    match fs::read_to_string(&shared_path) {
+    let settings = match fs::read_to_string(&shared_path) {
         Ok(contents) => {
             let settings = repository_settings_from_toml(&contents)
                 .with_context(|| format!("validate {}", shared_path.display()))?;
             validate_repository_settings(&settings)?;
+            settings
         }
         Err(err) if err.kind() == ErrorKind::NotFound => {
             let contents = default_repository_settings_toml()?;
             atomic_write_no_symlink(&shared_path, contents.as_bytes())?;
             report.shared_settings_created = true;
+            repository_settings_from_toml(&contents)
+                .with_context(|| format!("validate {}", shared_path.display()))?
         }
         Err(err) => return Err(err).with_context(|| format!("read {}", shared_path.display())),
-    }
+    };
+    let prompt_pack_report =
+        ensure_default_prompt_pack_files(repo_path, &conductor_dir, &settings)?;
+    report.prompt_pack_dir_created = prompt_pack_report.prompt_pack_dir_created;
+    report.default_prompt_pack_created = prompt_pack_report.default_prompt_pack_created;
+    report.active_prompt_pack_created = prompt_pack_report.active_prompt_pack_created;
 
     Ok(report)
 }
@@ -372,53 +386,7 @@ pub fn default_repository_settings_toml() -> Result<String> {
             run_mode: Some("concurrent".to_owned()),
             ..ScriptSettings::default()
         },
-        prompts: Some(PromptSettings {
-            new_workspace: Some(
-                "Create a small, reviewable workspace plan before changing code.".to_owned(),
-            ),
-            general: Some(
-                "Prefer small, reviewable changes. Explain verification clearly.".to_owned(),
-            ),
-            continue_work: Some(
-                "Continue from the current state. Inspect recent changes before editing."
-                    .to_owned(),
-            ),
-            summarize_session: Some(
-                "Summarize the work completed, verification run, and remaining risk.".to_owned(),
-            ),
-            handoff: Some(
-                "Write a concise handoff with context, changed files, tests, and next steps."
-                    .to_owned(),
-            ),
-            code_review: Some(
-                "Focus on correctness, behavior changes, missing tests, and regressions."
-                    .to_owned(),
-            ),
-            create_pr: Some("Write a concise PR body with summary, tests, and risk.".to_owned()),
-            fix_errors: Some("Reproduce the failure, then make the smallest safe fix.".to_owned()),
-            resolve_merge_conflicts: Some(
-                "Preserve user changes and explain any conflict resolution choices.".to_owned(),
-            ),
-            rename_branch: Some("Use a short descriptive branch name.".to_owned()),
-            commit_generation: Some(
-                "Write a conventional commit message that matches the actual diff.".to_owned(),
-            ),
-            test_fixing: Some(
-                "Run the failing test first, fix the root cause, then rerun focused tests."
-                    .to_owned(),
-            ),
-            refactor_style: Some(
-                "Keep behavior-preserving refactors separate from feature changes.".to_owned(),
-            ),
-            setup_script: Some(
-                "Infer the repository setup command from existing package and build files."
-                    .to_owned(),
-            ),
-            run_script: Some(
-                "Infer the local development run command and include port/env requirements."
-                    .to_owned(),
-            ),
-        }),
+        prompts: Some(default_prompt_settings()),
         prompt_pack: PromptPackSettings {
             active: Some("default".to_owned()),
             version: Some("v1".to_owned()),
@@ -449,6 +417,58 @@ pub fn default_repository_settings_toml() -> Result<String> {
         ..RepositorySettings::default()
     };
     repository_settings_to_toml(&settings)
+}
+
+pub fn default_prompt_pack_toml() -> Result<String> {
+    let raw = RawPromptPackFile {
+        name: Some("default".to_owned()),
+        version: Some("v1".to_owned()),
+        prompts: RawPromptSettings::from_settings(&default_prompt_settings()),
+    };
+    toml::to_string_pretty(&raw).context("serialize default prompt pack")
+}
+
+fn default_prompt_settings() -> PromptSettings {
+    PromptSettings {
+        new_workspace: Some(
+            "Create a small, reviewable workspace plan before changing code.".to_owned(),
+        ),
+        general: Some("Prefer small, reviewable changes. Explain verification clearly.".to_owned()),
+        continue_work: Some(
+            "Continue from the current state. Inspect recent changes before editing.".to_owned(),
+        ),
+        summarize_session: Some(
+            "Summarize the work completed, verification run, and remaining risk.".to_owned(),
+        ),
+        handoff: Some(
+            "Write a concise handoff with context, changed files, tests, and next steps."
+                .to_owned(),
+        ),
+        code_review: Some(
+            "Focus on correctness, behavior changes, missing tests, and regressions.".to_owned(),
+        ),
+        create_pr: Some("Write a concise PR body with summary, tests, and risk.".to_owned()),
+        fix_errors: Some("Reproduce the failure, then make the smallest safe fix.".to_owned()),
+        resolve_merge_conflicts: Some(
+            "Preserve user changes and explain any conflict resolution choices.".to_owned(),
+        ),
+        rename_branch: Some("Use a short descriptive branch name.".to_owned()),
+        commit_generation: Some(
+            "Write a conventional commit message that matches the actual diff.".to_owned(),
+        ),
+        test_fixing: Some(
+            "Run the failing test first, fix the root cause, then rerun focused tests.".to_owned(),
+        ),
+        refactor_style: Some(
+            "Keep behavior-preserving refactors separate from feature changes.".to_owned(),
+        ),
+        setup_script: Some(
+            "Infer the repository setup command from existing package and build files.".to_owned(),
+        ),
+        run_script: Some(
+            "Infer the local development run command and include port/env requirements.".to_owned(),
+        ),
+    }
 }
 
 pub fn repository_settings_from_toml(contents: &str) -> Result<RepositorySettings> {
@@ -617,6 +637,15 @@ struct RawPromptSettings {
     setup_script: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     run_script: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+struct RawPromptPackFile {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+    prompts: RawPromptSettings,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -1606,6 +1635,85 @@ fn validate_agent_provider(provider: &str) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct PromptPackBootstrap {
+    prompt_pack_dir_created: bool,
+    default_prompt_pack_created: bool,
+    active_prompt_pack_created: bool,
+}
+
+fn ensure_default_prompt_pack_files(
+    repo_path: &Path,
+    conductor_dir: &Path,
+    settings: &RepositorySettings,
+) -> Result<PromptPackBootstrap> {
+    let prompt_pack_dir = conductor_dir.join("prompt-packs");
+    let prompt_pack_dir_created = ensure_real_directory(&prompt_pack_dir)?;
+    let default_path = prompt_pack_dir.join("default.toml");
+    let default_prompt_pack_created = ensure_prompt_pack_file(&default_path)?;
+
+    let active_prompt_pack_created = settings
+        .prompt_pack
+        .path
+        .as_deref()
+        .and_then(active_prompt_pack_path)
+        .map(|relative_path| repo_path.join(relative_path))
+        .filter(|active_path| active_path != &default_path)
+        .map(|active_path| ensure_prompt_pack_file(&active_path))
+        .transpose()?
+        .unwrap_or(false);
+
+    Ok(PromptPackBootstrap {
+        prompt_pack_dir_created,
+        default_prompt_pack_created,
+        active_prompt_pack_created,
+    })
+}
+
+fn active_prompt_pack_path(path: &str) -> Option<&Path> {
+    let path = Path::new(path);
+    let prefix = Path::new(".archductor").join("prompt-packs");
+    (is_safe_relative_path(path.to_str()?) && path.parent() == Some(prefix.as_path()))
+        .then_some(path)
+}
+
+fn ensure_prompt_pack_file(path: &Path) -> Result<bool> {
+    reject_symlink_file(path)?;
+    match fs::read(path) {
+        Ok(_) => Ok(false),
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            let parent = path
+                .parent()
+                .with_context(|| format!("resolve parent for {}", path.display()))?;
+            ensure_real_directory(parent)?;
+            let contents = default_prompt_pack_toml()?;
+            atomic_write_no_symlink(path, contents.as_bytes())?;
+            Ok(true)
+        }
+        Err(err) => Err(err).with_context(|| format!("read {}", path.display())),
+    }
+}
+
+fn ensure_real_directory(path: &Path) -> Result<bool> {
+    let mut created = false;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            let file_type = metadata.file_type();
+            anyhow::ensure!(
+                !file_type.is_symlink() && file_type.is_dir(),
+                "{} must be a real directory",
+                path.display()
+            );
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            fs::create_dir(path).with_context(|| format!("create {}", path.display()))?;
+            created = true;
+        }
+        Err(err) => return Err(err).with_context(|| format!("inspect {}", path.display())),
+    }
+    Ok(created)
+}
+
 fn ensure_local_settings_dir(repo_path: &Path) -> Result<PathBuf> {
     ensure_settings_dir(repo_path).map(|(path, _)| path)
 }
@@ -1955,8 +2063,15 @@ LOCAL_ONLY = "1"
 
         assert!(report.conductor_dir_created);
         assert!(report.shared_settings_created);
+        assert!(report.prompt_pack_dir_created);
+        assert!(report.default_prompt_pack_created);
         let shared_path = temp.path().join(".archductor/settings.toml");
         assert!(shared_path.exists());
+        let prompt_pack_path = temp.path().join(".archductor/prompt-packs/default.toml");
+        assert!(prompt_pack_path.exists());
+        assert!(fs::read_to_string(prompt_pack_path)
+            .unwrap()
+            .contains("[prompts]"));
         let settings = load_repository_settings(temp.path()).unwrap();
         assert_eq!(settings.file_include_globs, [".env*"]);
         assert_eq!(settings.scripts.run_mode.as_deref(), Some("concurrent"));
@@ -1981,8 +2096,36 @@ LOCAL_ONLY = "1"
 
         assert!(!report.conductor_dir_created);
         assert!(!report.shared_settings_created);
+        assert!(report.prompt_pack_dir_created);
+        assert!(report.default_prompt_pack_created);
         let contents = fs::read_to_string(conductor_dir.join("settings.toml")).unwrap();
         assert!(contents.contains("cargo run"));
+        assert!(conductor_dir.join("prompt-packs/default.toml").exists());
+    }
+
+    #[test]
+    fn ensure_repository_config_seeds_active_prompt_pack_when_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let conductor_dir = temp.path().join(".archductor");
+        fs::create_dir(&conductor_dir).unwrap();
+        fs::write(
+            conductor_dir.join("settings.toml"),
+            r#"
+[prompt_pack]
+active = "review"
+version = "v1"
+path = ".archductor/prompt-packs/review.toml"
+"#,
+        )
+        .unwrap();
+
+        let report = ensure_repository_config(temp.path()).unwrap();
+
+        assert!(report.prompt_pack_dir_created);
+        assert!(report.default_prompt_pack_created);
+        assert!(report.active_prompt_pack_created);
+        assert!(conductor_dir.join("prompt-packs/default.toml").exists());
+        assert!(conductor_dir.join("prompt-packs/review.toml").exists());
     }
 
     #[cfg(unix)]
@@ -2011,6 +2154,26 @@ LOCAL_ONLY = "1"
         let err = ensure_repository_config(temp.path()).unwrap_err();
 
         assert!(err.to_string().contains("must not be a symlink"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_repository_config_rejects_prompt_pack_dir_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let conductor_dir = temp.path().join(".archductor");
+        fs::create_dir(&conductor_dir).unwrap();
+        fs::write(
+            conductor_dir.join("settings.toml"),
+            "[scripts]\nrun = \"cargo run\"\n",
+        )
+        .unwrap();
+        let external = temp.path().join("outside-packs");
+        fs::create_dir(&external).unwrap();
+        std::os::unix::fs::symlink(&external, conductor_dir.join("prompt-packs")).unwrap();
+
+        let err = ensure_repository_config(temp.path()).unwrap_err();
+
+        assert!(err.to_string().contains("must be a real directory"));
     }
 
     #[test]

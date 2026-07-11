@@ -2498,12 +2498,13 @@ impl WorkspaceStore {
         let expected_patch = fs::read_to_string(&active.patch_path)
             .with_context(|| format!("read {}", active.patch_path.display()))?;
         let current_patch = root_tracked_patch(&repository.root_path)?;
+        let current_patch = spotlight_meaningful_patch(&current_patch);
+        let expected_patch = spotlight_meaningful_patch(&expected_patch);
+        let conflict_paths = spotlight_conflict_paths(&current_patch, &expected_patch);
         if current_patch.trim() == expected_patch.trim() {
             return Ok(Vec::new());
         }
-        Ok(spotlight_conflict_paths(&current_patch, &expected_patch)
-            .into_iter()
-            .collect())
+        Ok(conflict_paths.into_iter().collect())
     }
 
     pub fn changed_files(&self, name: &str) -> Result<Vec<String>> {
@@ -6520,7 +6521,10 @@ fn parse_untracked_status_paths(output: &str) -> Vec<String> {
 }
 
 fn is_conductor_context_path(path: &str) -> bool {
-    path == ".context" || path.starts_with(".context/")
+    path == ".context"
+        || path.starts_with(".context/")
+        || path == ".archductor/prompt-packs"
+        || path.starts_with(".archductor/prompt-packs/")
 }
 
 fn untracked_file_counts(path: &Path) -> Result<(usize, usize)> {
@@ -6797,7 +6801,9 @@ fn workspace_tracked_patch(workspace: &Workspace) -> Result<String> {
 
 fn ensure_root_matches_spotlight_patch(root_path: &Path, expected_patch: &str) -> Result<()> {
     let current_patch = root_tracked_patch(root_path)?;
-    let conflict_detail = spotlight_conflict_detail(&current_patch, expected_patch);
+    let current_patch = spotlight_meaningful_patch(&current_patch);
+    let expected_patch = spotlight_meaningful_patch(expected_patch);
+    let conflict_detail = spotlight_conflict_detail(&current_patch, &expected_patch);
     anyhow::ensure!(
         current_patch.trim() == expected_patch.trim(),
         "repository root has changes outside the active Spotlight patch{conflict_detail}; clean or save root changes before changing Spotlight state"
@@ -6821,11 +6827,15 @@ fn root_tracked_patch(root_path: &Path) -> Result<String> {
 
 fn spotlight_conflict_detail(current_patch: &str, expected_patch: &str) -> String {
     let paths = spotlight_conflict_paths(current_patch, expected_patch);
+    spotlight_conflict_detail_from_paths(&paths)
+}
+
+fn spotlight_conflict_detail_from_paths(paths: &BTreeSet<String>) -> String {
     if paths.is_empty() {
         return String::new();
     }
 
-    let shown = paths.into_iter().take(6).collect::<Vec<_>>();
+    let shown = paths.iter().take(6).cloned().collect::<Vec<_>>();
     format!("; changed root paths: {}", shown.join(", "))
 }
 
@@ -6846,12 +6856,30 @@ fn spotlight_conflict_paths(current_patch: &str, expected_patch: &str) -> BTreeS
 fn patch_changed_paths(patch: &str) -> BTreeSet<String> {
     patch
         .lines()
-        .filter_map(|line| {
-            let rest = line.strip_prefix("diff --git a/")?;
-            let (_, path) = rest.split_once(" b/")?;
-            Some(path.to_owned())
-        })
+        .filter_map(patch_path_from_diff_line)
+        .filter(|path| !is_conductor_context_path(path))
         .collect()
+}
+
+fn spotlight_meaningful_patch(patch: &str) -> String {
+    let mut filtered = String::new();
+    let mut include = true;
+    for line in patch.lines() {
+        if let Some(path) = patch_path_from_diff_line(line) {
+            include = !is_conductor_context_path(&path);
+        }
+        if include {
+            filtered.push_str(line);
+            filtered.push('\n');
+        }
+    }
+    filtered
+}
+
+fn patch_path_from_diff_line(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("diff --git a/")?;
+    let (_, path) = rest.split_once(" b/")?;
+    Some(path.to_owned())
 }
 
 fn apply_git_patch(cwd: &Path, patch: &str) -> Result<()> {

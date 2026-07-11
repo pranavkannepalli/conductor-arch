@@ -221,8 +221,10 @@ surfaces, and expands `command_palette_presets` into terminal preset buttons
 from known aliases or `Label=command` entries. Configured `scripts.test`,
 `scripts.lint`, `scripts.typecheck`, and `scripts.build` are prepended to those
 terminal presets. Prompt pack metadata is saved in `.archductor/settings.toml`;
-import/export, session snapshots, and pack switching are still TODOs. The other
-fields are merged, saved, and preserved for workflow surfaces that use them.
+config bootstrap also seeds `.archductor/prompt-packs/default.toml` for new and
+existing projects when missing. Import/export, session snapshots, and pack
+switching are still TODOs. The other fields are merged, saved, and preserved
+for workflow surfaces that use them.
 
 ## 6. CLI Smoke Path
 

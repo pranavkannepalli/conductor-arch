@@ -467,12 +467,13 @@ fn ws_center_panel(
             let workspace_name = ws.name.clone();
             let state = state.clone();
             let refresh_hub = refresh_hub.clone();
-            create_pr_btn.connect_clicked(move |_| {
-                let prompt = workspace_create_pr_chat_prompt(&db_path, &workspace_name);
-                state.queue_pending_chat_prompt(prompt);
-                state.set_active_workspace_tab(WorkspaceTab::Chats);
-                refresh_hub.refresh(RefreshScope::Workspace);
-            });
+            connect_create_pr_prompt_button(
+                &create_pr_btn,
+                db_path,
+                workspace_name,
+                state,
+                refresh_hub,
+            );
         }
     }
     tab_bar.append(&create_pr_btn);
@@ -1207,7 +1208,13 @@ fn ws_right_panel(
     panel.set_hexpand(true);
     panel.set_overflow(gtk::Overflow::Hidden);
 
-    panel.append(&workspace_pr_status_panel(store, &ws.name));
+    panel.append(&workspace_pr_status_panel(
+        db_path,
+        store,
+        &ws.name,
+        state,
+        refresh_hub.clone(),
+    ));
     panel.append(&Separator::new(Orientation::Horizontal));
 
     let tab_strip = GBox::new(Orientation::Horizontal, 4);
@@ -4146,7 +4153,28 @@ fn workspace_pr_primary_action_tooltip(snapshot: &WorkspacePrStatusSnapshot) -> 
     }
 }
 
-fn workspace_pr_status_panel(store: &WorkspaceStore, workspace_name: &str) -> GBox {
+fn connect_create_pr_prompt_button(
+    button: &Button,
+    db_path: PathBuf,
+    workspace_name: String,
+    state: AppState,
+    refresh_hub: RefreshHub,
+) {
+    button.connect_clicked(move |_| {
+        let prompt = workspace_create_pr_chat_prompt(&db_path, &workspace_name);
+        state.queue_pending_chat_prompt(prompt);
+        state.set_active_workspace_tab(WorkspaceTab::Chats);
+        refresh_hub.refresh(RefreshScope::Workspace);
+    });
+}
+
+fn workspace_pr_status_panel(
+    db_path: &Path,
+    store: &WorkspaceStore,
+    workspace_name: &str,
+    state: &AppState,
+    refresh_hub: RefreshHub,
+) -> GBox {
     let snapshot = workspace_pr_status_snapshot(store, workspace_name);
     let panel = GBox::new(Orientation::Vertical, 8);
     panel.add_css_class("ws-pr-compact-panel");
@@ -4185,6 +4213,20 @@ fn workspace_pr_status_panel(store: &WorkspaceStore, workspace_name: &str) -> GB
         let url = pr.url.clone();
         view_btn.connect_clicked(move |_| open_external_url(&url));
         row.append(&view_btn);
+        panel.append(&row);
+    } else {
+        let row = make_action_row();
+        let create_btn = secondary_button("Create PR");
+        create_btn.add_css_class("suggested-action");
+        create_btn.set_tooltip_text(Some(workspace_pr_primary_action_tooltip(&snapshot)));
+        connect_create_pr_prompt_button(
+            &create_btn,
+            db_path.to_path_buf(),
+            workspace_name.to_owned(),
+            state.clone(),
+            refresh_hub,
+        );
+        row.append(&create_btn);
         panel.append(&row);
     }
 
