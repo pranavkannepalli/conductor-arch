@@ -26,6 +26,7 @@ use crate::session_pipeline::{
 use crate::session_state::AgentSessionState;
 use crate::settings::{
     ensure_repository_config, load_repository_settings, save_local_default_agent_provider,
+    RepositorySettings,
 };
 use crate::terminal_logs::{
     search_terminal_logs as search_terminal_logs_in_processes, summarize_terminal_sessions,
@@ -748,6 +749,55 @@ pub struct TerminalCommandResult {
     pub stderr: String,
     pub started_at: String,
     pub ended_at: String,
+}
+
+fn repository_command_palette_presets(settings: &RepositorySettings) -> Vec<String> {
+    let mut presets = Vec::new();
+    push_script_command_preset(
+        &mut presets,
+        "Test",
+        settings.scripts.test.as_deref().or(settings
+            .customization
+            .automation
+            .test_command
+            .as_deref()),
+    );
+    push_script_command_preset(
+        &mut presets,
+        "Lint",
+        settings.scripts.lint.as_deref().or(settings
+            .customization
+            .automation
+            .lint_command
+            .as_deref()),
+    );
+    push_script_command_preset(
+        &mut presets,
+        "Typecheck",
+        settings.scripts.typecheck.as_deref().or(settings
+            .customization
+            .automation
+            .typecheck_command
+            .as_deref()),
+    );
+    push_script_command_preset(
+        &mut presets,
+        "Build",
+        settings.scripts.build.as_deref().or(settings
+            .customization
+            .automation
+            .build_command
+            .as_deref()),
+    );
+
+    presets.extend(settings.customization.view.command_palette_presets.clone());
+    presets
+}
+
+fn push_script_command_preset(presets: &mut Vec<String>, label: &str, command: Option<&str>) {
+    if let Some(command) = command.map(str::trim).filter(|command| !command.is_empty()) {
+        presets.push(format!("{label}={command}"));
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4451,7 +4501,7 @@ mutation($threadId: ID!) {{
             keybindings: settings.customization.view.keybindings.clone(),
             terminal_font: settings.customization.view.terminal_font.clone(),
             terminal_scrollback: settings.customization.view.terminal_scrollback,
-            command_palette_presets: settings.customization.view.command_palette_presets.clone(),
+            command_palette_presets: repository_command_palette_presets(&settings),
             agent_profile_names: settings
                 .customization
                 .agent_profiles
@@ -10004,6 +10054,10 @@ working_directory = "apps/web"
 [customization.workspace_defaults]
 default_visible_tab = "checks"
 
+[scripts]
+test = "cargo test --workspace"
+typecheck = "cargo check --workspace"
+
 [customization.view]
 theme = "dark"
 accent_color = "green"
@@ -10064,7 +10118,12 @@ command_palette_presets = ["test", "Preview=pnpm dev"]
         assert_eq!(defaults.terminal_scrollback, Some(5000));
         assert_eq!(
             defaults.command_palette_presets,
-            vec!["test".to_owned(), "Preview=pnpm dev".to_owned()]
+            vec![
+                "Test=cargo test --workspace".to_owned(),
+                "Typecheck=cargo check --workspace".to_owned(),
+                "test".to_owned(),
+                "Preview=pnpm dev".to_owned()
+            ]
         );
         assert!(defaults.agent_profile_names.is_empty());
         assert!(defaults.notification_rules.is_empty());

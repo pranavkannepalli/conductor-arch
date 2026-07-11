@@ -16,6 +16,7 @@ pub struct RepositorySettings {
     pub enterprise_data_privacy: Option<bool>,
     pub scripts: ScriptSettings,
     pub environment_variables: Vec<(String, String)>,
+    pub prompt_pack: PromptPackSettings,
     pub prompts: Option<PromptSettings>,
     pub providers: ProviderSettings,
     pub git: GitSettings,
@@ -36,7 +37,11 @@ pub struct RepositorySettingsLoadReport {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PromptSettings {
+    pub new_workspace: Option<String>,
     pub general: Option<String>,
+    pub continue_work: Option<String>,
+    pub summarize_session: Option<String>,
+    pub handoff: Option<String>,
     pub code_review: Option<String>,
     pub create_pr: Option<String>,
     pub fix_errors: Option<String>,
@@ -45,6 +50,15 @@ pub struct PromptSettings {
     pub commit_generation: Option<String>,
     pub test_fixing: Option<String>,
     pub refactor_style: Option<String>,
+    pub setup_script: Option<String>,
+    pub run_script: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PromptPackSettings {
+    pub active: Option<String>,
+    pub version: Option<String>,
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -72,6 +86,10 @@ pub struct ScriptSettings {
     pub setup: Option<String>,
     pub run: Option<String>,
     pub archive: Option<String>,
+    pub test: Option<String>,
+    pub lint: Option<String>,
+    pub typecheck: Option<String>,
+    pub build: Option<String>,
     pub run_mode: Option<String>,
 }
 
@@ -102,6 +120,7 @@ pub struct AutomationSettings {
     pub required_local_files: Vec<String>,
     pub test_command: Option<String>,
     pub lint_command: Option<String>,
+    pub typecheck_command: Option<String>,
     pub build_command: Option<String>,
     pub pre_clone: Option<String>,
     pub post_clone: Option<String>,
@@ -120,6 +139,7 @@ pub struct AutomationSettings {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AgentProfileSettings {
     pub agent: Option<String>,
+    pub model: Option<String>,
     pub approval_mode: Option<String>,
     pub reasoning_mode: Option<String>,
     pub personality: Option<String>,
@@ -353,8 +373,22 @@ pub fn default_repository_settings_toml() -> Result<String> {
             ..ScriptSettings::default()
         },
         prompts: Some(PromptSettings {
+            new_workspace: Some(
+                "Create a small, reviewable workspace plan before changing code.".to_owned(),
+            ),
             general: Some(
                 "Prefer small, reviewable changes. Explain verification clearly.".to_owned(),
+            ),
+            continue_work: Some(
+                "Continue from the current state. Inspect recent changes before editing."
+                    .to_owned(),
+            ),
+            summarize_session: Some(
+                "Summarize the work completed, verification run, and remaining risk.".to_owned(),
+            ),
+            handoff: Some(
+                "Write a concise handoff with context, changed files, tests, and next steps."
+                    .to_owned(),
             ),
             code_review: Some(
                 "Focus on correctness, behavior changes, missing tests, and regressions."
@@ -376,7 +410,20 @@ pub fn default_repository_settings_toml() -> Result<String> {
             refactor_style: Some(
                 "Keep behavior-preserving refactors separate from feature changes.".to_owned(),
             ),
+            setup_script: Some(
+                "Infer the repository setup command from existing package and build files."
+                    .to_owned(),
+            ),
+            run_script: Some(
+                "Infer the local development run command and include port/env requirements."
+                    .to_owned(),
+            ),
         }),
+        prompt_pack: PromptPackSettings {
+            active: Some("default".to_owned()),
+            version: Some("v1".to_owned()),
+            path: Some(".archductor/prompt-packs/default.toml".to_owned()),
+        },
         customization: CustomizationSettings {
             automation: AutomationSettings {
                 auto_setup: Some(false),
@@ -423,10 +470,46 @@ pub fn validate_repository_settings(settings: &RepositorySettings) -> Result<()>
         ("scripts.setup", settings.scripts.setup.as_deref()),
         ("scripts.run", settings.scripts.run.as_deref()),
         ("scripts.archive", settings.scripts.archive.as_deref()),
+        ("scripts.test", settings.scripts.test.as_deref()),
+        ("scripts.lint", settings.scripts.lint.as_deref()),
+        ("scripts.typecheck", settings.scripts.typecheck.as_deref()),
+        ("scripts.build", settings.scripts.build.as_deref()),
+        (
+            "customization.automation.test_command",
+            settings.customization.automation.test_command.as_deref(),
+        ),
+        (
+            "customization.automation.lint_command",
+            settings.customization.automation.lint_command.as_deref(),
+        ),
+        (
+            "customization.automation.typecheck_command",
+            settings
+                .customization
+                .automation
+                .typecheck_command
+                .as_deref(),
+        ),
+        (
+            "customization.automation.build_command",
+            settings.customization.automation.build_command.as_deref(),
+        ),
     ] {
         if let Some(command) = command {
             anyhow::ensure!(!command.contains('\0'), "{label} cannot contain NUL bytes");
         }
+    }
+    if let Some(active) = settings.prompt_pack.active.as_deref() {
+        anyhow::ensure!(
+            !active.trim().is_empty() && !active.contains('\0'),
+            "prompt_pack.active must not be empty or contain NUL bytes"
+        );
+    }
+    if let Some(path) = settings.prompt_pack.path.as_deref() {
+        anyhow::ensure!(
+            is_safe_relative_path(path),
+            "prompt_pack.path must be a safe relative path"
+        );
     }
     for (key, _) in &settings.environment_variables {
         anyhow::ensure!(
@@ -491,6 +574,8 @@ struct RawRepositorySettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     environment_variables: Option<BTreeMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_pack: Option<RawPromptPackSettings>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     prompts: Option<RawPromptSettings>,
     #[serde(flatten)]
     providers: RawProviderSettings,
@@ -503,7 +588,15 @@ struct RawRepositorySettings {
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 struct RawPromptSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
+    new_workspace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     general: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    continue_work: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summarize_session: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    handoff: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     code_review: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -520,6 +613,20 @@ struct RawPromptSettings {
     test_fixing: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     refactor_style: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    setup_script: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    run_script: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+struct RawPromptPackSettings {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    active: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -530,6 +637,14 @@ struct RawScriptSettings {
     run: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     archive: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    test: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    typecheck: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    build: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     run_mode: Option<String>,
 }
@@ -611,6 +726,8 @@ struct RawAutomationSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     lint_command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    typecheck_command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     build_command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pre_clone: Option<String>,
@@ -642,6 +759,8 @@ struct RawAutomationSettings {
 struct RawAgentProfileSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     agent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     approval_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -733,6 +852,11 @@ impl RawRepositorySettings {
                 self.environment_variables.unwrap_or_default(),
                 local.environment_variables.unwrap_or_default(),
             )),
+            prompt_pack: Some(
+                self.prompt_pack
+                    .unwrap_or_default()
+                    .merge(local.prompt_pack.unwrap_or_default()),
+            ),
             prompts: Some(
                 self.prompts
                     .unwrap_or_default()
@@ -763,6 +887,10 @@ impl RawRepositorySettings {
                 setup: scripts.setup,
                 run: scripts.run,
                 archive: scripts.archive,
+                test: scripts.test,
+                lint: scripts.lint,
+                typecheck: scripts.typecheck,
+                build: scripts.build,
                 run_mode: scripts.run_mode,
             },
             environment_variables: self
@@ -770,17 +898,8 @@ impl RawRepositorySettings {
                 .unwrap_or_default()
                 .into_iter()
                 .collect(),
-            prompts: self.prompts.map(|p| PromptSettings {
-                general: p.general,
-                code_review: p.code_review,
-                create_pr: p.create_pr,
-                fix_errors: p.fix_errors,
-                resolve_merge_conflicts: p.resolve_merge_conflicts,
-                rename_branch: p.rename_branch,
-                commit_generation: p.commit_generation,
-                test_fixing: p.test_fixing,
-                refactor_style: p.refactor_style,
-            }),
+            prompt_pack: self.prompt_pack.unwrap_or_default().into_settings(),
+            prompts: self.prompts.map(RawPromptSettings::into_settings),
             providers: self.providers.into_settings(),
             git: self.git.unwrap_or_default().into_settings(),
             customization: self.customization.unwrap_or_default().into_settings(),
@@ -798,6 +917,10 @@ impl RawRepositorySettings {
                 setup: settings.scripts.setup.clone(),
                 run: settings.scripts.run.clone(),
                 archive: settings.scripts.archive.clone(),
+                test: settings.scripts.test.clone(),
+                lint: settings.scripts.lint.clone(),
+                typecheck: settings.scripts.typecheck.clone(),
+                build: settings.scripts.build.clone(),
                 run_mode: settings.scripts.run_mode.clone(),
             }),
             environment_variables: (!settings.environment_variables.is_empty()).then(|| {
@@ -807,17 +930,11 @@ impl RawRepositorySettings {
                     .cloned()
                     .collect::<BTreeMap<_, _>>()
             }),
-            prompts: settings.prompts.as_ref().map(|p| RawPromptSettings {
-                general: p.general.clone(),
-                code_review: p.code_review.clone(),
-                create_pr: p.create_pr.clone(),
-                fix_errors: p.fix_errors.clone(),
-                resolve_merge_conflicts: p.resolve_merge_conflicts.clone(),
-                rename_branch: p.rename_branch.clone(),
-                commit_generation: p.commit_generation.clone(),
-                test_fixing: p.test_fixing.clone(),
-                refactor_style: p.refactor_style.clone(),
-            }),
+            prompt_pack: Some(RawPromptPackSettings::from_settings(&settings.prompt_pack)),
+            prompts: settings
+                .prompts
+                .as_ref()
+                .map(RawPromptSettings::from_settings),
             providers: RawProviderSettings::from_settings(&settings.providers),
             git: Some(RawGitSettings::from_settings(&settings.git)),
             customization: Some(RawCustomizationSettings::from_settings(
@@ -833,6 +950,10 @@ impl RawScriptSettings {
             setup: local.setup.or(self.setup),
             run: local.run.or(self.run),
             archive: local.archive.or(self.archive),
+            test: local.test.or(self.test),
+            lint: local.lint.or(self.lint),
+            typecheck: local.typecheck.or(self.typecheck),
+            build: local.build.or(self.build),
             run_mode: local.run_mode.or(self.run_mode),
         }
     }
@@ -841,7 +962,11 @@ impl RawScriptSettings {
 impl RawPromptSettings {
     fn merge(self, local: Self) -> Self {
         Self {
+            new_workspace: local.new_workspace.or(self.new_workspace),
             general: local.general.or(self.general),
+            continue_work: local.continue_work.or(self.continue_work),
+            summarize_session: local.summarize_session.or(self.summarize_session),
+            handoff: local.handoff.or(self.handoff),
             code_review: local.code_review.or(self.code_review),
             create_pr: local.create_pr.or(self.create_pr),
             fix_errors: local.fix_errors.or(self.fix_errors),
@@ -852,6 +977,74 @@ impl RawPromptSettings {
             commit_generation: local.commit_generation.or(self.commit_generation),
             test_fixing: local.test_fixing.or(self.test_fixing),
             refactor_style: local.refactor_style.or(self.refactor_style),
+            setup_script: local.setup_script.or(self.setup_script),
+            run_script: local.run_script.or(self.run_script),
+        }
+    }
+
+    fn into_settings(self) -> PromptSettings {
+        PromptSettings {
+            new_workspace: self.new_workspace,
+            general: self.general,
+            continue_work: self.continue_work,
+            summarize_session: self.summarize_session,
+            handoff: self.handoff,
+            code_review: self.code_review,
+            create_pr: self.create_pr,
+            fix_errors: self.fix_errors,
+            resolve_merge_conflicts: self.resolve_merge_conflicts,
+            rename_branch: self.rename_branch,
+            commit_generation: self.commit_generation,
+            test_fixing: self.test_fixing,
+            refactor_style: self.refactor_style,
+            setup_script: self.setup_script,
+            run_script: self.run_script,
+        }
+    }
+
+    fn from_settings(settings: &PromptSettings) -> Self {
+        Self {
+            new_workspace: settings.new_workspace.clone(),
+            general: settings.general.clone(),
+            continue_work: settings.continue_work.clone(),
+            summarize_session: settings.summarize_session.clone(),
+            handoff: settings.handoff.clone(),
+            code_review: settings.code_review.clone(),
+            create_pr: settings.create_pr.clone(),
+            fix_errors: settings.fix_errors.clone(),
+            resolve_merge_conflicts: settings.resolve_merge_conflicts.clone(),
+            rename_branch: settings.rename_branch.clone(),
+            commit_generation: settings.commit_generation.clone(),
+            test_fixing: settings.test_fixing.clone(),
+            refactor_style: settings.refactor_style.clone(),
+            setup_script: settings.setup_script.clone(),
+            run_script: settings.run_script.clone(),
+        }
+    }
+}
+
+impl RawPromptPackSettings {
+    fn merge(self, local: Self) -> Self {
+        Self {
+            active: local.active.or(self.active),
+            version: local.version.or(self.version),
+            path: local.path.or(self.path),
+        }
+    }
+
+    fn into_settings(self) -> PromptPackSettings {
+        PromptPackSettings {
+            active: self.active,
+            version: self.version,
+            path: self.path,
+        }
+    }
+
+    fn from_settings(settings: &PromptPackSettings) -> Self {
+        Self {
+            active: settings.active.clone(),
+            version: settings.version.clone(),
+            path: settings.path.clone(),
         }
     }
 }
@@ -1059,6 +1252,7 @@ impl RawAutomationSettings {
             },
             test_command: local.test_command.or(self.test_command),
             lint_command: local.lint_command.or(self.lint_command),
+            typecheck_command: local.typecheck_command.or(self.typecheck_command),
             build_command: local.build_command.or(self.build_command),
             pre_clone: local.pre_clone.or(self.pre_clone),
             post_clone: local.post_clone.or(self.post_clone),
@@ -1082,6 +1276,7 @@ impl RawAutomationSettings {
             required_local_files: self.required_local_files,
             test_command: self.test_command,
             lint_command: self.lint_command,
+            typecheck_command: self.typecheck_command,
             build_command: self.build_command,
             pre_clone: self.pre_clone,
             post_clone: self.post_clone,
@@ -1105,6 +1300,7 @@ impl RawAutomationSettings {
             required_local_files: settings.required_local_files.clone(),
             test_command: settings.test_command.clone(),
             lint_command: settings.lint_command.clone(),
+            typecheck_command: settings.typecheck_command.clone(),
             build_command: settings.build_command.clone(),
             pre_clone: settings.pre_clone.clone(),
             post_clone: settings.post_clone.clone(),
@@ -1126,6 +1322,7 @@ impl RawAgentProfileSettings {
     fn merge(self, local: Self) -> Self {
         Self {
             agent: local.agent.or(self.agent),
+            model: local.model.or(self.model),
             approval_mode: local.approval_mode.or(self.approval_mode),
             reasoning_mode: local.reasoning_mode.or(self.reasoning_mode),
             personality: local.personality.or(self.personality),
@@ -1140,6 +1337,7 @@ impl RawAgentProfileSettings {
     fn into_settings(self) -> AgentProfileSettings {
         AgentProfileSettings {
             agent: self.agent,
+            model: self.model,
             approval_mode: self.approval_mode,
             reasoning_mode: self.reasoning_mode,
             personality: self.personality,
@@ -1150,6 +1348,7 @@ impl RawAgentProfileSettings {
     fn from_settings(settings: &AgentProfileSettings) -> Self {
         Self {
             agent: settings.agent.clone(),
+            model: settings.model.clone(),
             approval_mode: settings.approval_mode.clone(),
             reasoning_mode: settings.reasoning_mode.clone(),
             personality: settings.personality.clone(),
@@ -1685,14 +1884,27 @@ LOCAL_ONLY = "1"
                 setup: Some("pnpm install".to_owned()),
                 run: Some("pnpm dev --port $ARCHDUCTOR_PORT".to_owned()),
                 archive: Some("./script/archive.sh".to_owned()),
+                test: Some("pnpm test".to_owned()),
+                lint: Some("pnpm lint".to_owned()),
+                typecheck: Some("pnpm typecheck".to_owned()),
+                build: Some("pnpm build".to_owned()),
                 run_mode: Some("nonconcurrent".to_owned()),
             },
             environment_variables: vec![(
                 "API_BASE_URL".to_owned(),
                 "http://localhost:3000".to_owned(),
             )],
+            prompt_pack: PromptPackSettings {
+                active: Some("startup".to_owned()),
+                version: Some("v2".to_owned()),
+                path: Some(".archductor/prompt-packs/startup.toml".to_owned()),
+            },
             prompts: Some(PromptSettings {
+                new_workspace: Some("Plan before editing.".to_owned()),
                 general: Some("Ship small changes.".to_owned()),
+                continue_work: Some("Resume from existing context.".to_owned()),
+                summarize_session: Some("Summarize tests and risk.".to_owned()),
+                handoff: Some("Leave a concise handoff.".to_owned()),
                 code_review: Some("Find correctness issues.".to_owned()),
                 create_pr: Some("Include test evidence.".to_owned()),
                 fix_errors: Some("Focus on failing checks.".to_owned()),
@@ -1701,6 +1913,8 @@ LOCAL_ONLY = "1"
                 commit_generation: None,
                 test_fixing: None,
                 refactor_style: None,
+                setup_script: Some("Use the configured setup script.".to_owned()),
+                run_script: Some("Use the configured run script.".to_owned()),
             }),
             providers: ProviderSettings {
                 claude_code_executable_path: Some("/usr/local/bin/claude".to_owned()),
@@ -1725,6 +1939,10 @@ LOCAL_ONLY = "1"
         let loaded = load_repository_settings(temp.path()).unwrap();
 
         assert_eq!(loaded, settings);
+        let saved = fs::read_to_string(temp.path().join(".archductor/settings.toml")).unwrap();
+        assert!(saved.contains("[prompt_pack]"));
+        assert!(saved.contains("typecheck = \"pnpm typecheck\""));
+        assert!(saved.contains("summarize_session = \"Summarize tests and risk.\""));
         assert!(temp.path().join(".archductor/settings.toml").exists());
         assert!(!temp.path().join(".archductor/settings.local.toml").exists());
     }
@@ -1973,8 +2191,25 @@ theme = "dark"
             conductor_dir.join("settings.toml"),
             r#"
 [prompts]
+new_workspace = "Plan the workspace."
+continue_work = "Continue carefully."
+summarize_session = "Summarize verification."
+handoff = "Handoff next steps."
 test_fixing = "Fix the failing test first."
 refactor_style = "Keep refactors behavior-preserving."
+setup_script = "Prepare dependencies."
+run_script = "Start the app."
+
+[prompt_pack]
+active = "core"
+version = "v3"
+path = ".archductor/prompt-packs/core.toml"
+
+[scripts]
+test = "cargo test --workspace"
+lint = "cargo clippy --workspace"
+typecheck = "cargo check --workspace"
+build = "cargo build --workspace"
 
 [customization.naming]
 branch_template = "{prefix}/{type}-{slug}"
@@ -1990,6 +2225,7 @@ auto_start_agent = "codex"
 required_local_files = [".env", "certs/local.pem"]
 test_command = "cargo test --workspace"
 lint_command = "cargo clippy --workspace"
+typecheck_command = "cargo check --workspace"
 build_command = "cargo build --workspace"
 pre_workspace_create = "just pre-workspace"
 post_workspace_create = "just post-workspace"
@@ -1998,6 +2234,7 @@ post_merge = "just post-merge"
 
 [customization.agent_profiles.default]
 agent = "codex"
+model = "gpt-5-codex"
 approval_mode = "on-request"
 reasoning_mode = "medium"
 personality = "direct"
@@ -2058,6 +2295,18 @@ density = "comfortable"
             Some("Fix the failing test first.".to_owned())
         );
         assert_eq!(
+            settings.prompts.as_ref().unwrap().new_workspace,
+            Some("Plan the workspace.".to_owned())
+        );
+        assert_eq!(
+            settings.prompt_pack.path,
+            Some(".archductor/prompt-packs/core.toml".to_owned())
+        );
+        assert_eq!(
+            settings.scripts.typecheck,
+            Some("cargo check --workspace".to_owned())
+        );
+        assert_eq!(
             settings.customization.naming.branch_template,
             Some("{prefix}/{type}-{slug}".to_owned())
         );
@@ -2071,8 +2320,21 @@ density = "comfortable"
                 .agent_profiles
                 .get("default")
                 .unwrap()
+                .model,
+            Some("gpt-5-codex".to_owned())
+        );
+        assert_eq!(
+            settings
+                .customization
+                .agent_profiles
+                .get("default")
+                .unwrap()
                 .reasoning_mode,
             Some("high".to_owned())
+        );
+        assert_eq!(
+            settings.customization.automation.typecheck_command,
+            Some("cargo check --workspace".to_owned())
         );
         assert_eq!(
             settings.customization.merge_rules.definition_of_done,

@@ -40,9 +40,11 @@ many terminals.
 
 ### Settings And Customization
 
-- Support scripts, environment variables, prompts, provider paths, Git defaults,
-  file-copy rules, monorepo working directory, merge rules, workspace defaults,
-  view preferences, and import/export where implemented.
+- Support scripts, check commands, environment variables, prompts, prompt pack
+  metadata, provider paths, SSH key path, Git defaults, file-copy rules,
+  monorepo working directory, merge rules, workspace defaults, terminal
+  preferences, shortcuts, notification labels, and import/export where
+  implemented.
 - Treat advanced TOML as acceptable for power-user settings that do not yet have
   dedicated GUI controls.
 

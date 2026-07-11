@@ -9,7 +9,8 @@ use linux_archductor_core::repository::{AddRepository, RepositoryStore};
 use linux_archductor_core::settings::{
     customization_settings_from_toml, customization_settings_to_toml, inspect_repository_settings,
     load_repository_settings, save_repository_settings, FilePatternSource, GitSettings,
-    PromptSettings, ProviderSettings, RepositorySettings, ScriptSettings, SettingsLayer,
+    PromptPackSettings, PromptSettings, ProviderSettings, RepositorySettings, ScriptSettings,
+    SettingsLayer,
 };
 use linux_archductor_core::workspace::{CreateWorkspace, WorkspaceSourcePreflight, WorkspaceStore};
 use serde_json::Value;
@@ -755,8 +756,10 @@ pub(crate) fn build_projects_page(
                 archive: optional_entry_text(&archive_entry),
                 run_mode: optional_entry_text(&run_mode_entry)
                     .or_else(|| Some("concurrent".to_owned())),
+                ..ScriptSettings::default()
             },
             environment_variables: parse_environment_lines(&text_buffer_text(&env_view.1)),
+            prompt_pack: PromptPackSettings::default(),
             prompts: Some(PromptSettings {
                 general: optional_buffer_text(&general_prompt_view.1),
                 code_review: optional_buffer_text(&review_prompt_view.1),
@@ -767,6 +770,7 @@ pub(crate) fn build_projects_page(
                 commit_generation: optional_buffer_text(&commit_prompt_view.1),
                 test_fixing: optional_buffer_text(&test_fixing_prompt_view.1),
                 refactor_style: optional_buffer_text(&refactor_prompt_view.1),
+                ..PromptSettings::default()
             }),
             providers: ProviderSettings {
                 claude_code_executable_path: optional_entry_text(&claude_path_entry),

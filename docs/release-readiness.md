@@ -62,7 +62,8 @@ calling a public artifact launch-ready. At minimum, the pass needs:
 - diff, local review comments, todos, conflicts, PR checks, PR comments,
   review-thread actions, merge, archive, restore, and history
 - `.worktreeinclude`, monorepo working directory, linked directories, view
-  defaults, keybindings, terminal font/scrollback, and command presets
+  defaults, keybindings, terminal font/scrollback, configured check scripts,
+  prompt pack metadata, and command presets
 
 Linear live validation requires `LINEAR_API_KEY`. GitHub validation requires
 `gh auth status` to be authenticated.
@@ -109,9 +110,11 @@ Keep these visible in release notes and the website:
 
 - terminal rendering handles common ANSI/control redraws but is not a full
   terminal emulator
-- project onboarding/settings need more polish and fuller visibility
+- project onboarding/settings still need polish, but the main Settings surface
+  now exposes General, Prompts, Scripts, Git, Terminal, Shortcuts,
+  Notifications, Advanced
 - deeper layout/theme coverage is incomplete
-- prompt packs, naming templates, hooks, import/export, and richer notification
-  options are not fully surfaced in the GUI
+- prompt pack switching/import/export, naming templates, hooks, local check
+  runner UI, and richer notification options are not fully surfaced in the GUI
 - visual parity with macOS Archductor is incomplete
 - Linux is the only launch target for packages

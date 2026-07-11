@@ -193,17 +193,32 @@ spotlight_testing = false
 setup = "pnpm install"
 run = "pnpm dev --port $ARCHDUCTOR_PORT"
 archive = "./script/workspace-archive.sh"
+test = "cargo test --workspace"
+lint = "cargo clippy --workspace"
+typecheck = "cargo check --workspace"
+build = "cargo build --workspace"
 run_mode = "concurrent"
 
 [environment_variables]
 API_BASE_URL = "http://localhost:3000"
 
+[prompt_pack]
+active = "default"
+version = "v1"
+path = ".archductor/prompt-packs/default.toml"
+
 [prompts]
+new_workspace = "Create a small plan before changing code."
 general = "Prefer small, reviewable changes and run focused tests."
+continue_work = "Inspect current changes before editing."
+summarize_session = "Summarize verification and remaining risk."
+handoff = "Leave context, changed files, tests, and next steps."
 code_review = "Focus on correctness, behavior changes, and missing tests."
 create_pr = "Write concise PR descriptions with test evidence."
 test_fixing = "Reproduce failing tests first, then make the smallest fix."
 refactor_style = "Keep behavior-preserving refactors separate from feature work."
+setup_script = "Infer setup commands from repo files."
+run_script = "Infer run commands and required ports/env."
 
 [git]
 archive_on_merge = true
@@ -221,7 +236,14 @@ auto_start_agent = "codex"
 required_local_files = [".env"]
 test_command = "cargo test --workspace"
 lint_command = "cargo clippy --workspace"
+typecheck_command = "cargo check --workspace"
 build_command = "cargo build --workspace"
+
+[customization.agent_profiles.default]
+agent = "codex"
+model = "gpt-5-codex"
+approval_mode = "on-request"
+reasoning_mode = "medium"
 
 [customization.merge_rules]
 block_on_open_todos = true
@@ -432,8 +454,8 @@ Power users should be able to tune attention and speed:
 - Import/export for settings bundles and prompt packs.
 
 The current implemented settings format is TOML. The Projects settings page
-edits common repository fields directly and includes an advanced TOML block for
-the `[customization]` sections. Workspace creation already honors
+and Settings page edit common repository fields directly and include an advanced
+TOML block for the `[customization]` sections. Workspace creation already honors
 `customization.workspace_defaults.base_branch`, `branch_prefix`, and
 `port_block_size`. Runtime setup/run/archive scripts, terminal commands, and
 agent sessions honor `working_directory`. PR merge honors
@@ -445,12 +467,14 @@ launch tab is provided, and apply the configured `theme`, `accent_color`, and
 refresh, sidebar, and command-palette shortcuts, including `vim` and custom
 `action=shortcut` mappings, and applies `terminal_font` plus
 `terminal_scrollback` to workspace terminal surfaces. `command_palette_presets`
-feeds workspace terminal preset buttons; entries can be known aliases such as
-`test`, `lint`, `build`, `typecheck`, `ci`, `status`, `diff`, `env`, and
-`files`, or custom `Label=command` / `Label: command` entries. The CLI can
-export or import shared and local repository settings bundles. The other
-customization fields are saved, merged, and preserved for workflow surfaces
-that consume them.
+feeds workspace terminal preset buttons; entries can be known aliases or custom
+`Label=command` / `Label: command` entries. Configured `scripts.test`,
+`scripts.lint`, `scripts.typecheck`, and `scripts.build` are also exposed as
+terminal command presets. Prompt pack metadata is file-backed in settings today;
+pack import/export and switching are tracked TODOs until that workflow exists.
+The CLI can export or import shared and local repository settings bundles. The
+other customization fields are saved, merged, and preserved for workflow
+surfaces that consume them.
 
 ## Platform Stance
 

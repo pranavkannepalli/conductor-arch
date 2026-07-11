@@ -9,8 +9,8 @@ use linux_archductor_core::repository::RepositoryStore;
 use linux_archductor_core::settings::{
     customization_settings_from_toml, customization_settings_to_toml, ensure_repository_config,
     inspect_repository_settings, load_repository_settings, save_repository_settings,
-    FilePatternSource, GitSettings, PromptSettings, ProviderSettings, RepositorySettings,
-    ScriptSettings, SettingsLayer,
+    AgentProfileSettings, FilePatternSource, GitSettings, PromptPackSettings, PromptSettings,
+    ProviderSettings, RepositorySettings, ScriptSettings, SettingsLayer,
 };
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -112,13 +112,19 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
 
     let general_panel = settings_content_panel();
     let prompts_panel = settings_content_panel();
-    let providers_panel = settings_content_panel();
+    let scripts_panel = settings_content_panel();
     let git_panel = settings_content_panel();
+    let terminal_panel = settings_content_panel();
+    let shortcuts_panel = settings_content_panel();
+    let notifications_panel = settings_content_panel();
     let advanced_panel = settings_content_panel();
     content_stack.add_named(&general_panel, Some("general"));
     content_stack.add_named(&prompts_panel, Some("prompts"));
-    content_stack.add_named(&providers_panel, Some("providers"));
+    content_stack.add_named(&scripts_panel, Some("scripts"));
     content_stack.add_named(&git_panel, Some("git"));
+    content_stack.add_named(&terminal_panel, Some("terminal"));
+    content_stack.add_named(&shortcuts_panel, Some("shortcuts"));
+    content_stack.add_named(&notifications_panel, Some("notifications"));
     content_stack.add_named(&advanced_panel, Some("advanced"));
 
     let rail_buttons: Rc<RefCell<Vec<(String, Button)>>> = Rc::new(RefCell::new(Vec::new()));
@@ -161,6 +167,10 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
     let setup_entry = machine_entry("setup script");
     let run_entry = machine_entry("run script");
     let archive_entry = machine_entry("archive script");
+    let test_entry = machine_entry("test command");
+    let lint_entry = machine_entry("lint command");
+    let typecheck_entry = machine_entry("typecheck command");
+    let build_entry = machine_entry("build command");
     let run_mode_entry = machine_entry("run mode: concurrent/nonconcurrent");
     let spotlight_check = CheckButton::with_label("Enable spotlight testing");
     let privacy_check = CheckButton::with_label("Use enterprise privacy mode");
@@ -169,59 +179,17 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
     let auto_upstream_check = CheckButton::with_label("Auto setup upstream remote");
 
     let general_intro = settings_group(
-        "Repository runtime",
-        "Commands and runtime flags Linux Archductor uses when preparing and running this repository.",
+        "Repository defaults",
+        "High-level behavior for this repository. Scripts, checks, and Git defaults live in their own sections.",
     );
     general_panel.append(&general_intro.0);
-    general_intro.1.append(&settings_field_pair(
-        settings_field(
-            "Setup script",
-            "Runs after a workspace is created or prepared.",
-            &setup_entry,
-        ),
-        settings_field(
-            "Run script",
-            "Starts the repository runtime from the workspace.",
-            &run_entry,
-        ),
-    ));
-    general_intro.1.append(&settings_field_pair(
-        settings_field(
-            "Archive script",
-            "Runs before a workspace is archived if you use custom cleanup.",
-            &archive_entry,
-        ),
-        settings_field(
-            "Run mode",
-            "Usually `concurrent` unless this repository must serialize runs.",
-            &run_mode_entry,
-        ),
-    ));
-
-    let runtime_flags = settings_group(
-        "Runtime flags",
-        "Toggle repository-level behavior that affects merges, upstream setup, and privacy defaults.",
-    );
-    general_panel.append(&runtime_flags.0);
-    runtime_flags.1.append(&settings_toggle_row(
+    general_intro.1.append(&settings_toggle_row(
         &spotlight_check,
         "Turns on spotlight state tracking for workspace sync flows.",
     ));
-    runtime_flags.1.append(&settings_toggle_row(
+    general_intro.1.append(&settings_toggle_row(
         &privacy_check,
         "Uses privacy-safe behavior for repository and agent operations.",
-    ));
-    runtime_flags.1.append(&settings_toggle_row(
-        &archive_on_merge_check,
-        "Archives the workspace automatically after a successful merge.",
-    ));
-    runtime_flags.1.append(&settings_toggle_row(
-        &delete_branch_check,
-        "Deletes the local branch during archive cleanup.",
-    ));
-    runtime_flags.1.append(&settings_toggle_row(
-        &auto_upstream_check,
-        "Automatically configures upstream remotes for new worktree branches.",
     ));
 
     let env_view = settings_editor_view(120);
@@ -242,12 +210,15 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
     let codex_provider_entry = machine_entry("Codex provider");
     let bedrock_region_entry = machine_entry("Bedrock region");
     let vertex_project_entry = machine_entry("Vertex project id");
+    let ssh_key_entry = machine_entry("SSH key path");
+    let default_agent_entry = machine_entry("codex/claude/opencode");
+    let default_model_entry = machine_entry("default model label");
 
     let provider_paths = settings_group(
-        "Provider paths",
-        "Executable paths and provider routing for local agent launches.",
+        "Agents and providers",
+        "Executable paths, default agent, and provider routing for local agent launches.",
     );
-    providers_panel.append(&provider_paths.0);
+    general_panel.append(&provider_paths.0);
     provider_paths.1.append(&settings_field_pair(
         settings_field(
             "Claude executable",
@@ -258,6 +229,18 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
             "Codex executable",
             "Absolute path or command name used to start Codex.",
             &codex_path_entry,
+        ),
+    ));
+    provider_paths.1.append(&settings_field_pair(
+        settings_field(
+            "Default agent",
+            "Saved as `customization.automation.auto_start_agent`.",
+            &default_agent_entry,
+        ),
+        settings_field(
+            "Default model",
+            "Saved as `customization.agent_profiles.default.model`. TODO: pass through once provider launch args land.",
+            &default_model_entry,
         ),
     ));
     provider_paths.1.append(&settings_field_pair(
@@ -275,9 +258,9 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
 
     let provider_platforms = settings_group(
         "Platform settings",
-        "Provider-specific machine values for Bedrock and Vertex-backed setups.",
+        "Provider-specific machine values for Bedrock, Vertex, and SSH-backed setups.",
     );
-    providers_panel.append(&provider_platforms.0);
+    general_panel.append(&provider_platforms.0);
     provider_platforms.1.append(&settings_field_pair(
         settings_field(
             "Bedrock region",
@@ -290,6 +273,59 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
             &vertex_project_entry,
         ),
     ));
+    provider_platforms.1.append(&settings_field(
+        "SSH key path",
+        "Local SSH key path for provider or Git operations that need an explicit key.",
+        &ssh_key_entry,
+    ));
+
+    let script_group = settings_group(
+        "Workspace scripts",
+        "Commands Linux Archductor can run from the workspace context.",
+    );
+    scripts_panel.append(&script_group.0);
+    script_group.1.append(&settings_field_pair(
+        settings_field(
+            "Setup script",
+            "Runs after a workspace is created or prepared.",
+            &setup_entry,
+        ),
+        settings_field(
+            "Run script",
+            "Starts the repository runtime from the workspace.",
+            &run_entry,
+        ),
+    ));
+    script_group.1.append(&settings_field_pair(
+        settings_field(
+            "Archive script",
+            "Runs before a workspace is archived if you use custom cleanup.",
+            &archive_entry,
+        ),
+        settings_field(
+            "Run mode",
+            "Usually `concurrent` unless this repository must serialize runs.",
+            &run_mode_entry,
+        ),
+    ));
+
+    let checks_group = settings_group(
+        "Checks",
+        "Commands used by terminal presets now. TODO: connect these to a first-class check runner.",
+    );
+    scripts_panel.append(&checks_group.0);
+    checks_group.1.append(&settings_field_pair(
+        settings_field("Test", "Runs the repository test suite.", &test_entry),
+        settings_field("Lint", "Runs repository lint checks.", &lint_entry),
+    ));
+    checks_group.1.append(&settings_field_pair(
+        settings_field(
+            "Typecheck",
+            "Runs static type checks when available.",
+            &typecheck_entry,
+        ),
+        settings_field("Build", "Runs a production or release build.", &build_entry),
+    ));
 
     let branch_prefix_type_entry = machine_entry("branch prefix type");
     let branch_prefix_entry = machine_entry("branch prefix");
@@ -298,6 +334,18 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
         "Naming and branch defaults that shape generated workspaces.",
     );
     git_panel.append(&git_behavior.0);
+    git_behavior.1.append(&settings_toggle_row(
+        &archive_on_merge_check,
+        "Archives the workspace automatically after a successful merge.",
+    ));
+    git_behavior.1.append(&settings_toggle_row(
+        &delete_branch_check,
+        "Deletes the local branch during archive cleanup.",
+    ));
+    git_behavior.1.append(&settings_toggle_row(
+        &auto_upstream_check,
+        "Automatically configures upstream remotes for new worktree branches.",
+    ));
     git_behavior.1.append(&settings_field_pair(
         settings_field(
             "Branch prefix type",
@@ -323,11 +371,113 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
         &file_globs_view.0,
     ));
 
+    let terminal_font_entry = machine_entry("terminal font");
+    let terminal_scrollback_entry = machine_entry("terminal scrollback lines");
+    let transcript_display_entry = machine_entry("structured/plain");
+    let terminal_group = settings_group(
+        "Terminal",
+        "Terminal and transcript display defaults used by workspace surfaces.",
+    );
+    terminal_panel.append(&terminal_group.0);
+    terminal_group.1.append(&settings_field_pair(
+        settings_field(
+            "Terminal font",
+            "Font family and size, for example `JetBrains Mono 12`.",
+            &terminal_font_entry,
+        ),
+        settings_field(
+            "Scrollback",
+            "Maximum terminal transcript lines retained in the UI.",
+            &terminal_scrollback_entry,
+        ),
+    ));
+    terminal_group.1.append(&settings_field(
+        "Transcript display",
+        "Display mode for agent transcripts.",
+        &transcript_display_entry,
+    ));
+
+    let keybindings_entry = machine_entry("vim or action=shortcut list");
+    let command_presets_view = settings_editor_view(120);
+    let shortcuts_group = settings_group(
+        "Shortcuts and commands",
+        "Keyboard bindings and terminal command palette presets.",
+    );
+    shortcuts_panel.append(&shortcuts_group.0);
+    shortcuts_group.1.append(&settings_field(
+        "Keybindings",
+        "Use `vim` or comma-separated `action=shortcut` mappings.",
+        &keybindings_entry,
+    ));
+    shortcuts_group.1.append(&settings_editor_field(
+        "Command palette presets",
+        "One preset per line. Aliases include test, lint, typecheck, build, ci, status, diff, env, and files.",
+        &command_presets_view.0,
+    ));
+
+    let notifications_view = settings_editor_view(120);
+    let notifications_group = settings_group(
+        "Notifications",
+        "Notification rule labels. TODO: richer notification routing when the notification engine lands.",
+    );
+    notifications_panel.append(&notifications_group.0);
+    notifications_group.1.append(&settings_editor_field(
+        "Notification rules",
+        "One rule per line, such as `checks_failed`, `review_requested`, or `agent_stopped`.",
+        &notifications_view.0,
+    ));
+
+    let prompt_pack_active_entry = machine_entry("prompt pack name");
+    let prompt_pack_version_entry = machine_entry("prompt pack version");
+    let prompt_pack_path_entry = machine_entry(".archductor/prompt-packs/default.toml");
+    let prompt_pack_group = settings_group(
+        "Prompt pack",
+        "File-backed prompt pack metadata. TODO: import/export and pack switching UI.",
+    );
+    prompts_panel.append(&prompt_pack_group.0);
+    prompt_pack_group.1.append(&settings_field_pair(
+        settings_field(
+            "Active pack",
+            "Logical name of the prompt pack used for this repository.",
+            &prompt_pack_active_entry,
+        ),
+        settings_field(
+            "Version",
+            "Version label for auditing prompt changes.",
+            &prompt_pack_version_entry,
+        ),
+    ));
+    prompt_pack_group.1.append(&settings_field(
+        "Pack path",
+        "Safe relative path under the repository.",
+        &prompt_pack_path_entry,
+    ));
+
     let prompt_specs = [
+        (
+            "New workspace",
+            "Prompt guidance for planning a newly created workspace.",
+            110,
+        ),
         (
             "General agent instructions",
             "The default prompt context used for agent work in this repository.",
             120,
+        ),
+        (
+            "Continue work",
+            "Prompt guidance for resuming from the current workspace state.",
+            110,
+        ),
+        (
+            "Summarize session",
+            "Prompt guidance for end-of-session summaries.",
+            110,
+        ),
+        (
+            "Handoff",
+            "Prompt guidance for handoff notes when work stops before completion.",
+            110,
         ),
         (
             "Code review",
@@ -367,6 +517,16 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
         (
             "Refactor style",
             "Prompt guidance for safe structural cleanup and refactors.",
+            110,
+        ),
+        (
+            "Setup script",
+            "Prompt guidance for inferring or updating setup scripts.",
+            110,
+        ),
+        (
+            "Run script",
+            "Prompt guidance for inferring or updating run scripts.",
             110,
         ),
     ];
@@ -426,6 +586,10 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
     let setup_entry_load = setup_entry.clone();
     let run_entry_load = run_entry.clone();
     let archive_entry_load = archive_entry.clone();
+    let test_entry_load = test_entry.clone();
+    let lint_entry_load = lint_entry.clone();
+    let typecheck_entry_load = typecheck_entry.clone();
+    let build_entry_load = build_entry.clone();
     let run_mode_entry_load = run_mode_entry.clone();
     let spotlight_check_load = spotlight_check.clone();
     let privacy_check_load = privacy_check.clone();
@@ -438,8 +602,20 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
     let codex_provider_entry_load = codex_provider_entry.clone();
     let bedrock_region_entry_load = bedrock_region_entry.clone();
     let vertex_project_entry_load = vertex_project_entry.clone();
+    let ssh_key_entry_load = ssh_key_entry.clone();
+    let default_agent_entry_load = default_agent_entry.clone();
+    let default_model_entry_load = default_model_entry.clone();
     let branch_prefix_type_entry_load = branch_prefix_type_entry.clone();
     let branch_prefix_entry_load = branch_prefix_entry.clone();
+    let terminal_font_entry_load = terminal_font_entry.clone();
+    let terminal_scrollback_entry_load = terminal_scrollback_entry.clone();
+    let transcript_display_entry_load = transcript_display_entry.clone();
+    let keybindings_entry_load = keybindings_entry.clone();
+    let command_presets_buffer_load = command_presets_view.1.clone();
+    let notifications_buffer_load = notifications_view.1.clone();
+    let prompt_pack_active_entry_load = prompt_pack_active_entry.clone();
+    let prompt_pack_version_entry_load = prompt_pack_version_entry.clone();
+    let prompt_pack_path_entry_load = prompt_pack_path_entry.clone();
     let file_globs_buffer_load = file_globs_view.1.clone();
     let file_globs_text_load = file_globs_view.2.clone();
     let env_buffer_load = env_view.1.clone();
@@ -466,6 +642,42 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
                 setup_entry_load.set_text(settings.scripts.setup.as_deref().unwrap_or(""));
                 run_entry_load.set_text(settings.scripts.run.as_deref().unwrap_or(""));
                 archive_entry_load.set_text(settings.scripts.archive.as_deref().unwrap_or(""));
+                test_entry_load.set_text(
+                    settings
+                        .scripts
+                        .test
+                        .as_deref()
+                        .or(settings.customization.automation.test_command.as_deref())
+                        .unwrap_or(""),
+                );
+                lint_entry_load.set_text(
+                    settings
+                        .scripts
+                        .lint
+                        .as_deref()
+                        .or(settings.customization.automation.lint_command.as_deref())
+                        .unwrap_or(""),
+                );
+                typecheck_entry_load.set_text(
+                    settings
+                        .scripts
+                        .typecheck
+                        .as_deref()
+                        .or(settings
+                            .customization
+                            .automation
+                            .typecheck_command
+                            .as_deref())
+                        .unwrap_or(""),
+                );
+                build_entry_load.set_text(
+                    settings
+                        .scripts
+                        .build
+                        .as_deref()
+                        .or(settings.customization.automation.build_command.as_deref())
+                        .unwrap_or(""),
+                );
                 run_mode_entry_load
                     .set_text(settings.scripts.run_mode.as_deref().unwrap_or("concurrent"));
                 spotlight_check_load.set_active(settings.spotlight_testing.unwrap_or(false));
@@ -507,10 +719,75 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
                         .as_deref()
                         .unwrap_or(""),
                 );
+                ssh_key_entry_load
+                    .set_text(settings.providers.ssh_key_path.as_deref().unwrap_or(""));
+                default_agent_entry_load.set_text(
+                    settings
+                        .customization
+                        .automation
+                        .auto_start_agent
+                        .as_deref()
+                        .unwrap_or(""),
+                );
+                default_model_entry_load.set_text(
+                    settings
+                        .customization
+                        .agent_profiles
+                        .get("default")
+                        .and_then(|profile| profile.model.as_deref())
+                        .unwrap_or(""),
+                );
                 branch_prefix_type_entry_load
                     .set_text(settings.git.branch_prefix_type.as_deref().unwrap_or(""));
                 branch_prefix_entry_load
                     .set_text(settings.git.branch_prefix.as_deref().unwrap_or(""));
+                terminal_font_entry_load.set_text(
+                    settings
+                        .customization
+                        .view
+                        .terminal_font
+                        .as_deref()
+                        .unwrap_or(""),
+                );
+                terminal_scrollback_entry_load.set_text(
+                    &settings
+                        .customization
+                        .view
+                        .terminal_scrollback
+                        .map(|value| value.to_string())
+                        .unwrap_or_default(),
+                );
+                transcript_display_entry_load.set_text(
+                    settings
+                        .customization
+                        .view
+                        .transcript_display
+                        .as_deref()
+                        .unwrap_or(""),
+                );
+                keybindings_entry_load.set_text(
+                    settings
+                        .customization
+                        .view
+                        .keybindings
+                        .as_deref()
+                        .unwrap_or(""),
+                );
+                command_presets_buffer_load.set_text(
+                    &settings
+                        .customization
+                        .view
+                        .command_palette_presets
+                        .join("\n"),
+                );
+                notifications_buffer_load
+                    .set_text(&settings.customization.view.notification_rules.join("\n"));
+                prompt_pack_active_entry_load
+                    .set_text(settings.prompt_pack.active.as_deref().unwrap_or(""));
+                prompt_pack_version_entry_load
+                    .set_text(settings.prompt_pack.version.as_deref().unwrap_or(""));
+                prompt_pack_path_entry_load
+                    .set_text(settings.prompt_pack.path.as_deref().unwrap_or(""));
                 if inspection.worktreeinclude_exists {
                     file_globs_text_load.set_editable(false);
                     file_globs_buffer_load.set_text(&inspection.active_file_patterns.join("\n"));
@@ -528,7 +805,11 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
                 );
                 let prompts = settings.prompts.unwrap_or_default();
                 let prompt_values = [
+                    prompts.new_workspace,
                     prompts.general,
+                    prompts.continue_work,
+                    prompts.summarize_session,
+                    prompts.handoff,
                     prompts.code_review,
                     prompts.create_pr,
                     prompts.fix_errors,
@@ -537,6 +818,8 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
                     prompts.commit_generation,
                     prompts.test_fixing,
                     prompts.refactor_style,
+                    prompts.setup_script,
+                    prompts.run_script,
                 ];
                 for (buffer, value) in prompt_buffers_load.iter().zip(prompt_values.iter()) {
                     buffer.set_text(value.as_deref().unwrap_or(""));
@@ -590,7 +873,7 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
         let current_file_globs = load_repository_settings(&repo_path)
             .map(|settings| settings.file_include_globs)
             .unwrap_or_default();
-        let customization =
+        let mut customization =
             match customization_settings_from_toml(&text_buffer_text(&customization_view.1)) {
                 Ok(customization) => customization,
                 Err(err) => {
@@ -599,6 +882,49 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
                     return;
                 }
             };
+        let terminal_scrollback = match optional_entry_text(&terminal_scrollback_entry) {
+            Some(value) => match value.parse::<u32>() {
+                Ok(parsed) => Some(parsed),
+                Err(err) => {
+                    settings_result.set_text(&format!(
+                        "Save failed: terminal scrollback must be a number: {err}"
+                    ));
+                    return;
+                }
+            },
+            None => None,
+        };
+        let test_command = optional_entry_text(&test_entry);
+        let lint_command = optional_entry_text(&lint_entry);
+        let typecheck_command = optional_entry_text(&typecheck_entry);
+        let build_command = optional_entry_text(&build_entry);
+        customization.automation.auto_start_agent = optional_entry_text(&default_agent_entry);
+        customization.automation.test_command = test_command.clone();
+        customization.automation.lint_command = lint_command.clone();
+        customization.automation.typecheck_command = typecheck_command.clone();
+        customization.automation.build_command = build_command.clone();
+        match optional_entry_text(&default_model_entry) {
+            Some(model) => {
+                customization
+                    .agent_profiles
+                    .entry("default".to_owned())
+                    .or_insert_with(AgentProfileSettings::default)
+                    .model = Some(model);
+            }
+            None => {
+                if let Some(profile) = customization.agent_profiles.get_mut("default") {
+                    profile.model = None;
+                }
+            }
+        }
+        customization.view.terminal_font = optional_entry_text(&terminal_font_entry);
+        customization.view.terminal_scrollback = terminal_scrollback;
+        customization.view.transcript_display = optional_entry_text(&transcript_display_entry);
+        customization.view.keybindings = optional_entry_text(&keybindings_entry);
+        customization.view.command_palette_presets =
+            parse_text_lines(&text_buffer_text(&command_presets_view.1));
+        customization.view.notification_rules =
+            parse_text_lines(&text_buffer_text(&notifications_view.1));
         let settings = RepositorySettings {
             file_include_globs: if file_globs_view.2.is_editable() {
                 text_buffer_text(&file_globs_view.1)
@@ -616,20 +942,35 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
                 setup: optional_entry_text(&setup_entry),
                 run: optional_entry_text(&run_entry),
                 archive: optional_entry_text(&archive_entry),
+                test: test_command,
+                lint: lint_command,
+                typecheck: typecheck_command,
+                build: build_command,
                 run_mode: optional_entry_text(&run_mode_entry)
                     .or_else(|| Some("concurrent".to_owned())),
             },
             environment_variables: parse_environment_lines(&text_buffer_text(&env_view.1)),
+            prompt_pack: PromptPackSettings {
+                active: optional_entry_text(&prompt_pack_active_entry),
+                version: optional_entry_text(&prompt_pack_version_entry),
+                path: optional_entry_text(&prompt_pack_path_entry),
+            },
             prompts: Some(PromptSettings {
-                general: optional_buffer_text(&prompt_views[0].1),
-                code_review: optional_buffer_text(&prompt_views[1].1),
-                create_pr: optional_buffer_text(&prompt_views[2].1),
-                fix_errors: optional_buffer_text(&prompt_views[3].1),
-                resolve_merge_conflicts: optional_buffer_text(&prompt_views[4].1),
-                rename_branch: optional_buffer_text(&prompt_views[5].1),
-                commit_generation: optional_buffer_text(&prompt_views[6].1),
-                test_fixing: optional_buffer_text(&prompt_views[7].1),
-                refactor_style: optional_buffer_text(&prompt_views[8].1),
+                new_workspace: optional_buffer_text(&prompt_views[0].1),
+                general: optional_buffer_text(&prompt_views[1].1),
+                continue_work: optional_buffer_text(&prompt_views[2].1),
+                summarize_session: optional_buffer_text(&prompt_views[3].1),
+                handoff: optional_buffer_text(&prompt_views[4].1),
+                code_review: optional_buffer_text(&prompt_views[5].1),
+                create_pr: optional_buffer_text(&prompt_views[6].1),
+                fix_errors: optional_buffer_text(&prompt_views[7].1),
+                resolve_merge_conflicts: optional_buffer_text(&prompt_views[8].1),
+                rename_branch: optional_buffer_text(&prompt_views[9].1),
+                commit_generation: optional_buffer_text(&prompt_views[10].1),
+                test_fixing: optional_buffer_text(&prompt_views[11].1),
+                refactor_style: optional_buffer_text(&prompt_views[12].1),
+                setup_script: optional_buffer_text(&prompt_views[13].1),
+                run_script: optional_buffer_text(&prompt_views[14].1),
             }),
             providers: ProviderSettings {
                 claude_code_executable_path: optional_entry_text(&claude_path_entry),
@@ -638,7 +979,7 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
                 codex_provider: optional_entry_text(&codex_provider_entry),
                 bedrock_region: optional_entry_text(&bedrock_region_entry),
                 vertex_project_id: optional_entry_text(&vertex_project_entry),
-                ssh_key_path: None,
+                ssh_key_path: optional_entry_text(&ssh_key_entry),
             },
             git: GitSettings {
                 delete_branch_on_archive: Some(delete_branch_check.is_active()),
@@ -665,7 +1006,7 @@ fn settings_sections() -> Vec<SettingsSection> {
         SettingsSection {
             id: "general",
             title: "General",
-            description: "Scripts, runtime flags, and environment.",
+            description: "Repository defaults, environment, agents, and providers.",
         },
         SettingsSection {
             id: "prompts",
@@ -673,14 +1014,29 @@ fn settings_sections() -> Vec<SettingsSection> {
             description: "Prompt bodies for agent tasks and workflows.",
         },
         SettingsSection {
-            id: "providers",
-            title: "Providers",
-            description: "Executable paths and provider platform values.",
+            id: "scripts",
+            title: "Scripts",
+            description: "Setup, run, archive, and local check commands.",
         },
         SettingsSection {
             id: "git",
             title: "Git & Workspaces",
             description: "Branch behavior and file copy rules.",
+        },
+        SettingsSection {
+            id: "terminal",
+            title: "Terminal",
+            description: "Terminal and transcript display defaults.",
+        },
+        SettingsSection {
+            id: "shortcuts",
+            title: "Shortcuts",
+            description: "Keybindings and command palette presets.",
+        },
+        SettingsSection {
+            id: "notifications",
+            title: "Notifications",
+            description: "Notification routing labels.",
         },
         SettingsSection {
             id: "advanced",
@@ -833,6 +1189,14 @@ fn parse_environment_lines(text: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+fn parse_text_lines(text: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -845,7 +1209,16 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             ids,
-            vec!["general", "prompts", "providers", "git", "advanced"]
+            vec![
+                "general",
+                "prompts",
+                "scripts",
+                "git",
+                "terminal",
+                "shortcuts",
+                "notifications",
+                "advanced"
+            ]
         );
     }
 
