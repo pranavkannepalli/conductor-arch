@@ -18,7 +18,9 @@ use crate::pty::PtySession;
 use crate::runtime_session_store::RuntimeSessionStore;
 use crate::session_pipeline::PtyChunkInput;
 use crate::session_state::{AgentSessionState, SessionStateMachine};
-use crate::workspace::{ProcessStatus, SessionHarnessOptions, SessionKind, WorkspaceStore};
+use crate::workspace::{
+    ProcessStatus, SessionHarnessOptions, SessionKind, SessionLaunch, WorkspaceStore,
+};
 
 #[derive(Debug)]
 pub enum SessionCommand {
@@ -163,67 +165,124 @@ pub fn spawn_managed_session(
     let store = WorkspaceStore::open_with_logs(db_path.clone(), logs_dir.clone())?;
     let controller = controller_for_kind(kind);
     if let Some((connection, snapshot_state)) = adopt_running_session(&store, &workspace, kind)? {
-        let snapshot = Arc::new(Mutex::new(snapshot_state));
-        let (command_tx, command_rx) = mpsc::channel();
-        let snapshot_for_thread = snapshot.clone();
-        thread::spawn(move || {
-            run_session_loop(
-                db_path,
-                logs_dir,
-                snapshot_for_thread,
-                controller,
-                connection,
-                command_rx,
-                event_tx,
-            )
-        });
-        return Ok(SessionHandle {
-            snapshot,
-            command_tx,
-        });
+        return Ok(start_session_handle(
+            db_path,
+            logs_dir,
+            snapshot_state,
+            controller,
+            connection,
+            event_tx,
+        ));
     }
     let thread_record = ensure_thread_for_kind(&store, &workspace, kind)?;
     let launch = controller.build_launch(&store, &workspace, harness)?;
+    spawn_live_managed_session(LiveSessionStart {
+        db_path,
+        logs_dir,
+        store: &store,
+        workspace,
+        thread_id: thread_record.id,
+        kind,
+        launch,
+        controller,
+        event_tx,
+    })
+}
+
+struct LiveSessionStart<'a> {
+    db_path: PathBuf,
+    logs_dir: PathBuf,
+    store: &'a WorkspaceStore,
+    workspace: String,
+    thread_id: i64,
+    kind: SessionKind,
+    launch: SessionLaunch,
+    controller: Box<dyn HarnessController>,
+    event_tx: Sender<ArchcarEvent>,
+}
+
+fn spawn_live_managed_session(start: LiveSessionStart<'_>) -> Result<SessionHandle> {
     let pty = PtySession::spawn(
-        launch.program.clone(),
-        launch.args.clone(),
-        &launch.cwd,
-        launch.env.clone(),
+        start.launch.program.clone(),
+        start.launch.args.clone(),
+        &start.launch.cwd,
+        start.launch.env.clone(),
         24,
         80,
     )
-    .with_context(|| format!("spawn managed {:?} pty", kind))?;
+    .with_context(|| format!("spawn managed {:?} pty", start.kind))?;
     let pid = pty.process_id().context("pty has no process id")?;
-    let process =
-        store.record_session_process_for_thread(&workspace, thread_record.id, &launch, pid)?;
-    let snapshot = Arc::new(Mutex::new(SessionSnapshot {
-        session_id: process.id,
-        thread_id: thread_record.id,
-        workspace: workspace.clone(),
-        kind,
+    let process = start.store.record_session_process_for_thread(
+        &start.workspace,
+        start.thread_id,
+        &start.launch,
         pid,
-        status: ProcessStatus::Running,
-        runtime_state: AgentSessionState::Running,
-        ready: false,
-        screen: String::new(),
-    }));
+    )?;
+    let snapshot = running_session_snapshot(
+        process.id,
+        start.thread_id,
+        start.workspace,
+        start.kind,
+        pid,
+        false,
+    );
+    Ok(start_session_handle(
+        start.db_path,
+        start.logs_dir,
+        snapshot,
+        start.controller,
+        ManagedSessionConnection::Live(pty),
+        start.event_tx,
+    ))
+}
+
+fn start_session_handle(
+    db_path: PathBuf,
+    logs_dir: PathBuf,
+    snapshot_state: SessionSnapshot,
+    controller: Box<dyn HarnessController>,
+    connection: ManagedSessionConnection,
+    event_tx: Sender<ArchcarEvent>,
+) -> SessionHandle {
+    let snapshot = Arc::new(Mutex::new(snapshot_state));
     let (command_tx, command_rx) = mpsc::channel();
-    let snapshot_for_thread = snapshot.clone();
+    let snapshot_for_thread = Arc::clone(&snapshot);
     thread::spawn(move || {
         run_session_loop(
             db_path,
             logs_dir,
             snapshot_for_thread,
             controller,
-            ManagedSessionConnection::Live(pty),
+            connection,
             command_rx,
             event_tx,
         )
     });
-    Ok(SessionHandle {
+    SessionHandle {
         snapshot,
         command_tx,
-    })
+    }
+}
+
+fn running_session_snapshot(
+    session_id: i64,
+    thread_id: i64,
+    workspace: String,
+    kind: SessionKind,
+    pid: u32,
+    ready: bool,
+) -> SessionSnapshot {
+    SessionSnapshot {
+        session_id,
+        thread_id,
+        workspace,
+        kind,
+        pid,
+        status: ProcessStatus::Running,
+        runtime_state: AgentSessionState::Running,
+        ready,
+        screen: String::new(),
+    }
 }
 
 pub fn spawn_managed_session_for_thread(
@@ -258,44 +317,16 @@ pub fn spawn_managed_session_for_thread(
     } else {
         controller.build_launch(&store, &workspace, harness)?
     };
-    let pty = PtySession::spawn(
-        launch.program.clone(),
-        launch.args.clone(),
-        &launch.cwd,
-        launch.env.clone(),
-        24,
-        80,
-    )
-    .with_context(|| format!("spawn managed {:?} pty", kind))?;
-    let pid = pty.process_id().context("pty has no process id")?;
-    let process = store.record_session_process_for_thread(&workspace, thread_id, &launch, pid)?;
-    let snapshot = Arc::new(Mutex::new(SessionSnapshot {
-        session_id: process.id,
+    spawn_live_managed_session(LiveSessionStart {
+        db_path,
+        logs_dir,
+        store: &store,
+        workspace,
         thread_id,
-        workspace: workspace.clone(),
         kind,
-        pid,
-        status: ProcessStatus::Running,
-        runtime_state: AgentSessionState::Running,
-        ready: false,
-        screen: String::new(),
-    }));
-    let (command_tx, command_rx) = mpsc::channel();
-    let snapshot_for_thread = snapshot.clone();
-    thread::spawn(move || {
-        run_session_loop(
-            db_path,
-            logs_dir,
-            snapshot_for_thread,
-            controller,
-            ManagedSessionConnection::Live(pty),
-            command_rx,
-            event_tx,
-        )
-    });
-    Ok(SessionHandle {
-        snapshot,
-        command_tx,
+        launch,
+        controller,
+        event_tx,
     })
 }
 
@@ -334,17 +365,14 @@ fn adopt_running_session(
                 continue;
             }
         };
-        let snapshot = SessionSnapshot {
-            session_id: process.id,
+        let snapshot = running_session_snapshot(
+            process.id,
             thread_id,
-            workspace: workspace.to_owned(),
+            workspace.to_owned(),
             kind,
-            pid: process.pid,
-            status: ProcessStatus::Running,
-            runtime_state: AgentSessionState::Running,
-            ready: true,
-            screen: String::new(),
-        };
+            process.pid,
+            true,
+        );
         return Ok(Some((connection, snapshot)));
     }
     Ok(None)
@@ -393,34 +421,17 @@ pub fn restore_managed_session(
     let workspace = store.get_workspace_record(process.workspace_id)?.name;
     let controller = controller_for_kind(kind);
     let connection = ManagedSessionConnection::try_reattach_running(process.pid)?;
-    let snapshot = Arc::new(Mutex::new(SessionSnapshot {
-        session_id: process.id,
+    let snapshot = running_session_snapshot(
+        process.id,
         thread_id,
         workspace,
         kind,
-        pid: process.pid,
-        status: ProcessStatus::Running,
-        runtime_state: AgentSessionState::Running,
-        ready: kind == SessionKind::Codex,
-        screen: String::new(),
-    }));
-    let (command_tx, command_rx) = mpsc::channel();
-    let snapshot_for_thread = Arc::clone(&snapshot);
-    thread::spawn(move || {
-        run_session_loop(
-            db_path,
-            logs_dir,
-            snapshot_for_thread,
-            controller,
-            connection,
-            command_rx,
-            event_tx,
-        )
-    });
-    Ok(Some(SessionHandle {
-        snapshot,
-        command_tx,
-    }))
+        process.pid,
+        kind == SessionKind::Codex,
+    );
+    Ok(Some(start_session_handle(
+        db_path, logs_dir, snapshot, controller, connection, event_tx,
+    )))
 }
 
 fn format_input_audit_log(

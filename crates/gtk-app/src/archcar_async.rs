@@ -239,9 +239,28 @@ fn run_archcar_event_bridge(
     connect_lock: BridgeConnectLock,
 ) {
     let client = ArchcarClient::from_paths(&paths);
+    run_archcar_event_loop(
+        message_tx,
+        wake,
+        connect_lock,
+        || client.subscribe(),
+        Duration::from_millis(500),
+    );
+}
+
+fn run_archcar_event_loop<F, E>(
+    message_tx: Sender<AsyncArchcarMessage>,
+    wake: BridgeWakeSlot,
+    connect_lock: BridgeConnectLock,
+    mut subscribe: F,
+    reconnect_delay: Duration,
+) where
+    F: FnMut() -> Result<Receiver<ArchcarEvent>, E>,
+    E: std::fmt::Display,
+{
     loop {
         let subscribe_result = match connect_lock.lock() {
-            Ok(_guard) => client.subscribe(),
+            Ok(_guard) => subscribe(),
             Err(_) => {
                 let _ = send_bridge_message(
                     &message_tx,
@@ -269,7 +288,7 @@ fn run_archcar_event_bridge(
                     &message_tx,
                     &wake,
                     AsyncArchcarMessage::BridgeError {
-                        message: format!("subscribe archcar events failed: {err:#}"),
+                        message: format!("subscribe archcar events failed: {err}"),
                     },
                 ) {
                     return;
@@ -277,7 +296,7 @@ fn run_archcar_event_bridge(
                 warn!(error = %err, "async archcar event subscribe failed; retrying");
             }
         }
-        thread::sleep(Duration::from_millis(500));
+        thread::sleep(reconnect_delay);
     }
 }
 
@@ -424,5 +443,46 @@ mod tests {
             request_kind(&ArchcarRequest::Subscribe),
             AsyncArchcarRequestKind::GetSessionStatus { session_id: -1 }
         );
+    }
+
+    #[test]
+    fn event_bridge_does_not_resubscribe_while_subscription_is_idle() {
+        let (event_tx, event_rx) = mpsc::channel();
+        let (message_tx, message_rx) = mpsc::channel();
+        let wake = Arc::new(Mutex::new(None));
+        let connect_lock = Arc::new(Mutex::new(()));
+        let subscribe_count = Arc::new(AtomicU64::new(0));
+        let count_for_subscribe = Arc::clone(&subscribe_count);
+        let mut next_rx = Some(event_rx);
+
+        let handle = thread::spawn(move || {
+            run_archcar_event_loop(
+                message_tx,
+                wake,
+                connect_lock,
+                move || {
+                    count_for_subscribe.fetch_add(1, Ordering::SeqCst);
+                    next_rx
+                        .take()
+                        .ok_or_else(|| "subscription already consumed".to_owned())
+                },
+                Duration::from_millis(10),
+            );
+        });
+
+        for _ in 0..20 {
+            if subscribe_count.load(Ordering::SeqCst) == 1 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(subscribe_count.load(Ordering::SeqCst), 1);
+
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(subscribe_count.load(Ordering::SeqCst), 1);
+
+        drop(event_tx);
+        drop(message_rx);
+        handle.join().expect("event bridge loop exits");
     }
 }
