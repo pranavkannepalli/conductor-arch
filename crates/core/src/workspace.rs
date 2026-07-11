@@ -1412,17 +1412,6 @@ impl WorkspaceStore {
 
         self.stop_workspace_processes(workspace.id)?;
 
-        if remove_worktree {
-            remove_workspace_worktree(&repository.root_path, &workspace.path)?;
-        }
-
-        if delete_branch {
-            let _ = git_dynamic(
-                &repository.root_path,
-                &["branch", "-D", workspace.branch.as_str()],
-            );
-        }
-
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| -> Result<()> {
             self.record_workspace_event(
@@ -1437,13 +1426,25 @@ impl WorkspaceStore {
         match result {
             Ok(()) => {
                 self.conn.execute_batch("COMMIT")?;
-                Ok(workspace)
             }
             Err(err) => {
                 let _ = self.conn.execute_batch("ROLLBACK");
-                Err(err)
+                return Err(err);
             }
         }
+
+        if remove_worktree {
+            remove_workspace_worktree(&repository.root_path, &workspace.path)?;
+        }
+
+        if delete_branch {
+            let _ = git_dynamic(
+                &repository.root_path,
+                &["branch", "-D", workspace.branch.as_str()],
+            );
+        }
+
+        Ok(workspace)
     }
 
     pub fn archive(&self, name: &str, remove_worktree: bool) -> Result<Workspace> {
@@ -1452,6 +1453,22 @@ impl WorkspaceStore {
         let settings = load_repository_settings(&repository.root_path)?;
 
         self.stop_workspace_processes(workspace.id)?;
+
+        let now = timestamp();
+        let changed = self.conn.execute(
+            "UPDATE workspaces
+             SET status = 'archived', archived_at = ?1, updated_at = ?2
+             WHERE name = ?3",
+            params![now, now, name],
+        )?;
+        anyhow::ensure!(changed > 0, "workspace {name} not found");
+        let archived = self.get_by_name(name)?;
+        self.record_workspace_event(
+            archived.id,
+            &archived.name,
+            "workspace.archived",
+            "Archived workspace",
+        )?;
 
         if let Some(archive_script) = &settings.scripts.archive {
             if workspace.path.exists() {
@@ -1477,21 +1494,6 @@ impl WorkspaceStore {
             )?;
         }
 
-        let now = timestamp();
-        let changed = self.conn.execute(
-            "UPDATE workspaces
-             SET status = 'archived', archived_at = ?1, updated_at = ?2
-             WHERE name = ?3",
-            params![now, now, name],
-        )?;
-        anyhow::ensure!(changed > 0, "workspace {name} not found");
-        let archived = self.get_by_name(name)?;
-        self.record_workspace_event(
-            archived.id,
-            &archived.name,
-            "workspace.archived",
-            "Archived workspace",
-        )?;
         Ok(archived)
     }
 

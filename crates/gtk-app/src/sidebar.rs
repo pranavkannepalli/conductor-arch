@@ -931,6 +931,28 @@ fn attach_workspace_row_context_menu(
                     let row = row.clone();
                     let window = window.clone();
                     move || {
+                        let snapshot = state.snapshot();
+                        let was_selected_workspace =
+                            snapshot.selected_workspace.as_deref() == Some(workspace_name.as_str())
+                                && matches!(
+                                    snapshot.active_page,
+                                    AppPage::Workspace | AppPage::Review
+                                );
+                        state.remove_workspace_from_navigation(
+                            &workspace_name,
+                            AppPage::Dashboard,
+                        );
+                        if was_selected_workspace {
+                            stack.set_visible_child_name("dashboard");
+                        }
+                        if let Some(list) = row.parent().and_downcast::<ListBox>() {
+                            list.remove(&row);
+                        }
+                        refresh_view_preferences();
+                        refresh_workspace();
+                        refresh_hub.refresh(RefreshScope::Sidebar);
+                        refresh_hub.refresh(RefreshScope::Dashboard);
+
                         let rx = spawn_background_job({
                             let db_path = state.workspace_database_path().to_path_buf();
                             let workspace_name = workspace_name.clone();
@@ -944,13 +966,9 @@ fn attach_workspace_row_context_menu(
                                 })
                             }
                         });
-                        let workspace_name = workspace_name.clone();
                         let refresh_hub = refresh_hub.clone();
                         let refresh_workspace = refresh_workspace.clone();
                         let refresh_view_preferences = refresh_view_preferences.clone();
-                        let state = state.clone();
-                        let stack = stack.clone();
-                        let row = row.clone();
                         let window = window.clone();
                         // PER-190: temporary worker-result poll for workspace lifecycle actions;
                         // remove when sidebar jobs return through a GLib main-context future.
@@ -959,35 +977,20 @@ fn attach_workspace_row_context_menu(
                                 Ok(result) => {
                                     match result {
                                         Ok(()) => {
-                                            let snapshot = state.snapshot();
-                                            let was_selected_workspace = snapshot
-                                                .selected_workspace
-                                                .as_deref()
-                                                == Some(workspace_name.as_str())
-                                                && matches!(
-                                                    snapshot.active_page,
-                                                    AppPage::Workspace | AppPage::Review
-                                                );
-                                            state.remove_workspace_from_navigation(
-                                                &workspace_name,
-                                                AppPage::Dashboard,
-                                            );
-                                            if was_selected_workspace {
-                                                stack.set_visible_child_name("dashboard");
-                                            }
-                                            if let Some(list) = row.parent().and_downcast::<ListBox>()
-                                            {
-                                                list.remove(&row);
-                                            }
                                             refresh_view_preferences();
                                             refresh_workspace();
                                             refresh_hub.refresh(RefreshScope::All);
                                         }
-                                        Err(err) => show_workspace_error_dialog(
-                                            &window,
-                                            "Workspace action failed",
-                                            &format!("{err:#}"),
-                                        ),
+                                        Err(err) => {
+                                            refresh_view_preferences();
+                                            refresh_workspace();
+                                            refresh_hub.refresh(RefreshScope::Sidebar);
+                                            show_workspace_error_dialog(
+                                                &window,
+                                                "Workspace action failed",
+                                                &format!("{err:#}"),
+                                            );
+                                        }
                                     }
                                     glib::ControlFlow::Break
                                 }
