@@ -263,14 +263,8 @@ textview:disabled {
     padding: 8px 10px;
 }
 
-.workspace-row-menu-button {
-    opacity: 0;
-}
-
-.workspace-row-shell:hover .workspace-row-menu-button,
-.workspace-row-menu-button:hover,
-.workspace-row-menu-button:focus {
-    opacity: 1;
+.workspace-row-trailing {
+    min-width: 64px;
 }
 
 .workspace-row-diff-stats {

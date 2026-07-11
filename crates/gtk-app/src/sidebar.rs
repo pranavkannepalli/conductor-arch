@@ -1,13 +1,14 @@
 use adw::ApplicationWindow;
 use gtk::prelude::*;
 use gtk::{
-    Align, Box as GBox, Button, Entry, EventControllerKey, GestureClick, Image, Label, ListBox,
-    ListBoxRow, Orientation, PolicyType, Popover, ScrolledWindow, Stack,
+    Align, Box as GBox, Button, Entry, EventControllerKey, EventControllerMotion, GestureClick,
+    Image, Label, ListBox, ListBoxRow, Orientation, PolicyType, Popover, Revealer,
+    RevealerTransitionType, ScrolledWindow, Stack,
 };
 use linux_archductor_core::archcar::protocol::ArchcarRequest;
 use linux_archductor_core::repository::RepositoryStore;
 use linux_archductor_core::workspace::{CreateWorkspace, SessionKind, WorkspaceStore};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::rc::Rc;
@@ -670,7 +671,11 @@ fn build_workspace_row(
 
     row_box.append(&text_box);
 
-    row_box.append(&workspace_diff_stats(diff_additions, diff_deletions));
+    let trailing_box = GBox::new(Orientation::Horizontal, 0);
+    trailing_box.add_css_class("workspace-row-trailing");
+    trailing_box.set_halign(Align::End);
+    trailing_box.append(&workspace_diff_stats(diff_additions, diff_deletions));
+    row_box.append(&trailing_box);
 
     ListBoxRow::builder().child(&row_box).build()
 }
@@ -985,27 +990,80 @@ fn attach_workspace_row_context_menu(
     popover.set_child(Some(&menu));
     let menu_btn = icon_button("open-menu-symbolic", "Workspace actions");
     menu_btn.add_css_class("workspace-row-menu-button");
+    menu_btn.set_margin_start(4);
     popover.set_parent(&menu_btn);
+    let menu_revealer = Revealer::new();
+    menu_revealer.add_css_class("workspace-row-menu-revealer");
+    menu_revealer.set_transition_type(RevealerTransitionType::SlideLeft);
+    menu_revealer.set_transition_duration(140);
+    menu_revealer.set_reveal_child(false);
+    menu_revealer.set_child(Some(&menu_btn));
+    let row_hovered = Rc::new(Cell::new(false));
+    let menu_open = Rc::new(Cell::new(false));
+    let sync_menu_revealer = {
+        let menu_revealer = menu_revealer.clone();
+        let row_hovered = row_hovered.clone();
+        let menu_open = menu_open.clone();
+        Rc::new(move || {
+            menu_revealer.set_reveal_child(row_hovered.get() || menu_open.get());
+        })
+    };
     {
         let popover = popover.downgrade();
+        let menu_open = menu_open.clone();
+        let sync_menu_revealer = sync_menu_revealer.clone();
         menu_btn.connect_clicked(move |_| {
             if let Some(popover) = popover.upgrade() {
+                menu_open.set(true);
+                sync_menu_revealer();
                 popover.set_pointing_to(None);
                 popover.popup();
             }
         });
     }
+    {
+        let menu_open = menu_open.clone();
+        let sync_menu_revealer = sync_menu_revealer.clone();
+        popover.connect_closed(move |_| {
+            menu_open.set(false);
+            sync_menu_revealer();
+        });
+    }
     if let Some(row_box) = row.child().and_downcast::<GBox>() {
-        row_box.append(&menu_btn);
+        if let Some(trailing_box) = row_box.last_child().and_downcast::<GBox>() {
+            trailing_box.append(&menu_revealer);
+        }
+        let hover_controller = EventControllerMotion::new();
+        {
+            let row_hovered = row_hovered.clone();
+            let sync_menu_revealer = sync_menu_revealer.clone();
+            hover_controller.connect_enter(move |_, _, _| {
+                row_hovered.set(true);
+                sync_menu_revealer();
+            });
+        }
+        {
+            let row_hovered = row_hovered.clone();
+            let sync_menu_revealer = sync_menu_revealer.clone();
+            hover_controller.connect_leave(move |_| {
+                row_hovered.set(false);
+                sync_menu_revealer();
+            });
+        }
+        row_box.add_controller(hover_controller);
     }
 
     let gesture = GestureClick::new();
     gesture.set_button(3);
     let popover_for_click = popover.downgrade();
+    let menu_open_for_click = menu_open.clone();
+    let sync_revealer_for_click = sync_menu_revealer.clone();
     gesture.connect_pressed(move |_, _, _x, _y| {
         let Some(popover_for_click) = popover_for_click.upgrade() else {
             return;
         };
+        menu_open_for_click.set(true);
+        sync_revealer_for_click();
         popover_for_click.set_pointing_to(None);
         popover_for_click.popup();
     });
@@ -1014,6 +1072,8 @@ fn attach_workspace_row_context_menu(
     row.set_focusable(true);
     let key_controller = EventControllerKey::new();
     let popover_for_key = popover.downgrade();
+    let menu_open_for_key = menu_open.clone();
+    let sync_revealer_for_key = sync_menu_revealer.clone();
     key_controller.connect_key_pressed(move |_, key, _, modifiers| {
         let menu_key = key == gtk::gdk::Key::Menu;
         let shift_f10 =
@@ -1022,6 +1082,8 @@ fn attach_workspace_row_context_menu(
             return gtk::glib::Propagation::Proceed;
         }
         if let Some(popover) = popover_for_key.upgrade() {
+            menu_open_for_key.set(true);
+            sync_revealer_for_key();
             popover.set_pointing_to(None);
             popover.popup();
         }
