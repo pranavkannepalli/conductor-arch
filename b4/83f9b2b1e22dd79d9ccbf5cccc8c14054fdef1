@@ -1,0 +1,19 @@
+crates/gtk-app/src/sidebar.rs
+  s_fd4faa9de0cb3c::t_8742c5b08af8bc 936-943,945-954
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "b483f9b2b1e22dd79d9ccbf5cccc8c14054fdef1",
+  "prompts": {},
+  "sessions": {
+    "s_fd4faa9de0cb3c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5348-6ec9-7120-9048-d5a57b903834",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
