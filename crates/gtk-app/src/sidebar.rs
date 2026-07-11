@@ -933,28 +933,25 @@ fn attach_workspace_row_context_menu(
                                 Ok(result) => {
                                     match result {
                                         Ok(()) => {
-                                            if action == "delete" {
-                                                let snapshot = state.snapshot();
-                                                let was_selected_workspace = snapshot
-                                                    .selected_workspace
-                                                    .as_deref()
-                                                    == Some(workspace_name.as_str())
-                                                    && matches!(
-                                                        snapshot.active_page,
-                                                        AppPage::Workspace | AppPage::Review
-                                                    );
-                                                state.remove_workspace_from_navigation(
-                                                    &workspace_name,
-                                                    AppPage::Dashboard,
+                                            let snapshot = state.snapshot();
+                                            let was_selected_workspace = snapshot
+                                                .selected_workspace
+                                                .as_deref()
+                                                == Some(workspace_name.as_str())
+                                                && matches!(
+                                                    snapshot.active_page,
+                                                    AppPage::Workspace | AppPage::Review
                                                 );
-                                                if was_selected_workspace {
-                                                    stack.set_visible_child_name("dashboard");
-                                                }
-                                                if let Some(list) =
-                                                    row.parent().and_downcast::<ListBox>()
-                                                {
-                                                    list.remove(&row);
-                                                }
+                                            state.remove_workspace_from_navigation(
+                                                &workspace_name,
+                                                AppPage::Dashboard,
+                                            );
+                                            if was_selected_workspace {
+                                                stack.set_visible_child_name("dashboard");
+                                            }
+                                            if let Some(list) = row.parent().and_downcast::<ListBox>()
+                                            {
+                                                list.remove(&row);
                                             }
                                             refresh_view_preferences();
                                             refresh_workspace();
