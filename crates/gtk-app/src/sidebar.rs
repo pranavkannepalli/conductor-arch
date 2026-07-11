@@ -166,7 +166,7 @@ pub(crate) fn build_app_sidebar(
     header_lbl.set_hexpand(true);
     projects_header.append(&header_lbl);
     let add_workspace_btn =
-        sidebar_icon_button("folder-new-symbolic", "Add repository or workspace");
+        sidebar_icon_button("document-new-symbolic", "Add repository or workspace");
     {
         let db_path_hdr = app_state.workspace_database_path();
         let hub_hdr = refresh_hub.clone();
@@ -985,7 +985,7 @@ fn attach_workspace_row_context_menu(
     }
 
     popover.set_child(Some(&menu));
-    let menu_btn = icon_button("open-menu-symbolic", "Workspace actions");
+    let menu_btn = icon_button("view-more-symbolic", "Workspace actions");
     menu_btn.add_css_class("workspace-row-menu-button");
     menu_btn.set_margin_start(4);
     popover.set_parent(&menu_btn);

@@ -172,7 +172,7 @@ textview,
 }
 
 .projects-header {
-    padding: 12px 10px 6px 10px;
+    padding: 12px 6px 6px 10px;
 }
 
 .nav-row,
@@ -249,7 +249,7 @@ textview:disabled {
 
 .workspace-list row {
     border-radius: 7px;
-    margin: 2px 10px;
+    margin: 2px 6px 2px 10px;
     padding: 0;
 }
 
@@ -1369,7 +1369,7 @@ window.lc-theme-dark,
 
 /* ── Section header ── */
 .repo-section-row {
-    padding: 8px 10px 4px 10px;
+    padding: 8px 6px 4px 10px;
 }
 .repo-section-header {
     font-size: 12px;
@@ -1384,7 +1384,7 @@ window.lc-theme-dark,
 
 /* ── Updated workspace row shell ── */
 .workspace-row-shell {
-    padding: 7px 10px 7px 10px;
+    padding: 7px 6px 7px 10px;
 }
 
 .sidebar-icon-button {
