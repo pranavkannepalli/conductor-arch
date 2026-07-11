@@ -289,8 +289,8 @@ pub fn agent_session_panel(
     placeholder.add_css_class("chat-placeholder");
     placeholder.set_halign(Align::Start);
     placeholder.set_valign(Align::Start);
-    placeholder.set_margin_start(18);
-    placeholder.set_margin_top(18);
+    placeholder.set_margin_start(16);
+    placeholder.set_margin_top(14);
     placeholder.set_can_target(false);
     input_overlay.add_overlay(&placeholder);
     input_shell.append(&input_overlay);

@@ -1981,7 +1981,7 @@ row:hover .ws-folder-name {
 }
 .chat-placeholder {
     color: #7f7f7f;
-    font-size: 14px;
+    font-size: 13px;
 }
 .chat-input-scroll {
     background-color: transparent;
@@ -1994,7 +1994,7 @@ row:hover .ws-folder-name {
     color: #e4e4e4;
     border: none;
     box-shadow: none;
-    font-size: 14px;
+    font-size: 13px;
     min-height: 0;
 }
 .chat-toolbar {
