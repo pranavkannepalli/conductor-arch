@@ -987,7 +987,7 @@ fn attach_workspace_row_context_menu(
     popover.set_child(Some(&menu));
     let menu_btn = icon_button("view-more-symbolic", "Workspace actions");
     menu_btn.add_css_class("workspace-row-menu-button");
-    menu_btn.set_margin_start(4);
+    menu_btn.set_margin_start(2);
     popover.set_parent(&menu_btn);
     let menu_revealer = Revealer::new();
     menu_revealer.add_css_class("workspace-row-menu-revealer");

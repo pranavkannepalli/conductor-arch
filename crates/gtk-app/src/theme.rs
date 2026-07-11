@@ -269,14 +269,6 @@ textview:disabled {
     padding: 8px 10px;
 }
 
-.workspace-row-trailing {
-    min-width: 64px;
-}
-
-.workspace-row-diff-stats {
-    min-width: 64px;
-}
-
 .workspace-row-diff-added,
 .workspace-row-diff-removed {
     font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
