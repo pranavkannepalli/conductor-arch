@@ -231,6 +231,22 @@ pub fn save_repository_settings(
     std::fs::write(&path, contents).with_context(|| format!("write {}", path.display()))
 }
 
+pub fn save_local_default_agent_provider(repo_path: &Path, provider: &str) -> Result<()> {
+    validate_agent_provider(provider)?;
+    let conductor_dir = repo_path.join(".archductor");
+    std::fs::create_dir_all(&conductor_dir)
+        .with_context(|| format!("create {}", conductor_dir.display()))?;
+    let path = conductor_dir.join("settings.local.toml");
+    let mut raw = load_optional_settings(&path)?;
+    let customization = raw.customization.get_or_insert_with(Default::default);
+    let automation = customization
+        .automation
+        .get_or_insert_with(Default::default);
+    automation.auto_start_agent = Some(provider.to_owned());
+    let contents = toml::to_string_pretty(&raw).context("serialize local settings")?;
+    std::fs::write(&path, contents).with_context(|| format!("write {}", path.display()))
+}
+
 pub fn customization_settings_to_toml(settings: &CustomizationSettings) -> Result<String> {
     let raw = RawRepositorySettings {
         customization: Some(RawCustomizationSettings::from_settings(settings)),
@@ -1235,6 +1251,14 @@ fn is_valid_workspace_tab(value: &str) -> bool {
     )
 }
 
+fn validate_agent_provider(provider: &str) -> Result<()> {
+    anyhow::ensure!(
+        matches!(provider, "codex" | "claude" | "opencode"),
+        "default agent provider must be codex, claude, or opencode"
+    );
+    Ok(())
+}
+
 fn normalize_workspace_tab(value: &str) -> String {
     value
         .chars()
@@ -1403,6 +1427,36 @@ LOCAL_ONLY = "1"
         assert_eq!(loaded, settings);
         assert!(temp.path().join(".archductor/settings.toml").exists());
         assert!(!temp.path().join(".archductor/settings.local.toml").exists());
+    }
+
+    #[test]
+    fn save_local_default_agent_provider_updates_only_local_override() {
+        let temp = tempfile::tempdir().unwrap();
+        let conductor_dir = temp.path().join(".archductor");
+        fs::create_dir(&conductor_dir).unwrap();
+        fs::write(
+            conductor_dir.join("settings.toml"),
+            r#"
+[scripts]
+setup = "pnpm install"
+"#,
+        )
+        .unwrap();
+        fs::write(
+            conductor_dir.join("settings.local.toml"),
+            r#"
+[customization.view]
+theme = "dark"
+"#,
+        )
+        .unwrap();
+
+        save_local_default_agent_provider(temp.path(), "claude").unwrap();
+
+        let local = fs::read_to_string(conductor_dir.join("settings.local.toml")).unwrap();
+        assert!(local.contains("auto_start_agent = \"claude\""));
+        assert!(local.contains("theme = \"dark\""));
+        assert!(!local.contains("pnpm install"));
     }
 
     #[test]

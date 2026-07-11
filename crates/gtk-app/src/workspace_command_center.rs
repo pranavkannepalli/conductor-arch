@@ -9,6 +9,7 @@ use gtk::{
 use linux_archductor_core::archcar::protocol::{ArchcarInputKind, ArchcarRequest};
 use linux_archductor_core::doctor::SetupReadiness;
 use linux_archductor_core::paths::AppPaths;
+use linux_archductor_core::settings::save_local_default_agent_provider;
 use linux_archductor_core::workspace::{
     ChatThreadRecord, DiffFileSummary, ProcessRecord, ProcessStatus, PullRequest,
     PullRequestReviewThread, ReviewComment, SessionKind, Workspace, WorkspaceStore,
@@ -736,7 +737,9 @@ fn ws_center_panel(
                 .find(|thread| Some(thread.id) == active_thread)
                 .filter(|thread| provider_is_ready_launchable(&thread.provider))
                 .map(|thread| thread.provider.clone())
-                .unwrap_or_else(default_launchable_chat_provider);
+                .unwrap_or_else(|| {
+                    default_launchable_chat_provider_for_workspace(&db_path, &workspace_name)
+                });
             let title = workspace_chat_default_title(&visible_existing);
             let Ok(store) = WorkspaceStore::open(db_path.clone()) else {
                 return;
@@ -1060,15 +1063,26 @@ fn workspace_chat_thread_is_supported(thread: &ChatThreadRecord) -> bool {
     matches!(thread.provider.as_str(), "codex" | "claude")
 }
 
-fn default_launchable_chat_provider() -> String {
-    SetupReadiness::from_host()
+fn default_launchable_chat_provider_for_workspace(db_path: &Path, workspace_name: &str) -> String {
+    let provider = SetupReadiness::from_host()
         .first_ready_launchable_provider()
         .unwrap_or("codex")
-        .to_owned()
+        .to_owned();
+    persist_default_chat_provider(db_path, workspace_name, &provider);
+    provider
 }
 
 fn provider_is_ready_launchable(provider: &str) -> bool {
     SetupReadiness::from_host().provider_ready(provider) && matches!(provider, "codex" | "claude")
+}
+
+fn persist_default_chat_provider(db_path: &Path, workspace_name: &str, provider: &str) {
+    let result = WorkspaceStore::open(db_path)
+        .and_then(|store| store.workspace_repository_root(workspace_name))
+        .and_then(|repo_path| save_local_default_agent_provider(&repo_path, provider));
+    if let Err(err) = result {
+        error!("failed to persist chat provider {provider} for {workspace_name}: {err:#}");
+    }
 }
 
 fn close_workspace_chat_thread(

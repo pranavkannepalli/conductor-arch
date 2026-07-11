@@ -15,6 +15,7 @@ use linux_archductor_core::codex_tui::{
 use linux_archductor_core::doctor::SetupReadiness;
 #[cfg(test)]
 use linux_archductor_core::session_state::AgentSessionState;
+use linux_archductor_core::settings::save_local_default_agent_provider;
 use linux_archductor_core::workspace::{
     ChatEventRecord, ChatMessageRecord, ChatThreadRecord, ProcessRecord, ProcessStatus,
     SessionHarnessOptions, SessionKind, WorkspaceStore,
@@ -198,7 +199,7 @@ pub fn agent_session_panel(
         ));
     }
 
-    let initial_harness = initial_chat_harness_from_setup();
+    let initial_harness = initial_chat_harness_from_setup(&database_path, _workspace_name);
     let selected_harness = Rc::new(RefCell::new(initial_harness));
     let selected_model = Rc::new(RefCell::new(None::<String>));
     let reasoning_mode = Rc::new(RefCell::new(Some("high".to_owned())));
@@ -317,6 +318,8 @@ pub fn agent_session_panel(
         &["Codex", "Claude"],
         session_kind_index(initial_harness),
         {
+            let database_path = database_path.to_path_buf();
+            let workspace_name = _workspace_name.to_owned();
             let selected_harness = selected_harness.clone();
             let reasoning_mode = reasoning_mode.clone();
             let refresh_chat_surface = refresh_chat_surface.clone();
@@ -327,6 +330,11 @@ pub fn agent_session_panel(
             let sync_live_controls = sync_live_controls.clone();
             Rc::new(move |index| {
                 let kind = session_kind_from_index(index);
+                persist_selected_provider(
+                    &database_path,
+                    &workspace_name,
+                    session_kind_provider(kind),
+                );
                 select_harness_and_dispatch(
                     selected_harness.as_ref(),
                     reasoning_mode.as_ref(),
@@ -2883,11 +2891,16 @@ fn session_kind_index(kind: SessionKind) -> usize {
     }
 }
 
-fn initial_chat_harness_from_setup() -> SessionKind {
-    match SetupReadiness::from_host().first_ready_launchable_provider() {
-        Some("claude") => SessionKind::Claude,
-        _ => SessionKind::Codex,
+fn initial_chat_harness_from_setup(database_path: &Path, workspace_name: &str) -> SessionKind {
+    let readiness = SetupReadiness::from_host();
+    if let Some(provider) = configured_ready_provider(database_path, workspace_name, &readiness) {
+        return session_kind_from_provider(provider);
     }
+    let provider = readiness
+        .first_ready_launchable_provider()
+        .unwrap_or("codex");
+    persist_selected_provider(database_path, workspace_name, provider);
+    session_kind_from_provider(provider)
 }
 
 fn selected_provider_blocker_message(kind: SessionKind) -> Option<String> {
@@ -2902,6 +2915,53 @@ fn selected_provider_blocker_message(kind: SessionKind) -> Option<String> {
             session_kind_name(kind)
         )
     })
+}
+
+fn configured_ready_provider(
+    database_path: &Path,
+    workspace_name: &str,
+    readiness: &SetupReadiness,
+) -> Option<&'static str> {
+    let configured = WorkspaceStore::open(database_path)
+        .ok()
+        .and_then(|store| store.workspace_repo_settings(workspace_name).ok())
+        .and_then(|settings| settings.customization.automation.auto_start_agent);
+    let provider = configured.as_deref()?;
+    let provider = launchable_provider_name(provider)?;
+    readiness.provider_ready(provider).then_some(provider)
+}
+
+fn launchable_provider_name(provider: &str) -> Option<&'static str> {
+    match provider
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect::<String>()
+        .as_str()
+    {
+        "codex" => Some("codex"),
+        "claude" | "claudecode" => Some("claude"),
+        _ => None,
+    }
+}
+
+fn session_kind_from_provider(provider: &str) -> SessionKind {
+    match launchable_provider_name(provider) {
+        Some("claude") => SessionKind::Claude,
+        _ => SessionKind::Codex,
+    }
+}
+
+fn persist_selected_provider(database_path: &Path, workspace_name: &str, provider: &str) {
+    let Some(provider) = launchable_provider_name(provider) else {
+        return;
+    };
+    let result = WorkspaceStore::open(database_path)
+        .and_then(|store| store.workspace_repository_root(workspace_name))
+        .and_then(|repo_path| save_local_default_agent_provider(&repo_path, provider));
+    if let Err(err) = result {
+        warn!(workspace = %workspace_name, provider, error = %err, "failed to persist selected provider");
+    }
 }
 
 fn session_reasoning_mode_from_index(index: usize) -> String {

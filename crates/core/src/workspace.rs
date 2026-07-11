@@ -4395,6 +4395,12 @@ mutation($threadId: ID!) {{
         Ok(self.get_by_name(name)?.path)
     }
 
+    pub fn workspace_repository_root(&self, name: &str) -> Result<PathBuf> {
+        let workspace = self.get_by_name(name)?;
+        let repository = self.load_repository_by_id(workspace.repository_id)?;
+        Ok(repository.root_path)
+    }
+
     pub fn workspace_view_defaults(&self, name: &str) -> Result<WorkspaceViewDefaults> {
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
