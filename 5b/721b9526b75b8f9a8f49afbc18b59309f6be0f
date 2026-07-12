@@ -1,0 +1,52 @@
+crates/gtk-app/src/main.rs
+  s_02306b12f17af8::t_19c85040a9e5ea 441
+  s_02306b12f17af8::t_1905bc9609a30d 449-450
+crates/gtk-app/src/projects.rs
+  s_02306b12f17af8::t_43f1cfb757dd35 675,682,753,760
+  s_02306b12f17af8::t_2783e2db5e436e 683-685,687-690
+  s_02306b12f17af8::t_9a50c9204d7e0d 11,771-777,834-838
+crates/core/src/repository.rs
+  s_02306b12f17af8::t_74b9c5eb52bc91 4-5,230,235-248
+  s_02306b12f17af8::t_19c85040a9e5ea 6-7
+  s_02306b12f17af8::t_9a031e03f002be 249-250
+crates/gtk-app/src/settings.rs
+  s_02306b12f17af8::t_6308ef3402a530 954,959
+  s_02306b12f17af8::t_4ea0c6b0d3f4a3 523,526,565-567,569-570,607-647,696-697,849,852,858-867,871-875
+  s_02306b12f17af8::t_ab4d7928150bb4 1263-1270,1272-1301
+  s_02306b12f17af8::t_80fb444406dab3 648-669,870
+  s_02306b12f17af8::t_d609ba05b25156 876,878-891,894-950
+  s_02306b12f17af8::t_c1351c3654f3c3 967-973
+  s_02306b12f17af8::t_19c85040a9e5ea 670-695,698-753,756-811,813-840,842-848,850-851,853-857,868
+  s_02306b12f17af8::t_ee6bf1306a2465 85
+  s_02306b12f17af8::t_3305971d7fc92d 5,55-73,79-80,86,89,93
+  s_02306b12f17af8::t_08d396e8298968 1271
+  s_02306b12f17af8::t_d7666f6a17fb9e 1302-1313
+  s_02306b12f17af8::t_4e3bbfe3dbcc69 11
+  s_02306b12f17af8::t_36f4f7f266cd2d 555-559
+  s_02306b12f17af8::t_497e1b9a8709eb 877
+crates/core/src/doctor.rs
+  s_02306b12f17af8::t_daa4ee5e3c7a58 290-291
+crates/gtk-app/src/session_surface.rs
+  s_02306b12f17af8::t_065019d8e1fc4e 5028-5029,5035-5043
+  s_02306b12f17af8::t_19c85040a9e5ea 1427-1428,1445
+  s_02306b12f17af8::t_71e0456a44c785 3587,3589-3594
+  s_02306b12f17af8::t_6a9980b1f841c9 376-379,384-398,1252-1253,1258-1272,1429-1430,1435-1444,1446-1448,5087,5102-5115
+crates/core/src/settings.rs
+  s_02306b12f17af8::t_8011a80656a6d9 200-212
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "5b721b9526b75b8f9a8f49afbc18b59309f6be0f",
+  "prompts": {},
+  "sessions": {
+    "s_02306b12f17af8": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5393-0607-7c50-afa5-c9f624a6d923",
+        "model": "gpt-5.4-mini"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
