@@ -63,6 +63,8 @@ pub use crate::terminal_logs::{TerminalLogMatch, TerminalSessionSummary};
 const SIGTERM_EXIT_CODE: i32 = 143;
 const UNTRACKED_FILE_COUNT_BYTE_LIMIT: usize = 1024 * 1024;
 const DIFF_HUNK_PATCH_LIMIT_BYTES: usize = 200 * 1024;
+const TURN_CHECKPOINT_DIFF_LIMIT: usize = 25;
+const TURN_CHECKPOINT_DIFF_MAX_BYTES: usize = 64 * 1024;
 const WORKSPACE_CITY_NAMES: [&str; 200] = [
     "berlin",
     "tokyo",
@@ -1018,6 +1020,14 @@ pub struct Checkpoint {
     pub git_ref: String,
     pub message: String,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnCheckpointDiff {
+    pub checkpoint: Checkpoint,
+    pub end_checkpoint: Option<Checkpoint>,
+    pub diff: String,
+    pub truncated: bool,
 }
 
 struct RepositoryRecord {
@@ -4073,17 +4083,50 @@ mutation($threadId: ID!) {{
         Ok(checkpoints)
     }
 
-    pub fn latest_turn_checkpoint_diff(&self, name: &str) -> Result<Option<(Checkpoint, String)>> {
+    pub fn latest_turn_checkpoint_diff(&self, name: &str) -> Result<Option<TurnCheckpointDiff>> {
+        Ok(self.turn_checkpoint_diffs(name, 1)?.into_iter().next())
+    }
+
+    pub fn turn_checkpoint_diffs(
+        &self,
+        name: &str,
+        limit: usize,
+    ) -> Result<Vec<TurnCheckpointDiff>> {
         let workspace = self.get_by_name(name)?;
-        let checkpoint = self
+        let limit = limit.min(TURN_CHECKPOINT_DIFF_LIMIT);
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut checkpoints = self
             .checkpoint_list(name)?
             .into_iter()
-            .find(|checkpoint| checkpoint.message.starts_with("Turn start:"));
-        let Some(checkpoint) = checkpoint else {
-            return Ok(None);
-        };
-        let diff = diff_worktree_against_ref(&workspace, &checkpoint.git_ref)?;
-        Ok(Some((checkpoint, diff)))
+            .filter(|checkpoint| checkpoint.message.starts_with("Turn start:"))
+            .collect::<Vec<_>>();
+        if checkpoints.is_empty() {
+            return Ok(Vec::new());
+        }
+        checkpoints.sort_by_key(|checkpoint| checkpoint.id);
+
+        let mut rows = Vec::new();
+        let start = checkpoints.len().saturating_sub(limit);
+        for index in start..checkpoints.len() {
+            let checkpoint = checkpoints[index].clone();
+            let end_checkpoint = checkpoints.get(index + 1).cloned();
+            let raw_diff = match end_checkpoint.as_ref() {
+                Some(end) => diff_checkpoint_refs(&workspace, &checkpoint.git_ref, &end.git_ref)?,
+                None => diff_worktree_against_ref(&workspace, &checkpoint.git_ref)?,
+            };
+            let (diff, truncated) =
+                truncate_text_at_char_boundary(raw_diff, TURN_CHECKPOINT_DIFF_MAX_BYTES);
+            rows.push(TurnCheckpointDiff {
+                checkpoint,
+                end_checkpoint,
+                diff,
+                truncated,
+            });
+        }
+        rows.reverse();
+        Ok(rows)
     }
 
     pub fn checkpoint_restore(&self, name: &str, checkpoint_id: i64) -> Result<Checkpoint> {
@@ -7793,6 +7836,23 @@ fn diff_worktree_against_ref(workspace: &Workspace, base_ref: &str) -> Result<St
     })();
     let _ = fs::remove_file(&index_path);
     result
+}
+
+fn diff_checkpoint_refs(workspace: &Workspace, base_ref: &str, head_ref: &str) -> Result<String> {
+    git_output_dynamic(&workspace.path, &["diff", "--binary", base_ref, head_ref])
+}
+
+fn truncate_text_at_char_boundary(value: String, max_bytes: usize) -> (String, bool) {
+    if value.len() <= max_bytes {
+        return (value, false);
+    }
+    let mut end = max_bytes;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut truncated = value[..end].to_owned();
+    truncated.push_str("\n[Diff truncated at hard limit]\n");
+    (truncated, true)
 }
 
 fn worktree_snapshot_tree(cwd: &Path, index_path: &Path) -> Result<String> {
@@ -16615,16 +16675,80 @@ spotlight_testing = true
         fs::write(workspace.path.join("README.md"), "turn end\n").unwrap();
         fs::write(workspace.path.join("created.txt"), "created during turn\n").unwrap();
 
-        let (checkpoint, diff) = store
+        let turn = store
             .latest_turn_checkpoint_diff("berlin")
             .unwrap()
             .unwrap();
 
-        assert!(checkpoint.message.starts_with("Turn start: thread #42"));
-        assert!(diff.contains("-turn start"));
-        assert!(diff.contains("+turn end"));
-        assert!(diff.contains("created.txt"));
-        assert!(diff.contains("+created during turn"));
+        assert!(turn
+            .checkpoint
+            .message
+            .starts_with("Turn start: thread #42"));
+        assert!(turn.end_checkpoint.is_none());
+        assert!(turn.diff.contains("-turn start"));
+        assert!(turn.diff.contains("+turn end"));
+        assert!(turn.diff.contains("created.txt"));
+        assert!(turn.diff.contains("+created during turn"));
+    }
+
+    #[test]
+    fn turn_checkpoint_diffs_include_recent_turns_with_hard_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        fs::write(workspace.path.join("README.md"), "turn one start\n").unwrap();
+        let first = store
+            .checkpoint_create_turn_start("berlin", 1, None, "user")
+            .unwrap();
+        fs::write(workspace.path.join("README.md"), "turn one end\n").unwrap();
+        let second = store
+            .checkpoint_create_turn_start("berlin", 1, None, "user")
+            .unwrap();
+        fs::write(workspace.path.join("README.md"), "turn two end\n").unwrap();
+
+        let diffs = store.turn_checkpoint_diffs("berlin", 25).unwrap();
+
+        assert_eq!(diffs.len(), 2);
+        assert_eq!(diffs[0].checkpoint.id, second.id);
+        assert!(diffs[0].end_checkpoint.is_none());
+        assert!(diffs[0].diff.contains("-turn one end"));
+        assert!(diffs[0].diff.contains("+turn two end"));
+        assert_eq!(diffs[1].checkpoint.id, first.id);
+        assert_eq!(
+            diffs[1]
+                .end_checkpoint
+                .as_ref()
+                .map(|checkpoint| checkpoint.id),
+            Some(second.id)
+        );
+        assert!(diffs[1].diff.contains("-turn one start"));
+        assert!(diffs[1].diff.contains("+turn one end"));
+
+        let limited = store.turn_checkpoint_diffs("berlin", 1).unwrap();
+        assert_eq!(limited.len(), 1);
+        assert_eq!(limited[0].checkpoint.id, second.id);
     }
 
     #[test]

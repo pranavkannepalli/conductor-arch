@@ -12,8 +12,8 @@ use linux_archductor_core::doctor::SetupReadiness;
 use linux_archductor_core::paths::AppPaths;
 use linux_archductor_core::workspace::{
     ChatThreadRecord, DiffFileSummary, DiffHunkSummary, ProcessRecord, ProcessStatus, PullRequest,
-    PullRequestReviewThread, ReviewComment, SessionKind, Workspace, WorkspaceStore,
-    WorkspaceTimelineEvent,
+    PullRequestReviewThread, ReviewComment, SessionKind, TurnCheckpointDiff, Workspace,
+    WorkspaceStore, WorkspaceTimelineEvent,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -29,6 +29,8 @@ const WORKSPACE_SPLIT_MIN_START: i32 = 360;
 const WORKSPACE_SPLIT_MIN_END: i32 = 280;
 const WS_CHAT_TAB_LIMIT: usize = 10;
 const DIFF_RENDER_LIMIT_BYTES: usize = 200_000;
+const WORKSPACE_TURN_DIFF_LIMIT: usize = 25;
+const WORKSPACE_TURN_DIFF_MAX_KIB: usize = 64;
 type WorkspaceTabSelector = Rc<dyn Fn(&str)>;
 type ContextMenuItem = (&'static str, Rc<dyn Fn()>);
 
@@ -3872,7 +3874,7 @@ fn workspace_changes_panel(
     let untracked_view = workspace_untracked_changes_view(db_path, name);
     body_stack.add_named(&untracked_view, Some("untracked"));
 
-    let last_turn_view = workspace_last_turn_changes_view(db_path, name);
+    let last_turn_view = workspace_turn_changes_view(db_path, name);
     body_stack.add_named(&last_turn_view, Some("last_turn"));
 
     let checks_view = workspace_checks_text_view(store, name);
@@ -3894,7 +3896,7 @@ fn workspace_changes_panel(
         ("Total changes", "total", "Total changes"),
         ("Split diff", "split", "Split diff"),
         ("Untracked changes", "untracked", "Untracked changes"),
-        ("Last turn changes", "last_turn", "Last turn changes"),
+        ("Turn changes", "last_turn", "Turn changes"),
         ("By commit", "commits", "Changes by commit"),
         ("Checks", "checks", "Checks"),
     ] {
@@ -4889,7 +4891,7 @@ fn workspace_untracked_changes_view(db_path: &Path, name: &str) -> ScrolledWindo
     scroll
 }
 
-fn workspace_last_turn_changes_view(db_path: &Path, name: &str) -> ScrolledWindow {
+fn workspace_turn_changes_view(db_path: &Path, name: &str) -> ScrolledWindow {
     let view = TextView::new();
     view.set_editable(false);
     view.set_monospace(true);
@@ -4899,7 +4901,7 @@ fn workspace_last_turn_changes_view(db_path: &Path, name: &str) -> ScrolledWindo
     view.set_right_margin(6);
     view.set_top_margin(4);
     view.buffer()
-        .set_text(&workspace_last_turn_changes_text(db_path, name));
+        .set_text(&workspace_turn_changes_text(db_path, name));
     apply_diff_tags(&view.buffer());
     let scroll = ScrolledWindow::new();
     scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
@@ -5033,24 +5035,53 @@ fn workspace_untracked_changes_text(db_path: &Path, name: &str) -> String {
     }
 }
 
-fn workspace_last_turn_changes_text(db_path: &Path, name: &str) -> String {
-    let result =
-        WorkspaceStore::open(db_path).and_then(|store| store.latest_turn_checkpoint_diff(name));
+fn workspace_turn_changes_text(db_path: &Path, name: &str) -> String {
+    let result = WorkspaceStore::open(db_path)
+        .and_then(|store| store.turn_checkpoint_diffs(name, WORKSPACE_TURN_DIFF_LIMIT));
     match result {
-        Ok(Some((checkpoint, diff))) if diff.trim().is_empty() => format!(
-            "Last turn changes\nCheckpoint #{} {}\nNo changes since this turn started.\n",
-            checkpoint.id, checkpoint.created_at
-        ),
-        Ok(Some((checkpoint, diff))) => format!(
-            "Last turn changes\nCheckpoint #{} {}\n{}\n",
-            checkpoint.id, checkpoint.created_at, diff
-        ),
-        Ok(None) => {
-            "Last turn changes\nNo turn checkpoint yet. Send a chat prompt to create one.\n"
-                .to_owned()
+        Ok(turns) if turns.is_empty() => {
+            "Turn changes\nNo turn checkpoints yet. Send chat prompts to create them.\n".to_owned()
         }
-        Err(err) => format!("Last turn changes\nCould not read turn diff: {err:#}\n"),
+        Ok(turns) => format_workspace_turn_changes(&turns),
+        Err(err) => format!("Turn changes\nCould not read turn diffs: {err:#}\n"),
     }
+}
+
+fn format_workspace_turn_changes(turns: &[TurnCheckpointDiff]) -> String {
+    let mut out = format!(
+        "Turn changes\nShowing up to {} recent turns. Each diff is capped at {} KiB.\n",
+        WORKSPACE_TURN_DIFF_LIMIT, WORKSPACE_TURN_DIFF_MAX_KIB
+    );
+    for turn in turns {
+        out.push('\n');
+        out.push_str(&format!(
+            "Checkpoint #{} {}\n{}\n",
+            turn.checkpoint.id, turn.checkpoint.created_at, turn.checkpoint.message
+        ));
+        if let Some(end) = &turn.end_checkpoint {
+            out.push_str(&format!(
+                "Range: checkpoint #{} -> checkpoint #{}\n",
+                turn.checkpoint.id, end.id
+            ));
+        } else {
+            out.push_str(&format!(
+                "Range: checkpoint #{} -> current worktree\n",
+                turn.checkpoint.id
+            ));
+        }
+        if turn.diff.trim().is_empty() {
+            out.push_str("No changes for this turn.\n");
+        } else {
+            out.push_str(&turn.diff);
+            if !turn.diff.ends_with('\n') {
+                out.push('\n');
+            }
+            if turn.truncated {
+                out.push_str("[Turn diff reached hard display limit]\n");
+            }
+        }
+    }
+    out
 }
 
 fn workspace_checks_and_todos_text(store: &WorkspaceStore, name: &str) -> String {
@@ -7740,6 +7771,17 @@ fn apply_action_feedback(
 mod tests {
     use super::*;
 
+    fn test_checkpoint(id: i64, message: &str) -> linux_archductor_core::workspace::Checkpoint {
+        linux_archductor_core::workspace::Checkpoint {
+            id,
+            workspace_id: 1,
+            session_id: None,
+            git_ref: format!("refs/test/{id}"),
+            message: message.to_owned(),
+            created_at: "2026-07-12T00:00:00Z".to_owned(),
+        }
+    }
+
     #[test]
     fn workspace_tab_stack_name_maps_palette_targets_to_tabs() {
         assert_eq!(
@@ -8074,6 +8116,33 @@ mod tests {
         assert!(text.contains("12,345 persisted bytes"));
         assert!(text.contains("persisted transcript/event bytes divided by 4"));
         assert!(text.contains("- Fix parser [codex]: 10 tokens, 40 bytes, 2 messages, 1 events"));
+    }
+
+    #[test]
+    fn workspace_turn_changes_formats_multiple_bounded_turns() {
+        let turns = vec![
+            TurnCheckpointDiff {
+                checkpoint: test_checkpoint(2, "Turn start: thread #7 user"),
+                end_checkpoint: None,
+                diff: "diff --git a/README.md b/README.md\n+latest\n".to_owned(),
+                truncated: false,
+            },
+            TurnCheckpointDiff {
+                checkpoint: test_checkpoint(1, "Turn start: thread #7 user"),
+                end_checkpoint: Some(test_checkpoint(2, "Turn start: thread #7 user")),
+                diff: String::new(),
+                truncated: true,
+            },
+        ];
+
+        let text = format_workspace_turn_changes(&turns);
+
+        assert!(text.contains("Showing up to 25 recent turns"));
+        assert!(text.contains("Each diff is capped at 64 KiB"));
+        assert!(text.contains("Range: checkpoint #2 -> current worktree"));
+        assert!(text.contains("Range: checkpoint #1 -> checkpoint #2"));
+        assert!(text.contains("+latest"));
+        assert!(text.contains("No changes for this turn."));
     }
 
     #[test]
