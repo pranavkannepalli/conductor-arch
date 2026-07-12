@@ -3971,6 +3971,7 @@ fn workspace_git_file_action_row(
         refresh_hub.clone(),
         toast_overlay.clone(),
         feedback,
+        None,
         |store, workspace_name, file_path| store.stage_workspace_file(workspace_name, file_path),
     );
     row.append(&stage_btn);
@@ -3986,11 +3987,12 @@ fn workspace_git_file_action_row(
         refresh_hub.clone(),
         toast_overlay.clone(),
         feedback,
+        None,
         |store, workspace_name, file_path| store.unstage_workspace_file(workspace_name, file_path),
     );
     row.append(&unstage_btn);
 
-    let revert_btn = text_button("Revert");
+    let revert_btn = destructive_button("Revert");
     revert_btn.set_sensitive(!summary.untracked);
     connect_git_file_action(
         &revert_btn,
@@ -4001,6 +4003,7 @@ fn workspace_git_file_action_row(
         refresh_hub,
         toast_overlay,
         feedback,
+        Some("Confirm Revert"),
         |store, workspace_name, file_path| store.revert_workspace_file(workspace_name, file_path),
     );
     row.append(&revert_btn);
@@ -4017,6 +4020,7 @@ fn connect_git_file_action<F>(
     refresh_hub: RefreshHub,
     toast_overlay: ToastOverlay,
     feedback: &Label,
+    confirm_label: Option<&'static str>,
     action: F,
 ) where
     F: Fn(&WorkspaceStore, &str, &str) -> anyhow::Result<()> + 'static,
@@ -4025,7 +4029,29 @@ fn connect_git_file_action<F>(
     let workspace_name = workspace_name.to_owned();
     let file_path = file_path.to_owned();
     let feedback = feedback.clone();
+    let confirmed = Rc::new(RefCell::new(confirm_label.is_none()));
+    let button_for_click = button.clone();
     button.connect_clicked(move |_| {
+        if let Some(confirm_label) = confirm_label {
+            if !*confirmed.borrow() {
+                *confirmed.borrow_mut() = true;
+                button_for_click.set_label(confirm_label);
+                apply_action_feedback(
+                    &feedback,
+                    &toast_overlay,
+                    &format!("Click {confirm_label} to update {file_path}."),
+                    true,
+                );
+                return;
+            }
+        }
+        button_for_click.set_sensitive(false);
+        apply_action_feedback(
+            &feedback,
+            &toast_overlay,
+            &format!("Updating {file_path}..."),
+            false,
+        );
         let result = WorkspaceStore::open(&db_path)
             .and_then(|store| action(&store, &workspace_name, &file_path));
         match result {
@@ -4038,12 +4064,15 @@ fn connect_git_file_action<F>(
                 );
                 refresh_hub.refresh(RefreshScope::Workspace);
             }
-            Err(err) => apply_action_feedback(
-                &feedback,
-                &toast_overlay,
-                &format!("Could not update {file_path}: {err:#}"),
-                true,
-            ),
+            Err(err) => {
+                button_for_click.set_sensitive(true);
+                apply_action_feedback(
+                    &feedback,
+                    &toast_overlay,
+                    &format!("Could not update {file_path}: {err:#}"),
+                    true,
+                );
+            }
         }
     });
 }
