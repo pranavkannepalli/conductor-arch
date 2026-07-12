@@ -29,8 +29,8 @@ use command_palette::{
     ShortcutAction,
 };
 use gtk::{
-    Align, Box as GBox, CssProvider, Entry, Label, Orientation, Overlay, ScrolledWindow, Stack,
-    STYLE_PROVIDER_PRIORITY_APPLICATION,
+    Align, Box as GBox, CssProvider, Entry, Label, Orientation, Overflow, Overlay, ScrolledWindow,
+    Stack, STYLE_PROVIDER_PRIORITY_APPLICATION,
 };
 use linux_archductor_core::archcar::server::{
     reconcile_managed_sessions_on_startup, ArchcarServer,
@@ -818,11 +818,15 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     refresh_hub.set_history(refresh_history.clone());
     refresh_hub.set_sidebar(refresh_sidebar.clone());
 
-    split.set_sidebar(Some(&sidebar));
-    toast_overlay.set_child(Some(&main_stack));
-
     let content_overlay = Overlay::new();
-    content_overlay.set_child(Some(&toast_overlay));
+    content_overlay.set_child(Some(&main_stack));
+
+    toast_overlay.set_halign(Align::End);
+    toast_overlay.set_valign(Align::End);
+    toast_overlay.set_overflow(Overflow::Visible);
+    toast_overlay.set_margin_end(16);
+    toast_overlay.set_margin_bottom(16);
+    content_overlay.add_overlay(&toast_overlay);
 
     let reopen_sidebar_btn = icon_button("sidebar-show-symbolic", "Show sidebar");
     reopen_sidebar_btn.add_css_class("sidebar-reopen-button");
@@ -838,6 +842,8 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         });
     }
     content_overlay.add_overlay(&reopen_sidebar_btn);
+
+    split.set_sidebar(Some(&sidebar));
     reopen_sidebar_btn.set_visible(split.is_collapsed());
     {
         let reopen_sidebar_btn = reopen_sidebar_btn.clone();
