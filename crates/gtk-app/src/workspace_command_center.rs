@@ -5558,6 +5558,7 @@ fn workspace_checks_panel(
             let button_row = make_action_row();
             let draft_check = CheckButton::with_label("Draft");
             let push_btn = secondary_button(action_labels[0]);
+            let force_push_btn = destructive_button("Force Push Lease");
             let create_btn = text_button(action_labels[1]);
             create_btn.add_css_class("suggested-action");
             let body_buffer = body_view.buffer();
@@ -5582,9 +5583,58 @@ fn workspace_checks_panel(
                     Err(err) => apply_action_feedback(
                         &feedback_for_push,
                         &toast_for_push,
-                        &format!("Push branch failed: {err:#}"),
+                        &push_branch_error_feedback(&err),
                         true,
                     ),
+                }
+            });
+
+            let db_for_force_push = db_path.to_path_buf();
+            let workspace_for_force_push = name.to_owned();
+            let feedback_for_force_push = feedback.clone();
+            let toast_for_force_push = toast_overlay.clone();
+            let force_confirmed = Rc::new(RefCell::new(false));
+            let force_confirmed_for_click = force_confirmed.clone();
+            let force_push_btn_for_click = force_push_btn.clone();
+            force_push_btn.connect_clicked(move |_| {
+                if !*force_confirmed_for_click.borrow() {
+                    *force_confirmed_for_click.borrow_mut() = true;
+                    force_push_btn_for_click.set_label("Confirm Force Push");
+                    apply_action_feedback(
+                        &feedback_for_force_push,
+                        &toast_for_force_push,
+                        "Click Confirm Force Push to run git push --force-with-lease.",
+                        true,
+                    );
+                    return;
+                }
+                force_push_btn_for_click.set_sensitive(false);
+                match WorkspaceStore::open(db_for_force_push.clone())
+                    .and_then(|store| store.force_push_branch_with_lease(&workspace_for_force_push))
+                {
+                    Ok(output) => {
+                        let message = output
+                            .lines()
+                            .map(str::trim)
+                            .find(|line| !line.is_empty())
+                            .map(|line| format!("Force pushed with lease: {line}"))
+                            .unwrap_or_else(|| "Force pushed with lease.".to_owned());
+                        apply_action_feedback(
+                            &feedback_for_force_push,
+                            &toast_for_force_push,
+                            &message,
+                            true,
+                        );
+                    }
+                    Err(err) => {
+                        force_push_btn_for_click.set_sensitive(true);
+                        apply_action_feedback(
+                            &feedback_for_force_push,
+                            &toast_for_force_push,
+                            &push_branch_error_feedback(&err),
+                            true,
+                        );
+                    }
                 }
             });
 
@@ -5620,6 +5670,7 @@ fn workspace_checks_panel(
 
             button_row.append(&draft_check);
             button_row.append(&push_btn);
+            button_row.append(&force_push_btn);
             button_row.append(&create_btn);
             header.append(&button_row);
         }
@@ -5962,6 +6013,12 @@ fn pull_request_create_feedback(result: anyhow::Result<String>) -> String {
         }
         Err(err) => format!("Create PR failed: {err:#}"),
     }
+}
+
+fn push_branch_error_feedback(err: &anyhow::Error) -> String {
+    format!(
+        "Push branch failed: {err:#}\nSuggested fix: fetch latest origin state, inspect branch divergence, then retry normal push or use Force Push Lease when replacing your own remote branch is intended."
+    )
 }
 
 fn pull_request_merge_feedback(result: anyhow::Result<String>) -> String {

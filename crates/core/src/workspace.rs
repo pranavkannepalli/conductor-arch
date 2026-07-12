@@ -2914,6 +2914,27 @@ impl WorkspaceStore {
         Ok(output)
     }
 
+    pub fn force_push_branch_with_lease(&self, name: &str) -> Result<String> {
+        let workspace = self.get_by_name(name)?;
+        let output = git_output_dynamic(
+            &workspace.path,
+            &[
+                "push",
+                "--force-with-lease",
+                "-u",
+                "origin",
+                workspace.branch.as_str(),
+            ],
+        )?;
+        self.record_workspace_event(
+            workspace.id,
+            &workspace.name,
+            "branch.force_pushed",
+            &format!("Force pushed branch {} with lease", workspace.branch),
+        )?;
+        Ok(output)
+    }
+
     pub fn create_pull_request(
         &self,
         name: &str,
@@ -13859,6 +13880,98 @@ general = "Keep changes focused."
         assert_eq!(
             store
                 .workspace_timeline("berlin", Some("base_ref.updated"))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn force_push_branch_with_lease_updates_remote_branch() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let remote_path = temp.path().join("origin.git");
+        Command::new("git")
+            .args(["init", "--bare", "--initial-branch", "main"])
+            .arg(&remote_path)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["remote", "add", "origin"])
+            .arg(&remote_path)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["push", "-u", "origin", "main"])
+            .status()
+            .unwrap();
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        fs::write(workspace.path.join("README.md"), "force push\n").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&workspace.path)
+            .args(["add", "README.md"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&workspace.path)
+            .args([
+                "-c",
+                "user.name=Linux Archductor",
+                "-c",
+                "user.email=linux-archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "force push readme",
+            ])
+            .status()
+            .unwrap();
+
+        let output = store.force_push_branch_with_lease("berlin").unwrap();
+        let workspace_head = git_output(&workspace.path, ["rev-parse", "HEAD"]);
+        let remote_head = Command::new("git")
+            .arg("--git-dir")
+            .arg(&remote_path)
+            .args(["rev-parse", "refs/heads/lc/berlin"])
+            .output()
+            .unwrap();
+
+        assert!(output.contains("lc/berlin"));
+        assert_eq!(
+            String::from_utf8(remote_head.stdout).unwrap().trim(),
+            workspace_head.trim()
+        );
+        assert_eq!(
+            store
+                .workspace_timeline("berlin", Some("branch.force_pushed"))
                 .unwrap()
                 .len(),
             1
