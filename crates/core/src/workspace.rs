@@ -2759,7 +2759,14 @@ impl WorkspaceStore {
                 "--",
                 path_value.as_str(),
             ],
-        )
+        )?;
+        self.record_workspace_event(
+            workspace.id,
+            &workspace.name,
+            "file.reverted",
+            &format!("Reverted {relative_path} to HEAD"),
+        )?;
+        Ok(())
     }
 
     pub fn stage_workspace_file(&self, name: &str, relative_path: &str) -> Result<()> {
@@ -15312,6 +15319,11 @@ exit 1
             .changed_files("berlin")
             .unwrap()
             .contains(&"README.md".to_owned()));
+        let events = store
+            .workspace_timeline("berlin", Some("file.reverted"))
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(events[0].summary.contains("README.md"));
     }
 
     #[test]

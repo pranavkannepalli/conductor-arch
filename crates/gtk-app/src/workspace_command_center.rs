@@ -4039,7 +4039,9 @@ fn connect_git_file_action<F>(
                 apply_action_feedback(
                     &feedback,
                     &toast_overlay,
-                    &format!("Click {confirm_label} to update {file_path}."),
+                    &format!(
+                        "Click {confirm_label} to discard staged and working tree changes in {file_path}."
+                    ),
                     true,
                 );
                 return;
