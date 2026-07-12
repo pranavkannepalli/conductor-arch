@@ -7,8 +7,9 @@ use gtk::{
 use linux_archductor_core::paths::AppPaths;
 use linux_archductor_core::repository::RepositoryStore;
 use linux_archductor_core::settings::{
-    customization_settings_from_toml, customization_settings_to_toml, ensure_repository_config,
-    inspect_repository_settings, load_repository_settings_for_layer, save_repository_settings,
+    customization_settings_from_toml, customization_settings_to_toml,
+    default_repository_settings_toml, ensure_repository_config, inspect_repository_settings,
+    load_repository_settings_for_layer, repository_settings_from_toml, save_repository_settings,
     AgentProfileSettings, FilePatternSource, GitSettings, PromptSettings, ProviderSettings,
     RepositorySettings, ScriptSettings, SettingsLayer,
 };
@@ -91,11 +92,13 @@ pub(crate) fn build_settings_page(
     let settings_repo_select = ComboBoxText::new();
     settings_repo_select.set_hexpand(true);
     let init_settings_btn = text_button("Initialize");
+    let recover_defaults_btn = text_button("Recover Defaults");
     let save_settings_btn = text_button("Save");
     save_settings_btn.add_css_class("suggested-action");
     refresh_repository_select(&settings_repo_select, &paths.database_path, None);
     settings_top.append(&settings_repo_select);
     settings_top.append(&init_settings_btn);
+    settings_top.append(&recover_defaults_btn);
     settings_top.append(&save_settings_btn);
     settings_toolbar.append(&settings_top);
     body.append(&settings_toolbar);
@@ -917,6 +920,52 @@ pub(crate) fn build_settings_page(
         })
     };
     let load_selected_settings_for_repo = load_selected_settings.clone();
+    let db_path_recover_settings = paths.database_path.clone();
+    let settings_repo_select_recover = settings_repo_select.clone();
+    let local_tab_recover = local_tab.clone();
+    let settings_result_recover = settings_result.clone();
+    let toast_recover = toast_manager.clone();
+    let load_selected_settings_for_recover = load_selected_settings.clone();
+    recover_defaults_btn.connect_clicked(move |_| {
+        let repo_name = selected_repository_name(&settings_repo_select_recover);
+        if repo_name.is_empty() {
+            surface_label_error(
+                &settings_result_recover,
+                &toast_recover,
+                "Repository name is required.",
+            );
+            return;
+        }
+        let layer = selected_settings_layer(&local_tab_recover);
+        let settings = match recovered_settings_for_layer(layer) {
+            Ok(settings) => settings,
+            Err(err) => {
+                surface_label_error(
+                    &settings_result_recover,
+                    &toast_recover,
+                    format!("Recovery failed: {err:#}"),
+                );
+                return;
+            }
+        };
+        match repository_root(&db_path_recover_settings, &repo_name).and_then(|repo_path| {
+            save_repository_settings(&repo_path, layer, &settings).map(|()| repo_path)
+        }) {
+            Ok(repo_path) => {
+                load_selected_settings_for_recover();
+                settings_result_recover.set_text(&format!(
+                    "Recovered {:?} settings for {}. Previous file was backed up when present.",
+                    layer,
+                    repo_path.display()
+                ));
+            }
+            Err(err) => surface_label_error(
+                &settings_result_recover,
+                &toast_recover,
+                format!("Recovery failed: {err:#}"),
+            ),
+        }
+    });
     let loading_settings_for_repo = loading_settings_for_load.clone();
     let pending_autosave: Rc<RefCell<Option<gtk::glib::SourceId>>> = Rc::new(RefCell::new(None));
     let pending_autosave_target: Rc<RefCell<Option<(String, SettingsLayer)>>> =
@@ -1494,6 +1543,15 @@ fn run_mode_setting_for_layer(layer: SettingsLayer, value: Option<String>) -> Op
     }
 }
 
+fn recovered_settings_for_layer(layer: SettingsLayer) -> anyhow::Result<RepositorySettings> {
+    match layer {
+        SettingsLayer::RepositoryShared => {
+            repository_settings_from_toml(&default_repository_settings_toml()?)
+        }
+        SettingsLayer::LocalOverride => Ok(RepositorySettings::default()),
+    }
+}
+
 fn prompt_settings_is_empty(settings: &PromptSettings) -> bool {
     settings == &PromptSettings::default()
 }
@@ -1660,6 +1718,16 @@ mod tests {
             run_mode_setting_for_layer(SettingsLayer::RepositoryShared, None),
             Some("concurrent".to_owned())
         );
+    }
+
+    #[test]
+    fn recovery_defaults_match_selected_layer() {
+        let shared = recovered_settings_for_layer(SettingsLayer::RepositoryShared).unwrap();
+        assert_eq!(shared.file_include_globs, [".env*"]);
+        assert_eq!(shared.scripts.run_mode.as_deref(), Some("concurrent"));
+
+        let local = recovered_settings_for_layer(SettingsLayer::LocalOverride).unwrap();
+        assert_eq!(local, RepositorySettings::default());
     }
 
     #[test]

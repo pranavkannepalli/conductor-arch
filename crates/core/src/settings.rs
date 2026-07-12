@@ -2374,6 +2374,19 @@ LOCAL_ONLY = "1"
     }
 
     #[test]
+    fn load_repository_settings_missing_config_uses_safe_defaults() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let settings = load_repository_settings(temp.path()).unwrap();
+
+        assert!(settings.file_include_globs.is_empty());
+        assert!(settings.env_file_refs.is_empty());
+        assert!(settings.scripts.run.is_none());
+        assert!(settings.environment_variables.is_empty());
+        assert_eq!(settings.customization, CustomizationSettings::default());
+    }
+
+    #[test]
     fn ensure_repository_config_keeps_existing_valid_settings() {
         let temp = tempfile::tempdir().unwrap();
         let conductor_dir = temp.path().join(".archductor");
