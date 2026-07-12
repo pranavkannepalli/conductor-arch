@@ -1,0 +1,50 @@
+"$schema" = "https://conductor.build/schemas/settings.repo.schema.json"
+file_include_globs = ".env*"
+
+[scripts]
+run_mode = "concurrent"
+
+[prompt_pack]
+active = "default"
+version = "v1"
+path = ".archductor/prompt-packs/default.toml"
+
+[git]
+
+[customization.naming]
+
+[customization.automation]
+auto_setup = false
+
+[customization.merge_rules]
+
+[customization.workspace_defaults]
+base_branch = "main"
+branch_prefix = "lc"
+port_block_size = 10
+default_visible_tab = "changes"
+
+[customization.view]
+theme = "system"
+accent_color = "green"
+density = "compact"
+diff_preference = "unified"
+transcript_display = "structured"
+
+[customization.view.colors]
+accent = "#22c55e"
+accent_fg = "#052e16"
+background = "#191919"
+border = "#2a2a2a"
+border_strong = "#3a3a3a"
+danger = "#ff8a8a"
+hover = "#2a2a2a"
+hover_soft = "#242424"
+success = "#84e0a0"
+surface = "#1e1e1e"
+surface_muted = "#181818"
+surface_raised = "#202020"
+text = "#e4e4e4"
+text_muted = "#8a8a8a"
+text_strong = "#f8fafc"
+warning = "#f59e0b"
