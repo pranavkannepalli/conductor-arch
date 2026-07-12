@@ -1737,7 +1737,7 @@ fn normalize_agent_screen_message_body(body: &[String]) -> String {
             content.push_str("\n\n");
             content.push_str(trimmed);
         } else if join_with_previous {
-            if should_insert_agent_soft_wrap_space(previous_line.as_deref().unwrap(), trimmed) {
+            if should_insert_agent_soft_wrap_space(previous_line.as_deref().unwrap()) {
                 content.push(' ');
             }
             content.push_str(trimmed);
@@ -1754,12 +1754,23 @@ fn normalize_agent_screen_message_body(body: &[String]) -> String {
 }
 
 fn is_likely_terminal_soft_wrap(previous: &str, current: &str) -> bool {
-    (previous.ends_with('/') && starts_wordish(current))
-        || (previous.starts_with("http") && starts_wordish(current))
+    trailing_wrapped_path_token(previous)
+        .is_some_and(|token| token.ends_with('/') && starts_wordish(current))
 }
 
-fn should_insert_agent_soft_wrap_space(previous: &str, current: &str) -> bool {
-    !(previous.ends_with('/') || previous.ends_with('-')) || !starts_wordish(current)
+fn trailing_wrapped_path_token(line: &str) -> Option<&str> {
+    let token = line.split_whitespace().last()?;
+    let slash_count = token.matches('/').count();
+    (token.starts_with('/')
+        || token.starts_with("http://")
+        || token.starts_with("https://")
+        || token.contains("://")
+        || slash_count >= 2)
+        .then_some(token)
+}
+
+fn should_insert_agent_soft_wrap_space(previous: &str) -> bool {
+    !previous.ends_with('/') && !previous.ends_with('-')
 }
 
 fn starts_wordish(line: &str) -> bool {
@@ -2717,6 +2728,24 @@ test codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok
     }
 
     #[test]
+    fn preserves_deliberate_line_after_non_path_slash() {
+        let screen = "\
+╭─ Codex ───────────────╮
+│ Keep the branch prefix lc/
+│ hoi-an remains a separate line here.
+╰───────────────────────╯";
+
+        assert_eq!(
+            parse_codex_screen_messages(screen),
+            vec![ScreenMessage {
+                role: ScreenMessageRole::Agent,
+                content: "Keep the branch prefix lc/\nhoi-an remains a separate line here."
+                    .to_owned(),
+            }]
+        );
+    }
+
+    #[test]
     fn preserves_agent_list_item_boundaries_when_rejoining_wraps() {
         let screen = "\
 ╭─ Codex ───────────────╮
@@ -3024,7 +3053,7 @@ test codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok
             parse_codex_screen_messages(screen),
             vec![ScreenMessage {
                 role: ScreenMessageRole::Agent,
-                content: "Repo state is quiet.\n\nYou’re in /home/kitts/archductor/workspaces/chandelier/hoi-an on branch lc/hoi-an, and HEAD matches origin/main at commit 7f7ab37 (Add custom payment\nsplit (#14)). There are no tracked file changes. The only uncommitted thing is\nan untracked .context/ folder with placeholder files:\n\n- .context/brief.md\n- .context/todos.md\n- .context/agent-notes.md\n\nProject-wise, this is a Next.js 16.2.9 / React 19 app for Chandelier\nConsulting with public marketing pages, admin routes, Supabase, and Stripe\nAPIs. The last few merged changes were:\n\n- Add custom payment split\n- simplify client agreement flow\n- Stack projects page layout".to_owned(),
+                content: "Repo state is quiet.\n\nYou’re in /home/kitts/archductor/workspaces/chandelier/hoi-an on branch lc/\nhoi-an, and HEAD matches origin/main at commit 7f7ab37 (Add custom payment\nsplit (#14)). There are no tracked file changes. The only uncommitted thing is\nan untracked .context/ folder with placeholder files:\n\n- .context/brief.md\n- .context/todos.md\n- .context/agent-notes.md\n\nProject-wise, this is a Next.js 16.2.9 / React 19 app for Chandelier\nConsulting with public marketing pages, admin routes, Supabase, and Stripe\nAPIs. The last few merged changes were:\n\n- Add custom payment split\n- simplify client agreement flow\n- Stack projects page layout".to_owned(),
             }]
         );
     }

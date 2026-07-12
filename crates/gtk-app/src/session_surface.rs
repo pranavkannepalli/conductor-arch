@@ -793,6 +793,7 @@ pub fn agent_session_panel(
                 let _ = flush_pending_archcar_inputs(
                     &archcar_bridge,
                     &database_path,
+                    &workspace,
                     pending_commands.as_ref(),
                     pending_archcar_inputs.as_ref(),
                     archcar_ready_cache.as_ref(),
@@ -1554,7 +1555,6 @@ pub fn agent_session_panel(
                     ArchcarInputKind::User
                 },
             );
-            persist_turn_checkpoint();
             let queued = Label::new(Some(
                 "[session start] Runtime session requested through archcar. Queued message will send when the session is ready.",
             ));
@@ -5928,6 +5928,7 @@ fn any_running_archcar_codex_ready(
 fn flush_pending_archcar_inputs(
     bridge: &AsyncArchcarBridge,
     database_path: &Path,
+    workspace: &str,
     pending_commands: &RefCell<HashMap<i64, Vec<String>>>,
     pending_inputs: &RefCell<HashMap<i64, Vec<QueuedArchcarInput>>>,
     ready_cache: &RefCell<HashMap<i64, bool>>,
@@ -6017,6 +6018,21 @@ fn flush_pending_archcar_inputs(
             );
             if matches!(queued_input.kind, ArchcarInputKind::ReviewPrompt) {
                 app_state.set_staged_review_prompt(None);
+            }
+            if let Err(err) = create_turn_checkpoint_for_send(
+                database_path,
+                workspace,
+                thread_id,
+                Some(record.id),
+                matches!(queued_input.kind, ArchcarInputKind::ReviewPrompt),
+            ) {
+                warn!(
+                    workspace = %workspace,
+                    thread_id,
+                    process_id = record.id,
+                    error = %err,
+                    "turn checkpoint creation failed after queued archcar input submitted"
+                );
             }
             flushed_any = true;
         }

@@ -295,7 +295,7 @@ fn raw_chunks_from_slices(raw: &str, chunks: &[(usize, &str)]) -> Vec<RawChunk> 
         return Vec::new();
     }
     let redacted = redact_sensitive_text(raw);
-    let redacted_chunks = split_redacted_stream_for_chunks(&redacted, chunks);
+    let redacted_chunks = split_redacted_stream_for_chunks(raw, &redacted, chunks);
     let mut previous = String::new();
     chunks
         .iter()
@@ -319,22 +319,21 @@ fn raw_chunks_from_slices(raw: &str, chunks: &[(usize, &str)]) -> Vec<RawChunk> 
         .collect()
 }
 
-fn split_redacted_stream_for_chunks(redacted: &str, chunks: &[(usize, &str)]) -> Vec<String> {
+fn split_redacted_stream_for_chunks(
+    raw: &str,
+    redacted: &str,
+    chunks: &[(usize, &str)],
+) -> Vec<String> {
     let mut output = Vec::with_capacity(chunks.len());
+    let mut raw_cursor = 0;
     let mut cursor = 0;
     for (position, (_, chunk)) in chunks.iter().enumerate() {
         let is_last = position + 1 == chunks.len();
-        let newline_count = chunk.matches('\n').count();
+        raw_cursor += chunk.len();
         let end = if is_last {
             redacted.len()
-        } else if newline_count == 0 {
-            redacted_offset_after_chars(redacted, cursor, chunk.chars().count())
-                .map(|end| extend_past_partial_redaction_marker(redacted, end))
-                .unwrap_or(redacted.len())
         } else {
-            redacted_offset_after_newlines(redacted, cursor, newline_count)
-                .map(|end| extend_past_partial_redaction_marker(redacted, end))
-                .unwrap_or(redacted.len())
+            redacted_offset_for_raw_prefix(raw, redacted, raw_cursor).max(cursor)
         };
         output.push(redacted[cursor..end].to_owned());
         cursor = end;
@@ -342,49 +341,19 @@ fn split_redacted_stream_for_chunks(redacted: &str, chunks: &[(usize, &str)]) ->
     output
 }
 
-fn redacted_offset_after_chars(redacted: &str, start: usize, char_count: usize) -> Option<usize> {
-    if char_count == 0 {
-        return Some(start);
-    }
-    let mut seen = 0;
-    for (offset, ch) in redacted[start..].char_indices() {
-        seen += 1;
-        if seen == char_count {
-            return Some(start + offset + ch.len_utf8());
-        }
-    }
-    None
+fn redacted_offset_for_raw_prefix(raw: &str, redacted: &str, raw_end: usize) -> usize {
+    let proposed = redact_sensitive_text(&raw[..raw_end])
+        .len()
+        .min(redacted.len());
+    previous_char_boundary(redacted, proposed)
 }
 
-fn extend_past_partial_redaction_marker(redacted: &str, end: usize) -> usize {
-    const MARKER: &str = "[redacted]";
-    let mut search_start = 0;
-    while let Some(offset) = redacted[search_start..].find(MARKER) {
-        let marker_start = search_start + offset;
-        let marker_end = marker_start + MARKER.len();
-        if marker_start < end && end < marker_end {
-            return marker_end;
-        }
-        search_start = marker_end;
+fn previous_char_boundary(value: &str, proposed: usize) -> usize {
+    let mut index = proposed.min(value.len());
+    while !value.is_char_boundary(index) {
+        index -= 1;
     }
-    end
-}
-
-fn redacted_offset_after_newlines(
-    redacted: &str,
-    start: usize,
-    newline_count: usize,
-) -> Option<usize> {
-    let mut seen = 0;
-    for (offset, ch) in redacted[start..].char_indices() {
-        if ch == '\n' {
-            seen += 1;
-            if seen == newline_count {
-                return Some(start + offset + ch.len_utf8());
-            }
-        }
-    }
-    None
+    index
 }
 
 fn normalize_pty_text(raw: &str) -> String {
@@ -1195,6 +1164,35 @@ mod tests {
                 .collect::<String>(),
             "abcdef\n"
         );
+    }
+
+    #[test]
+    fn inspector_redacted_value_does_not_consume_later_visible_chunks() {
+        let chunks = vec![
+            PtyChunkRecord {
+                id: 1,
+                process_id: 1,
+                sequence: 1,
+                occurred_at_ms: 10,
+                stream: "stdout".to_owned(),
+                text: "TOKEN=very-long-secret-value".to_owned(),
+                created_at: "now".to_owned(),
+            },
+            PtyChunkRecord {
+                id: 2,
+                process_id: 1,
+                sequence: 2,
+                occurred_at_ms: 11,
+                stream: "stdout".to_owned(),
+                text: "\nvisible\n".to_owned(),
+                created_at: "now".to_owned(),
+            },
+        ];
+
+        let rendered = raw_chunks_from_records(&chunks);
+
+        assert_eq!(rendered[0].text, "TOKEN=[redacted]");
+        assert_eq!(rendered[1].text, "\nvisible\n");
     }
 
     #[test]
