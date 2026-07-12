@@ -62,6 +62,7 @@ pub use crate::terminal_logs::{TerminalLogMatch, TerminalSessionSummary};
 
 const SIGTERM_EXIT_CODE: i32 = 143;
 const UNTRACKED_FILE_COUNT_BYTE_LIMIT: usize = 1024 * 1024;
+const DIFF_HUNK_PATCH_LIMIT_BYTES: usize = 200 * 1024;
 const WORKSPACE_CITY_NAMES: [&str; 200] = [
     "berlin",
     "tokyo",
@@ -869,6 +870,16 @@ pub struct DiffFileSummary {
     pub staged: bool,
     pub unstaged: bool,
     pub untracked: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffHunkSummary {
+    pub index: usize,
+    pub header: String,
+    pub additions: usize,
+    pub deletions: usize,
+    pub staged: bool,
+    pub unsupported_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2716,6 +2727,77 @@ impl WorkspaceStore {
             );
         }
         git_output(&workspace.path, ["diff", "--cached", "--"])
+    }
+
+    pub fn diff_hunks(
+        &self,
+        name: &str,
+        relative_path: &str,
+        staged: bool,
+    ) -> Result<Vec<DiffHunkSummary>> {
+        let workspace = self.get_by_name(name)?;
+        let validated = validate_workspace_relative_path(relative_path)?;
+        let path_value = validated.to_string_lossy().to_string();
+        let diff = if staged {
+            git_output_dynamic(
+                &workspace.path,
+                &["diff", "--cached", "--", path_value.as_str()],
+            )?
+        } else {
+            git_output_dynamic(&workspace.path, &["diff", "--", path_value.as_str()])?
+        };
+        Ok(diff_hunk_summaries(&diff, staged))
+    }
+
+    pub fn stage_workspace_hunk(
+        &self,
+        name: &str,
+        relative_path: &str,
+        hunk_index: usize,
+    ) -> Result<()> {
+        let workspace = self.get_by_name(name)?;
+        let validated = validate_workspace_relative_path(relative_path)?;
+        let path_value = validated.to_string_lossy().to_string();
+        let diff = git_output_dynamic(&workspace.path, &["diff", "--", path_value.as_str()])?;
+        let patch = diff_hunk_patch(&diff, hunk_index)?;
+        validate_hunk_patch_supported(&patch)?;
+        git_patch(&workspace.path, &["apply", "--cached", "-"], &patch)?;
+        self.record_workspace_event(
+            workspace.id,
+            &workspace.name,
+            "git.hunk_staged",
+            &format!("Staged hunk {} in {relative_path}", hunk_index + 1),
+        )?;
+        Ok(())
+    }
+
+    pub fn unstage_workspace_hunk(
+        &self,
+        name: &str,
+        relative_path: &str,
+        hunk_index: usize,
+    ) -> Result<()> {
+        let workspace = self.get_by_name(name)?;
+        let validated = validate_workspace_relative_path(relative_path)?;
+        let path_value = validated.to_string_lossy().to_string();
+        let diff = git_output_dynamic(
+            &workspace.path,
+            &["diff", "--cached", "--", path_value.as_str()],
+        )?;
+        let patch = diff_hunk_patch(&diff, hunk_index)?;
+        validate_hunk_patch_supported(&patch)?;
+        git_patch(
+            &workspace.path,
+            &["apply", "--cached", "--reverse", "-"],
+            &patch,
+        )?;
+        self.record_workspace_event(
+            workspace.id,
+            &workspace.name,
+            "git.hunk_unstaged",
+            &format!("Unstaged hunk {} in {relative_path}", hunk_index + 1),
+        )?;
+        Ok(())
     }
 
     pub fn unified_diff_against_base(&self, name: &str, path: Option<&Path>) -> Result<String> {
@@ -7007,6 +7089,105 @@ fn parse_diff_numstat(output: &str) -> Vec<DiffFileSummary> {
             })
         })
         .collect()
+}
+
+fn diff_hunk_summaries(diff: &str, staged: bool) -> Vec<DiffHunkSummary> {
+    if diff.trim().is_empty() {
+        return Vec::new();
+    }
+    if let Some(reason) = hunk_unsupported_reason(diff) {
+        return vec![DiffHunkSummary {
+            index: 0,
+            header: "Unsupported hunks".to_owned(),
+            additions: 0,
+            deletions: 0,
+            staged,
+            unsupported_reason: Some(reason),
+        }];
+    }
+    let (_header, hunks) = split_diff_header_and_hunks(diff);
+    hunks
+        .iter()
+        .enumerate()
+        .map(|(index, hunk)| {
+            let mut additions = 0;
+            let mut deletions = 0;
+            for line in hunk.lines() {
+                if line.starts_with('+') && !line.starts_with("+++") {
+                    additions += 1;
+                } else if line.starts_with('-') && !line.starts_with("---") {
+                    deletions += 1;
+                }
+            }
+            DiffHunkSummary {
+                index,
+                header: hunk.lines().next().unwrap_or("@@").to_owned(),
+                additions,
+                deletions,
+                staged,
+                unsupported_reason: None,
+            }
+        })
+        .collect()
+}
+
+fn diff_hunk_patch(diff: &str, hunk_index: usize) -> Result<String> {
+    validate_hunk_diff_supported(diff)?;
+    let (header, hunks) = split_diff_header_and_hunks(diff);
+    let hunk = hunks
+        .get(hunk_index)
+        .with_context(|| format!("hunk {} was not found", hunk_index + 1))?;
+    Ok(format!("{header}{hunk}"))
+}
+
+fn split_diff_header_and_hunks(diff: &str) -> (String, Vec<String>) {
+    let mut header = String::new();
+    let mut hunks = Vec::new();
+    let mut current_hunk: Option<String> = None;
+    for line in diff.lines() {
+        if line.starts_with("@@") {
+            if let Some(hunk) = current_hunk.take() {
+                hunks.push(hunk);
+            }
+            current_hunk = Some(String::new());
+        }
+        if let Some(hunk) = current_hunk.as_mut() {
+            hunk.push_str(line);
+            hunk.push('\n');
+        } else {
+            header.push_str(line);
+            header.push('\n');
+        }
+    }
+    if let Some(hunk) = current_hunk {
+        hunks.push(hunk);
+    }
+    (header, hunks)
+}
+
+fn validate_hunk_diff_supported(diff: &str) -> Result<()> {
+    if let Some(reason) = hunk_unsupported_reason(diff) {
+        anyhow::bail!("{reason}; use file-level stage/unstage instead");
+    }
+    Ok(())
+}
+
+fn validate_hunk_patch_supported(patch: &str) -> Result<()> {
+    anyhow::ensure!(
+        patch.contains("\n@@"),
+        "selected hunk patch is invalid; use file-level stage/unstage instead"
+    );
+    Ok(())
+}
+
+fn hunk_unsupported_reason(diff: &str) -> Option<String> {
+    if diff.len() > DIFF_HUNK_PATCH_LIMIT_BYTES {
+        return Some("large file hunks are unsupported".to_owned());
+    }
+    if diff.contains("GIT binary patch") || diff.contains("Binary files ") {
+        return Some("binary file hunks are unsupported".to_owned());
+    }
+    None
 }
 
 fn workspace_diff_stats_against_base(workspace: &Workspace) -> Result<(usize, usize)> {
@@ -15612,6 +15793,93 @@ exit 1
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn stage_and_unstage_workspace_hunk_updates_the_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        let readme = repo_path.join("README.md");
+        fs::write(
+            &readme,
+            "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\neleven\ntwelve\n",
+        )
+        .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", "README.md"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args([
+                "-c",
+                "user.name=Linux Archductor",
+                "-c",
+                "user.email=linux-archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "expand readme",
+            ])
+            .status()
+            .unwrap();
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        fs::write(
+            workspace.path.join("README.md"),
+            "ONE\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\neleven\nTWELVE\n",
+        )
+        .unwrap();
+
+        let hunks = store.diff_hunks("berlin", "README.md", false).unwrap();
+        assert_eq!(hunks.len(), 2);
+        store
+            .stage_workspace_hunk("berlin", "README.md", 0)
+            .unwrap();
+        let staged = store
+            .staged_diff("berlin", Some(Path::new("README.md")))
+            .unwrap();
+        let unstaged = store
+            .unified_diff("berlin", Some(Path::new("README.md")))
+            .unwrap();
+        assert!(staged.contains("+ONE"));
+        assert!(!staged.contains("+TWELVE"));
+        assert!(unstaged.contains("+TWELVE"));
+
+        let staged_hunks = store.diff_hunks("berlin", "README.md", true).unwrap();
+        assert_eq!(staged_hunks.len(), 1);
+        store
+            .unstage_workspace_hunk("berlin", "README.md", 0)
+            .unwrap();
+        assert!(store
+            .staged_diff("berlin", Some(Path::new("README.md")))
+            .unwrap()
+            .trim()
+            .is_empty());
     }
 
     #[test]

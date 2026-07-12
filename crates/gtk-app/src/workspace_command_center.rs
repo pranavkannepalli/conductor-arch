@@ -11,7 +11,7 @@ use linux_archductor_core::archcar::protocol::{ArchcarInputKind, ArchcarRequest}
 use linux_archductor_core::doctor::SetupReadiness;
 use linux_archductor_core::paths::AppPaths;
 use linux_archductor_core::workspace::{
-    ChatThreadRecord, DiffFileSummary, ProcessRecord, ProcessStatus, PullRequest,
+    ChatThreadRecord, DiffFileSummary, DiffHunkSummary, ProcessRecord, ProcessStatus, PullRequest,
     PullRequestReviewThread, ReviewComment, SessionKind, Workspace, WorkspaceStore,
     WorkspaceTimelineEvent,
 };
@@ -3882,10 +3882,25 @@ fn workspace_git_file_actions_panel(
             has_staged = summaries.iter().any(|summary| summary.staged);
             let list = GBox::new(Orientation::Vertical, 4);
             for summary in summaries {
-                list.append(&workspace_git_file_action_row(
+                let file_block = GBox::new(Orientation::Vertical, 3);
+                let path = summary.path.clone();
+                let staged = summary.staged;
+                let unstaged = summary.unstaged || summary.untracked;
+                list.append(&file_block);
+                file_block.append(&workspace_git_file_action_row(
                     db_path,
                     name,
                     summary,
+                    refresh_hub.clone(),
+                    toast_overlay.clone(),
+                    feedback,
+                ));
+                file_block.append(&workspace_git_hunk_actions_panel(
+                    db_path,
+                    name,
+                    &path,
+                    unstaged,
+                    staged,
                     refresh_hub.clone(),
                     toast_overlay.clone(),
                     feedback,
@@ -4027,6 +4042,138 @@ fn workspace_git_batch_actions_row(
     row.append(&unstage_all_btn);
 
     row
+}
+
+fn workspace_git_hunk_actions_panel(
+    db_path: &Path,
+    name: &str,
+    path: &str,
+    show_unstaged: bool,
+    show_staged: bool,
+    refresh_hub: RefreshHub,
+    toast_overlay: ToastOverlay,
+    feedback: &Label,
+) -> GBox {
+    let panel = GBox::new(Orientation::Vertical, 2);
+    if show_unstaged {
+        append_hunk_rows(
+            &panel,
+            db_path,
+            name,
+            path,
+            false,
+            refresh_hub.clone(),
+            toast_overlay.clone(),
+            feedback,
+        );
+    }
+    if show_staged {
+        append_hunk_rows(
+            &panel,
+            db_path,
+            name,
+            path,
+            true,
+            refresh_hub,
+            toast_overlay,
+            feedback,
+        );
+    }
+    panel
+}
+
+fn append_hunk_rows(
+    panel: &GBox,
+    db_path: &Path,
+    name: &str,
+    path: &str,
+    staged: bool,
+    refresh_hub: RefreshHub,
+    toast_overlay: ToastOverlay,
+    feedback: &Label,
+) {
+    let hunks = WorkspaceStore::open(db_path)
+        .and_then(|store| store.diff_hunks(name, path, staged))
+        .unwrap_or_else(|err| {
+            vec![DiffHunkSummary {
+                index: 0,
+                header: "Could not read hunks".to_owned(),
+                additions: 0,
+                deletions: 0,
+                staged,
+                unsupported_reason: Some(format!("{err:#}")),
+            }]
+        });
+    for hunk in hunks.into_iter().take(8) {
+        panel.append(&workspace_git_hunk_action_row(
+            db_path,
+            name,
+            path,
+            hunk,
+            refresh_hub.clone(),
+            toast_overlay.clone(),
+            feedback,
+        ));
+    }
+}
+
+fn workspace_git_hunk_action_row(
+    db_path: &Path,
+    name: &str,
+    path: &str,
+    hunk: DiffHunkSummary,
+    refresh_hub: RefreshHub,
+    toast_overlay: ToastOverlay,
+    feedback: &Label,
+) -> GBox {
+    let row = GBox::new(Orientation::Horizontal, 6);
+    row.add_css_class("ws-git-file-action-row");
+    let label = Label::new(Some(&hunk_action_label(&hunk)));
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+    row.append(&label);
+
+    if let Some(reason) = hunk.unsupported_reason {
+        let unsupported = Label::new(Some(&format!("{reason}; use file-level fallback.")));
+        unsupported.add_css_class("card-meta");
+        unsupported.set_xalign(0.0);
+        unsupported.set_wrap(true);
+        row.append(&unsupported);
+        return row;
+    }
+
+    let action_label = if hunk.staged {
+        "Unstage Hunk"
+    } else {
+        "Stage Hunk"
+    };
+    let button = text_button(action_label);
+    let hunk_index = hunk.index;
+    connect_git_hunk_action(
+        &button,
+        db_path,
+        name,
+        path,
+        hunk_index,
+        hunk.staged,
+        refresh_hub,
+        toast_overlay,
+        feedback,
+    );
+    row.append(&button);
+    row
+}
+
+fn hunk_action_label(hunk: &DiffHunkSummary) -> String {
+    let state = if hunk.staged { "staged" } else { "unstaged" };
+    format!(
+        "  Hunk {} [{state}] +{} -{} {}",
+        hunk.index + 1,
+        hunk.additions,
+        hunk.deletions,
+        hunk.header
+    )
 }
 
 fn workspace_git_file_action_row(
@@ -4189,6 +4336,63 @@ fn workspace_git_file_action_row(
     row.append(&revert_btn);
 
     row
+}
+
+fn connect_git_hunk_action(
+    button: &Button,
+    db_path: &Path,
+    workspace_name: &str,
+    file_path: &str,
+    hunk_index: usize,
+    staged: bool,
+    refresh_hub: RefreshHub,
+    toast_overlay: ToastOverlay,
+    feedback: &Label,
+) {
+    let db_path = db_path.to_path_buf();
+    let workspace_name = workspace_name.to_owned();
+    let file_path = file_path.to_owned();
+    let feedback = feedback.clone();
+    let button_for_click = button.clone();
+    button.connect_clicked(move |_| {
+        button_for_click.set_sensitive(false);
+        let action_text = if staged {
+            "Unstaging hunk..."
+        } else {
+            "Staging hunk..."
+        };
+        apply_action_feedback(&feedback, &toast_overlay, action_text, false);
+        let result = WorkspaceStore::open(&db_path).and_then(|store| {
+            if staged {
+                store.unstage_workspace_hunk(&workspace_name, &file_path, hunk_index)
+            } else {
+                store.stage_workspace_hunk(&workspace_name, &file_path, hunk_index)
+            }
+        });
+        match result {
+            Ok(()) => {
+                let done = if staged {
+                    format!("Unstaged hunk {} in {}.", hunk_index + 1, file_path)
+                } else {
+                    format!("Staged hunk {} in {}.", hunk_index + 1, file_path)
+                };
+                apply_action_feedback(&feedback, &toast_overlay, &done, true);
+                refresh_hub.refresh(RefreshScope::Workspace);
+            }
+            Err(err) => {
+                button_for_click.set_sensitive(true);
+                apply_action_feedback(
+                    &feedback,
+                    &toast_overlay,
+                    &format!(
+                        "{}\nFallback: use Stage/Unstage on the full file.",
+                        git_action_error("Could not update hunk", &err)
+                    ),
+                    true,
+                );
+            }
+        }
+    });
 }
 
 fn connect_git_workspace_action<F>(
@@ -7279,6 +7483,21 @@ mod tests {
 
         assert!(rendered.contains("bad path"));
         assert!(rendered.contains("Hint: Refresh changes"));
+    }
+
+    #[test]
+    fn hunk_action_label_includes_state_and_counts() {
+        let label = hunk_action_label(&linux_archductor_core::workspace::DiffHunkSummary {
+            index: 1,
+            header: "@@ -10,2 +10,3 @@".to_owned(),
+            additions: 3,
+            deletions: 1,
+            staged: false,
+            unsupported_reason: None,
+        });
+
+        assert!(label.contains("Hunk 2 [unstaged] +3 -1"));
+        assert!(label.contains("@@ -10,2 +10,3 @@"));
     }
 
     #[test]
