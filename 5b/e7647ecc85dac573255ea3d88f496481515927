@@ -1,0 +1,19 @@
+docs/codex-smoke-test.md
+  s_c27d5fb11fa80f::t_18e139ee6bbdc6 1-20
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "5be7647ecc85dac573255ea3d88f496481515927",
+  "prompts": {},
+  "sessions": {
+    "s_c27d5fb11fa80f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f554d-88e1-77b0-9513-63fe11cf3ae0",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
