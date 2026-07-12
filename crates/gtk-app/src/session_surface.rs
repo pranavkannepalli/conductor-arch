@@ -546,7 +546,6 @@ pub fn agent_session_panel(
                 active_generation_for_thread(
                     &record_state.borrow(),
                     working_threads.as_ref(),
-                    archcar_ready_cache.as_ref(),
                     thread_id,
                     *selected_harness.borrow(),
                 )
@@ -571,7 +570,7 @@ pub fn agent_session_panel(
             } else {
                 true
             };
-            if !ready {
+            if !ready && !has_active_generation {
                 placeholder.set_text("Codex is starting...");
                 placeholder.set_visible(true);
                 set_composer_send_button_action(&send_btn, ComposerAction::Disabled);
@@ -1783,7 +1782,6 @@ pub fn agent_session_panel(
         let record_state = record_state.clone();
         let queued_chat_inputs = queued_chat_inputs.clone();
         let working_threads = working_threads.clone();
-        let archcar_ready_cache = archcar_ready_cache.clone();
         let messages = messages.clone();
         let send_text = send_text.clone();
         let update_composer_state = update_composer_state.clone();
@@ -1798,7 +1796,6 @@ pub fn agent_session_panel(
                 active_generation_for_thread(
                     &record_state.borrow(),
                     working_threads.as_ref(),
-                    archcar_ready_cache.as_ref(),
                     thread_id,
                     *selected_harness.borrow(),
                 )
@@ -4099,18 +4096,13 @@ fn latest_session_status_for_thread(
 fn active_generation_for_thread(
     records: &[ProcessRecord],
     working_threads: &RefCell<HashMap<i64, Instant>>,
-    ready_cache: &RefCell<HashMap<i64, bool>>,
     thread_id: i64,
     kind: SessionKind,
 ) -> bool {
-    let Some(session_id) = running_session_for_thread(records, thread_id, kind) else {
+    if running_session_for_thread(records, thread_id, kind).is_none() {
         return false;
-    };
+    }
     working_threads.borrow().contains_key(&thread_id)
-        && ready_cache
-            .borrow()
-            .get(&session_id)
-            .is_some_and(|ready| !*ready)
 }
 
 fn running_session_for_thread(
@@ -6953,7 +6945,7 @@ fix it
     }
 
     #[test]
-    fn active_generation_requires_working_thread_running_session_and_not_ready() {
+    fn active_generation_requires_working_thread_and_running_session() {
         let records = vec![process_record_with_thread(
             1,
             ProcessStatus::Running,
@@ -6961,12 +6953,10 @@ fix it
             "codex",
         )];
         let working_threads = RefCell::new(HashMap::new());
-        let ready_cache = RefCell::new(HashMap::from([(1, false)]));
 
         assert!(!active_generation_for_thread(
             &records,
             &working_threads,
-            &ready_cache,
             7,
             SessionKind::Codex
         ));
@@ -6974,30 +6964,12 @@ fix it
         assert!(active_generation_for_thread(
             &records,
             &working_threads,
-            &ready_cache,
-            7,
-            SessionKind::Codex
-        ));
-        ready_cache.borrow_mut().insert(1, true);
-        assert!(!active_generation_for_thread(
-            &records,
-            &working_threads,
-            &ready_cache,
-            7,
-            SessionKind::Codex
-        ));
-        ready_cache.borrow_mut().remove(&1);
-        assert!(!active_generation_for_thread(
-            &records,
-            &working_threads,
-            &ready_cache,
             7,
             SessionKind::Codex
         ));
         assert!(!active_generation_for_thread(
             &records,
             &working_threads,
-            &ready_cache,
             8,
             SessionKind::Codex
         ));
