@@ -950,6 +950,76 @@ fn attach_workspace_row_context_menu(
                         let workspace_name = workspace_name.clone();
                         let window = window.clone();
                         let toast_manager = toast_manager.clone();
+                        if action == "delete" {
+                            let snapshot = state.snapshot();
+                            let was_selected_workspace =
+                                snapshot.selected_workspace.as_deref()
+                                    == Some(workspace_name.as_str())
+                                    && matches!(
+                                        snapshot.active_page,
+                                        AppPage::Workspace | AppPage::Review
+                                    );
+                            state.remove_workspace_from_navigation(
+                                &workspace_name,
+                                AppPage::Dashboard,
+                            );
+                            if was_selected_workspace {
+                                stack.set_visible_child_name("dashboard");
+                            }
+                            if let Some(list) = row.parent().and_downcast::<ListBox>() {
+                                list.remove(&row);
+                            }
+                            refresh_view_preferences();
+                            refresh_workspace();
+
+                            spawn_background_job(
+                                {
+                                    let db_path = state.workspace_database_path().to_path_buf();
+                                    let workspace_name = workspace_name.clone();
+                                    move || {
+                                        WorkspaceStore::open(db_path)
+                                            .and_then(|store| store.delete(&workspace_name, false, false))
+                                            .map_err(|err| format!("{err:#}"))
+                                    }
+                                },
+                                move |result| match result {
+                                    Ok(deleted) => {
+                                        refresh_view_preferences();
+                                        refresh_workspace();
+                                        refresh_hub.refresh(RefreshScope::All);
+                                        let db_cleanup =
+                                            state.workspace_database_path().to_path_buf();
+                                        std::thread::spawn(move || {
+                                            if let Err(err) =
+                                                WorkspaceStore::open(db_cleanup).and_then(|store| {
+                                                    store.cleanup_deleted_workspace_artifacts(
+                                                        &deleted, true, true,
+                                                    )
+                                                })
+                                            {
+                                                error!(
+                                                    workspace = %deleted.name,
+                                                    error = %err,
+                                                    "background workspace artifact cleanup failed after delete"
+                                                );
+                                            }
+                                        });
+                                    }
+                                    Err(err) => {
+                                        refresh_view_preferences();
+                                        refresh_workspace();
+                                        refresh_hub.refresh(RefreshScope::All);
+                                        show_workspace_error_dialog(
+                                            &window,
+                                            "Workspace action failed",
+                                            &err,
+                                            &toast_manager,
+                                        );
+                                    }
+                                },
+                            );
+                            return Ok(());
+                        }
                         spawn_background_job(
                             {
                                 let db_path = state.workspace_database_path().to_path_buf();
@@ -958,9 +1028,6 @@ fn attach_workspace_row_context_menu(
                                     WorkspaceStore::open(db_path).and_then(|store| match action {
                                         "archive" => {
                                             store.archive(&workspace_name, false).map(|_| ())
-                                        }
-                                        "delete" => {
-                                            store.delete(&workspace_name, true, true).map(|_| ())
                                         }
                                         _ => unreachable!(),
                                     })

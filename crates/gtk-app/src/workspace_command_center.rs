@@ -38,7 +38,7 @@ use crate::refresh::{RefreshHub, RefreshScope};
 use crate::state::{AppState, WorkspaceTab};
 use crate::toast::{show_toast as emit_toast, surface_label_error, ToastManager, ToastMessage};
 use crate::{
-    archcar_async::spawn_archcar_request,
+    archcar_async::{spawn_archcar_request, spawn_background_job},
     buttons::{menu_text_button, resolve_icon_name, text_button},
     cli_binary, detail_row, history, session_surface, shell_quote, spawn_terminal_command,
     terminal, title_case_workspace,
@@ -2765,32 +2765,56 @@ fn lifecycle_panel(
             }
             progress_action.set_text(&format!("{action} in progress..."));
             if action == "delete" {
-                match WorkspaceStore::open(db_action.clone())
-                    .and_then(|store| store.delete(&workspace, false, false))
-                {
-                    Ok(deleted) => {
-                        progress_action.set_text(&workspace_delete_feedback(Ok(deleted.clone())));
-                        state_after_action.set_selected_workspace(None);
-                        refresh_after_action.refresh(RefreshScope::All);
-                        let db_cleanup = db_action.clone();
-                        std::thread::spawn(move || {
-                            if let Err(err) = WorkspaceStore::open(db_cleanup).and_then(|store| {
-                                store.cleanup_deleted_workspace_artifacts(&deleted, true, true)
-                            }) {
-                                error!(
-                                    workspace = %deleted.name,
-                                    error = %err,
-                                    "background workspace artifact cleanup failed after delete"
+                state_after_action
+                    .remove_workspace_from_navigation(&workspace, crate::state::AppPage::Dashboard);
+                refresh_after_action.refresh(RefreshScope::Workspace);
+                progress_action.set_text("Deleting in background...");
+                let db_delete = db_action.clone();
+                let workspace_delete = workspace.clone();
+                let refresh_after_delete = refresh_after_action.clone();
+                let progress_after_delete = progress_action.clone();
+                let toast_after_delete = toast_action.clone();
+                let db_cleanup_after_delete = db_action.clone();
+                spawn_background_job(
+                    move || {
+                        WorkspaceStore::open(db_delete)
+                            .and_then(|store| store.delete(&workspace_delete, false, false))
+                            .map_err(|err| format!("{err:#}"))
+                    },
+                    move |result| {
+                        match result {
+                            Ok(deleted) => {
+                                progress_after_delete
+                                    .set_text(&workspace_delete_feedback(Ok(deleted.clone())));
+                                let db_cleanup = db_cleanup_after_delete.clone();
+                                std::thread::spawn(move || {
+                                    if let Err(err) =
+                                        WorkspaceStore::open(db_cleanup).and_then(|store| {
+                                            store.cleanup_deleted_workspace_artifacts(
+                                                &deleted, true, true,
+                                            )
+                                        })
+                                    {
+                                        error!(
+                                            workspace = %deleted.name,
+                                            error = %err,
+                                            "background workspace artifact cleanup failed after delete"
+                                        );
+                                    }
+                                });
+                            }
+                            Err(err) => {
+                                let err = anyhow::anyhow!(err);
+                                apply_runtime_action_feedback(
+                                    &progress_after_delete,
+                                    &toast_after_delete,
+                                    lifecycle_action_failure_feedback("Delete", &err),
                                 );
                             }
-                        });
-                    }
-                    Err(err) => apply_runtime_action_feedback(
-                        &progress_action,
-                        &toast_action,
-                        lifecycle_action_failure_feedback("Delete", &err),
-                    ),
-                }
+                        }
+                        refresh_after_delete.refresh(RefreshScope::All);
+                    },
+                );
                 return;
             }
             let result = WorkspaceStore::open(db_action.clone()).and_then(|store| match action {
