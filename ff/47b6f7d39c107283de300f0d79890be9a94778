@@ -1,0 +1,21 @@
+crates/gtk-app/src/pty_inspector.rs
+  s_d816f62089d08d::t_2f4d8ffbe69f30 1343-1370
+  s_d816f62089d08d::t_a2802d7afcc7c3 402
+  s_d816f62089d08d::t_8512654b854e18 1342
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "ff47b6f7d39c107283de300f0d79890be9a94778",
+  "prompts": {},
+  "sessions": {
+    "s_d816f62089d08d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5590-0aa6-7882-8afd-d6cfb07127bd",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
