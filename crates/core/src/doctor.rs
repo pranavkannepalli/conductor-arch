@@ -1,3 +1,6 @@
+use crate::agent_tools::{
+    all_tools, launchable_agent_tools, launchable_provider_key, tool_by_provider, ToolSpec,
+};
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
@@ -82,9 +85,9 @@ impl DoctorReport {
 impl SetupReadiness {
     pub fn from_host() -> Self {
         let gh = thread::spawn(gh_readiness);
-        let codex = thread::spawn(codex_readiness);
-        let claude = thread::spawn(claude_readiness);
-        let opencode = thread::spawn(opencode_readiness);
+        let codex = thread::spawn(|| provider_readiness("codex"));
+        let claude = thread::spawn(|| provider_readiness("claude"));
+        let opencode = thread::spawn(|| provider_readiness("opencode"));
 
         Self {
             gh: gh
@@ -103,33 +106,40 @@ impl SetupReadiness {
     }
 
     pub fn any_agent_ready(&self) -> bool {
-        self.codex.ready || self.claude.ready || self.opencode.ready
+        launchable_agent_tools().any(|tool| {
+            self.provider_check(tool.provider_key)
+                .is_some_and(|check| check.ready)
+        })
     }
 
     pub fn first_ready_launchable_provider(&self) -> Option<&'static str> {
-        if self.codex.ready {
-            Some("codex")
-        } else if self.claude.ready {
-            Some("claude")
-        } else {
-            None
-        }
+        launchable_agent_tools()
+            .find(|tool| {
+                self.provider_check(tool.provider_key)
+                    .is_some_and(|check| check.ready)
+            })
+            .map(|tool| tool.provider_key)
     }
 
     pub fn provider_ready(&self, provider: &str) -> bool {
-        match normalize_provider(provider).as_str() {
-            "codex" => self.codex.ready,
-            "claude" | "claudecode" => self.claude.ready,
-            "opencode" => self.opencode.ready,
-            _ => false,
-        }
+        tool_by_provider(provider)
+            .and_then(|tool| self.provider_check(tool.provider_key))
+            .is_some_and(|check| check.ready)
     }
 
     pub fn launchable_provider_ready(&self, provider: &str) -> bool {
-        match normalize_provider(provider).as_str() {
-            "codex" => self.codex.ready,
-            "claude" | "claudecode" => self.claude.ready,
-            _ => false,
+        launchable_provider_key(provider)
+            .and_then(|provider| self.provider_check(provider))
+            .is_some_and(|check| check.ready)
+    }
+
+    fn provider_check(&self, provider: &str) -> Option<SetupCheck> {
+        match provider {
+            "codex" => Some(self.codex.clone()),
+            "claude" => Some(self.claude.clone()),
+            "opencode" => Some(self.opencode.clone()),
+            _ if tool_by_provider(provider).is_some() => Some(provider_readiness(provider)),
+            _ => None,
         }
     }
 }
@@ -204,16 +214,11 @@ fn install_command(id: Option<&str>, like: &[String]) -> Option<&'static str> {
 }
 
 fn dependency_checks() -> Vec<DependencyCheck> {
-    [
+    let mut checks = [
         ("git", true),
         ("gh", true),
         ("sqlite3", true),
         ("ssh", true),
-        ("codex", false),
-        ("claude", false),
-        ("opencode", false),
-        ("code", false),
-        ("cursor", false),
     ]
     .into_iter()
     .map(|(name, required)| DependencyCheck {
@@ -221,7 +226,13 @@ fn dependency_checks() -> Vec<DependencyCheck> {
         required,
         installed: command_exists(name),
     })
-    .collect()
+    .collect::<Vec<_>>();
+    checks.extend(all_tools().iter().map(|tool| DependencyCheck {
+        name: tool.default_command,
+        required: false,
+        installed: command_exists(tool.default_command),
+    }));
+    checks
 }
 
 fn gh_readiness() -> SetupCheck {
@@ -264,36 +275,27 @@ fn gh_status_has_active_github_account(stdout: &[u8]) -> bool {
         .unwrap_or(false)
 }
 
-fn codex_readiness() -> SetupCheck {
-    if !command_exists("codex") {
-        return SetupCheck::missing("Install Codex CLI.");
-    }
-    if command_succeeds("codex", &["login", "status"]) {
-        SetupCheck::ready("Signed in to Codex.")
-    } else {
-        SetupCheck::blocked("Run `codex login`.")
-    }
+fn provider_readiness(provider: &str) -> SetupCheck {
+    let Some(tool) = tool_by_provider(provider) else {
+        return SetupCheck::missing(format!("Install {provider}."));
+    };
+    readiness_for_tool(tool)
 }
 
-fn claude_readiness() -> SetupCheck {
-    if !command_exists("claude") {
-        return SetupCheck::missing("Install Claude Code.");
+fn readiness_for_tool(tool: &ToolSpec) -> SetupCheck {
+    let program = tool
+        .readiness_probe
+        .first()
+        .copied()
+        .unwrap_or(tool.default_command);
+    if !command_exists(program) {
+        return SetupCheck::missing(format!("Install {}.", tool.display_name));
     }
-    if command_succeeds("claude", &["auth", "status"]) {
-        SetupCheck::ready("Signed in to Claude Code.")
+    let readiness_args = tool.readiness_probe.get(1..).unwrap_or_default();
+    if command_succeeds(program, readiness_args) {
+        SetupCheck::ready(format!("{} is ready.", tool.display_name))
     } else {
-        SetupCheck::blocked("Run `claude auth login`.")
-    }
-}
-
-fn opencode_readiness() -> SetupCheck {
-    if !command_exists("opencode") {
-        return SetupCheck::missing("Install OpenCode.");
-    }
-    if command_succeeds("opencode", &["--version"]) {
-        SetupCheck::ready("OpenCode CLI responds to version probe.")
-    } else {
-        SetupCheck::blocked("OpenCode CLI is installed but did not pass a version probe.")
+        SetupCheck::blocked(tool.auth_guidance)
     }
 }
 
@@ -378,14 +380,6 @@ fn command_exists(name: &str) -> bool {
             })
         })
         .unwrap_or(false)
-}
-
-fn normalize_provider(value: &str) -> String {
-    value
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect()
 }
 
 #[cfg(unix)]

@@ -1,5 +1,10 @@
+use crate::settings::ensure_repository_config;
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
+#[cfg(unix)]
+use std::ffi::OsString;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -44,11 +49,12 @@ impl RepositoryStore {
     }
 
     pub fn add(&self, input: AddRepository) -> Result<Repository> {
-        let root_path = input
+        let input_path = input
             .root_path
             .canonicalize()
             .with_context(|| format!("resolve repository path {}", input.root_path.display()))?;
-        ensure_git_repository(&root_path)?;
+        let root_path = resolve_git_repository_root(&input_path)?;
+        ensure_repository_config(&root_path)?;
 
         let name = input.name.unwrap_or_else(|| {
             root_path
@@ -209,19 +215,37 @@ fn row_to_repository(row: &rusqlite::Row<'_>) -> rusqlite::Result<Repository> {
     })
 }
 
-fn ensure_git_repository(path: &Path) -> Result<()> {
-    let status = Command::new("git")
+fn resolve_git_repository_root(path: &Path) -> Result<PathBuf> {
+    let output = Command::new("git")
         .arg("-C")
         .arg(path)
         .args(["rev-parse", "--show-toplevel"])
-        .status()
+        .output()
         .context("run git rev-parse")?;
     anyhow::ensure!(
-        status.success(),
+        output.status.success(),
         "{} is not a Git repository",
         path.display()
     );
-    Ok(())
+    let root = path_from_git_stdout(output.stdout)?;
+    root.canonicalize()
+        .with_context(|| format!("resolve repository root {}", root.display()))
+}
+
+fn path_from_git_stdout(stdout: Vec<u8>) -> Result<PathBuf> {
+    let stdout = stdout
+        .strip_suffix(b"\r\n")
+        .or_else(|| stdout.strip_suffix(b"\n"))
+        .unwrap_or(&stdout);
+    #[cfg(unix)]
+    {
+        Ok(PathBuf::from(OsString::from_vec(stdout.to_vec())))
+    }
+    #[cfg(not(unix))]
+    {
+        let root = String::from_utf8(stdout.to_vec()).context("parse git repository root")?;
+        Ok(PathBuf::from(root.trim()))
+    }
 }
 
 fn detect_default_branch(root_path: &Path, remote_name: &str) -> String {
@@ -296,5 +320,65 @@ mod tests {
 
         let repositories = store.list().unwrap();
         assert_eq!(repositories, vec![saved]);
+    }
+
+    #[test]
+    fn add_repository_bootstraps_repository_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = temp.path().join("demo");
+        fs::create_dir(&repo_path).unwrap();
+        Command::new("git")
+            .args(["init", "--initial-branch", "main"])
+            .arg(&repo_path)
+            .status()
+            .unwrap();
+
+        RepositoryStore::open(temp.path().join("state.db"))
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo-app".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo-app")),
+            })
+            .unwrap();
+
+        assert!(repo_path.join(".archductor/settings.toml").exists());
+    }
+
+    #[test]
+    fn add_repository_from_subdirectory_uses_git_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = temp.path().join("demo");
+        let subdir = repo_path.join("apps/web");
+        fs::create_dir_all(&subdir).unwrap();
+        Command::new("git")
+            .args(["init", "--initial-branch", "main"])
+            .arg(&repo_path)
+            .status()
+            .unwrap();
+
+        let store = RepositoryStore::open(temp.path().join("state.db")).unwrap();
+        let saved = store
+            .add(AddRepository {
+                name: Some("demo-app".to_owned()),
+                root_path: subdir.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo-app")),
+            })
+            .unwrap();
+
+        assert_eq!(saved.root_path, repo_path.canonicalize().unwrap());
+        assert!(repo_path.join(".archductor/settings.toml").exists());
+        assert!(!subdir.join(".archductor/settings.toml").exists());
+    }
+
+    #[test]
+    fn path_from_git_stdout_strips_crlf_as_one_suffix() {
+        let path = path_from_git_stdout(b"/tmp/demo\r\n".to_vec()).unwrap();
+
+        assert_eq!(path, PathBuf::from("/tmp/demo"));
     }
 }

@@ -43,8 +43,9 @@ Relationships:
 ## V1 Must-Haves
 
 - Project onboarding from an existing local repository and Git clone.
-- Repository settings editing for scripts, environment, prompts, Git behavior,
-  provider paths, workspace defaults, and safe advanced TOML.
+- Repository settings editing for scripts, check commands, environment,
+  prompts, prompt pack metadata, Git behavior, provider paths, terminal,
+  shortcuts, notification labels, workspace defaults, and safe advanced TOML.
 - Workspace creation from branch, prompt, GitHub issue, GitHub PR, and Linear
   issue where credentials are available.
 - Durable session/process records that survive app restart.

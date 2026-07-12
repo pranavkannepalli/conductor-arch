@@ -4,6 +4,9 @@ use gtk::{
     Image, Label, Orientation, Overlay, Popover, Revealer, RevealerTransitionType, ScrolledWindow,
     Spinner, TextBuffer, TextView, ToggleButton, Widget,
 };
+use linux_archductor_core::agent_tools::{
+    launchable_agent_tools, launchable_provider_key, tool_by_provider,
+};
 use linux_archductor_core::archcar::protocol::{ArchcarEvent, ArchcarInputKind, ArchcarResponse};
 use linux_archductor_core::codex_tui::{
     merge_screen_messages, parse_codex_context_usage, parse_codex_file_change_block,
@@ -15,6 +18,7 @@ use linux_archductor_core::codex_tui::{
 use linux_archductor_core::doctor::SetupReadiness;
 #[cfg(test)]
 use linux_archductor_core::session_state::AgentSessionState;
+use linux_archductor_core::settings::load_repository_settings;
 use linux_archductor_core::workspace::{
     ChatEventRecord, ChatMessageRecord, ChatThreadRecord, ProcessRecord, ProcessStatus,
     SessionHarnessOptions, SessionKind, WorkspaceStore,
@@ -43,6 +47,7 @@ use crate::buttons::{
 use crate::motion::{append_revealed, clear_box};
 use crate::state::AppState;
 use crate::terminal::terminal_display_text;
+use crate::toast::ToastManager;
 
 const SESSION_SCROLLBACK_LINES: usize = 2_000;
 const SESSION_TAIL_HISTORY: usize = 120;
@@ -133,6 +138,7 @@ struct ChatRenderSignature {
     threads: Vec<ChatRenderThreadSignature>,
     messages: Vec<ChatRenderMessageSignature>,
     events: Vec<ChatRenderEventSignature>,
+    transcript_display: String,
     render_state: &'static str,
     runtime_summary: Option<String>,
 }
@@ -185,6 +191,7 @@ pub fn agent_session_panel(
     include_header: bool,
     setup_readiness: Option<Rc<RefCell<SetupReadiness>>>,
     external_chat_tabs: Option<ExternalChatTabs>,
+    toast_manager: ToastManager,
 ) -> GBox {
     let root = GBox::new(Orientation::Vertical, 0);
     root.add_css_class("chat-surface");
@@ -317,11 +324,17 @@ pub fn agent_session_panel(
     let left_group = GBox::new(Orientation::Horizontal, 8);
     left_group.set_hexpand(true);
 
-    let interface_btn = mode_menu_button(
-        session_kind_name(initial_harness),
-        "code-symbolic",
-        &["Codex", "Claude"],
-        session_kind_index(initial_harness),
+    let provider_model_choices = {
+        let readiness = setup_readiness.borrow();
+        Rc::new(provider_model_choices(&readiness, initial_harness))
+    };
+    let provider_model_btn = provider_model_menu_button(
+        provider_model_choices.clone(),
+        selected_provider_model_choice_index(
+            provider_model_choices.as_ref(),
+            initial_harness,
+            selected_model.borrow().as_deref(),
+        ),
         {
             let database_path = database_path.to_path_buf();
             let workspace_name = _workspace_name.to_owned();
@@ -333,13 +346,15 @@ pub fn agent_session_panel(
             let pending_commands = pending_commands.clone();
             let selected_thread = selected_thread.clone();
             let sync_live_controls = sync_live_controls.clone();
+            let archcar_bridge = archcar_bridge.clone();
+            let archcar_ready_cache = archcar_ready_cache.clone();
+            let inflight_archcar_actions = inflight_archcar_actions.clone();
             Rc::new(move |index| {
-                let kind = session_kind_from_index(index);
-                persist_selected_provider(
-                    &database_path,
-                    &workspace_name,
-                    session_kind_provider(kind),
-                );
+                let Some(choice) = provider_model_choices.get(index).cloned() else {
+                    return;
+                };
+                let kind = session_kind_from_provider(&choice.provider);
+                persist_selected_provider(&database_path, &workspace_name, &choice.provider);
                 select_harness_and_dispatch(
                     selected_harness.as_ref(),
                     reasoning_mode.as_ref(),
@@ -348,9 +363,47 @@ pub fn agent_session_panel(
                     refresh_chat_surface.borrow().as_ref(),
                     None,
                 );
-                *selected_model.borrow_mut() = None;
-                if kind != SessionKind::Codex {
-                    if let Some(thread_id) = *selected_thread.borrow() {
+                *selected_model.borrow_mut() = choice.model.clone();
+                if let Some(thread_id) = *selected_thread.borrow() {
+                    if kind == SessionKind::Codex {
+                        replace_pending_model_command(
+                            &pending_commands,
+                            thread_id,
+                            choice.model.as_deref(),
+                        );
+                        if let Ok(records) = WorkspaceStore::open(database_path.clone())
+                            .and_then(|store| store.list_thread_processes(thread_id))
+                        {
+                            if let Some(session_id) =
+                                any_running_archcar_codex_ready(&records, &archcar_ready_cache)
+                            {
+                                let pending_controls =
+                                    flush_pending_commands_for_send(&pending_commands, thread_id);
+                                for (index, control) in pending_controls.iter().enumerate() {
+                                    if !queue_archcar_control_send(
+                                        &archcar_bridge,
+                                        inflight_archcar_actions.as_ref(),
+                                        thread_id,
+                                        session_id,
+                                        control.clone(),
+                                    ) {
+                                        requeue_pending_controls(
+                                            &pending_commands,
+                                            thread_id,
+                                            &pending_controls,
+                                            index,
+                                        );
+                                        warn!(
+                                            thread_id,
+                                            session_id,
+                                            "archcar control send failed; requeued pending controls"
+                                        );
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    } else {
                         pending_commands.borrow_mut().remove(&thread_id);
                     }
                 }
@@ -360,24 +413,6 @@ pub fn agent_session_panel(
             })
         },
     );
-    let model_btn = mode_menu_button("Default", "M", &["Default", "gpt-5", "gpt-5-mini"], 0, {
-        let selected_model = selected_model.clone();
-        let selected_harness = selected_harness.clone();
-        let selected_thread = selected_thread.clone();
-        let pending_commands = pending_commands.clone();
-        Rc::new(move |index| {
-            let model = session_model_from_index(index);
-            *selected_model.borrow_mut() = model.clone();
-            if *selected_harness.borrow() == SessionKind::Codex {
-                if let (Some(thread_id), Some(command)) = (
-                    *selected_thread.borrow(),
-                    codex_model_command(model.as_deref()),
-                ) {
-                    queue_thread_command(&pending_commands, thread_id, command);
-                }
-            }
-        })
-    });
     let thinking_btn =
         mode_menu_button("High", "◔", &["Low", "Medium", "High", "Extra high"], 2, {
             let reasoning_mode = reasoning_mode.clone();
@@ -398,8 +433,7 @@ pub fn agent_session_panel(
         });
     thinking_btn.add_css_class("chat-thinking-menu");
 
-    left_group.append(&interface_btn);
-    left_group.append(&model_btn);
+    left_group.append(&provider_model_btn);
     left_group.append(&thinking_btn);
 
     let right_group = GBox::new(Orientation::Horizontal, 8);
@@ -422,13 +456,11 @@ pub fn agent_session_panel(
 
     let sync_live_controls_fn: Rc<dyn Fn()> = Rc::new({
         let selected_harness = selected_harness.clone();
-        let model_btn = model_btn.clone();
         let thinking_btn = thinking_btn.clone();
         move || {
             let controls = visible_live_controls_for_provider(session_kind_provider(
                 *selected_harness.borrow(),
             ));
-            model_btn.set_visible(controls.iter().any(|control| control == "model"));
             thinking_btn.set_visible(controls.iter().any(|control| control == "thinking"));
         }
     });
@@ -526,6 +558,7 @@ pub fn agent_session_panel(
         let update_composer_for_view = update_composer_state.clone();
         let external_chat_tabs = external_chat_tabs.clone();
         let context_usage = context_usage.clone();
+        let toast_manager = toast_manager.clone();
         Rc::new(move || {
             debug!(workspace = %workspace, "chat refresh_view start");
             let (loaded, loaded_threads) = match WorkspaceStore::open(database_path.clone())
@@ -540,8 +573,9 @@ pub fn agent_session_panel(
                     clear_box(&thread_row);
                     clear_box(&messages);
                     apply_context_usage_state(&context_usage, None);
-                    let label =
-                        Label::new(Some(&session_refresh_error_text("load sessions", &err)));
+                    let message = session_refresh_error_text("load sessions", &err);
+                    toast_manager.error(message.clone());
+                    let label = Label::new(Some(&message));
                     label.add_css_class("chat-agent-text");
                     label.set_selectable(true);
                     label.set_wrap(true);
@@ -592,6 +626,7 @@ pub fn agent_session_panel(
                             selected_thread_id,
                             codex_ready.as_ref(),
                             update_composer_for_view.as_ref(),
+                            &toast_manager,
                         );
                         archcar_changed = true;
                     }
@@ -608,6 +643,7 @@ pub fn agent_session_panel(
                             working_threads.as_ref(),
                             codex_ready.as_ref(),
                             update_composer_for_view.as_ref(),
+                            &toast_manager,
                         );
                     }
                     AsyncArchcarMessage::BridgeError { message } => {
@@ -615,6 +651,7 @@ pub fn agent_session_panel(
                             bridge_error_state.borrow_mut().record(&message)
                         {
                             warn!(workspace = %workspace, error = %visible_message, "archcar bridge error");
+                            toast_manager.error(visible_message.clone());
                             if current_kind == SessionKind::Codex {
                                 if let Some(thread_id) = selected_thread_id {
                                     apply_codex_startup_signal(
@@ -751,6 +788,7 @@ pub fn agent_session_panel(
                             &thread_state.borrow(),
                             &[],
                             &[],
+                            "structured",
                             "missing_thread",
                             None,
                         );
@@ -851,10 +889,10 @@ pub fn agent_session_panel(
                                 Ok(timeline) => timeline,
                                 Err(err) => {
                                     error!(workspace = %workspace, thread_id, error = %err, "chat refresh_view failed to load thread timeline");
-                                    let label = Label::new(Some(&session_refresh_error_text(
-                                        "load chat timeline",
-                                        &err,
-                                    )));
+                                    let message =
+                                        session_refresh_error_text("load chat timeline", &err);
+                                    toast_manager.error(message.clone());
+                                    let label = Label::new(Some(&message));
                                     label.add_css_class("chat-agent-text");
                                     label.set_selectable(true);
                                     label.set_wrap(true);
@@ -866,8 +904,13 @@ pub fn agent_session_panel(
                                     return;
                                 }
                             };
+                            let transcript_display =
+                                transcript_display_for_workspace(&database_path, &workspace);
                             let render_legacy_inline_events =
-                                render_legacy_inline_events_for_thread(&thread_events);
+                                render_legacy_inline_events_for_thread(
+                                    &thread_events,
+                                    &transcript_display,
+                                );
                             debug!(
                                 workspace = %workspace,
                                 thread_id,
@@ -887,6 +930,7 @@ pub fn agent_session_panel(
                                     &thread_state.borrow(),
                                     &thread_messages,
                                     &thread_events,
+                                    &transcript_display,
                                     "timeline",
                                     runtime_summary.clone(),
                                 );
@@ -920,6 +964,7 @@ pub fn agent_session_panel(
                                         ChatTimelineItem::Message(message) => {
                                             if let Some(widget) = chat_message_widget(
                                                 &message,
+                                                render_raw_message_content(&transcript_display),
                                                 render_legacy_inline_events,
                                             ) {
                                                 append_chat_refresh_row(&messages, &widget);
@@ -948,6 +993,7 @@ pub fn agent_session_panel(
                         &thread_state.borrow(),
                         &[],
                         &[],
+                        "structured",
                         "empty",
                         runtime_summary.clone(),
                     );
@@ -982,6 +1028,7 @@ pub fn agent_session_panel(
                         &thread_state.borrow(),
                         &[],
                         &[],
+                        "structured",
                         "no_thread",
                         None,
                     );
@@ -1016,6 +1063,7 @@ pub fn agent_session_panel(
     let db_for_send = database_path.clone();
     let workspace_for_send = _workspace_name.to_owned();
     let selected_harness_for_send = selected_harness.clone();
+    let selected_model_for_send = selected_model.clone();
     let thread_state_for_send = thread_state.clone();
     let selected_thread_for_send = selected_thread.clone();
     let pending_commands_for_send = pending_commands.clone();
@@ -1035,6 +1083,7 @@ pub fn agent_session_panel(
     let codex_startup_states_for_send = codex_startup_states.clone();
     let update_composer_for_send = update_composer_state.clone();
     let setup_readiness_for_send = setup_readiness.clone();
+    let toast_for_send = toast_manager.clone();
     let send_text = Rc::new(move |text: String, staged_review: bool| {
         let command = text.trim().to_owned();
         if command.is_empty() {
@@ -1072,6 +1121,7 @@ pub fn agent_session_panel(
         if let Some(message) =
             selected_provider_blocker_after_refresh(selected_kind, &setup_readiness_for_send)
         {
+            toast_for_send.error(message.clone());
             let error = Label::new(Some(&message));
             error.add_css_class("chat-agent-text");
             error.set_selectable(true);
@@ -1122,10 +1172,20 @@ pub fn agent_session_panel(
         ) {
             Ok(thread_id) => {
                 app_state_for_send.set_selected_chat_thread(Some(thread_id));
+                if selected_kind == SessionKind::Codex && selected_model_for_send.borrow().is_some()
+                {
+                    replace_pending_model_command(
+                        &pending_commands_for_send,
+                        thread_id,
+                        selected_model_for_send.borrow().as_deref(),
+                    );
+                }
                 thread_id
             }
             Err(err) => {
-                let error = Label::new(Some(&format!("[chat thread] {err:#}")));
+                let message = format!("[chat thread] {err:#}");
+                toast_for_send.error(message.clone());
+                let error = Label::new(Some(&message));
                 error.add_css_class("chat-agent-text");
                 error.set_selectable(true);
                 error.set_wrap(true);
@@ -1145,7 +1205,9 @@ pub fn agent_session_panel(
         {
             Ok(thread) => thread,
             Err(err) => {
-                let error = Label::new(Some(&format!("[chat thread] {err:#}")));
+                let message = format!("[chat thread] {err:#}");
+                toast_for_send.error(message.clone());
+                let error = Label::new(Some(&message));
                 error.add_css_class("chat-agent-text");
                 error.set_selectable(true);
                 error.set_wrap(true);
@@ -1212,14 +1274,27 @@ pub fn agent_session_panel(
                 {
                     let pending_controls =
                         flush_pending_commands_for_send(&pending_commands_for_send, thread_id);
-                    for control in pending_controls {
-                        queue_archcar_control_send(
+                    for (index, control) in pending_controls.iter().enumerate() {
+                        if !queue_archcar_control_send(
                             &archcar_bridge_for_send,
                             inflight_archcar_actions_for_send.as_ref(),
                             thread_id,
                             record.id,
-                            control,
-                        );
+                            control.clone(),
+                        ) {
+                            requeue_pending_controls(
+                                &pending_commands_for_send,
+                                thread_id,
+                                &pending_controls,
+                                index,
+                            );
+                            warn!(
+                                thread_id,
+                                process_id = record.id,
+                                "archcar control send failed; requeued pending controls"
+                            );
+                            break;
+                        }
                     }
                     let kind = if staged_review {
                         ArchcarInputKind::ReviewPrompt
@@ -1374,14 +1449,28 @@ pub fn agent_session_panel(
         app_state_for_send.set_selected_agent_session(Some(process_id));
         active_sessions_for_send.borrow_mut().insert(process_id);
 
-        for control in flush_pending_commands_for_send(&pending_commands_for_send, thread_id) {
-            queue_archcar_control_send(
+        let pending_controls =
+            flush_pending_commands_for_send(&pending_commands_for_send, thread_id);
+        for (index, control) in pending_controls.iter().enumerate() {
+            if !queue_archcar_control_send(
                 &archcar_bridge_for_send,
                 inflight_archcar_actions_for_send.as_ref(),
                 thread_id,
                 process_id,
-                control,
-            );
+                control.clone(),
+            ) {
+                requeue_pending_controls(
+                    &pending_commands_for_send,
+                    thread_id,
+                    &pending_controls,
+                    index,
+                );
+                warn!(
+                    thread_id,
+                    process_id, "archcar control send failed; requeued pending controls"
+                );
+                break;
+            }
         }
         let input_kind = if staged_review {
             ArchcarInputKind::ReviewPrompt
@@ -1420,6 +1509,7 @@ pub fn agent_session_panel(
         let thread_state_for_switch = thread_state.clone();
         let selected_thread_for_switch = selected_thread.clone();
         let update_composer_for_switch = update_composer_state.clone();
+        let toast_for_switch = toast_manager.clone();
         let switch_action = Rc::new(move |next_kind: SessionKind| {
             let (records, threads) =
                 match WorkspaceStore::open(db_for_switch.clone()).map(|store| {
@@ -1434,7 +1524,9 @@ pub fn agent_session_panel(
                 }) {
                     Ok(result) => result,
                     Err(err) => {
-                        let error = Label::new(Some(&format!("[session switch] {err:#}")));
+                        let message = format!("[session switch] {err:#}");
+                        toast_for_switch.error(message.clone());
+                        let error = Label::new(Some(&message));
                         error.add_css_class("chat-agent-text");
                         error.set_selectable(true);
                         error.set_wrap(true);
@@ -1591,9 +1683,11 @@ pub fn agent_session_panel(
         let refresh_view = refresh_view.clone();
         let update_composer_state = update_composer_state.clone();
         let setup_readiness = setup_readiness.clone();
+        let toast_manager = toast_manager.clone();
         move |_| {
             let kind = *selected_harness.borrow();
-            if selected_provider_blocker_after_refresh(kind, &setup_readiness).is_some() {
+            if let Some(message) = selected_provider_blocker_after_refresh(kind, &setup_readiness) {
+                toast_manager.error(message);
                 error!(workspace = %workspace_name, harness = ?kind, "refusing to create chat for unready provider");
                 return;
             }
@@ -1617,6 +1711,7 @@ pub fn agent_session_panel(
                     refresh_view();
                 }
                 Err(err) => {
+                    toast_manager.error(format!("Create chat thread failed: {err:#}"));
                     error!(workspace = %workspace_name, error = %err, "failed to create chat thread");
                 }
             }
@@ -1929,6 +2024,7 @@ fn chat_render_signature(
     threads: &[ChatThreadRecord],
     messages: &[ChatMessageRecord],
     events: &[ChatEventRecord],
+    transcript_display: &str,
     render_state: &'static str,
     runtime_summary: Option<String>,
 ) -> ChatRenderSignature {
@@ -1987,6 +2083,7 @@ fn chat_render_signature(
                 )
             })
             .collect(),
+        transcript_display: transcript_display.to_owned(),
         render_state,
         runtime_summary,
     }
@@ -1994,6 +2091,7 @@ fn chat_render_signature(
 
 fn chat_message_widget(
     message: &ChatMessageRecord,
+    render_raw_message_content: bool,
     render_legacy_inline_events: bool,
 ) -> Option<Widget> {
     match message.role.as_str() {
@@ -2013,7 +2111,7 @@ fn chat_message_widget(
             if !inline_events.is_empty() {
                 return Some(inline_events_widget(&inline_events));
             }
-            let content = chat_agent_message_display_content(message, render_legacy_inline_events);
+            let content = chat_agent_message_display_content(message, render_raw_message_content);
             if content.trim().is_empty() {
                 return None;
             }
@@ -2031,9 +2129,9 @@ fn chat_message_widget(
 
 fn chat_agent_message_display_content(
     message: &ChatMessageRecord,
-    render_legacy_inline_events: bool,
+    render_raw_message_content: bool,
 ) -> String {
-    if render_legacy_inline_events {
+    if render_raw_message_content {
         message.content.clone()
     } else {
         strip_codex_status_blocks(&message.content)
@@ -2107,8 +2205,31 @@ fn chat_event_widget(event: &ChatEventRecord) -> Widget {
         })
 }
 
-fn render_legacy_inline_events_for_thread(thread_events: &[ChatEventRecord]) -> bool {
-    thread_events.is_empty()
+fn render_legacy_inline_events_for_thread(
+    thread_events: &[ChatEventRecord],
+    transcript_display: &str,
+) -> bool {
+    match transcript_display.trim().to_ascii_lowercase().as_str() {
+        "raw" => false,
+        "legacy" => thread_events.is_empty(),
+        _ => thread_events.is_empty(),
+    }
+}
+
+fn render_raw_message_content(transcript_display: &str) -> bool {
+    matches!(
+        transcript_display.trim().to_ascii_lowercase().as_str(),
+        "raw" | "legacy"
+    )
+}
+
+fn transcript_display_for_workspace(database_path: &Path, workspace_name: &str) -> String {
+    WorkspaceStore::open(database_path)
+        .and_then(|store| store.workspace_repository_root(workspace_name))
+        .and_then(|root| load_repository_settings(&root))
+        .ok()
+        .and_then(|settings| settings.customization.view.transcript_display)
+        .unwrap_or_else(|| "structured".to_owned())
 }
 
 fn stored_chat_event_inline_event(event: &ChatEventRecord) -> Option<CodexInlineEvent> {
@@ -2842,6 +2963,90 @@ fn supported_chat_session_kinds() -> &'static [SessionKind] {
     &[SessionKind::Codex, SessionKind::Claude]
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProviderModelChoice {
+    provider: String,
+    model: Option<String>,
+}
+
+impl ProviderModelChoice {
+    fn provider_label(&self) -> &'static str {
+        provider_display_name(&self.provider)
+    }
+
+    fn model_label(&self) -> &str {
+        self.model.as_deref().unwrap_or("Default")
+    }
+
+    fn button_label(&self) -> String {
+        format!("{} · {}", self.provider_label(), self.model_label())
+    }
+
+    fn icon_name(&self) -> &'static str {
+        provider_icon_name(&self.provider)
+    }
+}
+
+fn provider_model_choices(
+    readiness: &SetupReadiness,
+    fallback_kind: SessionKind,
+) -> Vec<ProviderModelChoice> {
+    let mut choices = launchable_agent_tools()
+        .filter(|tool| readiness.launchable_provider_ready(tool.provider_key))
+        .flat_map(|tool| provider_model_choices_for_provider(tool.provider_key))
+        .collect::<Vec<_>>();
+    if choices.is_empty() {
+        choices = provider_model_choices_for_provider(session_kind_provider(fallback_kind));
+    }
+    choices
+}
+
+fn provider_model_choices_for_provider(provider: &str) -> Vec<ProviderModelChoice> {
+    match launchable_provider_name(provider) {
+        Some("codex") => [None, Some("gpt-5"), Some("gpt-5-mini")]
+            .into_iter()
+            .map(|model| ProviderModelChoice {
+                provider: "codex".to_owned(),
+                model: model.map(str::to_owned),
+            })
+            .collect(),
+        Some("claude") => vec![ProviderModelChoice {
+            provider: "claude".to_owned(),
+            model: None,
+        }],
+        _ => Vec::new(),
+    }
+}
+
+fn selected_provider_model_choice_index(
+    choices: &[ProviderModelChoice],
+    kind: SessionKind,
+    model: Option<&str>,
+) -> usize {
+    let provider = session_kind_provider(kind);
+    choices
+        .iter()
+        .position(|choice| {
+            choice.provider == provider
+                && choice.model.as_deref().unwrap_or("") == model.unwrap_or("")
+        })
+        .unwrap_or(0)
+}
+
+fn provider_display_name(provider: &str) -> &'static str {
+    tool_by_provider(provider)
+        .map(|tool| tool.display_name)
+        .unwrap_or("Agent")
+}
+
+fn provider_icon_name(provider: &str) -> &'static str {
+    match launchable_provider_name(provider) {
+        Some("codex") => "code-symbolic",
+        Some("claude") => "application-x-executable-symbolic",
+        _ => "application-x-executable-symbolic",
+    }
+}
+
 fn select_harness_and_dispatch(
     selected_harness: &RefCell<SessionKind>,
     reasoning_mode: &RefCell<Option<String>>,
@@ -2884,20 +3089,6 @@ fn apply_thread_selection<F, U>(
     *selected_thread.borrow_mut() = next_thread;
     set_selected_chat_thread(next_thread);
     update_composer_state();
-}
-
-fn session_kind_from_index(index: usize) -> SessionKind {
-    match index {
-        1 => SessionKind::Claude,
-        _ => SessionKind::Codex,
-    }
-}
-
-fn session_kind_index(kind: SessionKind) -> usize {
-    match kind {
-        SessionKind::Claude => 1,
-        _ => 0,
-    }
 }
 
 fn initial_chat_harness_from_setup(
@@ -2957,17 +3148,7 @@ fn configured_ready_provider(
 }
 
 fn launchable_provider_name(provider: &str) -> Option<&'static str> {
-    match provider
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect::<String>()
-        .as_str()
-    {
-        "codex" => Some("codex"),
-        "claude" | "claudecode" => Some("claude"),
-        _ => None,
-    }
+    launchable_provider_key(provider)
 }
 
 fn session_kind_from_provider(provider: &str) -> SessionKind {
@@ -3001,17 +3182,26 @@ fn session_reasoning_mode_from_index(index: usize) -> String {
     }
 }
 
-fn session_model_from_index(index: usize) -> Option<String> {
-    match index {
-        1 => Some("gpt-5".to_owned()),
-        2 => Some("gpt-5-mini".to_owned()),
-        _ => None,
+fn codex_model_command(model: Option<&str>) -> Option<String> {
+    match model.map(str::trim).filter(|model| !model.is_empty()) {
+        Some(model) => Some(format!("/model {model}")),
+        None => Some("/model default".to_owned()),
     }
 }
 
-fn codex_model_command(model: Option<&str>) -> Option<String> {
-    let model = model?.trim();
-    (!model.is_empty()).then(|| format!("/model {model}"))
+fn replace_pending_model_command(
+    pending: &RefCell<HashMap<i64, Vec<String>>>,
+    thread_id: i64,
+    model: Option<&str>,
+) {
+    pending
+        .borrow_mut()
+        .entry(thread_id)
+        .or_default()
+        .retain(|existing| !existing.starts_with("/model "));
+    if let Some(command) = codex_model_command(model) {
+        queue_thread_command(pending, thread_id, command);
+    }
 }
 
 fn codex_reasoning_command(level: &str) -> Option<String> {
@@ -3378,6 +3568,98 @@ fn mode_menu_child(icon_name: &str, text_label: &str) -> GBox {
     shell.append(&text);
     shell.append(&arrow);
     shell
+}
+
+fn provider_model_menu_button(
+    choices: Rc<Vec<ProviderModelChoice>>,
+    selected_index: usize,
+    on_selected: Rc<dyn Fn(usize)>,
+) -> Button {
+    let selected = choices
+        .get(selected_index)
+        .or_else(|| choices.first())
+        .cloned()
+        .unwrap_or_else(|| ProviderModelChoice {
+            provider: "codex".to_owned(),
+            model: None,
+        });
+    let button = Button::new();
+    button.add_css_class("chat-mode-menu");
+    style_text_button(&button);
+    button.set_tooltip_text(Some(&selected.button_label()));
+    provider_model_menu_set_child(&button, &selected);
+    let popover = provider_model_menu_popover(button.clone(), choices, selected_index, on_selected);
+    popover.set_parent(&button);
+    button.connect_clicked(move |_| {
+        popover.popup();
+    });
+    button
+}
+
+fn provider_model_menu_set_child(button: &Button, choice: &ProviderModelChoice) {
+    let shell = mode_menu_child(choice.icon_name(), &choice.button_label());
+    button.set_child(Some(&shell));
+}
+
+fn provider_model_menu_popover(
+    button: Button,
+    choices: Rc<Vec<ProviderModelChoice>>,
+    selected_index: usize,
+    on_selected: Rc<dyn Fn(usize)>,
+) -> Popover {
+    let popover = Popover::new();
+    popover.add_css_class("chat-menu-popover");
+    let list = GBox::new(Orientation::Vertical, 4);
+    list.add_css_class("chat-menu-list");
+
+    let mut last_provider = None::<String>;
+    for (index, choice) in choices.iter().enumerate() {
+        if last_provider.as_deref() != Some(choice.provider.as_str()) {
+            let header = Label::new(Some(choice.provider_label()));
+            header.add_css_class("chat-menu-group-label");
+            header.set_xalign(0.0);
+            list.append(&header);
+            last_provider = Some(choice.provider.clone());
+        }
+
+        let row = Button::new();
+        row.add_css_class("chat-menu-item");
+        let row_box = GBox::new(Orientation::Horizontal, 10);
+        let icon = Image::from_icon_name(resolve_icon_name(choice.icon_name()));
+        icon.add_css_class("chat-menu-item-icon");
+        let name = Label::new(Some(choice.model_label()));
+        name.add_css_class("chat-menu-item-label");
+        name.set_xalign(0.0);
+        name.set_hexpand(true);
+        row_box.append(&icon);
+        row_box.append(&name);
+        row.set_child(Some(&row_box));
+        if index == selected_index {
+            row.add_css_class("chat-menu-item-selected");
+        }
+        let button_for_row = button.clone();
+        let choice_for_row = choice.clone();
+        let popover_for_row = popover.clone();
+        let on_selected = on_selected.clone();
+        let list_for_row = list.clone();
+        row.connect_clicked(move |clicked| {
+            let mut child = list_for_row.first_child();
+            while let Some(widget) = child {
+                if let Ok(button) = widget.clone().downcast::<Button>() {
+                    button.remove_css_class("chat-menu-item-selected");
+                }
+                child = widget.next_sibling();
+            }
+            clicked.add_css_class("chat-menu-item-selected");
+            provider_model_menu_set_child(&button_for_row, &choice_for_row);
+            button_for_row.set_tooltip_text(Some(&choice_for_row.button_label()));
+            on_selected(index);
+            popover_for_row.popdown();
+        });
+        list.append(&row);
+    }
+    popover.set_child(Some(&list));
+    popover
 }
 
 fn mode_menu_popover(
@@ -4800,14 +5082,22 @@ fn flush_pending_archcar_inputs(
         }
 
         let pending_controls = flush_pending_commands_for_send(pending_commands, thread_id);
-        for control in pending_controls {
-            queue_archcar_control_send(
+        for (index, control) in pending_controls.iter().enumerate() {
+            if !queue_archcar_control_send(
                 bridge,
                 inflight_actions,
                 thread_id,
                 record.id,
                 control.clone(),
-            );
+            ) {
+                requeue_pending_controls(pending_commands, thread_id, &pending_controls, index);
+                warn!(
+                    thread_id,
+                    process_id = record.id,
+                    "archcar control send failed; requeued pending controls"
+                );
+                return flushed_any;
+            }
             debug!(
                 thread_id,
                 process_id = record.id,
@@ -4851,7 +5141,7 @@ fn queue_archcar_control_send(
     thread_id: i64,
     session_id: i64,
     command: String,
-) {
+) -> bool {
     let token = bridge.send_input(
         session_id,
         command.clone(),
@@ -4866,6 +5156,20 @@ fn queue_archcar_control_send(
                 command,
             },
         );
+        true
+    } else {
+        false
+    }
+}
+
+fn requeue_pending_controls(
+    pending_commands: &RefCell<HashMap<i64, Vec<String>>>,
+    thread_id: i64,
+    controls: &[String],
+    start_index: usize,
+) {
+    for control in controls[start_index..].iter().cloned() {
+        queue_thread_command(pending_commands, thread_id, control);
     }
 }
 
@@ -4952,6 +5256,7 @@ fn handle_archcar_event(
     selected_thread_id: Option<i64>,
     codex_ready: &RefCell<bool>,
     update_composer_state: &dyn Fn(),
+    toast_manager: &ToastManager,
 ) {
     match event {
         ArchcarEvent::SessionSpawnQueued { workspace, kind } => {
@@ -5032,6 +5337,7 @@ fn handle_archcar_event(
                 selected_harness,
                 selected_thread_id,
             ) {
+                toast_manager.error(message.clone());
                 apply_codex_startup_signal(
                     &mut startup_states.borrow_mut(),
                     CodexStartupSignal::Error {
@@ -5056,6 +5362,7 @@ fn handle_archcar_response(
     working_threads: &RefCell<HashMap<i64, Instant>>,
     codex_ready: &RefCell<bool>,
     update_composer_state: &dyn Fn(),
+    toast_manager: &ToastManager,
 ) -> bool {
     let mut changed = false;
     let Some(action) = inflight_actions.borrow_mut().remove(&response.token) else {
@@ -5080,12 +5387,11 @@ fn handle_archcar_response(
             Ok(other) => {
                 warn!(%workspace, token = response.token, ?other, "unexpected archcar ensure response");
                 if let Some(thread_id) = thread_id {
+                    let message = format!("Unexpected archcar ensure response: {other:?}");
+                    toast_manager.error(message.clone());
                     apply_codex_startup_signal(
                         &mut startup_states.borrow_mut(),
-                        CodexStartupSignal::Error {
-                            thread_id,
-                            message: format!("Unexpected archcar ensure response: {other:?}"),
-                        },
+                        CodexStartupSignal::Error { thread_id, message },
                     );
                     clear_thread_working(working_threads, thread_id);
                 }
@@ -5094,6 +5400,7 @@ fn handle_archcar_response(
             Err(err) => {
                 warn!(%workspace, token = response.token, error = %err, "archcar ensure failed");
                 if let Some(thread_id) = thread_id {
+                    toast_manager.error(err.clone());
                     apply_codex_startup_signal(
                         &mut startup_states.borrow_mut(),
                         CodexStartupSignal::Error {
@@ -5118,12 +5425,11 @@ fn handle_archcar_response(
                 warn!(thread_id, session_id, control = %command, ?other, "unexpected archcar control response");
                 queue_thread_command(pending_commands, thread_id, command);
                 note_archcar_ready(&mut ready_cache.borrow_mut(), session_id, false);
+                let message = format!("Unexpected archcar control response: {other:?}");
+                toast_manager.error(message.clone());
                 apply_codex_startup_signal(
                     &mut startup_states.borrow_mut(),
-                    CodexStartupSignal::Error {
-                        thread_id,
-                        message: format!("Unexpected archcar control response: {other:?}"),
-                    },
+                    CodexStartupSignal::Error { thread_id, message },
                 );
                 set_codex_ready_state(codex_ready, update_composer_state, false);
                 changed = true;
@@ -5138,6 +5444,7 @@ fn handle_archcar_response(
                 warn!(thread_id, session_id, control = %command, error = %err, "archcar control send failed");
                 queue_thread_command(pending_commands, thread_id, command);
                 note_archcar_ready(&mut ready_cache.borrow_mut(), session_id, false);
+                toast_manager.error(err.clone());
                 apply_codex_startup_signal(
                     &mut startup_states.borrow_mut(),
                     CodexStartupSignal::Error {
@@ -5174,12 +5481,11 @@ fn handle_archcar_response(
                 warn!(thread_id, session_id, kind = ?kind, ?other, "unexpected archcar input response");
                 queue_archcar_input(pending_inputs, thread_id, input, kind);
                 note_archcar_ready(&mut ready_cache.borrow_mut(), session_id, false);
+                let message = format!("Unexpected archcar input response: {other:?}");
+                toast_manager.error(message.clone());
                 apply_codex_startup_signal(
                     &mut startup_states.borrow_mut(),
-                    CodexStartupSignal::Error {
-                        thread_id,
-                        message: format!("Unexpected archcar input response: {other:?}"),
-                    },
+                    CodexStartupSignal::Error { thread_id, message },
                 );
                 clear_thread_working(working_threads, thread_id);
                 set_codex_ready_state(codex_ready, update_composer_state, false);
@@ -5195,6 +5501,7 @@ fn handle_archcar_response(
                 warn!(thread_id, session_id, kind = ?kind, error = %err, "archcar input send failed");
                 queue_archcar_input(pending_inputs, thread_id, input, kind);
                 note_archcar_ready(&mut ready_cache.borrow_mut(), session_id, false);
+                toast_manager.error(err.clone());
                 apply_codex_startup_signal(
                     &mut startup_states.borrow_mut(),
                     CodexStartupSignal::Error {
@@ -5379,6 +5686,7 @@ Do not answer this message. Use it only for continuity and wait for the next rea
 mod tests {
     use super::*;
     use crate::archcar_async::AsyncArchcarRequestKind;
+    use linux_archductor_core::doctor::SetupCheck;
     use linux_archductor_core::workspace::ProcessKind;
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -5404,13 +5712,6 @@ mod tests {
             session_harness_metadata: metadata.map(str::to_owned),
             session_resume_id: None,
         }
-    }
-
-    #[test]
-    fn session_kind_from_index_maps_harness_menu_order() {
-        assert_eq!(session_kind_from_index(0), SessionKind::Codex);
-        assert_eq!(session_kind_from_index(1), SessionKind::Claude);
-        assert_eq!(session_kind_from_index(2), SessionKind::Codex);
     }
 
     #[test]
@@ -5442,6 +5743,75 @@ mod tests {
         assert_eq!(
             supported_chat_session_kinds(),
             &[SessionKind::Codex, SessionKind::Claude]
+        );
+    }
+
+    #[test]
+    fn provider_model_choices_show_only_ready_launchable_code_providers() {
+        let readiness = SetupReadiness {
+            gh: SetupCheck::ready("ready"),
+            codex: SetupCheck::ready("ready"),
+            claude: SetupCheck::missing("missing"),
+            opencode: SetupCheck::ready("ready"),
+        };
+
+        let choices = provider_model_choices(&readiness, SessionKind::Codex);
+
+        assert_eq!(
+            choices,
+            vec![
+                ProviderModelChoice {
+                    provider: "codex".to_owned(),
+                    model: None,
+                },
+                ProviderModelChoice {
+                    provider: "codex".to_owned(),
+                    model: Some("gpt-5".to_owned()),
+                },
+                ProviderModelChoice {
+                    provider: "codex".to_owned(),
+                    model: Some("gpt-5-mini".to_owned()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn provider_model_choices_group_ready_launchable_providers() {
+        let readiness = SetupReadiness {
+            gh: SetupCheck::ready("ready"),
+            codex: SetupCheck::ready("ready"),
+            claude: SetupCheck::ready("ready"),
+            opencode: SetupCheck::ready("ready"),
+        };
+
+        let choices = provider_model_choices(&readiness, SessionKind::Codex);
+
+        assert_eq!(
+            choices
+                .iter()
+                .map(|choice| (choice.provider.as_str(), choice.model.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("codex", None),
+                ("codex", Some("gpt-5")),
+                ("codex", Some("gpt-5-mini")),
+                ("claude", None),
+            ]
+        );
+    }
+
+    #[test]
+    fn default_model_choice_queues_codex_model_reset() {
+        let pending = RefCell::new(HashMap::<i64, Vec<String>>::new());
+        queue_thread_command(&pending, 7, "/model gpt-5".to_owned());
+        queue_thread_command(&pending, 7, "/thinking high".to_owned());
+
+        replace_pending_model_command(&pending, 7, None);
+
+        assert_eq!(
+            pending.borrow().get(&7).cloned().unwrap_or_default(),
+            vec!["/thinking high".to_owned(), "/model default".to_owned()]
         );
     }
 
@@ -6513,8 +6883,7 @@ I summarized the result.
             updated_at: "now".to_owned(),
         };
 
-        let legacy_enabled = render_legacy_inline_events_for_thread(&[]);
-        let legacy_disabled = render_legacy_inline_events_for_thread(&[ChatEventRecord {
+        let persisted_event = ChatEventRecord {
             id: 88,
             thread_id: 7,
             process_id: Some(5),
@@ -6526,12 +6895,21 @@ I summarized the result.
             timeline_seq: 1,
             created_at: "now".to_owned(),
             updated_at: "now".to_owned(),
-        }]);
+        };
+        let legacy_enabled = render_legacy_inline_events_for_thread(&[], "structured");
+        let legacy_disabled = render_legacy_inline_events_for_thread(
+            std::slice::from_ref(&persisted_event),
+            "structured",
+        );
+        let raw_enabled =
+            render_legacy_inline_events_for_thread(std::slice::from_ref(&persisted_event), "raw");
         let legacy_events = legacy_inline_events_for_message(&message, legacy_enabled);
         let persisted_timeline_events = legacy_inline_events_for_message(&message, legacy_disabled);
+        let raw_events = legacy_inline_events_for_message(&message, raw_enabled);
 
         assert_eq!(legacy_events.len(), 1);
         assert!(persisted_timeline_events.is_empty());
+        assert!(raw_events.is_empty());
     }
 
     #[test]

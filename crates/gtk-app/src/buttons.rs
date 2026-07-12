@@ -1,9 +1,24 @@
 use gtk::prelude::*;
-use gtk::{Button, Widget};
+use gtk::{Align, Button, Label, Widget};
 
 pub(crate) fn text_button(label: &str) -> Button {
     let button = Button::with_label(label);
     style_text_button(&button);
+    button
+}
+
+pub(crate) fn menu_text_button(label: &str) -> Button {
+    let button = Button::new();
+    style_text_button(&button);
+    button.add_css_class("chat-menu-item");
+
+    let label = Label::new(Some(label));
+    label.add_css_class("chat-menu-item-label");
+    label.set_xalign(0.0);
+    label.set_halign(Align::Fill);
+    label.set_hexpand(true);
+    button.set_child(Some(&label));
+
     button
 }
 
@@ -23,7 +38,11 @@ pub(crate) fn resolve_icon_name(icon: &str) -> &'static str {
         "sidebar-hide-symbolic" => "view-left-pane-symbolic",
         "sidebar-show-symbolic" => "view-left-pane-symbolic",
         "emblem-system-symbolic" => "preferences-system-symbolic",
+        "document-new-symbolic" => "document-new-symbolic",
         "folder-new-symbolic" => "folder-new-symbolic",
+        "folder-open-symbolic" => "folder-open-symbolic",
+        "network-workgroup-symbolic" => "network-workgroup-symbolic",
+        "open-menu-symbolic" => "open-menu-symbolic",
         "pan-down-symbolic" => "pan-down-symbolic",
         "dialog-error-symbolic" => "dialog-error-symbolic",
         "application-x-executable-symbolic" => "application-x-executable-symbolic",
@@ -36,6 +55,8 @@ pub(crate) fn resolve_icon_name(icon: &str) -> &'static str {
         "view-filter-symbolic" => "view-filter-symbolic",
         "list-add-symbolic" => "list-add-symbolic",
         "list-drag-handle-symbolic" => "list-drag-handle-symbolic",
+        "utilities-terminal-symbolic" => "utilities-terminal-symbolic",
+        "view-more-symbolic" => "view-more-symbolic",
         "window-close-symbolic" => "window-close-symbolic",
         "window-minimize-symbolic" => "window-minimize-symbolic",
         "window-maximize-symbolic" => "window-maximize-symbolic",
@@ -84,5 +105,13 @@ mod tests {
     fn preserves_standard_icon_names() {
         assert_eq!(resolve_icon_name("folder-symbolic"), "folder-symbolic");
         assert_eq!(resolve_icon_name("go-next-symbolic"), "go-next-symbolic");
+        assert_eq!(
+            resolve_icon_name("open-menu-symbolic"),
+            "open-menu-symbolic"
+        );
+        assert_eq!(
+            resolve_icon_name("utilities-terminal-symbolic"),
+            "utilities-terminal-symbolic"
+        );
     }
 }

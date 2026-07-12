@@ -1,27 +1,26 @@
 use adw::ApplicationWindow;
 use gtk::prelude::*;
 use gtk::{
-    Box as GBox, Button, Entry, EventControllerKey, GestureClick, Image, Label, ListBox,
-    ListBoxRow, Orientation, PolicyType, Popover, ScrolledWindow, Stack,
+    Align, Box as GBox, Button, Entry, EventControllerKey, EventControllerMotion, GestureClick,
+    Image, Label, ListBox, ListBoxRow, Orientation, PolicyType, Popover, Revealer,
+    RevealerTransitionType, ScrolledWindow, Spinner, Stack,
 };
 use linux_archductor_core::archcar::protocol::ArchcarRequest;
 use linux_archductor_core::repository::RepositoryStore;
 use linux_archductor_core::workspace::{CreateWorkspace, SessionKind, WorkspaceStore};
-use std::cell::RefCell;
-use std::collections::HashMap;
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::rc::Rc;
-use std::sync::mpsc;
-use std::time::Duration;
 use tracing::error;
 
-use crate::archcar_async::spawn_archcar_request;
-use crate::buttons::{icon_button, resolve_icon_name, text_button};
+use crate::archcar_async::{spawn_archcar_request, spawn_background_job};
+use crate::buttons::{icon_button, menu_text_button, resolve_icon_name, text_button};
 use crate::projects::show_project_creation_popover;
 use crate::refresh::{RefreshHub, RefreshScope};
 use crate::state::{AppPage, AppState, WorkspaceTab};
 use crate::title_case_workspace;
-use crate::workspace_command_center::workspace_pull_request_status_summary;
+use crate::toast::{surface_label_error, ToastManager};
 
 pub(crate) fn build_app_sidebar(
     app_state: &AppState,
@@ -32,6 +31,7 @@ pub(crate) fn build_app_sidebar(
     debug_mode: bool,
     refresh_workspace: impl Fn() + Clone + 'static,
     refresh_view_preferences: Rc<dyn Fn()>,
+    toast_manager: ToastManager,
 ) -> (GBox, impl Fn() + Clone + 'static) {
     let app_state = app_state.clone();
     let sidebar_box = GBox::new(Orientation::Vertical, 0);
@@ -166,12 +166,13 @@ pub(crate) fn build_app_sidebar(
     header_lbl.set_hexpand(true);
     projects_header.append(&header_lbl);
     let add_workspace_btn =
-        sidebar_icon_button("folder-new-symbolic", "Add repository or workspace");
+        sidebar_icon_button("document-new-symbolic", "Add repository or workspace");
     {
         let db_path_hdr = app_state.workspace_database_path();
         let hub_hdr = refresh_hub.clone();
         let rw_hdr = refresh_workspace.clone();
         let rvp_hdr = refresh_view_preferences.clone();
+        let toast_hdr = toast_manager.clone();
         add_workspace_btn.connect_clicked(move |button| {
             show_project_creation_popover(
                 button,
@@ -187,6 +188,7 @@ pub(crate) fn build_app_sidebar(
                         rvp_hdr();
                     }
                 }),
+                toast_hdr.clone(),
             );
         });
     }
@@ -219,6 +221,8 @@ pub(crate) fn build_app_sidebar(
     list.add_css_class("workspace-list");
     list.set_selection_mode(gtk::SelectionMode::Single);
     let names: Rc<RefCell<HashMap<i32, String>>> = Rc::new(RefCell::new(HashMap::new()));
+    let pending_workspace_creates: Rc<RefCell<HashSet<String>>> =
+        Rc::new(RefCell::new(HashSet::new()));
     let db_path = app_state.workspace_database_path();
     let db_path_populate = db_path.clone();
 
@@ -234,6 +238,8 @@ pub(crate) fn build_app_sidebar(
         let stack = stack.clone();
         let sync_nav_buttons = sync_nav_buttons.clone();
         let db_path_populate = db_path_populate.clone();
+        let pending_workspace_creates = Rc::clone(&pending_workspace_creates);
+        let toast_populate = toast_manager.clone();
         move || {
             sync_nav_buttons();
             while let Some(child) = list.first_child() {
@@ -279,7 +285,8 @@ pub(crate) fn build_app_sidebar(
                         continue;
                     }
 
-                    let header_row = section_header_row(&repo_name, lines.len(), {
+                    let create_pending = pending_workspace_creates.borrow().contains(&repo_name);
+                    let header_row = section_header_row(&repo_name, lines.len(), create_pending, {
                         let db_path = db_path_populate.clone();
                         let refresh_hub = refresh_hub.clone();
                         let refresh_workspace = refresh_workspace.clone();
@@ -287,37 +294,48 @@ pub(crate) fn build_app_sidebar(
                         let app_state = app_state.clone();
                         let stack = stack.clone();
                         let repo_name = repo_name.clone();
+                        let pending_workspace_creates = Rc::clone(&pending_workspace_creates);
+                        let toast_create = toast_populate.clone();
                         move |add_btn: Button| {
+                            if !pending_workspace_creates
+                                .borrow_mut()
+                                .insert(repo_name.clone())
+                            {
+                                return;
+                            }
                             add_btn.set_sensitive(false);
                             add_btn.set_tooltip_text(Some("Creating workspace..."));
-                            let rx = spawn_background_job({
-                                let db_path = db_path.clone();
-                                let repo_name = repo_name.clone();
-                                move || {
-                                    WorkspaceStore::open(db_path).and_then(|store| {
-                                        store.create(CreateWorkspace {
-                                            repository_name: repo_name,
-                                            name: String::new(),
-                                            branch: String::new(),
-                                            base_ref: None,
-                                        })
-                                    })
-                                }
-                            });
                             let refresh_hub = refresh_hub.clone();
                             let refresh_workspace = refresh_workspace.clone();
                             let refresh_view_preferences = refresh_view_preferences.clone();
                             let app_state = app_state.clone();
                             let stack = stack.clone();
-                            // PER-190: temporary worker-result poll for workspace
-                            // creation; remove when sidebar jobs return through a
-                            // GLib main-context future.
-                            glib::timeout_add_local(Duration::from_millis(100), move || {
-                                match rx.try_recv() {
-                                    Ok(result) => {
-                                        add_btn.set_sensitive(true);
-                                        add_btn.set_tooltip_text(Some("Create workspace"));
-                                        if let Ok(workspace) = result {
+                            let pending_workspace_creates = Rc::clone(&pending_workspace_creates);
+                            let repo_name_for_callback = repo_name.clone();
+                            let toast_create = toast_create.clone();
+                            spawn_background_job(
+                                {
+                                    let db_path = db_path.clone();
+                                    let repo_name = repo_name.clone();
+                                    move || {
+                                        WorkspaceStore::open(db_path).and_then(|store| {
+                                            store.create(CreateWorkspace {
+                                                repository_name: repo_name,
+                                                name: String::new(),
+                                                branch: String::new(),
+                                                base_ref: None,
+                                            })
+                                        })
+                                    }
+                                },
+                                move |result| {
+                                    pending_workspace_creates
+                                        .borrow_mut()
+                                        .remove(&repo_name_for_callback);
+                                    add_btn.set_sensitive(true);
+                                    add_btn.set_tooltip_text(Some("Create workspace"));
+                                    match result {
+                                        Ok(workspace) => {
                                             let default_tab = WorkspaceStore::open(
                                                 app_state.workspace_database_path(),
                                             )
@@ -338,16 +356,11 @@ pub(crate) fn build_app_sidebar(
                                             refresh_workspace();
                                             refresh_view_preferences();
                                         }
-                                        glib::ControlFlow::Break
+                                        Err(err) => toast_create
+                                            .error(format!("Create workspace failed: {err:#}")),
                                     }
-                                    Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-                                    Err(mpsc::TryRecvError::Disconnected) => {
-                                        add_btn.set_sensitive(true);
-                                        add_btn.set_tooltip_text(Some("Create workspace"));
-                                        glib::ControlFlow::Break
-                                    }
-                                }
-                            });
+                                },
+                            );
                         }
                     });
                     list.append(&header_row);
@@ -366,35 +379,25 @@ pub(crate) fn build_app_sidebar(
                             &ws.name,
                             &ws.branch,
                             &ws.status,
-                            line.run_running,
-                            line.active_sessions,
-                            line.open_todos,
-                            line.pull_request.as_ref().map(|p| p.number),
-                            line.pull_request.as_ref().map(|pr| {
-                                workspace_pull_request_status_summary(
-                                    &workspace_store,
-                                    &ws.name,
-                                    pr,
-                                )
-                            }),
-                            line.branch_push_state
-                                .as_ref()
-                                .map(|s| s.ahead)
-                                .unwrap_or(0),
+                            line.diff_additions,
+                            line.diff_deletions,
                             &ws.updated_at,
                         );
-                        attach_workspace_row_context_menu(
-                            &row,
-                            ws.name.clone(),
-                            app_state.clone(),
-                            stack.clone(),
-                            window.clone(),
-                            refresh_hub.clone(),
-                            refresh_workspace.clone(),
-                            refresh_view_preferences.clone(),
-                        );
+                        if ws.status == "active" {
+                            attach_workspace_row_context_menu(
+                                &row,
+                                ws.name.clone(),
+                                app_state.clone(),
+                                stack.clone(),
+                                window.clone(),
+                                refresh_hub.clone(),
+                                refresh_workspace.clone(),
+                                refresh_view_preferences.clone(),
+                                toast_populate.clone(),
+                            );
+                            names.borrow_mut().insert(row_idx, ws.name.clone());
+                        }
                         list.append(&row);
-                        names.borrow_mut().insert(row_idx, ws.name.clone());
                         row_idx += 1;
                     }
                 }
@@ -481,6 +484,7 @@ pub(crate) fn build_app_sidebar(
         let hub_bar = refresh_hub.clone();
         let rw_bar = refresh_workspace.clone();
         let rvp_bar = refresh_view_preferences.clone();
+        let toast_bar = toast_manager.clone();
         add_repo_btn.connect_clicked(move |button| {
             show_project_creation_popover(
                 button,
@@ -496,6 +500,7 @@ pub(crate) fn build_app_sidebar(
                         rvp_bar();
                     }
                 }),
+                toast_bar.clone(),
             );
         });
     }
@@ -636,34 +641,23 @@ fn build_workspace_row(
     name: &str,
     branch: &str,
     status: &str,
-    run_active: bool,
-    active_sessions: usize,
-    open_todos: usize,
-    pr_number: Option<i64>,
-    github_badge: Option<crate::workspace_command_center::PullRequestStatusSummary>,
-    ahead: usize,
+    diff_additions: usize,
+    diff_deletions: usize,
     updated_at: &str,
 ) -> ListBoxRow {
     let row_box = GBox::new(Orientation::Horizontal, 10);
     row_box.add_css_class("project-row");
     row_box.add_css_class("workspace-row-shell");
-    let is_active = run_active || active_sessions > 0;
-    if is_active {
-        row_box.add_css_class("workspace-row-active");
-    }
 
     let branch_icon = Image::from_icon_name(resolve_icon_name("list-drag-handle-symbolic"));
     branch_icon.add_css_class("workspace-row-branch-icon");
-    if is_active {
-        branch_icon.add_css_class("workspace-row-branch-icon-active");
-    }
     row_box.append(&branch_icon);
 
     // Text column
     let text_box = GBox::new(Orientation::Vertical, 2);
     text_box.set_hexpand(true);
 
-    // Top row: name + badge
+    // Top row: name
     let top_row = GBox::new(Orientation::Horizontal, 6);
     top_row.set_hexpand(true);
 
@@ -674,39 +668,17 @@ fn build_workspace_row(
     name_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
     top_row.append(&name_label);
 
-    // Badge priority: PR > preview > active > ahead commits > todos
-    let badge_text = workspace_badge_text(
-        pr_number,
-        github_badge
-            .as_ref()
-            .and_then(|state| state.attention_label()),
-        run_active,
-        active_sessions,
-        ahead,
-        open_todos,
-    );
-
-    if let Some(badge) = badge_text {
-        let badge_label = Label::new(Some(&badge));
-        badge_label.add_css_class("workspace-badge");
-        if let Some(state) = github_badge.as_ref() {
-            if let Some(css_class) = state.attention_css_class() {
-                badge_label.add_css_class(css_class);
-            }
-        }
-        if !is_active && ahead == 0 && pr_number.is_none() {
-            badge_label.add_css_class("workspace-badge-muted");
-        }
-        badge_label.set_xalign(1.0);
-        top_row.append(&badge_label);
-    }
-
     text_box.append(&top_row);
 
     // Second row: branch · time ago
     let mut meta_parts: Vec<String> = Vec::new();
     if !branch.is_empty() {
         meta_parts.push(branch.to_string());
+    }
+    if status == "creating" {
+        meta_parts.push("Creating workspace...".to_owned());
+    } else if status == "failed" {
+        meta_parts.push("Creation failed".to_owned());
     }
     let ts = relative_time(updated_at);
     if !ts.is_empty() {
@@ -720,10 +692,48 @@ fn build_workspace_row(
     meta_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
     text_box.append(&meta_label);
 
-    let _ = status;
     row_box.append(&text_box);
 
-    ListBoxRow::builder().child(&row_box).build()
+    let trailing_box = GBox::new(Orientation::Horizontal, 0);
+    trailing_box.add_css_class("workspace-row-trailing");
+    trailing_box.set_halign(Align::End);
+    if status == "creating" {
+        let spinner = Spinner::new();
+        spinner.start();
+        trailing_box.append(&spinner);
+    } else if status == "failed" {
+        let failed = Label::new(Some("Failed"));
+        failed.add_css_class("status-error");
+        trailing_box.append(&failed);
+    } else {
+        trailing_box.append(&workspace_diff_stats(diff_additions, diff_deletions));
+    }
+    row_box.append(&trailing_box);
+
+    let row = ListBoxRow::builder().child(&row_box).build();
+    if status != "active" {
+        row.set_selectable(false);
+        row.set_activatable(false);
+    }
+    row
+}
+
+fn workspace_diff_stats(additions: usize, deletions: usize) -> GBox {
+    let stats = GBox::new(Orientation::Horizontal, 5);
+    stats.add_css_class("workspace-row-diff-stats");
+    stats.set_halign(Align::End);
+
+    let additions_label = Label::new(Some(&format!("+ {additions}")));
+    additions_label.add_css_class("workspace-row-diff-added");
+    additions_label.set_xalign(1.0);
+    stats.append(&additions_label);
+
+    let deletions_label = Label::new(Some(&format!("- {deletions}")));
+    deletions_label.add_css_class("workspace-row-diff-removed");
+    deletions_label.set_xalign(1.0);
+    stats.append(&deletions_label);
+
+    stats
 }
 
 fn attach_workspace_row_context_menu(
@@ -735,15 +745,15 @@ fn attach_workspace_row_context_menu(
     refresh_hub: RefreshHub,
     refresh_workspace: impl Fn() + Clone + 'static,
     refresh_view_preferences: Rc<dyn Fn()>,
+    toast_manager: ToastManager,
 ) {
     let popover = Popover::new();
     popover.add_css_class("context-menu-popover");
-    popover.set_parent(row);
+    popover.set_position(gtk::PositionType::Bottom);
     let menu = GBox::new(Orientation::Vertical, 4);
     menu.add_css_class("chat-menu-list");
 
-    let rename_btn = text_button("Rename");
-    rename_btn.add_css_class("chat-menu-item");
+    let rename_btn = menu_text_button("Rename");
     {
         let workspace_name = workspace_name.clone();
         let state = state.clone();
@@ -752,6 +762,7 @@ fn attach_workspace_row_context_menu(
         let refresh_view_preferences = refresh_view_preferences.clone();
         let popover_for_item = popover.downgrade();
         let window = window.downgrade();
+        let toast_manager = toast_manager.clone();
         rename_btn.connect_clicked(move |_| {
             if let Some(popover) = popover_for_item.upgrade() {
                 popover.popdown();
@@ -765,6 +776,7 @@ fn attach_workspace_row_context_menu(
                 "Workspace name",
                 &workspace_name,
                 "Rename",
+                toast_manager.clone(),
                 Rc::new({
                     let workspace_name = workspace_name.clone();
                     let state = state.clone();
@@ -790,8 +802,7 @@ fn attach_workspace_row_context_menu(
     }
     menu.append(&rename_btn);
 
-    let duplicate_btn = text_button("Duplicate");
-    duplicate_btn.add_css_class("chat-menu-item");
+    let duplicate_btn = menu_text_button("Duplicate");
     {
         let workspace_name = workspace_name.clone();
         let refresh_hub = refresh_hub.clone();
@@ -801,6 +812,7 @@ fn attach_workspace_row_context_menu(
         let stack = stack.clone();
         let popover_for_item = popover.downgrade();
         let window = window.downgrade();
+        let toast_manager = toast_manager.clone();
         duplicate_btn.connect_clicked(move |_| {
             if let Some(popover) = popover_for_item.upgrade() {
                 popover.popdown();
@@ -814,6 +826,7 @@ fn attach_workspace_row_context_menu(
                 "New workspace name",
                 "",
                 "Duplicate",
+                toast_manager.clone(),
                 Rc::new({
                     let workspace_name = workspace_name.clone();
                     let refresh_hub = refresh_hub.clone();
@@ -822,59 +835,49 @@ fn attach_workspace_row_context_menu(
                     let state = state.clone();
                     let stack = stack.clone();
                     let window = window.clone();
+                    let toast_manager = toast_manager.clone();
                     move |new_name| {
                         if new_name.is_empty() {
                             return Ok(());
                         }
-                        let rx = spawn_background_job({
-                            let db_path = state.workspace_database_path().to_path_buf();
-                            let workspace_name = workspace_name.clone();
-                            let new_name = new_name.clone();
-                            move || {
-                                WorkspaceStore::open(db_path)
-                                    .and_then(|store| {
-                                        store.duplicate(&workspace_name, &new_name, None)
-                                    })
-                                    .map_err(|err| format!("{err:#}"))
-                            }
-                        });
                         let refresh_hub = refresh_hub.clone();
                         let refresh_workspace = refresh_workspace.clone();
                         let refresh_view_preferences = refresh_view_preferences.clone();
                         let state = state.clone();
                         let stack = stack.clone();
                         let window = window.clone();
-                        // PER-190: temporary worker-result poll for workspace lifecycle actions;
-                        // remove when sidebar jobs return through a GLib main-context future.
-                        glib::timeout_add_local(Duration::from_millis(100), move || {
-                            match rx.try_recv() {
-                                Ok(Ok(workspace)) => {
+                        let toast_manager = toast_manager.clone();
+                        spawn_background_job(
+                            {
+                                let db_path = state.workspace_database_path().to_path_buf();
+                                let workspace_name = workspace_name.clone();
+                                let new_name = new_name.clone();
+                                move || {
+                                    WorkspaceStore::open(db_path)
+                                        .and_then(|store| {
+                                            store.duplicate(&workspace_name, &new_name, None)
+                                        })
+                                        .map_err(|err| format!("{err:#}"))
+                                }
+                            },
+                            move |result| match result {
+                                Ok(workspace) => {
                                     state.navigate_to_workspace(Some(workspace.name));
                                     stack.set_visible_child_name("workspace");
                                     refresh_view_preferences();
                                     refresh_workspace();
                                     refresh_hub.refresh(RefreshScope::All);
-                                    glib::ControlFlow::Break
                                 }
-                                Ok(Err(err)) => {
+                                Err(err) => {
                                     show_workspace_error_dialog(
                                         &window,
                                         "Workspace action failed",
                                         &err,
+                                        &toast_manager,
                                     );
-                                    glib::ControlFlow::Break
                                 }
-                                Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-                                Err(mpsc::TryRecvError::Disconnected) => {
-                                    show_workspace_error_dialog(
-                                        &window,
-                                        "Workspace action failed",
-                                        "Background worker disconnected.",
-                                    );
-                                    glib::ControlFlow::Break
-                                }
-                            }
-                        });
+                            },
+                        );
                         Ok(())
                     }
                 }),
@@ -885,8 +888,7 @@ fn attach_workspace_row_context_menu(
 
     for (label, destructive, action) in [("Archive", false, "archive"), ("Delete", true, "delete")]
     {
-        let item = text_button(label);
-        item.add_css_class("chat-menu-item");
+        let item = menu_text_button(label);
         if destructive {
             item.add_css_class("destructive-action");
         }
@@ -899,6 +901,7 @@ fn attach_workspace_row_context_menu(
         let row = row.downgrade();
         let popover_for_item = popover.downgrade();
         let window = window.downgrade();
+        let toast_manager = toast_manager.clone();
         item.connect_clicked(move |_| {
             if let Some(popover) = popover_for_item.upgrade() {
                 popover.popdown();
@@ -926,6 +929,7 @@ fn attach_workspace_row_context_menu(
                 &message,
                 label,
                 destructive,
+                toast_manager.clone(),
                 Rc::new({
                     let workspace_name = workspace_name.clone();
                     let refresh_hub = refresh_hub.clone();
@@ -935,81 +939,72 @@ fn attach_workspace_row_context_menu(
                     let stack = stack.clone();
                     let row = row.clone();
                     let window = window.clone();
+                    let toast_manager = toast_manager.clone();
                     move || {
-                        let rx = spawn_background_job({
-                            let db_path = state.workspace_database_path().to_path_buf();
-                            let workspace_name = workspace_name.clone();
-                            move || {
-                                WorkspaceStore::open(db_path).and_then(|store| match action {
-                                    "archive" => store.archive(&workspace_name, false).map(|_| ()),
-                                    "delete" => {
-                                        store.delete(&workspace_name, true, true).map(|_| ())
-                                    }
-                                    _ => unreachable!(),
-                                })
-                            }
-                        });
-                        let workspace_name = workspace_name.clone();
                         let refresh_hub = refresh_hub.clone();
                         let refresh_workspace = refresh_workspace.clone();
                         let refresh_view_preferences = refresh_view_preferences.clone();
                         let state = state.clone();
                         let stack = stack.clone();
                         let row = row.clone();
+                        let workspace_name = workspace_name.clone();
                         let window = window.clone();
-                        // PER-190: temporary worker-result poll for workspace lifecycle actions;
-                        // remove when sidebar jobs return through a GLib main-context future.
-                        glib::timeout_add_local(Duration::from_millis(100), move || {
-                            match rx.try_recv() {
-                                Ok(result) => {
-                                    match result {
-                                        Ok(()) => {
-                                            if action == "delete" {
-                                                let snapshot = state.snapshot();
-                                                let was_selected_workspace = snapshot
-                                                    .selected_workspace
-                                                    .as_deref()
+                        let toast_manager = toast_manager.clone();
+                        spawn_background_job(
+                            {
+                                let db_path = state.workspace_database_path().to_path_buf();
+                                let workspace_name = workspace_name.clone();
+                                move || {
+                                    WorkspaceStore::open(db_path).and_then(|store| match action {
+                                        "archive" => {
+                                            store.archive(&workspace_name, false).map(|_| ())
+                                        }
+                                        "delete" => {
+                                            store.delete(&workspace_name, true, true).map(|_| ())
+                                        }
+                                        _ => unreachable!(),
+                                    })
+                                }
+                            },
+                            move |result| match result {
+                                Ok(()) => {
+                                            let snapshot = state.snapshot();
+                                            let was_selected_workspace =
+                                                snapshot.selected_workspace.as_deref()
                                                     == Some(workspace_name.as_str())
                                                     && matches!(
                                                         snapshot.active_page,
                                                         AppPage::Workspace | AppPage::Review
                                                     );
-                                                state.remove_workspace_from_navigation(
-                                                    &workspace_name,
-                                                    AppPage::Dashboard,
-                                                );
-                                                if was_selected_workspace {
-                                                    stack.set_visible_child_name("dashboard");
-                                                }
-                                                if let Some(list) =
-                                                    row.parent().and_downcast::<ListBox>()
-                                                {
-                                                    list.remove(&row);
-                                                }
+                                            state.remove_workspace_from_navigation(
+                                                &workspace_name,
+                                                AppPage::Dashboard,
+                                            );
+                                            if was_selected_workspace {
+                                                stack.set_visible_child_name("dashboard");
+                                            }
+                                            if let Some(list) =
+                                                row.parent().and_downcast::<ListBox>()
+                                            {
+                                                list.remove(&row);
                                             }
                                             refresh_view_preferences();
                                             refresh_workspace();
                                             refresh_hub.refresh(RefreshScope::All);
-                                        }
-                                        Err(err) => show_workspace_error_dialog(
-                                            &window,
-                                            "Workspace action failed",
-                                            &format!("{err:#}"),
-                                        ),
-                                    }
-                                    glib::ControlFlow::Break
                                 }
-                                Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-                                Err(mpsc::TryRecvError::Disconnected) => {
-                                    show_workspace_error_dialog(
-                                        &window,
-                                        "Workspace action failed",
-                                        "Background worker disconnected.",
-                                    );
-                                    glib::ControlFlow::Break
+                                Err(err) => {
+                                            refresh_view_preferences();
+                                            refresh_workspace();
+                                            refresh_hub.refresh(RefreshScope::Sidebar);
+                                            show_workspace_error_dialog(
+                                                &window,
+                                                "Workspace action failed",
+                                                &format!("{err:#}"),
+                                                &toast_manager,
+                                            );
                                 }
-                            }
-                        });
+                            },
+                        );
                         Ok(())
                     }
                 }),
@@ -1019,27 +1014,91 @@ fn attach_workspace_row_context_menu(
     }
 
     popover.set_child(Some(&menu));
-    let menu_btn = icon_button("open-menu-symbolic", "Workspace actions");
+    let menu_btn = icon_button("view-more-symbolic", "Workspace actions");
     menu_btn.add_css_class("workspace-row-menu-button");
+    menu_btn.set_margin_start(2);
+    popover.set_parent(row);
+    let menu_revealer = Revealer::new();
+    menu_revealer.add_css_class("workspace-row-menu-revealer");
+    menu_revealer.set_transition_type(RevealerTransitionType::SlideLeft);
+    menu_revealer.set_transition_duration(140);
+    menu_revealer.set_reveal_child(false);
+    menu_revealer.set_child(Some(&menu_btn));
+    let row_hovered = Rc::new(Cell::new(false));
+    let menu_open = Rc::new(Cell::new(false));
+    let sync_menu_revealer = {
+        let menu_revealer = menu_revealer.clone();
+        let row_hovered = row_hovered.clone();
+        let menu_open = menu_open.clone();
+        Rc::new(move || {
+            menu_revealer.set_reveal_child(row_hovered.get() || menu_open.get());
+        })
+    };
     {
         let popover = popover.downgrade();
-        menu_btn.connect_clicked(move |_| {
+        let menu_open = menu_open.clone();
+        let sync_menu_revealer = sync_menu_revealer.clone();
+        let row_for_menu = row.clone();
+        menu_btn.connect_clicked(move |button| {
             if let Some(popover) = popover.upgrade() {
+                menu_open.set(true);
+                sync_menu_revealer();
+                let rect = button.compute_bounds(&row_for_menu).map(|bounds| {
+                    gtk::gdk::Rectangle::new(
+                        bounds.x().round() as i32,
+                        bounds.y().round() as i32,
+                        bounds.width().ceil().max(1.0) as i32,
+                        bounds.height().ceil().max(1.0) as i32,
+                    )
+                });
+                popover.set_pointing_to(rect.as_ref());
                 popover.popup();
             }
         });
     }
+    {
+        let menu_open = menu_open.clone();
+        let sync_menu_revealer = sync_menu_revealer.clone();
+        popover.connect_closed(move |_| {
+            menu_open.set(false);
+            sync_menu_revealer();
+        });
+    }
     if let Some(row_box) = row.child().and_downcast::<GBox>() {
-        row_box.append(&menu_btn);
+        if let Some(trailing_box) = row_box.last_child().and_downcast::<GBox>() {
+            trailing_box.append(&menu_revealer);
+        }
+        let hover_controller = EventControllerMotion::new();
+        {
+            let row_hovered = row_hovered.clone();
+            let sync_menu_revealer = sync_menu_revealer.clone();
+            hover_controller.connect_enter(move |_, _, _| {
+                row_hovered.set(true);
+                sync_menu_revealer();
+            });
+        }
+        {
+            let row_hovered = row_hovered.clone();
+            let sync_menu_revealer = sync_menu_revealer.clone();
+            hover_controller.connect_leave(move |_| {
+                row_hovered.set(false);
+                sync_menu_revealer();
+            });
+        }
+        row_box.add_controller(hover_controller);
     }
 
     let gesture = GestureClick::new();
     gesture.set_button(3);
     let popover_for_click = popover.downgrade();
+    let menu_open_for_click = menu_open.clone();
+    let sync_revealer_for_click = sync_menu_revealer.clone();
     gesture.connect_pressed(move |_, _, x, y| {
         let Some(popover_for_click) = popover_for_click.upgrade() else {
             return;
         };
+        menu_open_for_click.set(true);
+        sync_revealer_for_click();
         let rect = gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1);
         popover_for_click.set_pointing_to(Some(&rect));
         popover_for_click.popup();
@@ -1049,6 +1108,8 @@ fn attach_workspace_row_context_menu(
     row.set_focusable(true);
     let key_controller = EventControllerKey::new();
     let popover_for_key = popover.downgrade();
+    let menu_open_for_key = menu_open.clone();
+    let sync_revealer_for_key = sync_menu_revealer.clone();
     key_controller.connect_key_pressed(move |_, key, _, modifiers| {
         let menu_key = key == gtk::gdk::Key::Menu;
         let shift_f10 =
@@ -1057,6 +1118,9 @@ fn attach_workspace_row_context_menu(
             return gtk::glib::Propagation::Proceed;
         }
         if let Some(popover) = popover_for_key.upgrade() {
+            menu_open_for_key.set(true);
+            sync_revealer_for_key();
+            popover.set_pointing_to(None);
             popover.popup();
         }
         gtk::glib::Propagation::Stop
@@ -1069,6 +1133,7 @@ fn show_workspace_text_dialog(
     placeholder: &str,
     initial: &str,
     action_label: &str,
+    toast_manager: ToastManager,
     on_submit: Rc<dyn Fn(String) -> Result<(), String>>,
 ) {
     let dialog = gtk::Window::builder()
@@ -1111,10 +1176,11 @@ fn show_workspace_text_dialog(
         let dialog = dialog.clone();
         let entry = entry.clone();
         let error_label = error_label.clone();
+        let toast_manager = toast_manager.clone();
         action_btn.connect_clicked(move |_| match on_submit(entry.text().trim().to_owned()) {
             Ok(()) => dialog.close(),
             Err(message) => {
-                error_label.set_text(&message);
+                surface_label_error(&error_label, &toast_manager, message);
                 error_label.set_visible(true);
             }
         });
@@ -1134,6 +1200,7 @@ fn show_workspace_confirm_dialog(
     message: &str,
     action_label: &str,
     destructive: bool,
+    toast_manager: ToastManager,
     on_confirm: Rc<dyn Fn() -> Result<(), String>>,
 ) {
     let dialog = gtk::Window::builder()
@@ -1178,10 +1245,11 @@ fn show_workspace_confirm_dialog(
     {
         let dialog = dialog.clone();
         let error_label = error_label.clone();
+        let toast_manager = toast_manager.clone();
         action_btn.connect_clicked(move |_| match on_confirm() {
             Ok(()) => dialog.close(),
             Err(message) => {
-                error_label.set_text(&message);
+                surface_label_error(&error_label, &toast_manager, message);
                 error_label.set_visible(true);
             }
         });
@@ -1194,7 +1262,13 @@ fn show_workspace_confirm_dialog(
     dialog.present();
 }
 
-fn show_workspace_error_dialog(window: &ApplicationWindow, title: &str, message: &str) {
+fn show_workspace_error_dialog(
+    window: &ApplicationWindow,
+    title: &str,
+    message: &str,
+    toast_manager: &ToastManager,
+) {
+    toast_manager.error(message.to_owned());
     let dialog = gtk::Window::builder()
         .title(title)
         .modal(true)
@@ -1230,35 +1304,6 @@ fn show_workspace_error_dialog(window: &ApplicationWindow, title: &str, message:
     dialog.present();
 }
 
-fn workspace_badge_text(
-    pr_number: Option<i64>,
-    pr_attention: Option<&str>,
-    run_active: bool,
-    active_sessions: usize,
-    ahead: usize,
-    open_todos: usize,
-) -> Option<String> {
-    if let Some(attention) = pr_attention.filter(|value| !value.is_empty()) {
-        return Some(attention.to_owned());
-    }
-    if let Some(pr) = pr_number {
-        return Some(format!("PR #{pr}"));
-    }
-    if run_active {
-        return Some("preview".to_owned());
-    }
-    if active_sessions > 0 {
-        return Some("active".to_owned());
-    }
-    if ahead > 0 {
-        return Some(format!("+{ahead}"));
-    }
-    if open_todos > 0 {
-        return Some(format!("{open_todos} todo"));
-    }
-    None
-}
-
 fn primary_sidebar_nav_labels(debug_mode: bool) -> Vec<&'static str> {
     let mut labels = vec!["Dashboard", "History"];
     if debug_mode {
@@ -1274,6 +1319,7 @@ fn sidebar_should_restore_workspace_selection(page: &AppPage) -> bool {
 fn section_header_row(
     name: &str,
     _workspace_count: usize,
+    create_pending: bool,
     on_add_workspace: impl Fn(Button) + 'static,
 ) -> ListBoxRow {
     let shell = GBox::new(Orientation::Horizontal, 6);
@@ -1292,7 +1338,12 @@ fn section_header_row(
 
     let add_btn = sidebar_icon_button("list-add-symbolic", "Create workspace");
     add_btn.add_css_class("repo-header-add");
-    add_btn.set_tooltip_text(Some("Create workspace"));
+    if create_pending {
+        add_btn.set_sensitive(false);
+        add_btn.set_tooltip_text(Some("Creating workspace..."));
+    } else {
+        add_btn.set_tooltip_text(Some("Create workspace"));
+    }
     add_btn.connect_clicked({
         let add_btn = add_btn.clone();
         move |_| on_add_workspace(add_btn.clone())
@@ -1303,18 +1354,6 @@ fn section_header_row(
     row.set_selectable(false);
     row.set_activatable(false);
     row
-}
-
-fn spawn_background_job<F, T>(job: F) -> mpsc::Receiver<T>
-where
-    F: FnOnce() -> T + Send + 'static,
-    T: Send + 'static,
-{
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(job());
-    });
-    rx
 }
 
 fn empty_repo_row() -> ListBoxRow {
@@ -1384,24 +1423,8 @@ fn relative_time(ts: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        primary_sidebar_nav_labels, sidebar_should_restore_workspace_selection,
-        spawn_background_job, workspace_badge_text,
-    };
+    use super::{primary_sidebar_nav_labels, sidebar_should_restore_workspace_selection};
     use crate::state::AppPage;
-    use std::time::{Duration, Instant};
-
-    #[test]
-    fn workspace_badge_prefers_failed_github_state_over_pr_number() {
-        let badge = workspace_badge_text(Some(42), Some("checks failed"), false, 0, 0, 0);
-        assert_eq!(badge.as_deref(), Some("checks failed"));
-    }
-
-    #[test]
-    fn workspace_badge_falls_back_to_pr_number_without_github_state() {
-        let badge = workspace_badge_text(Some(42), None, false, 0, 0, 0);
-        assert_eq!(badge.as_deref(), Some("PR #42"));
-    }
 
     #[test]
     fn primary_sidebar_nav_labels_gate_pty_inspector_under_history() {
@@ -1427,21 +1450,5 @@ mod tests {
         assert!(!sidebar_should_restore_workspace_selection(
             &AppPage::History
         ));
-    }
-
-    #[test]
-    fn spawn_background_job_returns_before_work_finishes() {
-        let start = Instant::now();
-        let rx = spawn_background_job(|| {
-            std::thread::sleep(Duration::from_millis(150));
-            42
-        });
-
-        assert!(start.elapsed() < Duration::from_millis(50));
-        assert!(matches!(
-            rx.try_recv(),
-            Err(std::sync::mpsc::TryRecvError::Empty)
-        ));
-        assert_eq!(rx.recv_timeout(Duration::from_secs(1)).unwrap(), 42);
     }
 }

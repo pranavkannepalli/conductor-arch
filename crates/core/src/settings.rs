@@ -6,6 +6,7 @@ use std::io::{ErrorKind, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::path::PathBuf;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -15,6 +16,7 @@ pub struct RepositorySettings {
     pub enterprise_data_privacy: Option<bool>,
     pub scripts: ScriptSettings,
     pub environment_variables: Vec<(String, String)>,
+    pub prompt_pack: PromptPackSettings,
     pub prompts: Option<PromptSettings>,
     pub providers: ProviderSettings,
     pub git: GitSettings,
@@ -22,8 +24,28 @@ pub struct RepositorySettings {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RepositoryConfigBootstrap {
+    pub conductor_dir_created: bool,
+    pub shared_settings_created: bool,
+    pub prompt_pack_dir_created: bool,
+    pub default_prompt_pack_created: bool,
+    pub active_prompt_pack_created: bool,
+    pub context_gitignore_updated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositorySettingsLoadReport {
+    pub settings: RepositorySettings,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PromptSettings {
+    pub new_workspace: Option<String>,
     pub general: Option<String>,
+    pub continue_work: Option<String>,
+    pub summarize_session: Option<String>,
+    pub handoff: Option<String>,
     pub code_review: Option<String>,
     pub create_pr: Option<String>,
     pub fix_errors: Option<String>,
@@ -32,6 +54,15 @@ pub struct PromptSettings {
     pub commit_generation: Option<String>,
     pub test_fixing: Option<String>,
     pub refactor_style: Option<String>,
+    pub setup_script: Option<String>,
+    pub run_script: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PromptPackSettings {
+    pub active: Option<String>,
+    pub version: Option<String>,
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -42,7 +73,6 @@ pub struct ProviderSettings {
     pub codex_provider: Option<String>,
     pub bedrock_region: Option<String>,
     pub vertex_project_id: Option<String>,
-    pub ssh_key_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -59,6 +89,10 @@ pub struct ScriptSettings {
     pub setup: Option<String>,
     pub run: Option<String>,
     pub archive: Option<String>,
+    pub test: Option<String>,
+    pub lint: Option<String>,
+    pub typecheck: Option<String>,
+    pub build: Option<String>,
     pub run_mode: Option<String>,
 }
 
@@ -89,6 +123,7 @@ pub struct AutomationSettings {
     pub required_local_files: Vec<String>,
     pub test_command: Option<String>,
     pub lint_command: Option<String>,
+    pub typecheck_command: Option<String>,
     pub build_command: Option<String>,
     pub pre_clone: Option<String>,
     pub post_clone: Option<String>,
@@ -107,6 +142,7 @@ pub struct AutomationSettings {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AgentProfileSettings {
     pub agent: Option<String>,
+    pub model: Option<String>,
     pub approval_mode: Option<String>,
     pub reasoning_mode: Option<String>,
     pub personality: Option<String>,
@@ -138,6 +174,7 @@ pub struct WorkspaceDefaultSettings {
 pub struct ViewSettings {
     pub theme: Option<String>,
     pub accent_color: Option<String>,
+    pub colors: BTreeMap<String, String>,
     pub density: Option<String>,
     pub sidebar_layout: Option<String>,
     pub diff_preference: Option<String>,
@@ -152,9 +189,158 @@ pub struct ViewSettings {
 }
 
 pub fn load_repository_settings(repo_path: &Path) -> Result<RepositorySettings> {
+    match load_repository_settings_strict(repo_path) {
+        Ok(settings) => Ok(settings),
+        Err(err) if is_recoverable_settings_load_error(&err) => {
+            Ok(load_repository_settings_recovering(repo_path).settings)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn load_repository_settings_strict(repo_path: &Path) -> Result<RepositorySettings> {
     let shared = load_optional_settings(&repo_path.join(".archductor/settings.toml"))?;
     let local = load_optional_settings(&repo_path.join(".archductor/settings.local.toml"))?;
-    Ok(shared.merge(local).into_settings())
+    let mut settings = shared.merge(local).into_settings();
+    validate_repository_settings(&settings)?;
+    apply_prompt_pack_prompts(repo_path, &mut settings)?;
+    Ok(settings)
+}
+
+pub fn load_repository_settings_for_layer(
+    repo_path: &Path,
+    layer: SettingsLayer,
+) -> Result<RepositorySettings> {
+    let path = match layer {
+        SettingsLayer::RepositoryShared => repo_path.join(".archductor/settings.toml"),
+        SettingsLayer::LocalOverride => repo_path.join(".archductor/settings.local.toml"),
+    };
+    load_optional_settings(&path).map(|settings| settings.into_settings())
+}
+
+pub fn load_repository_settings_recovering(repo_path: &Path) -> RepositorySettingsLoadReport {
+    let shared_path = repo_path.join(".archductor/settings.toml");
+    let local_path = repo_path.join(".archductor/settings.local.toml");
+    let mut errors = Vec::new();
+    let shared = match load_optional_settings(&shared_path) {
+        Ok(settings) => settings,
+        Err(err) => {
+            errors.push(err.to_string());
+            RawRepositorySettings::default()
+        }
+    };
+    let local = match load_optional_settings(&local_path) {
+        Ok(settings) => settings,
+        Err(err) => {
+            errors.push(err.to_string());
+            RawRepositorySettings::default()
+        }
+    };
+    let mut settings = shared.merge(local).into_settings();
+    match validate_repository_settings(&settings) {
+        Ok(()) => {
+            if let Err(err) = apply_prompt_pack_prompts(repo_path, &mut settings) {
+                errors.push(err.to_string());
+            }
+            RepositorySettingsLoadReport { settings, errors }
+        }
+        Err(err) => {
+            errors.push(err.to_string());
+            RepositorySettingsLoadReport {
+                settings: RepositorySettings::default(),
+                errors,
+            }
+        }
+    }
+}
+
+fn apply_prompt_pack_prompts(repo_path: &Path, settings: &mut RepositorySettings) -> Result<()> {
+    let Some(pack_prompts) = load_prompt_pack_prompts(repo_path, &settings.prompt_pack)? else {
+        return Ok(());
+    };
+    settings.prompts = Some(match settings.prompts.take() {
+        Some(prompts) => merge_prompt_settings(pack_prompts, prompts),
+        None => pack_prompts,
+    });
+    Ok(())
+}
+
+fn load_prompt_pack_prompts(
+    repo_path: &Path,
+    prompt_pack: &PromptPackSettings,
+) -> Result<Option<PromptSettings>> {
+    let Some(relative_path) = prompt_pack
+        .path
+        .as_deref()
+        .and_then(active_prompt_pack_path)
+    else {
+        return Ok(None);
+    };
+    let path = repo_path.join(relative_path);
+    if !prompt_pack_path_is_real(&repo_path.join(".archductor/prompt-packs"), true)? {
+        return Ok(None);
+    }
+    if !prompt_pack_path_is_real(&path, false)? {
+        return Ok(None);
+    }
+    let contents = fs::read_to_string(&path)
+        .with_context(|| format!("read prompt pack {}", path.display()))?;
+    let raw: RawPromptPackFile = toml::from_str(&contents)
+        .with_context(|| format!("parse prompt pack {}", path.display()))?;
+    Ok(Some(raw.prompts.into_settings()))
+}
+
+fn merge_prompt_settings(base: PromptSettings, overrides: PromptSettings) -> PromptSettings {
+    RawPromptSettings::from_settings(&base)
+        .merge(RawPromptSettings::from_settings(&overrides))
+        .into_settings()
+}
+
+fn is_recoverable_settings_load_error(err: &anyhow::Error) -> bool {
+    let message = err.to_string();
+    !(message.contains("must not be a symlink")
+        || message.contains("read settings")
+        || message.contains("inspect "))
+}
+
+pub fn ensure_repository_config(repo_path: &Path) -> Result<RepositoryConfigBootstrap> {
+    let (conductor_dir, conductor_dir_created) = ensure_settings_dir(repo_path)?;
+    let shared_path = conductor_dir.join("settings.toml");
+    reject_symlink_file(&shared_path)?;
+
+    let mut report = RepositoryConfigBootstrap {
+        conductor_dir_created,
+        shared_settings_created: false,
+        prompt_pack_dir_created: false,
+        default_prompt_pack_created: false,
+        active_prompt_pack_created: false,
+        context_gitignore_updated: false,
+    };
+
+    let settings = match fs::read_to_string(&shared_path) {
+        Ok(contents) => {
+            let settings = repository_settings_from_toml(&contents)
+                .with_context(|| format!("validate {}", shared_path.display()))?;
+            validate_repository_settings(&settings)?;
+            settings
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            let contents = default_repository_settings_toml()?;
+            atomic_write_no_symlink(&shared_path, contents.as_bytes())?;
+            report.shared_settings_created = true;
+            repository_settings_from_toml(&contents)
+                .with_context(|| format!("validate {}", shared_path.display()))?
+        }
+        Err(err) => return Err(err).with_context(|| format!("read {}", shared_path.display())),
+    };
+    let prompt_pack_report =
+        ensure_default_prompt_pack_files(repo_path, &conductor_dir, &settings)?;
+    report.prompt_pack_dir_created = prompt_pack_report.prompt_pack_dir_created;
+    report.default_prompt_pack_created = prompt_pack_report.default_prompt_pack_created;
+    report.active_prompt_pack_created = prompt_pack_report.active_prompt_pack_created;
+    report.context_gitignore_updated = ensure_context_gitignored(repo_path)?;
+
+    Ok(report)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,7 +378,7 @@ pub fn inspect_repository_settings(repo_path: &Path) -> Result<RepositorySetting
     } else {
         Vec::new()
     };
-    let settings = load_repository_settings(repo_path)?;
+    let settings = load_repository_settings_recovering(repo_path).settings;
     let (active_file_patterns_source, active_file_patterns) =
         if !worktreeinclude_patterns.is_empty() {
             (
@@ -224,16 +410,16 @@ pub fn save_repository_settings(
     settings: &RepositorySettings,
 ) -> Result<()> {
     validate_repository_settings(settings)?;
-    let conductor_dir = repo_path.join(".archductor");
-    std::fs::create_dir_all(&conductor_dir)
-        .with_context(|| format!("create {}", conductor_dir.display()))?;
+    let (conductor_dir, _) = ensure_settings_dir(repo_path)?;
     let path = match layer {
         SettingsLayer::RepositoryShared => conductor_dir.join("settings.toml"),
         SettingsLayer::LocalOverride => conductor_dir.join("settings.local.toml"),
     };
+    reject_symlink_file(&path)?;
+    backup_settings_file(&path)?;
     let raw = RawRepositorySettings::from_settings(settings);
     let contents = toml::to_string_pretty(&raw).context("serialize repository settings")?;
-    std::fs::write(&path, contents).with_context(|| format!("write {}", path.display()))
+    atomic_write_no_symlink(&path, contents.as_bytes())
 }
 
 pub fn save_local_default_agent_provider(repo_path: &Path, provider: &str) -> Result<()> {
@@ -272,6 +458,123 @@ pub fn repository_settings_to_toml(settings: &RepositorySettings) -> Result<Stri
     toml::to_string_pretty(&raw).context("serialize repository settings")
 }
 
+pub fn default_repository_settings_toml() -> Result<String> {
+    let settings = RepositorySettings {
+        file_include_globs: vec![".env*".to_owned()],
+        scripts: ScriptSettings {
+            run_mode: Some("concurrent".to_owned()),
+            ..ScriptSettings::default()
+        },
+        prompts: None,
+        prompt_pack: PromptPackSettings {
+            active: Some("default".to_owned()),
+            version: Some("v1".to_owned()),
+            path: Some(".archductor/prompt-packs/default.toml".to_owned()),
+        },
+        customization: CustomizationSettings {
+            automation: AutomationSettings {
+                auto_setup: Some(false),
+                ..AutomationSettings::default()
+            },
+            workspace_defaults: WorkspaceDefaultSettings {
+                base_branch: Some("main".to_owned()),
+                branch_prefix: Some("lc".to_owned()),
+                port_block_size: Some(10),
+                default_visible_tab: Some("changes".to_owned()),
+                ..WorkspaceDefaultSettings::default()
+            },
+            view: ViewSettings {
+                theme: Some("system".to_owned()),
+                accent_color: Some("green".to_owned()),
+                colors: default_view_colors(),
+                density: Some("compact".to_owned()),
+                diff_preference: Some("unified".to_owned()),
+                transcript_display: Some("structured".to_owned()),
+                ..ViewSettings::default()
+            },
+            ..CustomizationSettings::default()
+        },
+        ..RepositorySettings::default()
+    };
+    repository_settings_to_toml(&settings)
+}
+
+pub fn default_prompt_pack_toml() -> Result<String> {
+    let raw = RawPromptPackFile {
+        name: Some("default".to_owned()),
+        version: Some("v1".to_owned()),
+        prompts: RawPromptSettings::from_settings(&default_prompt_settings()),
+    };
+    toml::to_string_pretty(&raw).context("serialize default prompt pack")
+}
+
+fn default_prompt_settings() -> PromptSettings {
+    PromptSettings {
+        new_workspace: Some(
+            "Create a small, reviewable workspace plan before changing code.".to_owned(),
+        ),
+        general: Some("Prefer small, reviewable changes. Explain verification clearly.".to_owned()),
+        continue_work: Some(
+            "Continue from the current state. Inspect recent changes before editing.".to_owned(),
+        ),
+        summarize_session: Some(
+            "Summarize the work completed, verification run, and remaining risk.".to_owned(),
+        ),
+        handoff: Some(
+            "Write a concise handoff with context, changed files, tests, and next steps."
+                .to_owned(),
+        ),
+        code_review: Some(
+            "Focus on correctness, behavior changes, missing tests, and regressions.".to_owned(),
+        ),
+        create_pr: Some("Write a concise PR body with summary, tests, and risk.".to_owned()),
+        fix_errors: Some("Reproduce the failure, then make the smallest safe fix.".to_owned()),
+        resolve_merge_conflicts: Some(
+            "Preserve user changes and explain any conflict resolution choices.".to_owned(),
+        ),
+        rename_branch: Some("Use a short descriptive branch name.".to_owned()),
+        commit_generation: Some(
+            "Write a conventional commit message that matches the actual diff.".to_owned(),
+        ),
+        test_fixing: Some(
+            "Run the failing test first, fix the root cause, then rerun focused tests.".to_owned(),
+        ),
+        refactor_style: Some(
+            "Keep behavior-preserving refactors separate from feature changes.".to_owned(),
+        ),
+        setup_script: Some(
+            "Infer the repository setup command from existing package and build files.".to_owned(),
+        ),
+        run_script: Some(
+            "Infer the local development run command and include port/env requirements.".to_owned(),
+        ),
+    }
+}
+
+fn default_view_colors() -> BTreeMap<String, String> {
+    [
+        ("background", "#191919"),
+        ("surface", "#1e1e1e"),
+        ("surface_raised", "#202020"),
+        ("surface_muted", "#181818"),
+        ("hover", "#2a2a2a"),
+        ("hover_soft", "#242424"),
+        ("border", "#2a2a2a"),
+        ("border_strong", "#3a3a3a"),
+        ("text", "#e4e4e4"),
+        ("text_strong", "#f8fafc"),
+        ("text_muted", "#8a8a8a"),
+        ("accent", "#22c55e"),
+        ("accent_fg", "#052e16"),
+        ("success", "#84e0a0"),
+        ("warning", "#f59e0b"),
+        ("danger", "#ff8a8a"),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.to_owned(), value.to_owned()))
+    .collect()
+}
+
 pub fn repository_settings_from_toml(contents: &str) -> Result<RepositorySettings> {
     let raw: RawRepositorySettings =
         toml::from_str(contents).context("parse repository settings")?;
@@ -291,10 +594,46 @@ pub fn validate_repository_settings(settings: &RepositorySettings) -> Result<()>
         ("scripts.setup", settings.scripts.setup.as_deref()),
         ("scripts.run", settings.scripts.run.as_deref()),
         ("scripts.archive", settings.scripts.archive.as_deref()),
+        ("scripts.test", settings.scripts.test.as_deref()),
+        ("scripts.lint", settings.scripts.lint.as_deref()),
+        ("scripts.typecheck", settings.scripts.typecheck.as_deref()),
+        ("scripts.build", settings.scripts.build.as_deref()),
+        (
+            "customization.automation.test_command",
+            settings.customization.automation.test_command.as_deref(),
+        ),
+        (
+            "customization.automation.lint_command",
+            settings.customization.automation.lint_command.as_deref(),
+        ),
+        (
+            "customization.automation.typecheck_command",
+            settings
+                .customization
+                .automation
+                .typecheck_command
+                .as_deref(),
+        ),
+        (
+            "customization.automation.build_command",
+            settings.customization.automation.build_command.as_deref(),
+        ),
     ] {
         if let Some(command) = command {
             anyhow::ensure!(!command.contains('\0'), "{label} cannot contain NUL bytes");
         }
+    }
+    if let Some(active) = settings.prompt_pack.active.as_deref() {
+        anyhow::ensure!(
+            !active.trim().is_empty() && !active.contains('\0'),
+            "prompt_pack.active must not be empty or contain NUL bytes"
+        );
+    }
+    if let Some(path) = settings.prompt_pack.path.as_deref() {
+        anyhow::ensure!(
+            active_prompt_pack_path(path).is_some(),
+            "prompt_pack.path must name a file directly under .archductor/prompt-packs"
+        );
     }
     for (key, _) in &settings.environment_variables {
         anyhow::ensure!(
@@ -341,6 +680,16 @@ pub fn validate_repository_settings(settings: &RepositorySettings) -> Result<()>
             "customization.naming.default_merge_method must be squash, merge, or rebase"
         );
     }
+    for (key, value) in &settings.customization.view.colors {
+        anyhow::ensure!(
+            is_valid_view_color_key(key),
+            "customization.view.colors.{key} is not a supported color key"
+        );
+        anyhow::ensure!(
+            is_valid_hex_color(value),
+            "customization.view.colors.{key} must be a hex color like #22c55e"
+        );
+    }
     Ok(())
 }
 
@@ -359,6 +708,8 @@ struct RawRepositorySettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     environment_variables: Option<BTreeMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_pack: Option<RawPromptPackSettings>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     prompts: Option<RawPromptSettings>,
     #[serde(flatten)]
     providers: RawProviderSettings,
@@ -371,7 +722,15 @@ struct RawRepositorySettings {
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 struct RawPromptSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
+    new_workspace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     general: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    continue_work: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summarize_session: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    handoff: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     code_review: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -388,6 +747,29 @@ struct RawPromptSettings {
     test_fixing: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     refactor_style: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    setup_script: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    run_script: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+struct RawPromptPackFile {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+    prompts: RawPromptSettings,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+struct RawPromptPackSettings {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    active: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -398,6 +780,14 @@ struct RawScriptSettings {
     run: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     archive: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    test: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    typecheck: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    build: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     run_mode: Option<String>,
 }
@@ -416,8 +806,6 @@ struct RawProviderSettings {
     bedrock_region: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     vertex_project_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    ssh_key_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -479,6 +867,8 @@ struct RawAutomationSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     lint_command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    typecheck_command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     build_command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pre_clone: Option<String>,
@@ -510,6 +900,8 @@ struct RawAutomationSettings {
 struct RawAgentProfileSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     agent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     approval_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -560,6 +952,8 @@ struct RawViewSettings {
     theme: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     accent_color: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    colors: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     density: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -601,6 +995,11 @@ impl RawRepositorySettings {
                 self.environment_variables.unwrap_or_default(),
                 local.environment_variables.unwrap_or_default(),
             )),
+            prompt_pack: Some(
+                self.prompt_pack
+                    .unwrap_or_default()
+                    .merge(local.prompt_pack.unwrap_or_default()),
+            ),
             prompts: Some(
                 self.prompts
                     .unwrap_or_default()
@@ -631,6 +1030,10 @@ impl RawRepositorySettings {
                 setup: scripts.setup,
                 run: scripts.run,
                 archive: scripts.archive,
+                test: scripts.test,
+                lint: scripts.lint,
+                typecheck: scripts.typecheck,
+                build: scripts.build,
                 run_mode: scripts.run_mode,
             },
             environment_variables: self
@@ -638,17 +1041,8 @@ impl RawRepositorySettings {
                 .unwrap_or_default()
                 .into_iter()
                 .collect(),
-            prompts: self.prompts.map(|p| PromptSettings {
-                general: p.general,
-                code_review: p.code_review,
-                create_pr: p.create_pr,
-                fix_errors: p.fix_errors,
-                resolve_merge_conflicts: p.resolve_merge_conflicts,
-                rename_branch: p.rename_branch,
-                commit_generation: p.commit_generation,
-                test_fixing: p.test_fixing,
-                refactor_style: p.refactor_style,
-            }),
+            prompt_pack: self.prompt_pack.unwrap_or_default().into_settings(),
+            prompts: self.prompts.map(RawPromptSettings::into_settings),
             providers: self.providers.into_settings(),
             git: self.git.unwrap_or_default().into_settings(),
             customization: self.customization.unwrap_or_default().into_settings(),
@@ -666,6 +1060,10 @@ impl RawRepositorySettings {
                 setup: settings.scripts.setup.clone(),
                 run: settings.scripts.run.clone(),
                 archive: settings.scripts.archive.clone(),
+                test: settings.scripts.test.clone(),
+                lint: settings.scripts.lint.clone(),
+                typecheck: settings.scripts.typecheck.clone(),
+                build: settings.scripts.build.clone(),
                 run_mode: settings.scripts.run_mode.clone(),
             }),
             environment_variables: (!settings.environment_variables.is_empty()).then(|| {
@@ -675,17 +1073,11 @@ impl RawRepositorySettings {
                     .cloned()
                     .collect::<BTreeMap<_, _>>()
             }),
-            prompts: settings.prompts.as_ref().map(|p| RawPromptSettings {
-                general: p.general.clone(),
-                code_review: p.code_review.clone(),
-                create_pr: p.create_pr.clone(),
-                fix_errors: p.fix_errors.clone(),
-                resolve_merge_conflicts: p.resolve_merge_conflicts.clone(),
-                rename_branch: p.rename_branch.clone(),
-                commit_generation: p.commit_generation.clone(),
-                test_fixing: p.test_fixing.clone(),
-                refactor_style: p.refactor_style.clone(),
-            }),
+            prompt_pack: Some(RawPromptPackSettings::from_settings(&settings.prompt_pack)),
+            prompts: settings
+                .prompts
+                .as_ref()
+                .map(RawPromptSettings::from_settings),
             providers: RawProviderSettings::from_settings(&settings.providers),
             git: Some(RawGitSettings::from_settings(&settings.git)),
             customization: Some(RawCustomizationSettings::from_settings(
@@ -701,6 +1093,10 @@ impl RawScriptSettings {
             setup: local.setup.or(self.setup),
             run: local.run.or(self.run),
             archive: local.archive.or(self.archive),
+            test: local.test.or(self.test),
+            lint: local.lint.or(self.lint),
+            typecheck: local.typecheck.or(self.typecheck),
+            build: local.build.or(self.build),
             run_mode: local.run_mode.or(self.run_mode),
         }
     }
@@ -709,7 +1105,11 @@ impl RawScriptSettings {
 impl RawPromptSettings {
     fn merge(self, local: Self) -> Self {
         Self {
+            new_workspace: local.new_workspace.or(self.new_workspace),
             general: local.general.or(self.general),
+            continue_work: local.continue_work.or(self.continue_work),
+            summarize_session: local.summarize_session.or(self.summarize_session),
+            handoff: local.handoff.or(self.handoff),
             code_review: local.code_review.or(self.code_review),
             create_pr: local.create_pr.or(self.create_pr),
             fix_errors: local.fix_errors.or(self.fix_errors),
@@ -720,6 +1120,74 @@ impl RawPromptSettings {
             commit_generation: local.commit_generation.or(self.commit_generation),
             test_fixing: local.test_fixing.or(self.test_fixing),
             refactor_style: local.refactor_style.or(self.refactor_style),
+            setup_script: local.setup_script.or(self.setup_script),
+            run_script: local.run_script.or(self.run_script),
+        }
+    }
+
+    fn into_settings(self) -> PromptSettings {
+        PromptSettings {
+            new_workspace: self.new_workspace,
+            general: self.general,
+            continue_work: self.continue_work,
+            summarize_session: self.summarize_session,
+            handoff: self.handoff,
+            code_review: self.code_review,
+            create_pr: self.create_pr,
+            fix_errors: self.fix_errors,
+            resolve_merge_conflicts: self.resolve_merge_conflicts,
+            rename_branch: self.rename_branch,
+            commit_generation: self.commit_generation,
+            test_fixing: self.test_fixing,
+            refactor_style: self.refactor_style,
+            setup_script: self.setup_script,
+            run_script: self.run_script,
+        }
+    }
+
+    fn from_settings(settings: &PromptSettings) -> Self {
+        Self {
+            new_workspace: settings.new_workspace.clone(),
+            general: settings.general.clone(),
+            continue_work: settings.continue_work.clone(),
+            summarize_session: settings.summarize_session.clone(),
+            handoff: settings.handoff.clone(),
+            code_review: settings.code_review.clone(),
+            create_pr: settings.create_pr.clone(),
+            fix_errors: settings.fix_errors.clone(),
+            resolve_merge_conflicts: settings.resolve_merge_conflicts.clone(),
+            rename_branch: settings.rename_branch.clone(),
+            commit_generation: settings.commit_generation.clone(),
+            test_fixing: settings.test_fixing.clone(),
+            refactor_style: settings.refactor_style.clone(),
+            setup_script: settings.setup_script.clone(),
+            run_script: settings.run_script.clone(),
+        }
+    }
+}
+
+impl RawPromptPackSettings {
+    fn merge(self, local: Self) -> Self {
+        Self {
+            active: local.active.or(self.active),
+            version: local.version.or(self.version),
+            path: local.path.or(self.path),
+        }
+    }
+
+    fn into_settings(self) -> PromptPackSettings {
+        PromptPackSettings {
+            active: self.active,
+            version: self.version,
+            path: self.path,
+        }
+    }
+
+    fn from_settings(settings: &PromptPackSettings) -> Self {
+        Self {
+            active: settings.active.clone(),
+            version: settings.version.clone(),
+            path: settings.path.clone(),
         }
     }
 }
@@ -735,7 +1203,6 @@ impl RawProviderSettings {
             codex_provider: local.codex_provider.or(self.codex_provider),
             bedrock_region: local.bedrock_region.or(self.bedrock_region),
             vertex_project_id: local.vertex_project_id.or(self.vertex_project_id),
-            ssh_key_path: local.ssh_key_path.or(self.ssh_key_path),
         }
     }
 
@@ -747,7 +1214,6 @@ impl RawProviderSettings {
             codex_provider: self.codex_provider,
             bedrock_region: self.bedrock_region,
             vertex_project_id: self.vertex_project_id,
-            ssh_key_path: self.ssh_key_path,
         }
     }
 
@@ -759,7 +1225,6 @@ impl RawProviderSettings {
             codex_provider: settings.codex_provider.clone(),
             bedrock_region: settings.bedrock_region.clone(),
             vertex_project_id: settings.vertex_project_id.clone(),
-            ssh_key_path: settings.ssh_key_path.clone(),
         }
     }
 }
@@ -927,6 +1392,7 @@ impl RawAutomationSettings {
             },
             test_command: local.test_command.or(self.test_command),
             lint_command: local.lint_command.or(self.lint_command),
+            typecheck_command: local.typecheck_command.or(self.typecheck_command),
             build_command: local.build_command.or(self.build_command),
             pre_clone: local.pre_clone.or(self.pre_clone),
             post_clone: local.post_clone.or(self.post_clone),
@@ -950,6 +1416,7 @@ impl RawAutomationSettings {
             required_local_files: self.required_local_files,
             test_command: self.test_command,
             lint_command: self.lint_command,
+            typecheck_command: self.typecheck_command,
             build_command: self.build_command,
             pre_clone: self.pre_clone,
             post_clone: self.post_clone,
@@ -973,6 +1440,7 @@ impl RawAutomationSettings {
             required_local_files: settings.required_local_files.clone(),
             test_command: settings.test_command.clone(),
             lint_command: settings.lint_command.clone(),
+            typecheck_command: settings.typecheck_command.clone(),
             build_command: settings.build_command.clone(),
             pre_clone: settings.pre_clone.clone(),
             post_clone: settings.post_clone.clone(),
@@ -994,6 +1462,7 @@ impl RawAgentProfileSettings {
     fn merge(self, local: Self) -> Self {
         Self {
             agent: local.agent.or(self.agent),
+            model: local.model.or(self.model),
             approval_mode: local.approval_mode.or(self.approval_mode),
             reasoning_mode: local.reasoning_mode.or(self.reasoning_mode),
             personality: local.personality.or(self.personality),
@@ -1008,6 +1477,7 @@ impl RawAgentProfileSettings {
     fn into_settings(self) -> AgentProfileSettings {
         AgentProfileSettings {
             agent: self.agent,
+            model: self.model,
             approval_mode: self.approval_mode,
             reasoning_mode: self.reasoning_mode,
             personality: self.personality,
@@ -1018,6 +1488,7 @@ impl RawAgentProfileSettings {
     fn from_settings(settings: &AgentProfileSettings) -> Self {
         Self {
             agent: settings.agent.clone(),
+            model: settings.model.clone(),
             approval_mode: settings.approval_mode.clone(),
             reasoning_mode: settings.reasoning_mode.clone(),
             personality: settings.personality.clone(),
@@ -1106,6 +1577,7 @@ impl RawViewSettings {
         Self {
             theme: local.theme.or(self.theme),
             accent_color: local.accent_color.or(self.accent_color),
+            colors: merge_maps(self.colors, local.colors),
             density: local.density.or(self.density),
             sidebar_layout: local.sidebar_layout.or(self.sidebar_layout),
             diff_preference: local.diff_preference.or(self.diff_preference),
@@ -1136,6 +1608,7 @@ impl RawViewSettings {
         ViewSettings {
             theme: self.theme,
             accent_color: self.accent_color,
+            colors: self.colors,
             density: self.density,
             sidebar_layout: self.sidebar_layout,
             diff_preference: self.diff_preference,
@@ -1154,6 +1627,7 @@ impl RawViewSettings {
         Self {
             theme: settings.theme.clone(),
             accent_color: settings.accent_color.clone(),
+            colors: settings.colors.clone(),
             density: settings.density.clone(),
             sidebar_layout: settings.sidebar_layout.clone(),
             diff_preference: settings.diff_preference.clone(),
@@ -1184,8 +1658,18 @@ fn merge_profile_maps(
 }
 
 fn load_optional_settings(path: &Path) -> Result<RawRepositorySettings> {
-    if !path.exists() {
-        return Ok(RawRepositorySettings::default());
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            anyhow::ensure!(
+                !metadata.file_type().is_symlink(),
+                "{} must not be a symlink",
+                path.display()
+            );
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            return Ok(RawRepositorySettings::default());
+        }
+        Err(err) => return Err(err).with_context(|| format!("inspect {}", path.display())),
     }
 
     let contents = std::fs::read_to_string(path)
@@ -1215,6 +1699,35 @@ fn is_valid_environment_key(key: &str) -> bool {
     let mut chars = key.chars();
     matches!(chars.next(), Some(first) if first == '_' || first.is_ascii_alphabetic())
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn is_valid_view_color_key(key: &str) -> bool {
+    matches!(
+        key,
+        "background"
+            | "surface"
+            | "surface_raised"
+            | "surface_muted"
+            | "hover"
+            | "hover_soft"
+            | "border"
+            | "border_strong"
+            | "text"
+            | "text_strong"
+            | "text_muted"
+            | "accent"
+            | "accent_fg"
+            | "success"
+            | "warning"
+            | "danger"
+    )
+}
+
+fn is_valid_hex_color(value: &str) -> bool {
+    let Some(hex) = value.strip_prefix('#') else {
+        return false;
+    };
+    matches!(hex.len(), 3 | 6) && hex.chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
 fn is_safe_relative_path(path: &str) -> bool {
@@ -1259,14 +1772,199 @@ fn is_valid_workspace_tab(value: &str) -> bool {
 
 fn validate_agent_provider(provider: &str) -> Result<()> {
     anyhow::ensure!(
-        matches!(provider, "codex" | "claude" | "opencode"),
+        crate::agent_tools::supported_agent_provider_key(provider).is_some(),
         "default agent provider must be codex, claude, or opencode"
     );
     Ok(())
 }
 
-fn ensure_local_settings_dir(repo_path: &Path) -> Result<std::path::PathBuf> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct PromptPackBootstrap {
+    prompt_pack_dir_created: bool,
+    default_prompt_pack_created: bool,
+    active_prompt_pack_created: bool,
+}
+
+fn ensure_default_prompt_pack_files(
+    repo_path: &Path,
+    conductor_dir: &Path,
+    settings: &RepositorySettings,
+) -> Result<PromptPackBootstrap> {
+    let prompt_pack_dir = conductor_dir.join("prompt-packs");
+    let prompt_pack_dir_created = ensure_real_directory(&prompt_pack_dir)?;
+    let default_path = prompt_pack_dir.join("default.toml");
+    let default_prompt_pack_created =
+        ensure_prompt_pack_file(&default_path, "default", Some("v1"))?;
+
+    let active_prompt_pack_created = settings
+        .prompt_pack
+        .path
+        .as_deref()
+        .and_then(active_prompt_pack_path)
+        .map(|relative_path| repo_path.join(relative_path))
+        .filter(|active_path| active_path != &default_path)
+        .map(|active_path| {
+            let active = settings.prompt_pack.active.as_deref().unwrap_or("default");
+            ensure_prompt_pack_file(
+                &active_path,
+                active,
+                settings.prompt_pack.version.as_deref(),
+            )
+        })
+        .transpose()?
+        .unwrap_or(false);
+
+    Ok(PromptPackBootstrap {
+        prompt_pack_dir_created,
+        default_prompt_pack_created,
+        active_prompt_pack_created,
+    })
+}
+
+fn ensure_context_gitignored(repo_path: &Path) -> Result<bool> {
+    let gitignore_path = repo_path.join(".gitignore");
+    let existing = match fs::read_to_string(&gitignore_path) {
+        Ok(contents) => contents,
+        Err(err) if err.kind() == ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(err).with_context(|| format!("read {}", gitignore_path.display())),
+    };
+
+    let mut lines = existing.lines().map(str::to_owned).collect::<Vec<_>>();
+    let had_context = lines
+        .iter()
+        .any(|line| gitignore_pattern_key(line).as_deref() == Some(".context"));
+    let had_local_settings = lines.iter().any(|line| {
+        matches!(
+            gitignore_pattern_key(line).as_deref(),
+            Some(".archductor/settings.local.toml" | ".archductor/settings.local.toml*")
+        )
+    });
+    let original_len = lines.len();
+    lines.retain(|line| !is_managed_archductor_ignore_pattern(line));
+    let mut changed = lines.len() != original_len;
+
+    if !had_context {
+        lines.push(".context/".to_owned());
+        changed = true;
+    }
+    if lines
+        .iter()
+        .any(|line| is_archductor_directory_ignore_pattern(line))
+    {
+        let unignore_rules = [
+            "!.archductor/",
+            "!.archductor/settings.toml",
+            "!.archductor/prompt-packs/",
+            "!.archductor/prompt-packs/*.toml",
+        ];
+        for rule in unignore_rules {
+            if !lines.iter().any(|line| line.trim() == rule) {
+                lines.push(rule.to_owned());
+                changed = true;
+            }
+        }
+    }
+    if !had_local_settings {
+        lines.push(".archductor/settings.local.toml*".to_owned());
+        changed = true;
+    }
+
+    if !changed {
+        return Ok(false);
+    }
+
+    let mut contents = lines.join("\n");
+    contents.push('\n');
+    atomic_write_no_symlink(&gitignore_path, contents.as_bytes())
+        .with_context(|| format!("write {}", gitignore_path.display()))?;
+    Ok(true)
+}
+
+pub(crate) fn gitignore_pattern_key(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('!') {
+        return None;
+    }
+    let trimmed = trimmed.trim_start_matches('/');
+    Some(trimmed.trim_end_matches('/').to_owned())
+}
+
+fn is_managed_archductor_ignore_pattern(line: &str) -> bool {
+    matches!(gitignore_pattern_key(line).as_deref(), Some(".archductor"))
+}
+
+fn is_archductor_directory_ignore_pattern(line: &str) -> bool {
+    matches!(
+        gitignore_pattern_key(line).as_deref(),
+        Some(".archductor/*" | ".archductor/**")
+    )
+}
+
+fn active_prompt_pack_path(path: &str) -> Option<&Path> {
+    let path = Path::new(path);
+    let prefix = Path::new(".archductor").join("prompt-packs");
+    (is_safe_relative_path(path.to_str()?) && path.parent() == Some(prefix.as_path()))
+        .then_some(path)
+}
+
+fn ensure_prompt_pack_file(path: &Path, name: &str, version: Option<&str>) -> Result<bool> {
+    reject_symlink_file(path)?;
+    match fs::read(path) {
+        Ok(_) => Ok(false),
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            let parent = path
+                .parent()
+                .with_context(|| format!("resolve parent for {}", path.display()))?;
+            ensure_real_directory(parent)?;
+            let contents = prompt_pack_toml(name, version.unwrap_or("v1"))?;
+            atomic_write_no_symlink(path, contents.as_bytes())?;
+            Ok(true)
+        }
+        Err(err) => Err(err).with_context(|| format!("read {}", path.display())),
+    }
+}
+
+fn prompt_pack_toml(name: &str, version: &str) -> Result<String> {
+    let mut raw: toml::Value =
+        toml::from_str(&default_prompt_pack_toml()?).context("parse default prompt pack")?;
+    let table = raw
+        .as_table_mut()
+        .context("default prompt pack must be a TOML table")?;
+    table.insert("name".to_owned(), toml::Value::String(name.to_owned()));
+    table.insert(
+        "version".to_owned(),
+        toml::Value::String(version.to_owned()),
+    );
+    toml::to_string_pretty(&raw).context("serialize prompt pack")
+}
+
+fn ensure_real_directory(path: &Path) -> Result<bool> {
+    let mut created = false;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            let file_type = metadata.file_type();
+            anyhow::ensure!(
+                !file_type.is_symlink() && file_type.is_dir(),
+                "{} must be a real directory",
+                path.display()
+            );
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            fs::create_dir(path).with_context(|| format!("create {}", path.display()))?;
+            created = true;
+        }
+        Err(err) => return Err(err).with_context(|| format!("inspect {}", path.display())),
+    }
+    Ok(created)
+}
+
+fn ensure_local_settings_dir(repo_path: &Path) -> Result<PathBuf> {
+    ensure_settings_dir(repo_path).map(|(path, _)| path)
+}
+
+fn ensure_settings_dir(repo_path: &Path) -> Result<(PathBuf, bool)> {
     let conductor_dir = repo_path.join(".archductor");
+    let mut created = false;
     match fs::symlink_metadata(&conductor_dir) {
         Ok(metadata) => {
             let file_type = metadata.file_type();
@@ -1279,6 +1977,7 @@ fn ensure_local_settings_dir(repo_path: &Path) -> Result<std::path::PathBuf> {
         Err(err) if err.kind() == ErrorKind::NotFound => {
             fs::create_dir(&conductor_dir)
                 .with_context(|| format!("create {}", conductor_dir.display()))?;
+            created = true;
         }
         Err(err) => {
             return Err(err).with_context(|| format!("inspect {}", conductor_dir.display()))
@@ -1292,7 +1991,7 @@ fn ensure_local_settings_dir(repo_path: &Path) -> Result<std::path::PathBuf> {
         "{} must be a real directory",
         conductor_dir.display()
     );
-    Ok(conductor_dir)
+    Ok((conductor_dir, created))
 }
 
 fn reject_symlink_file(path: &Path) -> Result<()> {
@@ -1308,6 +2007,31 @@ fn reject_symlink_file(path: &Path) -> Result<()> {
         Err(err) => return Err(err).with_context(|| format!("inspect {}", path.display())),
     }
     Ok(())
+}
+
+fn prompt_pack_path_is_real(path: &Path, directory: bool) -> Result<bool> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err).with_context(|| format!("inspect {}", path.display())),
+    };
+    let file_type = metadata.file_type();
+    anyhow::ensure!(
+        !file_type.is_symlink(),
+        "{} must not be a symlink",
+        path.display()
+    );
+    anyhow::ensure!(
+        if directory {
+            file_type.is_dir()
+        } else {
+            file_type.is_file()
+        },
+        "{} must be a real {}",
+        path.display(),
+        if directory { "directory" } else { "file" }
+    );
+    Ok(true)
 }
 
 fn set_local_default_agent_provider(value: &mut toml::Value, provider: &str) -> Result<()> {
@@ -1337,9 +2061,13 @@ fn atomic_write_no_symlink(path: &Path, contents: &[u8]) -> Result<()> {
     let parent = path
         .parent()
         .with_context(|| format!("resolve parent for {}", path.display()))?;
-    let tmp_path = parent.join(format!(".{}.{}.tmp", "settings.local.toml", Uuid::new_v4()));
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("settings.toml");
+    let tmp_path = parent.join(format!(".{filename}.{}.tmp", Uuid::new_v4()));
     let write_result = (|| -> Result<()> {
-        let permissions = local_settings_write_permissions(path)?;
+        let permissions = settings_write_permissions(path)?;
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -1365,16 +2093,22 @@ fn atomic_write_no_symlink(path: &Path, contents: &[u8]) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn local_settings_write_permissions(path: &Path) -> Result<fs::Permissions> {
+fn settings_write_permissions(path: &Path) -> Result<fs::Permissions> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => Ok(metadata.permissions()),
-        Err(err) if err.kind() == ErrorKind::NotFound => Ok(fs::Permissions::from_mode(0o600)),
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            if path.file_name().and_then(|name| name.to_str()) == Some("settings.local.toml") {
+                Ok(fs::Permissions::from_mode(0o600))
+            } else {
+                Ok(fs::Permissions::from_mode(0o644))
+            }
+        }
         Err(err) => Err(err).with_context(|| format!("inspect {}", path.display())),
     }
 }
 
 #[cfg(not(unix))]
-fn local_settings_write_permissions(_path: &Path) -> Result<()> {
+fn settings_write_permissions(_path: &Path) -> Result<()> {
     Ok(())
 }
 
@@ -1387,6 +2121,18 @@ fn set_permissions_if_supported(path: &Path, permissions: fs::Permissions) -> Re
 #[cfg(not(unix))]
 fn set_permissions_if_supported(_path: &Path, _permissions: ()) -> Result<()> {
     Ok(())
+}
+
+fn backup_settings_file(path: &Path) -> Result<Option<PathBuf>> {
+    reject_symlink_file(path)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let backup_path = path.with_extension("toml.bak");
+    reject_symlink_file(&backup_path)?;
+    fs::copy(path, &backup_path)
+        .with_context(|| format!("backup {} to {}", path.display(), backup_path.display()))?;
+    Ok(Some(backup_path))
 }
 
 fn normalize_workspace_tab(value: &str) -> String {
@@ -1515,14 +2261,27 @@ LOCAL_ONLY = "1"
                 setup: Some("pnpm install".to_owned()),
                 run: Some("pnpm dev --port $ARCHDUCTOR_PORT".to_owned()),
                 archive: Some("./script/archive.sh".to_owned()),
+                test: Some("pnpm test".to_owned()),
+                lint: Some("pnpm lint".to_owned()),
+                typecheck: Some("pnpm typecheck".to_owned()),
+                build: Some("pnpm build".to_owned()),
                 run_mode: Some("nonconcurrent".to_owned()),
             },
             environment_variables: vec![(
                 "API_BASE_URL".to_owned(),
                 "http://localhost:3000".to_owned(),
             )],
+            prompt_pack: PromptPackSettings {
+                active: Some("startup".to_owned()),
+                version: Some("v2".to_owned()),
+                path: Some(".archductor/prompt-packs/startup.toml".to_owned()),
+            },
             prompts: Some(PromptSettings {
+                new_workspace: Some("Plan before editing.".to_owned()),
                 general: Some("Ship small changes.".to_owned()),
+                continue_work: Some("Resume from existing context.".to_owned()),
+                summarize_session: Some("Summarize tests and risk.".to_owned()),
+                handoff: Some("Leave a concise handoff.".to_owned()),
                 code_review: Some("Find correctness issues.".to_owned()),
                 create_pr: Some("Include test evidence.".to_owned()),
                 fix_errors: Some("Focus on failing checks.".to_owned()),
@@ -1531,6 +2290,8 @@ LOCAL_ONLY = "1"
                 commit_generation: None,
                 test_fixing: None,
                 refactor_style: None,
+                setup_script: Some("Use the configured setup script.".to_owned()),
+                run_script: Some("Use the configured run script.".to_owned()),
             }),
             providers: ProviderSettings {
                 claude_code_executable_path: Some("/usr/local/bin/claude".to_owned()),
@@ -1539,7 +2300,6 @@ LOCAL_ONLY = "1"
                 codex_provider: Some("openai".to_owned()),
                 bedrock_region: None,
                 vertex_project_id: None,
-                ssh_key_path: None,
             },
             git: GitSettings {
                 delete_branch_on_archive: Some(false),
@@ -1555,8 +2315,303 @@ LOCAL_ONLY = "1"
         let loaded = load_repository_settings(temp.path()).unwrap();
 
         assert_eq!(loaded, settings);
+        let saved = fs::read_to_string(temp.path().join(".archductor/settings.toml")).unwrap();
+        assert!(saved.contains("[prompt_pack]"));
+        assert!(saved.contains("typecheck = \"pnpm typecheck\""));
+        assert!(saved.contains("summarize_session = \"Summarize tests and risk.\""));
         assert!(temp.path().join(".archductor/settings.toml").exists());
         assert!(!temp.path().join(".archductor/settings.local.toml").exists());
+    }
+
+    #[test]
+    fn ensure_repository_config_creates_shared_defaults() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let report = ensure_repository_config(temp.path()).unwrap();
+
+        assert!(report.conductor_dir_created);
+        assert!(report.shared_settings_created);
+        assert!(report.prompt_pack_dir_created);
+        assert!(report.default_prompt_pack_created);
+        assert!(report.context_gitignore_updated);
+        let shared_path = temp.path().join(".archductor/settings.toml");
+        assert!(shared_path.exists());
+        let gitignore = fs::read_to_string(temp.path().join(".gitignore")).unwrap();
+        assert!(gitignore.contains(".context/"));
+        assert!(gitignore.contains(".archductor/settings.local.toml*"));
+        assert!(!gitignore.lines().any(|line| line.trim() == ".archductor/"));
+        let prompt_pack_path = temp.path().join(".archductor/prompt-packs/default.toml");
+        assert!(prompt_pack_path.exists());
+        assert!(fs::read_to_string(prompt_pack_path)
+            .unwrap()
+            .contains("[prompts]"));
+        let settings = load_repository_settings(temp.path()).unwrap();
+        assert_eq!(settings.file_include_globs, [".env*"]);
+        assert_eq!(settings.scripts.run_mode.as_deref(), Some("concurrent"));
+        assert_eq!(
+            settings.customization.workspace_defaults.port_block_size,
+            Some(10)
+        );
+    }
+
+    #[test]
+    fn ensure_repository_config_keeps_existing_valid_settings() {
+        let temp = tempfile::tempdir().unwrap();
+        let conductor_dir = temp.path().join(".archductor");
+        fs::create_dir(&conductor_dir).unwrap();
+        fs::write(
+            conductor_dir.join("settings.toml"),
+            "[scripts]\nrun = \"cargo run\"\n",
+        )
+        .unwrap();
+        fs::write(temp.path().join(".gitignore"), "target/\n.archductor/\n").unwrap();
+
+        let report = ensure_repository_config(temp.path()).unwrap();
+
+        assert!(!report.conductor_dir_created);
+        assert!(!report.shared_settings_created);
+        assert!(report.prompt_pack_dir_created);
+        assert!(report.default_prompt_pack_created);
+        assert!(report.context_gitignore_updated);
+        let contents = fs::read_to_string(conductor_dir.join("settings.toml")).unwrap();
+        assert!(contents.contains("cargo run"));
+        assert!(conductor_dir.join("prompt-packs/default.toml").exists());
+        let gitignore = fs::read_to_string(temp.path().join(".gitignore")).unwrap();
+        assert!(gitignore.contains("target/"));
+        assert!(gitignore.contains(".context/"));
+        assert!(gitignore.contains(".archductor/settings.local.toml*"));
+        assert!(!gitignore.lines().any(|line| line.trim() == ".archductor/"));
+    }
+
+    #[test]
+    fn ensure_repository_config_seeds_active_prompt_pack_when_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let conductor_dir = temp.path().join(".archductor");
+        fs::create_dir(&conductor_dir).unwrap();
+        fs::write(
+            conductor_dir.join("settings.toml"),
+            r#"
+[prompt_pack]
+active = "review"
+version = "v1"
+path = ".archductor/prompt-packs/review.toml"
+"#,
+        )
+        .unwrap();
+
+        let report = ensure_repository_config(temp.path()).unwrap();
+
+        assert!(report.prompt_pack_dir_created);
+        assert!(report.default_prompt_pack_created);
+        assert!(report.active_prompt_pack_created);
+        assert!(conductor_dir.join("prompt-packs/default.toml").exists());
+        let review_pack =
+            fs::read_to_string(conductor_dir.join("prompt-packs/review.toml")).unwrap();
+        assert!(review_pack.contains("name = \"review\""));
+        assert!(review_pack.contains("version = \"v1\""));
+    }
+
+    #[test]
+    fn load_repository_settings_uses_configured_prompt_pack_prompts() {
+        let temp = tempfile::tempdir().unwrap();
+        let conductor_dir = temp.path().join(".archductor");
+        let prompt_pack_dir = conductor_dir.join("prompt-packs");
+        fs::create_dir_all(&prompt_pack_dir).unwrap();
+        fs::write(
+            conductor_dir.join("settings.toml"),
+            r#"
+[prompt_pack]
+active = "review"
+version = "v7"
+path = ".archductor/prompt-packs/review.toml"
+
+[prompts]
+create_pr = "Use repository override."
+"#,
+        )
+        .unwrap();
+        fs::write(
+            prompt_pack_dir.join("review.toml"),
+            r#"
+name = "review"
+version = "v7"
+
+[prompts]
+general = "Use review pack."
+create_pr = "Use pack PR prompt."
+"#,
+        )
+        .unwrap();
+
+        let settings = load_repository_settings(temp.path()).unwrap();
+        let prompts = settings.prompts.unwrap();
+
+        assert_eq!(prompts.general.as_deref(), Some("Use review pack."));
+        assert_eq!(
+            prompts.create_pr.as_deref(),
+            Some("Use repository override.")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_repository_config_rejects_gitignore_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let external = temp.path().join("outside-gitignore");
+        fs::write(&external, "target/\n").unwrap();
+        std::os::unix::fs::symlink(&external, temp.path().join(".gitignore")).unwrap();
+
+        let err = ensure_repository_config(temp.path()).unwrap_err();
+
+        assert!(format!("{err:#}").contains("symlink"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_repository_config_rejects_archductor_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let external = temp.path().join("outside");
+        fs::create_dir(&external).unwrap();
+        std::os::unix::fs::symlink(&external, temp.path().join(".archductor")).unwrap();
+
+        let err = ensure_repository_config(temp.path()).unwrap_err();
+
+        assert!(err.to_string().contains("must be a real directory"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_repository_config_rejects_shared_settings_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let conductor_dir = temp.path().join(".archductor");
+        fs::create_dir(&conductor_dir).unwrap();
+        let external = temp.path().join("outside.toml");
+        fs::write(&external, "outside = true\n").unwrap();
+        std::os::unix::fs::symlink(&external, conductor_dir.join("settings.toml")).unwrap();
+
+        let err = ensure_repository_config(temp.path()).unwrap_err();
+
+        assert!(err.to_string().contains("must not be a symlink"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_repository_config_rejects_prompt_pack_dir_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let conductor_dir = temp.path().join(".archductor");
+        fs::create_dir(&conductor_dir).unwrap();
+        fs::write(
+            conductor_dir.join("settings.toml"),
+            "[scripts]\nrun = \"cargo run\"\n",
+        )
+        .unwrap();
+        let external = temp.path().join("outside-packs");
+        fs::create_dir(&external).unwrap();
+        std::os::unix::fs::symlink(&external, conductor_dir.join("prompt-packs")).unwrap();
+
+        let err = ensure_repository_config(temp.path()).unwrap_err();
+
+        assert!(err.to_string().contains("must be a real directory"));
+    }
+
+    #[test]
+    fn load_repository_settings_recovering_reports_invalid_local_settings() {
+        let temp = tempfile::tempdir().unwrap();
+        let conductor_dir = temp.path().join(".archductor");
+        fs::create_dir(&conductor_dir).unwrap();
+        fs::write(
+            conductor_dir.join("settings.toml"),
+            "[scripts]\nrun = \"cargo run\"\n",
+        )
+        .unwrap();
+        fs::write(conductor_dir.join("settings.local.toml"), "[scripts\n").unwrap();
+
+        let report = load_repository_settings_recovering(temp.path());
+
+        assert_eq!(report.settings.scripts.run.as_deref(), Some("cargo run"));
+        assert_eq!(report.errors.len(), 1);
+        assert!(report.errors[0].contains("parse settings"));
+    }
+
+    #[test]
+    fn load_repository_settings_recovering_uses_defaults_for_invalid_merged_settings() {
+        let temp = tempfile::tempdir().unwrap();
+        let conductor_dir = temp.path().join(".archductor");
+        fs::create_dir(&conductor_dir).unwrap();
+        fs::write(
+            conductor_dir.join("settings.toml"),
+            "[scripts]\nrun_mode = \"parallel\"\n",
+        )
+        .unwrap();
+
+        let report = load_repository_settings_recovering(temp.path());
+
+        assert_eq!(report.settings, RepositorySettings::default());
+        assert_eq!(report.errors.len(), 1);
+        assert!(report.errors[0].contains("scripts.run_mode"));
+        assert_eq!(
+            load_repository_settings(temp.path()).unwrap(),
+            RepositorySettings::default()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_repository_settings_rejects_settings_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let conductor_dir = temp.path().join(".archductor");
+        fs::create_dir(&conductor_dir).unwrap();
+        let external = temp.path().join("outside.toml");
+        fs::write(&external, "[scripts]\nrun = \"outside\"\n").unwrap();
+        std::os::unix::fs::symlink(&external, conductor_dir.join("settings.toml")).unwrap();
+
+        let err = load_repository_settings(temp.path()).unwrap_err();
+
+        assert!(err.to_string().contains("must not be a symlink"));
+    }
+
+    #[test]
+    fn save_repository_settings_backs_up_existing_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let conductor_dir = temp.path().join(".archductor");
+        fs::create_dir(&conductor_dir).unwrap();
+        let shared_path = conductor_dir.join("settings.toml");
+        fs::write(&shared_path, "[scripts]\nrun = \"old\"\n").unwrap();
+
+        let settings = RepositorySettings {
+            scripts: ScriptSettings {
+                run: Some("new".to_owned()),
+                ..ScriptSettings::default()
+            },
+            ..RepositorySettings::default()
+        };
+        save_repository_settings(temp.path(), SettingsLayer::RepositoryShared, &settings).unwrap();
+
+        assert!(fs::read_to_string(&shared_path).unwrap().contains("new"));
+        assert!(fs::read_to_string(conductor_dir.join("settings.toml.bak"))
+            .unwrap()
+            .contains("old"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_repository_settings_rejects_symlink_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let conductor_dir = temp.path().join(".archductor");
+        fs::create_dir(&conductor_dir).unwrap();
+        let external = temp.path().join("outside.toml");
+        fs::write(&external, "outside = true\n").unwrap();
+        std::os::unix::fs::symlink(&external, conductor_dir.join("settings.toml")).unwrap();
+
+        let err = save_repository_settings(
+            temp.path(),
+            SettingsLayer::RepositoryShared,
+            &RepositorySettings::default(),
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("must not be a symlink"));
+        assert_eq!(fs::read_to_string(external).unwrap(), "outside = true\n");
     }
 
     #[test]
@@ -1638,10 +2693,27 @@ theme = "dark"
         fs::create_dir(&conductor_dir).unwrap();
         fs::write(
             conductor_dir.join("settings.toml"),
-            r#"
+            r##"
 [prompts]
+new_workspace = "Plan the workspace."
+continue_work = "Continue carefully."
+summarize_session = "Summarize verification."
+handoff = "Handoff next steps."
 test_fixing = "Fix the failing test first."
 refactor_style = "Keep refactors behavior-preserving."
+setup_script = "Prepare dependencies."
+run_script = "Start the app."
+
+[prompt_pack]
+active = "core"
+version = "v3"
+path = ".archductor/prompt-packs/core.toml"
+
+[scripts]
+test = "cargo test --workspace"
+lint = "cargo clippy --workspace"
+typecheck = "cargo check --workspace"
+build = "cargo build --workspace"
 
 [customization.naming]
 branch_template = "{prefix}/{type}-{slug}"
@@ -1657,6 +2729,7 @@ auto_start_agent = "codex"
 required_local_files = [".env", "certs/local.pem"]
 test_command = "cargo test --workspace"
 lint_command = "cargo clippy --workspace"
+typecheck_command = "cargo check --workspace"
 build_command = "cargo build --workspace"
 pre_workspace_create = "just pre-workspace"
 post_workspace_create = "just post-workspace"
@@ -1665,6 +2738,7 @@ post_merge = "just post-merge"
 
 [customization.agent_profiles.default]
 agent = "codex"
+model = "gpt-5-codex"
 approval_mode = "on-request"
 reasoning_mode = "medium"
 personality = "direct"
@@ -1700,12 +2774,18 @@ notification_rules = ["checks_failed", "review_requested"]
 keybindings = "vim"
 command_palette_presets = ["ci", "review"]
 settings_import_export = "toml"
-"#,
+
+[customization.view.colors]
+accent = "#22c55e"
+accent_fg = "#052e16"
+background = "#191919"
+text = "#e4e4e4"
+"##,
         )
         .unwrap();
         fs::write(
             conductor_dir.join("settings.local.toml"),
-            r#"
+            r##"
 [customization.automation]
 auto_start_agent = "claude"
 
@@ -1714,7 +2794,11 @@ reasoning_mode = "high"
 
 [customization.view]
 density = "comfortable"
-"#,
+
+[customization.view.colors]
+accent = "#0ea5e9"
+surface = "#102030"
+"##,
         )
         .unwrap();
 
@@ -1723,6 +2807,18 @@ density = "comfortable"
         assert_eq!(
             settings.prompts.as_ref().unwrap().test_fixing,
             Some("Fix the failing test first.".to_owned())
+        );
+        assert_eq!(
+            settings.prompts.as_ref().unwrap().new_workspace,
+            Some("Plan the workspace.".to_owned())
+        );
+        assert_eq!(
+            settings.prompt_pack.path,
+            Some(".archductor/prompt-packs/core.toml".to_owned())
+        );
+        assert_eq!(
+            settings.scripts.typecheck,
+            Some("cargo check --workspace".to_owned())
         );
         assert_eq!(
             settings.customization.naming.branch_template,
@@ -1738,8 +2834,21 @@ density = "comfortable"
                 .agent_profiles
                 .get("default")
                 .unwrap()
+                .model,
+            Some("gpt-5-codex".to_owned())
+        );
+        assert_eq!(
+            settings
+                .customization
+                .agent_profiles
+                .get("default")
+                .unwrap()
                 .reasoning_mode,
             Some("high".to_owned())
+        );
+        assert_eq!(
+            settings.customization.automation.typecheck_command,
+            Some("cargo check --workspace".to_owned())
         );
         assert_eq!(
             settings.customization.merge_rules.definition_of_done,
@@ -1752,6 +2861,18 @@ density = "comfortable"
         assert_eq!(
             settings.customization.view.density,
             Some("comfortable".to_owned())
+        );
+        assert_eq!(
+            settings.customization.view.colors.get("accent"),
+            Some(&"#0ea5e9".to_owned())
+        );
+        assert_eq!(
+            settings.customization.view.colors.get("surface"),
+            Some(&"#102030".to_owned())
+        );
+        assert_eq!(
+            settings.customization.view.colors.get("background"),
+            Some(&"#191919".to_owned())
         );
 
         save_repository_settings(temp.path(), SettingsLayer::RepositoryShared, &settings).unwrap();
@@ -1773,6 +2894,7 @@ density = "comfortable"
             },
             view: ViewSettings {
                 theme: Some("dark".to_owned()),
+                colors: BTreeMap::from([("accent".to_owned(), "#0ea5e9".to_owned())]),
                 density: Some("compact".to_owned()),
                 ..ViewSettings::default()
             },
@@ -1783,6 +2905,31 @@ density = "comfortable"
 
         assert!(text.contains("[customization.naming]"));
         assert_eq!(customization_settings_from_toml(&text).unwrap(), settings);
+    }
+
+    #[test]
+    fn rejects_invalid_view_colors() {
+        let invalid_color = repository_settings_from_toml(
+            r##"
+[customization.view.colors]
+accent = "alert(1)"
+"##,
+        )
+        .unwrap_err();
+        assert!(invalid_color
+            .to_string()
+            .contains("customization.view.colors.accent must be a hex color"));
+
+        let invalid_key = repository_settings_from_toml(
+            r##"
+[customization.view.colors]
+totally_custom = "#ffffff"
+"##,
+        )
+        .unwrap_err();
+        assert!(invalid_key
+            .to_string()
+            .contains("customization.view.colors.totally_custom is not a supported color key"));
     }
 
     #[test]

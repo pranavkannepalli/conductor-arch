@@ -1,4 +1,5 @@
 use adw::{Toast, ToastOverlay};
+use gtk::Label;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ToastVariant {
@@ -79,12 +80,26 @@ impl ToastManager {
     pub(crate) fn show(&self, message: ToastMessage) {
         show_toast(&self.overlay, message);
     }
+
+    pub(crate) fn error(&self, text: impl Into<String>) {
+        self.show(ToastMessage::error(text));
+    }
 }
 
 pub(crate) fn show_toast(overlay: &ToastOverlay, message: ToastMessage) {
     let toast = Toast::new(&message.display_text());
     toast.set_timeout(message.timeout_seconds());
     overlay.add_toast(toast);
+}
+
+pub(crate) fn surface_label_error(
+    label: &Label,
+    toast_manager: &ToastManager,
+    text: impl Into<String>,
+) {
+    let text = text.into();
+    label.set_text(&text);
+    toast_manager.error(text);
 }
 
 #[cfg(test)]

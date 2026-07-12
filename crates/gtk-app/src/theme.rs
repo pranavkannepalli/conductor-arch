@@ -3,9 +3,23 @@ pub(crate) fn app_css() -> &'static str {
 }
 
 const APP_CSS: &str = r#"
+@define-color lc-bg #191919;
+@define-color lc-surface #1e1e1e;
+@define-color lc-surface-raised #202020;
+@define-color lc-surface-muted #181818;
+@define-color lc-hover #2a2a2a;
+@define-color lc-hover-soft #242424;
+@define-color lc-border #2a2a2a;
+@define-color lc-border-strong #3a3a3a;
+@define-color lc-text #e4e4e4;
+@define-color lc-text-strong #f8fafc;
+@define-color lc-text-muted #8a8a8a;
+@define-color lc-success #84e0a0;
+@define-color lc-danger #ff8a8a;
+
 window {
-    background-color: #191919;
-    color: #e4e4e4;
+    background-color: @lc-bg;
+    color: @lc-text;
     font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", "Cantarell", "Noto Sans", sans-serif;
 }
 
@@ -42,8 +56,8 @@ textview,
 .dashboard,
 .page-shell,
 .history-view {
-    background-color: #191919;
-    color: #e4e4e4;
+    background-color: @lc-bg;
+    color: @lc-text;
 }
 
 .page-header,
@@ -105,8 +119,8 @@ textview,
 }
 
 .sidebar {
-    background-color: #202020;
-    border-right: 1px solid #2a2a2a;
+    background-color: @lc-surface-raised;
+    border-right: 1px solid @lc-border;
     padding-top: 10px;
 }
 
@@ -172,7 +186,7 @@ textview,
 }
 
 .projects-header {
-    padding: 12px 10px 6px 10px;
+    padding: 12px 6px 6px 10px;
 }
 
 .nav-row,
@@ -249,16 +263,19 @@ textview:disabled {
 
 .workspace-list row {
     border-radius: 7px;
-    margin: 2px 10px;
+    margin: 2px 6px 2px 10px;
     padding: 0;
 }
 
-.workspace-list row:selected {
-    background-color: #2e2e2e;
+.workspace-list row:hover {
+    background-color: @lc-hover;
 }
 
-.workspace-list row:hover {
-    background-color: #2c2c2c;
+.workspace-list row:hover .workspace-row-shell,
+.workspace-list row:selected .workspace-row-shell {
+    background-color: @lc-hover-soft;
+    border-color: @lc-border-strong;
+    padding-right: 14px;
 }
 
 .workspace-row-shell,
@@ -267,20 +284,24 @@ textview:disabled {
     padding: 8px 10px;
 }
 
-.workspace-row-active {
-    background-color: #2e2e2e;
-    border: 1px solid transparent;
-    border-radius: 7px;
+.workspace-row-diff-added,
+.workspace-row-diff-removed {
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-size: 11px;
+    font-weight: 700;
 }
 
-.workspace-row-branch-icon,
-.workspace-row-branch-icon-active {
+.workspace-row-diff-added {
+    color: @lc-success;
+}
+
+.workspace-row-diff-removed {
+    color: @lc-danger;
+}
+
+.workspace-row-branch-icon {
     min-width: 14px;
-    color: #7e7e7e;
-}
-
-.workspace-row-branch-icon-active {
-    color: #aaaaaa;
+    color: @lc-text-muted;
 }
 
 .workspace-name {
@@ -682,15 +703,15 @@ separator {
 
 .repo-section-icon,
 .workspace-row-icon {
-    color: #8a8a8a;
+    color: @lc-text-muted;
 }
 
 .workspace-row-icon-active {
-    color: #aaaaaa;
+    color: @lc-text;
 }
 
 .repo-section-header {
-    color: #c8c8c8;
+    color: @lc-text;
     font-size: 13px;
     font-weight: 500;
     letter-spacing: 0;
@@ -698,7 +719,7 @@ separator {
 }
 
 .repo-section-count {
-    color: #8a8a8a;
+    color: @lc-text-muted;
     font-size: 13px;
 }
 
@@ -706,12 +727,12 @@ separator {
     min-width: 24px;
     min-height: 24px;
     padding: 0;
-    color: #8a8a8a;
+    color: @lc-text-muted;
     border: none;
 }
 
 .repo-header-add:hover {
-    color: #e4e4e4;
+    color: @lc-text;
 }
 
 .settings-cta {
@@ -1346,37 +1367,6 @@ window.lc-theme-dark,
     color: #8a8a8a;
 }
 
-/* ── Workspace ahead-commits badge ── */
-.workspace-badge {
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
-    font-size: 11px;
-    font-weight: 600;
-    color: #aaaaaa;
-    background-color: rgba(255, 255, 255, 0.08);
-    border-radius: 7px;
-    padding: 1px 6px;
-}
-.workspace-badge-muted {
-    color: #b4b4b4;
-    background-color: transparent;
-}
-.workspace-badge.ws-pr-status-ready {
-    background-color: #163522;
-    color: #84e0a0;
-}
-.workspace-badge.ws-pr-status-pending {
-    background-color: #262626;
-    color: #a8a8a8;
-}
-.workspace-badge.ws-pr-status-failed {
-    background-color: #3a1a1a;
-    color: #ff8a8a;
-}
-.workspace-badge.ws-pr-status-merged {
-    background-color: #311d46;
-    color: #c6a3ff;
-}
-
 /* ── Sidebar bottom bar ── */
 .sidebar-bottom-bar {
     background-color: #1e1e1e;
@@ -1387,22 +1377,22 @@ window.lc-theme-dark,
 
 /* ── Section header ── */
 .repo-section-row {
-    padding: 8px 10px 4px 10px;
+    padding: 8px 6px 4px 10px;
 }
 .repo-section-header {
     font-size: 12px;
     font-weight: 600;
-    color: #e4e4e4;
+    color: @lc-text;
     letter-spacing: 0;
 }
 .repo-section-icon {
     min-width: 14px;
-    color: #8a8a8a;
+    color: @lc-text-muted;
 }
 
 /* ── Updated workspace row shell ── */
 .workspace-row-shell {
-    padding: 7px 10px 7px 10px;
+    padding: 7px 14px 7px 10px;
 }
 
 .sidebar-icon-button {
@@ -1971,6 +1961,12 @@ row:hover .ws-folder-name {
     border: 1px solid #313131;
     border-radius: 14px;
 }
+popover.chat-menu-popover contents {
+    background-color: #1e1e1e;
+    border: none;
+    border-radius: 10px;
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.32);
+}
 .context-menu-popover {
     background-color: transparent;
     border: none;
@@ -1987,16 +1983,23 @@ popover.context-menu-popover arrow {
     border: none;
 }
 .chat-menu-list {
-    padding: 8px;
+    padding: 4px;
+}
+.chat-menu-group-label {
+    color: #8f8f8f;
+    font-size: 11px;
+    font-weight: 700;
+    margin: 6px 8px 2px;
 }
 .chat-menu-item {
     background: transparent;
     border: none;
     box-shadow: none;
     text-shadow: none;
-    border-radius: 10px;
-    padding: 9px 10px;
+    border-radius: 7px;
+    padding: 6px 8px;
     color: #d8d8d8;
+    min-height: 30px;
 }
 .chat-menu-item:hover,
 .chat-menu-item-selected {
@@ -2004,6 +2007,7 @@ popover.context-menu-popover arrow {
 }
 .chat-menu-item-label {
     color: inherit;
+    text-align: left;
 }
 .chat-menu-shortcut {
     min-width: 22px;
@@ -2311,9 +2315,9 @@ window,
 .history-row,
 .project-row,
 .workspace-row-shell {
-    background-color: #181818;
-    border-color: #2b2b2b;
-    color: #f8fafc;
+    background-color: @lc-surface-muted;
+    border-color: @lc-border;
+    color: @lc-text-strong;
 }
 
 .chat-composer-box,
@@ -2418,13 +2422,12 @@ window,
 .nav-button:hover,
 .nav-row:hover,
 .chat-menu-item:hover {
-    background-color: #2a2a2a;
-    color: #f8fafc;
+    background-color: @lc-hover;
+    color: @lc-text-strong;
 }
 
 .nav-row-active,
 .nav-button-active,
-.workspace-row-active,
 .workspace-list row:selected,
 .chat-mode-selected,
 .chat-menu-item-selected,
@@ -2618,10 +2621,12 @@ textview:focus,
 .chat-menu-item-icon,
 .chat-focus-btn image,
 .chat-toolbar-btn image,
-.sidebar-nav-icon,
-.workspace-row-branch-icon,
-.workspace-row-branch-icon-active {
+.sidebar-nav-icon {
     color: #93c5fd;
+}
+
+.workspace-row-branch-icon {
+    color: @lc-text-muted;
 }
 
 .ws-check-icon-active,

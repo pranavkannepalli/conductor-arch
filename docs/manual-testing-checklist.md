@@ -29,13 +29,16 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] Import that file back into shared and local settings with
   `linux-archductor repo settings <name> import <file>` and `--local`.
 - [ ] Configure setup, run, archive, run mode, Spotlight testing, Files to copy,
-  environment variables, provider executable fields, prompts, and Git behavior.
-- [ ] Confirm all repository action prompts are editable from the GUI: general,
-  code review, create PR, fix errors, resolve conflicts, rename branch, commit
-  generation, test fixing, and refactor style.
-- [ ] Confirm prompt profiles or prompt packs can be represented in the
-  advanced customization TOML block even if the first UI only edits the active
-  values.
+  test/lint/typecheck/build commands, environment variables, provider
+  executable fields, prompts, prompt pack metadata, and Git
+  behavior.
+- [ ] Confirm all repository action prompts are editable from Settings:
+  new workspace, general, continue work, summarize session, handoff, code
+  review, create PR, fix errors, resolve conflicts, rename branch, commit
+  generation, test fixing, refactor style, setup script, and run script.
+- [ ] Confirm prompt pack active/version/path fields save to
+  `.archductor/settings.toml`. Mark pack import/export, switching, and session
+  snapshots as TODOs.
 - [ ] Confirm final assembled agent prompts can be previewed or exported before
   launch, or mark prompt preview as a known gap.
 - [ ] Configure branch naming, workspace naming, commit style, PR title/body
@@ -44,10 +47,10 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] Confirm repository setup can be fully automated with setup/run/archive
   scripts and no manual terminal-only step for a normal workspace.
 - [ ] Confirm repository automation can represent required local file checks,
-  test/lint/build presets, and pre/post hooks, or mark unsupported hooks as a
-  known gap.
-- [ ] Configure default agent, agent profile, approval mode, reasoning/effort,
-  Codex personality/goals, and MCP visibility.
+  test/lint/typecheck/build presets, and pre/post hooks, or mark unsupported
+  hooks as a known gap.
+- [ ] Configure default agent, default model, agent profile, approval mode,
+  reasoning/effort, Codex personality/goals, and MCP visibility.
 - [ ] Configure merge blockers and a repository-specific definition of done.
 - [ ] Confirm PR merge honors configured default merge method, open todo/comment
   blockers, failed-check blockers, and pending-check blockers.
@@ -312,6 +315,9 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] Set `customization.view.command_palette_presets = ["test",
   "Preview=pnpm dev"]` and confirm the terminal preset row shows Test and
   Preview buttons with the expected commands in their tooltips.
+- [ ] Set `scripts.test`, `scripts.lint`, `scripts.typecheck`, and
+  `scripts.build`, then confirm workspace terminal presets show those concrete
+  commands ahead of custom presets.
 
 ## Known Gaps To Keep Visible
 

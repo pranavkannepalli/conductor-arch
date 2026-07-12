@@ -41,13 +41,16 @@ use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use refresh::{RefreshHub, RefreshScope};
 use state::{AppPage, AppState, WorkspaceTab};
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::time::Instant;
 use toast::{ToastManager, ToastMessage};
 
 const APP_ID: &str = "io.github.pranavkannepalli.linux-archductor";
+static NEXT_COLOR_SCOPE_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LaunchTarget {
@@ -61,6 +64,7 @@ struct LaunchTarget {
 struct ViewPreferences {
     theme: Option<ViewTheme>,
     accent: Option<AccentColor>,
+    colors: BTreeMap<String, String>,
     density: Option<ViewDensity>,
 }
 
@@ -93,6 +97,7 @@ impl ViewPreferences {
                 .accent_color
                 .as_deref()
                 .and_then(AccentColor::from_config),
+            colors: defaults.colors,
             density: defaults
                 .density
                 .as_deref()
@@ -113,6 +118,9 @@ impl ViewPreferences {
             Some(AccentColor::Amber) => classes.push("lc-accent-amber"),
             Some(AccentColor::Rose) => classes.push("lc-accent-rose"),
             None => {}
+        }
+        if !self.colors.is_empty() {
+            classes.push("lc-custom-colors");
         }
         match self.density {
             Some(ViewDensity::Compact) => classes.push("lc-density-compact"),
@@ -163,6 +171,7 @@ const VIEW_PREFERENCE_CLASSES: &[&str] = &[
     "lc-accent-green",
     "lc-accent-amber",
     "lc-accent-rose",
+    "lc-custom-colors",
     "lc-density-compact",
     "lc-density-comfortable",
 ];
@@ -388,20 +397,188 @@ fn resolve_keybindings(db_path: PathBuf, workspace: Option<&str>) -> Keybindings
         .unwrap_or_default()
 }
 
-fn apply_view_preferences(window: &ApplicationWindow, preferences: &ViewPreferences) {
+fn apply_view_preferences(
+    window: &ApplicationWindow,
+    preferences: &ViewPreferences,
+    colors_css: &CssProvider,
+    color_scope_class: &str,
+) {
     let style_manager = StyleManager::default();
     match preferences.theme {
         Some(ViewTheme::Light) => style_manager.set_color_scheme(ColorScheme::ForceLight),
         Some(ViewTheme::Dark) => style_manager.set_color_scheme(ColorScheme::ForceDark),
         Some(ViewTheme::System) | None => style_manager.set_color_scheme(ColorScheme::Default),
     }
+    colors_css.load_from_data(&view_colors_css(color_scope_class, &preferences.colors));
     for class_name in VIEW_PREFERENCE_CLASSES {
         window.remove_css_class(class_name);
     }
+    window.remove_css_class(color_scope_class);
     for class_name in preferences.css_classes() {
         window.add_css_class(class_name);
     }
+    if !preferences.colors.is_empty() {
+        window.add_css_class(color_scope_class);
+    }
 }
+
+fn view_colors_css(scope_class: &str, colors: &BTreeMap<String, String>) -> String {
+    if colors.is_empty() {
+        return String::new();
+    }
+    let mut css = String::new();
+    let color_suffix = scope_class.replace('-', "_");
+    for (key, css_name, default) in VIEW_COLOR_TOKENS {
+        let value = colors
+            .get(*key)
+            .filter(|value| is_config_hex_color(value))
+            .map(String::as_str)
+            .unwrap_or(default);
+        css.push_str(&format!(
+            "@define-color {css_name}-{color_suffix} {value};\n"
+        ));
+    }
+    let mut scoped_css = CUSTOM_COLOR_CSS.replace(".lc-custom-colors", &format!(".{scope_class}"));
+    let mut color_names = VIEW_COLOR_TOKENS
+        .iter()
+        .map(|(_, css_name, _)| *css_name)
+        .collect::<Vec<_>>();
+    color_names.sort_by_key(|name| std::cmp::Reverse(name.len()));
+    for css_name in color_names {
+        scoped_css = scoped_css.replace(
+            &format!("@{css_name};"),
+            &format!("@{css_name}-{color_suffix};"),
+        );
+    }
+    css.push_str(&scoped_css);
+    css
+}
+
+fn is_config_hex_color(value: &str) -> bool {
+    let Some(hex) = value.strip_prefix('#') else {
+        return false;
+    };
+    matches!(hex.len(), 3 | 6) && hex.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+const VIEW_COLOR_TOKENS: &[(&str, &str, &str)] = &[
+    ("background", "lc-bg", "#191919"),
+    ("surface", "lc-surface", "#1e1e1e"),
+    ("surface_raised", "lc-surface-raised", "#202020"),
+    ("surface_muted", "lc-surface-muted", "#181818"),
+    ("hover", "lc-hover", "#2a2a2a"),
+    ("hover_soft", "lc-hover-soft", "#242424"),
+    ("border", "lc-border", "#2a2a2a"),
+    ("border_strong", "lc-border-strong", "#3a3a3a"),
+    ("text", "lc-text", "#e4e4e4"),
+    ("text_strong", "lc-text-strong", "#f8fafc"),
+    ("text_muted", "lc-text-muted", "#8a8a8a"),
+    ("accent", "lc-accent", "#22c55e"),
+    ("accent_fg", "lc-accent-fg", "#052e16"),
+    ("success", "lc-success", "#84e0a0"),
+    ("warning", "lc-warning", "#f59e0b"),
+    ("danger", "lc-danger", "#ff8a8a"),
+];
+
+const CUSTOM_COLOR_CSS: &str = r#"
+window.lc-custom-colors,
+.lc-custom-colors .dashboard,
+.lc-custom-colors .page-shell,
+.lc-custom-colors .history-view {
+    background-color: @lc-bg;
+    color: @lc-text;
+}
+
+.lc-custom-colors .page-header,
+.lc-custom-colors .dashboard-header,
+.lc-custom-colors .sidebar,
+.lc-custom-colors .settings-toolbar,
+.lc-custom-colors .settings-content-shell,
+.lc-custom-colors .settings-group,
+.lc-custom-colors .settings-rail {
+    background-color: @lc-surface;
+    border-color: @lc-border;
+}
+
+.lc-custom-colors .workspace-card,
+.lc-custom-colors .command-panel,
+.lc-custom-colors .metric-card,
+.lc-custom-colors .detail-row,
+.lc-custom-colors .settings-panel,
+.lc-custom-colors .settings-content-panel,
+.lc-custom-colors .project-template-card,
+.lc-custom-colors .chat-composer-box {
+    background-color: @lc-surface-raised;
+    border-color: @lc-border;
+    color: @lc-text;
+}
+
+.lc-custom-colors .card-meta,
+.lc-custom-colors .workspace-meta,
+.lc-custom-colors .detail-label,
+.lc-custom-colors .project-tab,
+.lc-custom-colors .column-count,
+.lc-custom-colors .empty-label,
+.lc-custom-colors .card-branch,
+.lc-custom-colors .card-diff,
+.lc-custom-colors .workspace-row-branch-icon {
+    color: @lc-text-muted;
+}
+
+.lc-custom-colors .dashboard-title,
+.lc-custom-colors .workspace-name,
+.lc-custom-colors .card-title,
+.lc-custom-colors .metric-value,
+.lc-custom-colors .detail-value,
+.lc-custom-colors .column-title {
+    color: @lc-text;
+}
+
+.lc-custom-colors .nav-button-active,
+.lc-custom-colors .nav-row-active,
+.lc-custom-colors .nav-button:hover,
+.lc-custom-colors .nav-row:hover,
+.lc-custom-colors .workspace-list row:selected,
+.lc-custom-colors .workspace-list row:hover {
+    background-color: @lc-hover;
+    color: @lc-text;
+}
+
+.lc-custom-colors .section-title,
+.lc-custom-colors .project-tab-active,
+.lc-custom-colors .card-activity,
+.lc-custom-colors .workspace-title {
+    color: @lc-accent;
+    border-color: @lc-accent;
+}
+
+.lc-custom-colors .chat-mode-selected,
+.lc-custom-colors .chat-send-btn-active,
+.lc-custom-colors .chat-user-bubble,
+.lc-custom-colors .suggested-action {
+    background-color: @lc-accent;
+    border-color: @lc-accent;
+    color: @lc-accent-fg;
+}
+
+.lc-custom-colors .diff-added,
+.lc-custom-colors .status-running,
+.lc-custom-colors .workspace-status-running {
+    color: @lc-success;
+}
+
+.lc-custom-colors .chat-context-usage-warning {
+    border-color: @lc-warning;
+    color: @lc-warning;
+}
+
+.lc-custom-colors .diff-removed,
+.lc-custom-colors .status-error,
+.lc-custom-colors .workspace-status-error,
+.lc-custom-colors .ws-check-icon-fail {
+    color: @lc-danger;
+}
+"#;
 
 fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     let startup = Instant::now();
@@ -462,7 +639,22 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         &css,
         STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
-    apply_view_preferences(&window, &initial_view_preferences);
+    let view_colors_css = CssProvider::new();
+    let color_scope_class = format!(
+        "lc-custom-colors-{}",
+        NEXT_COLOR_SCOPE_ID.fetch_add(1, Ordering::Relaxed)
+    );
+    gtk::style_context_add_provider_for_display(
+        &gtk::gdk::Display::default().unwrap(),
+        &view_colors_css,
+        STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
+    apply_view_preferences(
+        &window,
+        &initial_view_preferences,
+        &view_colors_css,
+        &color_scope_class,
+    );
     tracing::info!(
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: styles applied"
@@ -516,7 +708,15 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     let (projects_page, refresh_projects) = projects::build_projects_page(
         &app_state.paths,
         refresh_dashboard.clone(),
-        refresh_workspace_detail.clone(),
+        {
+            let refresh_workspace_detail = refresh_workspace_detail.clone();
+            let refresh_hub = refresh_hub.clone();
+            move || {
+                refresh_workspace_detail();
+                refresh_hub.refresh(RefreshScope::Sidebar);
+            }
+        },
+        toast_manager.clone(),
     );
     tracing::info!(
         elapsed_ms = startup.elapsed().as_millis(),
@@ -526,7 +726,8 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: building settings page"
     );
-    let (settings_page, refresh_settings) = settings::build_settings_page(&app_state.paths);
+    let (settings_page, refresh_settings) =
+        settings::build_settings_page(&app_state.paths, toast_manager.clone());
     tracing::info!(
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: settings page built"
@@ -536,7 +737,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         "gtk startup: building history page"
     );
     let (history_page, refresh_history) =
-        history::build_history_page(app_state.workspace_database_path());
+        history::build_history_page(app_state.workspace_database_path(), toast_manager.clone());
     tracing::info!(
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: history page built"
@@ -569,13 +770,20 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     let refresh_view_preferences: Rc<dyn Fn()> = {
         let state_for_view = app_state.clone();
         let window_for_view = window.clone();
+        let colors_css_for_view = view_colors_css.clone();
+        let color_scope_class = color_scope_class.clone();
         let db_path_for_view = app_state.workspace_database_path();
         let keybindings_for_view = Rc::clone(&current_keybindings);
         Rc::new(move || {
             let workspace = state_for_view.selected_workspace();
             let preferences =
                 resolve_view_preferences(db_path_for_view.clone(), workspace.as_deref());
-            apply_view_preferences(&window_for_view, &preferences);
+            apply_view_preferences(
+                &window_for_view,
+                &preferences,
+                &colors_css_for_view,
+                &color_scope_class,
+            );
             *keybindings_for_view.borrow_mut() =
                 resolve_keybindings(db_path_for_view.clone(), workspace.as_deref());
         })
@@ -590,6 +798,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         debug_mode,
         refresh_workspace_detail.clone(),
         refresh_view_preferences.clone(),
+        toast_manager.clone(),
     );
     tracing::info!(
         elapsed_ms = startup.elapsed().as_millis(),
@@ -1456,6 +1665,7 @@ mod tests {
             default_visible_tab: None,
             theme: Some("light".to_owned()),
             accent_color: Some("green".to_owned()),
+            colors: BTreeMap::new(),
             density: Some("compact".to_owned()),
             keybindings: None,
             terminal_font: None,
@@ -1477,6 +1687,7 @@ mod tests {
             default_visible_tab: None,
             theme: Some("noir".to_owned()),
             accent_color: Some("purple".to_owned()),
+            colors: BTreeMap::new(),
             density: Some("tiny".to_owned()),
             keybindings: None,
             terminal_font: None,
@@ -1487,6 +1698,35 @@ mod tests {
         });
 
         assert!(preferences.css_classes().is_empty());
+    }
+
+    #[test]
+    fn view_preferences_apply_custom_color_tokens() {
+        let preferences = ViewPreferences::from_defaults(WorkspaceViewDefaults {
+            default_visible_tab: None,
+            theme: None,
+            accent_color: None,
+            colors: BTreeMap::from([
+                ("accent".to_owned(), "#0ea5e9".to_owned()),
+                ("accent_fg".to_owned(), "#001018".to_owned()),
+                ("background".to_owned(), "#101820".to_owned()),
+            ]),
+            density: None,
+            keybindings: None,
+            terminal_font: None,
+            terminal_scrollback: None,
+            command_palette_presets: Vec::new(),
+            agent_profile_names: Vec::new(),
+            notification_rules: Vec::new(),
+        });
+
+        assert_eq!(preferences.css_classes(), vec!["lc-custom-colors"]);
+        let css = view_colors_css("lc-custom-colors-test", &preferences.colors);
+        assert!(css.contains("@define-color lc-accent-lc_custom_colors_test #0ea5e9;"));
+        assert!(css.contains("@define-color lc-accent-fg-lc_custom_colors_test #001018;"));
+        assert!(css.contains("@define-color lc-bg-lc_custom_colors_test #101820;"));
+        assert!(css.contains(".lc-custom-colors-test .chat-mode-selected"));
+        assert!(!css.contains(".lc-custom-colors .chat-mode-selected"));
     }
 
     #[test]

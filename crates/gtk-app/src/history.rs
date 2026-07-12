@@ -3,9 +3,10 @@ use gtk::{
     Box as GBox, Label, ListBox, Orientation, PolicyType, ScrolledWindow, Separator, TextView,
 };
 use linux_archductor_core::import::default_conductor_app_database;
-use linux_archductor_core::workspace::WorkspaceStore;
+use linux_archductor_core::workspace::{WorkspaceStatusLine, WorkspaceStore};
 use rusqlite::Connection;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -14,8 +15,12 @@ use std::time::Duration;
 use tracing::error;
 
 use crate::motion::{append_revealed_to_list, clear_list};
+use crate::toast::ToastManager;
 
-pub(crate) fn build_history_page(database_path: PathBuf) -> (GBox, impl Fn() + Clone + 'static) {
+pub(crate) fn build_history_page(
+    database_path: PathBuf,
+    toast_manager: ToastManager,
+) -> (GBox, impl Fn() + Clone + 'static) {
     let root = GBox::new(Orientation::Vertical, 0);
     root.add_css_class("dashboard");
     root.add_css_class("page-shell");
@@ -26,7 +31,7 @@ pub(crate) fn build_history_page(database_path: PathBuf) -> (GBox, impl Fn() + C
     title.add_css_class("dashboard-title");
     title.set_xalign(0.0);
     let subtitle = Label::new(Some(
-        "Local Linux agent sessions plus imported Archductor chats when available.",
+        "All remaining workspaces across active, backlog, and archived states.",
     ));
     subtitle.add_css_class("card-meta");
     subtitle.set_xalign(0.0);
@@ -55,19 +60,24 @@ pub(crate) fn build_history_page(database_path: PathBuf) -> (GBox, impl Fn() + C
     split.append(&message_scroll);
     root.append(&split);
 
-    let session_ids: Rc<RefCell<std::collections::HashMap<i32, String>>> =
-        Rc::new(RefCell::new(std::collections::HashMap::new()));
+    let workspace_rows: Rc<RefCell<HashMap<i32, WorkspaceHistoryEntry>>> =
+        Rc::new(RefCell::new(HashMap::new()));
     let refresh_generation = Rc::new(RefCell::new(0u64));
     let refresh = {
         let list = list.clone();
-        let session_ids = Rc::clone(&session_ids);
+        let message_view = message_view.clone();
+        let workspace_rows = Rc::clone(&workspace_rows);
         let database_path = database_path.clone();
         let refresh_generation = Rc::clone(&refresh_generation);
+        let toast_manager = toast_manager.clone();
         move || {
             clear_list(&list);
-            session_ids.borrow_mut().clear();
+            workspace_rows.borrow_mut().clear();
+            message_view
+                .buffer()
+                .set_text("Select a workspace to inspect its current state.");
 
-            let loading = Label::new(Some("Loading history..."));
+            let loading = Label::new(Some("Loading workspace history..."));
             loading.add_css_class("empty-label");
             loading.set_xalign(0.0);
             loading.set_margin_start(24);
@@ -79,29 +89,30 @@ pub(crate) fn build_history_page(database_path: PathBuf) -> (GBox, impl Fn() + C
             let (tx, rx) = mpsc::channel();
             let db_path = database_path.clone();
             std::thread::spawn(move || {
-                let _ = tx.send(history_recent_sessions(&db_path));
+                let _ = tx.send(history_recent_workspaces(&db_path));
             });
 
             let list = list.clone();
-            let session_ids = Rc::clone(&session_ids);
+            let workspace_rows = Rc::clone(&workspace_rows);
             let refresh_generation = Rc::clone(&refresh_generation);
+            let toast_manager = toast_manager.clone();
             // PER-190: temporary worker-result poll for DB/import history load;
             // remove when this page switches to a GLib main-context future.
             glib::timeout_add_local(Duration::from_millis(100), move || match rx.try_recv() {
-                Ok(sessions) => {
+                Ok(Ok(workspaces)) => {
                     if *refresh_generation.borrow() != generation {
                         return glib::ControlFlow::Break;
                     }
                     clear_list(&list);
-                    session_ids.borrow_mut().clear();
-                    for (idx, session) in sessions.into_iter().enumerate() {
-                        append_revealed_to_list(&list, &session_summary_row(&session));
-                        session_ids
+                    workspace_rows.borrow_mut().clear();
+                    for (idx, workspace) in workspaces.into_iter().enumerate() {
+                        append_revealed_to_list(&list, &workspace_history_row(&workspace));
+                        workspace_rows
                             .borrow_mut()
-                            .insert(i32::try_from(idx).unwrap_or(i32::MAX), session.id);
+                            .insert(i32::try_from(idx).unwrap_or(i32::MAX), workspace);
                     }
                     if list.first_child().is_none() {
-                        let empty = Label::new(Some("No chat history yet."));
+                        let empty = Label::new(Some("No workspace history yet."));
                         empty.add_css_class("empty-label");
                         empty.set_xalign(0.0);
                         empty.set_margin_start(24);
@@ -110,11 +121,28 @@ pub(crate) fn build_history_page(database_path: PathBuf) -> (GBox, impl Fn() + C
                     }
                     glib::ControlFlow::Break
                 }
+                Ok(Err(err)) => {
+                    if *refresh_generation.borrow() == generation {
+                        clear_list(&list);
+                        let message = format!("Could not load workspace history: {err:#}");
+                        toast_manager.error(message.clone());
+                        let empty = Label::new(Some(&message));
+                        empty.add_css_class("empty-label");
+                        empty.set_xalign(0.0);
+                        empty.set_margin_start(24);
+                        empty.set_margin_top(24);
+                        empty.set_wrap(true);
+                        append_revealed_to_list(&list, &empty);
+                    }
+                    glib::ControlFlow::Break
+                }
                 Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
                 Err(mpsc::TryRecvError::Disconnected) => {
                     if *refresh_generation.borrow() == generation {
                         clear_list(&list);
-                        let empty = Label::new(Some("Could not load chat history."));
+                        let message = "Could not load workspace history.";
+                        toast_manager.error(message);
+                        let empty = Label::new(Some(message));
                         empty.add_css_class("empty-label");
                         empty.set_xalign(0.0);
                         empty.set_margin_start(24);
@@ -127,46 +155,17 @@ pub(crate) fn build_history_page(database_path: PathBuf) -> (GBox, impl Fn() + C
         }
     };
 
-    let session_ids_select = Rc::clone(&session_ids);
-    let database_path_select = database_path.clone();
-    let message_generation = Rc::new(RefCell::new(0u64));
+    let workspace_rows_select = Rc::clone(&workspace_rows);
     list.connect_row_selected(move |_, row| {
         guarded_gtk_callback((), || {
-            let Some(session_id) =
-                row.and_then(|r| session_ids_select.borrow().get(&r.index()).cloned())
+            let Some(workspace) =
+                row.and_then(|r| workspace_rows_select.borrow().get(&r.index()).cloned())
             else {
                 return;
             };
-            let buffer = message_view.buffer();
-            buffer.set_text("Loading chat messages...");
-            *message_generation.borrow_mut() += 1;
-            let generation = *message_generation.borrow();
-            let (tx, rx) = mpsc::channel();
-            let db_path = database_path_select.clone();
-            std::thread::spawn(move || {
-                let _ = tx.send(history_session_messages(&db_path, &session_id));
-            });
-            let message_view = message_view.clone();
-            let message_generation = Rc::clone(&message_generation);
-            // PER-190: temporary worker-result poll for selected transcript load;
-            // remove when this page switches to a GLib main-context future.
-            glib::timeout_add_local(Duration::from_millis(100), move || match rx.try_recv() {
-                Ok(text) => {
-                    if *message_generation.borrow() == generation {
-                        message_view.buffer().set_text(&text);
-                    }
-                    glib::ControlFlow::Break
-                }
-                Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    if *message_generation.borrow() == generation {
-                        message_view
-                            .buffer()
-                            .set_text("Could not load chat messages.");
-                    }
-                    glib::ControlFlow::Break
-                }
-            });
+            message_view
+                .buffer()
+                .set_text(&workspace_history_detail(&workspace));
         })
     });
 
@@ -174,7 +173,179 @@ pub(crate) fn build_history_page(database_path: PathBuf) -> (GBox, impl Fn() + C
     (root, refresh)
 }
 
-// ── DASHBOARD ─────────────────────────────────────────────────────────────
+// ── WORKSPACE HISTORY ─────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceHistoryEntry {
+    name: String,
+    repository_name: String,
+    branch: String,
+    base_ref: String,
+    path: String,
+    status: String,
+    bucket: String,
+    updated_at: String,
+    created_at: String,
+    archived_at: Option<String>,
+    port_base: u16,
+    open_todos: usize,
+    active_sessions: usize,
+    run_running: bool,
+    pull_request: Option<i64>,
+    diff_additions: usize,
+    diff_deletions: usize,
+}
+
+fn workspace_history_row(workspace: &WorkspaceHistoryEntry) -> GBox {
+    let row = GBox::new(Orientation::Vertical, 3);
+    row.add_css_class("history-row");
+    let title = Label::new(Some(&workspace.name));
+    title.add_css_class("workspace-name");
+    title.set_xalign(0.0);
+    title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    let meta = Label::new(Some(&format!(
+        "{} · {} · {}",
+        workspace.repository_name, workspace.branch, workspace.bucket
+    )));
+    meta.add_css_class("workspace-meta");
+    meta.set_xalign(0.0);
+    meta.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    let status = Label::new(Some(&format!(
+        "{} · updated {} · +{} -{}",
+        workspace.status, workspace.updated_at, workspace.diff_additions, workspace.diff_deletions
+    )));
+    status.add_css_class("card-meta");
+    status.set_xalign(0.0);
+    status.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    row.append(&title);
+    row.append(&meta);
+    row.append(&status);
+    row
+}
+
+fn history_recent_workspaces(database_path: &Path) -> anyhow::Result<Vec<WorkspaceHistoryEntry>> {
+    let store = WorkspaceStore::open(database_path)?;
+    let mut workspaces = store.list_status().map(|lines| {
+        lines
+            .iter()
+            .map(workspace_history_entry)
+            .collect::<Vec<_>>()
+    })?;
+    workspaces.sort_by(|left, right| {
+        workspace_history_sort_key(right)
+            .cmp(&workspace_history_sort_key(left))
+            .then_with(|| right.updated_at.cmp(&left.updated_at))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    Ok(workspaces)
+}
+
+fn workspace_history_entry(line: &WorkspaceStatusLine) -> WorkspaceHistoryEntry {
+    WorkspaceHistoryEntry {
+        name: line.workspace.name.clone(),
+        repository_name: line.repository_name.clone(),
+        branch: line.workspace.branch.clone(),
+        base_ref: line.workspace.base_ref.clone(),
+        path: line.workspace.path.to_string_lossy().to_string(),
+        status: line.workspace.status.clone(),
+        bucket: workspace_history_bucket(line).to_owned(),
+        updated_at: line.workspace.updated_at.clone(),
+        created_at: line.workspace.created_at.clone(),
+        archived_at: line.workspace.archived_at.clone(),
+        port_base: line.workspace.port_base,
+        open_todos: line.open_todos,
+        active_sessions: line.active_sessions,
+        run_running: line.run_running,
+        pull_request: line.pull_request.as_ref().map(|pr| pr.number),
+        diff_additions: line.diff_additions,
+        diff_deletions: line.diff_deletions,
+    }
+}
+
+fn workspace_history_bucket(line: &WorkspaceStatusLine) -> &'static str {
+    if line.workspace.status == "archived" {
+        "Archived"
+    } else if line.run_running
+        || line.active_sessions > 0
+        || line
+            .pull_request
+            .as_ref()
+            .is_some_and(|pr| pr.state.eq_ignore_ascii_case("open"))
+    {
+        "Active"
+    } else {
+        "Backlog"
+    }
+}
+
+fn workspace_history_sort_key(workspace: &WorkspaceHistoryEntry) -> u8 {
+    match workspace.bucket.as_str() {
+        "Active" => 3,
+        "Backlog" => 2,
+        "Archived" => 1,
+        _ => 0,
+    }
+}
+
+fn workspace_history_detail(workspace: &WorkspaceHistoryEntry) -> String {
+    let pr = workspace
+        .pull_request
+        .map(|number| format!("PR #{number}"))
+        .unwrap_or_else(|| "No PR".to_owned());
+    let archived = workspace.archived_at.as_deref().unwrap_or("Not archived");
+    format!(
+        "{name}\n\
+         \n\
+         State\n\
+         {bucket} · {status}\n\
+         \n\
+         Project\n\
+         {repository}\n\
+         \n\
+         Branch\n\
+         {branch}\n\
+         Base: {base_ref}\n\
+         \n\
+         Summary\n\
+         +{additions} -{deletions}\n\
+         {todos} open todos\n\
+         {sessions} active sessions\n\
+         Run: {run}\n\
+         {pr}\n\
+         Port base: {port_base}\n\
+         \n\
+         Dates\n\
+         Created: {created_at}\n\
+         Updated: {updated_at}\n\
+         Archived: {archived}\n\
+         \n\
+         Path\n\
+         {path}",
+        name = workspace.name,
+        bucket = workspace.bucket,
+        status = workspace.status,
+        repository = workspace.repository_name,
+        branch = workspace.branch,
+        base_ref = workspace.base_ref,
+        additions = workspace.diff_additions,
+        deletions = workspace.diff_deletions,
+        todos = workspace.open_todos,
+        sessions = workspace.active_sessions,
+        run = if workspace.run_running {
+            "running"
+        } else {
+            "idle"
+        },
+        pr = pr,
+        port_base = workspace.port_base,
+        created_at = workspace.created_at,
+        updated_at = workspace.updated_at,
+        archived = archived,
+        path = workspace.path
+    )
+}
+
+// ── CHAT HISTORY HELPERS ──────────────────────────────────────────────────
 
 pub(crate) struct ChatSummary {
     id: String,
@@ -466,5 +637,68 @@ where
             error!("recovered panic inside history GTK callback");
             fallback
         }
+    }
+}
+
+#[cfg(test)]
+mod workspace_history_tests {
+    use super::{workspace_history_bucket, WorkspaceStatusLine};
+    use linux_archductor_core::workspace::{PullRequest, Workspace};
+    use std::path::PathBuf;
+
+    fn line(status: &str) -> WorkspaceStatusLine {
+        WorkspaceStatusLine {
+            workspace: Workspace {
+                id: 1,
+                repository_id: 1,
+                name: "berlin".to_owned(),
+                path: PathBuf::from("/tmp/berlin"),
+                branch: "lc/berlin".to_owned(),
+                base_ref: "main".to_owned(),
+                port_base: 3000,
+                status: status.to_owned(),
+                archived_at: None,
+                created_at: "1".to_owned(),
+                updated_at: "2".to_owned(),
+            },
+            repository_name: "demo".to_owned(),
+            open_todos: 0,
+            pull_request: None,
+            run_running: false,
+            active_sessions: 0,
+            branch_push_state: None,
+            diff_additions: 0,
+            diff_deletions: 0,
+        }
+    }
+
+    #[test]
+    fn workspace_history_bucket_covers_active_backlog_and_archived() {
+        let backlog = line("active");
+        assert_eq!(workspace_history_bucket(&backlog), "Backlog");
+
+        let mut active = line("active");
+        active.active_sessions = 1;
+        assert_eq!(workspace_history_bucket(&active), "Active");
+
+        let mut review = line("active");
+        review.pull_request = Some(PullRequest {
+            id: 1,
+            workspace_id: 1,
+            provider: "github".to_owned(),
+            number: 42,
+            url: "https://example.test/pull/42".to_owned(),
+            state: "open".to_owned(),
+            created_at: "1".to_owned(),
+            updated_at: "2".to_owned(),
+        });
+        assert_eq!(workspace_history_bucket(&review), "Active");
+
+        let mut closed_review = review;
+        closed_review.pull_request.as_mut().unwrap().state = "closed".to_owned();
+        assert_eq!(workspace_history_bucket(&closed_review), "Backlog");
+
+        let archived = line("archived");
+        assert_eq!(workspace_history_bucket(&archived), "Archived");
     }
 }

@@ -105,19 +105,31 @@ spotlight_testing = false
 [scripts]
 setup = "true"
 run = "true"
+test = "true"
+lint = "true"
+typecheck = "true"
+build = "true"
 run_mode = "concurrent"
 ```
 
-Replace `true` with real project commands. Commit shared settings. Put
-machine-local overrides and secrets in `.archductor/settings.local.toml`.
+Replace `true` with real project commands. Commit shared `.archductor` files
+that should travel across workspaces or PCs. Keep workspace `.context/` files
+gitignored because they are per-workspace scratch context. Put machine-local
+overrides and secrets in `.archductor/settings.local.toml`.
 If `.worktreeinclude` exists, it takes precedence over `file_include_globs`.
+Check scripts are exposed as workspace terminal command presets today. A
+first-class local check runner is still a TODO.
 
 Repository prompts are part of the customization surface and should be editable
 from the Projects settings UI:
 
 ```toml
 [prompts]
+new_workspace = "Create a short plan before changing code."
 general = "Prefer small, reviewable changes."
+continue_work = "Inspect current changes before editing."
+summarize_session = "Summarize verification and remaining risk."
+handoff = "Leave context, changed files, tests, and next steps."
 code_review = "Focus on correctness and missing tests."
 create_pr = "Write concise PR descriptions with test evidence."
 fix_errors = "Fix failing checks with the smallest safe change."
@@ -126,6 +138,13 @@ rename_branch = "Use short kebab-case branch names."
 commit_generation = "Use conventional commits and include tests run."
 test_fixing = "Reproduce the failing test before changing production code."
 refactor_style = "Keep behavior-preserving refactors separate."
+setup_script = "Infer setup commands from repo files."
+run_script = "Infer run commands and required ports/env."
+
+[prompt_pack]
+active = "default"
+version = "v1"
+path = ".archductor/prompt-packs/default.toml"
 ```
 
 Other customization areas should be representable in settings even when the GUI
@@ -151,10 +170,12 @@ auto_start_agent = "codex"
 required_local_files = [".env"]
 test_command = "pnpm test"
 lint_command = "pnpm lint"
+typecheck_command = "pnpm typecheck"
 build_command = "pnpm build"
 
 [customization.agent_profiles.default]
 agent = "codex"
+model = "gpt-5-codex"
 approval_mode = "on-request"
 reasoning_mode = "medium"
 
@@ -199,8 +220,13 @@ configured `theme`, `accent_color`, and `density` as stylesheet classes. GTK
 also consumes `keybindings` for global refresh, sidebar, and command-palette
 shortcuts, applies `terminal_font` plus `terminal_scrollback` to terminal
 surfaces, and expands `command_palette_presets` into terminal preset buttons
-from known aliases or `Label=command` entries; the other fields are merged,
-saved, and preserved for workflow surfaces that use them.
+from known aliases or `Label=command` entries. Configured `scripts.test`,
+`scripts.lint`, `scripts.typecheck`, and `scripts.build` are prepended to those
+terminal presets. Prompt pack metadata is saved in `.archductor/settings.toml`;
+config bootstrap also seeds `.archductor/prompt-packs/default.toml` for new and
+existing projects when missing. Import/export, session snapshots, and pack
+switching are still TODOs. The other fields are merged, saved, and preserved
+for workflow surfaces that use them.
 
 ## 6. CLI Smoke Path
 

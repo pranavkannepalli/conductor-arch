@@ -17,6 +17,7 @@ use std::rc::Rc;
 
 use crate::buttons::text_button;
 use crate::refresh::{RefreshHub, RefreshScope};
+use crate::toast::ToastManager;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
@@ -157,6 +158,7 @@ pub fn embedded_terminal_panel(
     _refresh_hub: RefreshHub,
     preferences: TerminalPreferences,
     command_presets: Vec<TerminalCommandPreset>,
+    toast_manager: ToastManager,
 ) -> GBox {
     let root = GBox::new(Orientation::Vertical, 8);
     root.add_css_class("terminal-panel");
@@ -208,6 +210,7 @@ pub fn embedded_terminal_panel(
     let db_for_start = database_path.clone();
     let workspace_for_start = workspace_name.to_owned();
     let buffer_for_start = transcript.buffer();
+    let toast_for_start = toast_manager.clone();
     start_btn.connect_clicked(move |_| {
         let request = ArchcarRequest::SpawnSession {
             workspace: workspace_for_start.clone(),
@@ -227,7 +230,9 @@ pub fn embedded_terminal_panel(
             .map(|_| ())
         {
             tracing::warn!(workspace = %workspace_for_start, error = %err, "terminal runtime reconcile failed after shell start");
-            append_text(&buffer_for_start, &terminal_runtime_error_text(&err));
+            let message = terminal_runtime_error_text(&err);
+            toast_for_start.error(message.trim().to_owned());
+            append_text(&buffer_for_start, &message);
         }
     });
 
@@ -381,29 +386,43 @@ fn terminal_runtime_error_text(err: &anyhow::Error) -> String {
     format!("\n[terminal runtime error]\n{err:#}\n")
 }
 
+fn toast_if_terminal_error(toast_manager: &ToastManager, message: &str) {
+    if message.contains("[terminal ") && message.contains(" error]") || message.contains("[error]")
+    {
+        toast_manager.error(message.trim().to_owned());
+    }
+}
+
 fn load_terminal_tab_transcript(
     database_path: PathBuf,
     workspace_name: String,
     process_id: i64,
     buffer: TextBuffer,
+    toast_manager: ToastManager,
 ) {
-    match WorkspaceStore::open(database_path.clone())
-        .and_then(|store| {
-            store
-                .list_terminals(&workspace_name)?
-                .into_iter()
-                .find(|record| record.id == process_id)
-                .with_context(|| {
-                    format!("terminal session {process_id} not found for workspace {workspace_name}")
-                })
-        }) {
-        Ok(record) => run_terminal_transcript_load(database_path, workspace_name, record, buffer),
-        Err(err) => append_text(
-            &buffer,
-            &format!(
-                "\n[terminal transcript error]\nCould not load terminal session {process_id}: {err:#}\n"
-            ),
+    match WorkspaceStore::open(database_path.clone()).and_then(|store| {
+        store
+            .list_terminals(&workspace_name)?
+            .into_iter()
+            .find(|record| record.id == process_id)
+            .with_context(|| {
+                format!("terminal session {process_id} not found for workspace {workspace_name}")
+            })
+    }) {
+        Ok(record) => run_terminal_transcript_load(
+            database_path,
+            workspace_name,
+            record,
+            buffer,
+            toast_manager,
         ),
+        Err(err) => {
+            let message = format!(
+                "\n[terminal transcript error]\nCould not load terminal session {process_id}: {err:#}\n"
+            );
+            toast_manager.error(message.trim().to_owned());
+            append_text(&buffer, &message);
+        }
     }
 }
 
@@ -446,6 +465,7 @@ fn run_terminal_log_search(
     browser_database_path: PathBuf,
     browser_workspace_name: String,
     jump_history_pages: Rc<RefCell<HashMap<i64, usize>>>,
+    toast_manager: ToastManager,
 ) {
     append_text(
         &buffer,
@@ -454,6 +474,8 @@ fn run_terminal_log_search(
     let query_for_thread = query.clone();
     let buffer_for_ui = buffer.clone();
     let buffer_for_disconnect = buffer.clone();
+    let toast_for_result = toast_manager.clone();
+    let toast_for_disconnect = toast_manager.clone();
     run_terminal_worker(
         move || {
             WorkspaceStore::open(database_path)
@@ -472,20 +494,19 @@ fn run_terminal_log_search(
                     browser_workspace_name.clone(),
                     buffer_for_ui.clone(),
                     jump_history_pages.clone(),
+                    toast_for_result.clone(),
                 );
             }
             Err(err) => {
-                append_text(
-                    &buffer_for_ui,
-                    &format!("[terminal search error]\n{err:#}\n"),
-                );
+                let message = format!("[terminal search error]\n{err:#}\n");
+                toast_for_result.error(message.trim().to_owned());
+                append_text(&buffer_for_ui, &message);
             }
         },
         move || {
-            append_text(
-                &buffer_for_disconnect,
-                "[error]\nterminal search worker disconnected\n",
-            );
+            let message = "[error]\nterminal search worker disconnected\n";
+            toast_for_disconnect.error(message.trim().to_owned());
+            append_text(&buffer_for_disconnect, message);
         },
     );
 }
@@ -496,6 +517,7 @@ fn run_terminal_match_transcript(
     process_id: i64,
     line_number: usize,
     buffer: TextBuffer,
+    toast_manager: ToastManager,
 ) {
     append_text(
         &buffer,
@@ -505,6 +527,8 @@ fn run_terminal_match_transcript(
         ),
     );
     let buffer_for_disconnect = buffer.clone();
+    let toast_for_message = toast_manager.clone();
+    let toast_for_disconnect = toast_manager.clone();
     run_terminal_worker(
         move || {
             WorkspaceStore::open(database_path)
@@ -533,13 +557,13 @@ fn run_terminal_match_transcript(
                 .unwrap_or_else(|err| format!("[terminal match error]\n{err:#}\n"))
         },
         move |message| {
+            toast_if_terminal_error(&toast_for_message, &message);
             buffer.set_text(&message);
         },
         move || {
-            append_text(
-                &buffer_for_disconnect,
-                "[error]\nterminal match worker disconnected\n",
-            );
+            let message = "[error]\nterminal match worker disconnected\n";
+            toast_for_disconnect.error(message.trim().to_owned());
+            append_text(&buffer_for_disconnect, message);
         },
     );
 }
@@ -551,6 +575,7 @@ fn run_terminal_line_transcript(
     line_number: usize,
     context_lines: usize,
     buffer: TextBuffer,
+    toast_manager: ToastManager,
 ) {
     append_text(
         &buffer,
@@ -560,6 +585,8 @@ fn run_terminal_line_transcript(
         ),
     );
     let buffer_for_disconnect = buffer.clone();
+    let toast_for_message = toast_manager.clone();
+    let toast_for_disconnect = toast_manager.clone();
     run_terminal_worker(
         move || {
             WorkspaceStore::open(database_path)
@@ -587,13 +614,13 @@ fn run_terminal_line_transcript(
                 })
         },
         move |message| {
+            toast_if_terminal_error(&toast_for_message, &message);
             buffer.set_text(&message);
         },
         move || {
-            append_text(
-                &buffer_for_disconnect,
-                "[error]\nterminal line-jump worker disconnected\n",
-            );
+            let message = "[error]\nterminal line-jump worker disconnected\n";
+            toast_for_disconnect.error(message.trim().to_owned());
+            append_text(&buffer_for_disconnect, message);
         },
     );
 }
@@ -624,6 +651,7 @@ fn run_terminal_tail_transcript(
     workspace_name: String,
     process_id: i64,
     buffer: TextBuffer,
+    toast_manager: ToastManager,
 ) {
     append_text(
         &buffer,
@@ -632,6 +660,8 @@ fn run_terminal_tail_transcript(
     let database_path_for_thread = database_path.clone();
     let workspace_name_for_thread = workspace_name.clone();
     let buffer_for_disconnect = buffer.clone();
+    let toast_for_message = toast_manager.clone();
+    let toast_for_disconnect = toast_manager.clone();
     run_terminal_worker(
         move || {
             WorkspaceStore::open(database_path_for_thread.clone())
@@ -657,13 +687,13 @@ fn run_terminal_tail_transcript(
             })
         },
         move |message| {
+            toast_if_terminal_error(&toast_for_message, &message);
             buffer.set_text(&message);
         },
         move || {
-            append_text(
-                &buffer_for_disconnect,
-                "[error]\nterminal tail worker disconnected\n",
-            );
+            let message = "[error]\nterminal tail worker disconnected\n";
+            toast_for_disconnect.error(message.trim().to_owned());
+            append_text(&buffer_for_disconnect, message);
         },
     );
 }
@@ -673,6 +703,7 @@ fn run_terminal_head_transcript(
     workspace_name: String,
     process_id: i64,
     buffer: TextBuffer,
+    toast_manager: ToastManager,
 ) {
     append_text(
         &buffer,
@@ -681,6 +712,8 @@ fn run_terminal_head_transcript(
     let database_path_for_thread = database_path.clone();
     let workspace_name_for_thread = workspace_name.clone();
     let buffer_for_disconnect = buffer.clone();
+    let toast_for_message = toast_manager.clone();
+    let toast_for_disconnect = toast_manager.clone();
     run_terminal_worker(
         move || {
             WorkspaceStore::open(database_path_for_thread.clone())
@@ -706,13 +739,13 @@ fn run_terminal_head_transcript(
             })
         },
         move |message| {
+            toast_if_terminal_error(&toast_for_message, &message);
             buffer.set_text(&message);
         },
         move || {
-            append_text(
-                &buffer_for_disconnect,
-                "[error]\nterminal head worker disconnected\n",
-            );
+            let message = "[error]\nterminal head worker disconnected\n";
+            toast_for_disconnect.error(message.trim().to_owned());
+            append_text(&buffer_for_disconnect, message);
         },
     );
 }
@@ -855,12 +888,15 @@ fn run_terminal_history(
     browser_workspace_name: String,
     browser_buffer: TextBuffer,
     jump_history_pages: Rc<RefCell<HashMap<i64, usize>>>,
+    toast_manager: ToastManager,
 ) {
     append_text(&buffer, "\n[terminal history]\n[loading]\n");
     let preserved_selection = history_combo
         .active_id()
         .and_then(|id| id.as_str().parse::<i64>().ok());
     let buffer_for_disconnect = buffer.clone();
+    let toast_for_result = toast_manager.clone();
+    let toast_for_disconnect = toast_manager.clone();
     run_terminal_worker(
         move || {
             WorkspaceStore::open(database_path)
@@ -886,6 +922,7 @@ fn run_terminal_history(
                     browser_workspace_name.clone(),
                     browser_buffer.clone(),
                     jump_history_pages.clone(),
+                    toast_for_result.clone(),
                 );
                 *history_records.borrow_mut() = filtered;
                 *history_records_all.borrow_mut() = display_summaries;
@@ -893,14 +930,15 @@ fn run_terminal_history(
                 append_text(&buffer, &format_terminal_history(&displayed_records));
             }
             Err(err) => {
-                append_text(&buffer, &format!("[terminal history error]\n{err:#}\n"));
+                let message = format!("[terminal history error]\n{err:#}\n");
+                toast_for_result.error(message.trim().to_owned());
+                append_text(&buffer, &message);
             }
         },
         move || {
-            append_text(
-                &buffer_for_disconnect,
-                "[error]\nterminal history worker disconnected\n",
-            );
+            let message = "[error]\nterminal history worker disconnected\n";
+            toast_for_disconnect.error(message.trim().to_owned());
+            append_text(&buffer_for_disconnect, message);
         },
     );
 }
@@ -910,12 +948,15 @@ fn run_terminal_transcript_load(
     workspace_name: String,
     record: ProcessRecord,
     buffer: TextBuffer,
+    toast_manager: ToastManager,
 ) {
     append_text(
         &buffer,
         &format!("\n[terminal transcript #{}]\n[loading]\n", record.id),
     );
     let buffer_for_disconnect = buffer.clone();
+    let toast_for_message = toast_manager.clone();
+    let toast_for_disconnect = toast_manager.clone();
     run_terminal_worker(
         move || match WorkspaceStore::open(database_path)
             .and_then(|store| store.read_terminal_log(&workspace_name, record.id))
@@ -924,13 +965,13 @@ fn run_terminal_transcript_load(
             Err(err) => format!("[terminal transcript error]\n{err:#}\n"),
         },
         move |message| {
+            toast_if_terminal_error(&toast_for_message, &message);
             buffer.set_text(&message);
         },
         move || {
-            append_text(
-                &buffer_for_disconnect,
-                "[error]\nterminal transcript worker disconnected\n",
-            );
+            let message = "[error]\nterminal transcript worker disconnected\n";
+            toast_for_disconnect.error(message.trim().to_owned());
+            append_text(&buffer_for_disconnect, message);
         },
     );
 }
@@ -986,6 +1027,7 @@ fn set_terminal_search_results_browser(
     workspace_name: String,
     buffer: TextBuffer,
     jump_history_pages: Rc<RefCell<HashMap<i64, usize>>>,
+    toast_manager: ToastManager,
 ) {
     while let Some(child) = history_browser.first_child() {
         history_browser.remove(&child);
@@ -1051,6 +1093,7 @@ fn set_terminal_search_results_browser(
         let open_tail_btn_workspace = workspace_name.clone();
         let open_tail_btn_buffer = buffer.clone();
         let open_transcript_btn_jump_pages = jump_history_pages.clone();
+        let open_transcript_btn_toast = toast_manager.clone();
         open_transcript_btn.connect_clicked(move |_| {
             open_transcript_btn_jump_pages
                 .borrow_mut()
@@ -1060,6 +1103,7 @@ fn set_terminal_search_results_browser(
                 open_transcript_btn_workspace.clone(),
                 process_id,
                 open_transcript_btn_buffer.clone(),
+                open_transcript_btn_toast.clone(),
             );
         });
         header_row.append(&open_transcript_btn);
@@ -1067,6 +1111,7 @@ fn set_terminal_search_results_browser(
         let tail_transcript_btn = text_button("Tail output");
         tail_transcript_btn.set_tooltip_text(Some("Load only tail output for this process"));
         let tail_transcript_btn_jump_pages = jump_history_pages.clone();
+        let tail_transcript_btn_toast = toast_manager.clone();
         tail_transcript_btn.connect_clicked(move |_| {
             tail_transcript_btn_jump_pages
                 .borrow_mut()
@@ -1076,6 +1121,7 @@ fn set_terminal_search_results_browser(
                 open_tail_btn_workspace.clone(),
                 process_id,
                 open_tail_btn_buffer.clone(),
+                tail_transcript_btn_toast.clone(),
             );
         });
         header_row.append(&tail_transcript_btn);
@@ -1103,6 +1149,7 @@ fn set_terminal_search_results_browser(
             let row_db = database_path.clone();
             let row_workspace = workspace_name.clone();
             let row_buffer = buffer.clone();
+            let row_toast = toast_manager.clone();
             let process_id = item.process_id;
             let line_hint = item.line_number;
             let command = item.command.clone();
@@ -1127,6 +1174,7 @@ fn set_terminal_search_results_browser(
                     process_id,
                     line_hint,
                     row_buffer.clone(),
+                    row_toast.clone(),
                 );
             });
 
@@ -1137,6 +1185,7 @@ fn set_terminal_search_results_browser(
             let open_btn_buffer = buffer.clone();
             let open_btn_process = item.process_id;
             let open_btn_jump_pages = jump_history_pages.clone();
+            let open_btn_toast = toast_manager.clone();
             open_btn.connect_clicked(move |_| {
                 open_btn_jump_pages
                     .borrow_mut()
@@ -1146,6 +1195,7 @@ fn set_terminal_search_results_browser(
                     open_btn_workspace.clone(),
                     open_btn_process,
                     open_btn_buffer.clone(),
+                    open_btn_toast.clone(),
                 );
             });
 
@@ -1156,6 +1206,7 @@ fn set_terminal_search_results_browser(
             let tail_btn_buffer = buffer.clone();
             let tail_btn_process = item.process_id;
             let tail_btn_jump_pages = jump_history_pages.clone();
+            let tail_btn_toast = toast_manager.clone();
             tail_btn.connect_clicked(move |_| {
                 tail_btn_jump_pages
                     .borrow_mut()
@@ -1165,6 +1216,7 @@ fn set_terminal_search_results_browser(
                     tail_btn_workspace.clone(),
                     tail_btn_process,
                     tail_btn_buffer.clone(),
+                    tail_btn_toast.clone(),
                 );
             });
 
@@ -1313,6 +1365,7 @@ fn set_terminal_history_browser(
     workspace_name: String,
     buffer: TextBuffer,
     jump_history_pages: Rc<RefCell<HashMap<i64, usize>>>,
+    toast_manager: ToastManager,
 ) {
     while let Some(child) = history_browser.first_child() {
         history_browser.remove(&child);
@@ -1402,11 +1455,13 @@ fn set_terminal_history_browser(
             let row_workspace = workspace_name.clone();
             let row_buffer = buffer.clone();
             let row_record = record.clone();
+            let row_toast = toast_manager.clone();
             let row_button_db = row_db.clone();
             let row_button_workspace = row_workspace.clone();
             let row_button_buffer = row_buffer.clone();
             let row_button_record = row_record.clone();
             let row_button_jump_pages = jump_history_pages.clone();
+            let row_button_toast = row_toast.clone();
             row_button.connect_clicked(move |_| {
                 row_combo_for_row_button.set_active_id(Some(&row_button_record.id.to_string()));
                 row_button_jump_pages
@@ -1417,6 +1472,7 @@ fn set_terminal_history_browser(
                     row_button_workspace.clone(),
                     row_button_record.clone(),
                     row_button_buffer.clone(),
+                    row_button_toast.clone(),
                 );
             });
 
@@ -1429,10 +1485,12 @@ fn set_terminal_history_browser(
             let open_btn_combo = row_combo_for_open_btn.clone();
             let open_btn_latest_line = latest_line;
             let open_btn_jump_pages = jump_history_pages.clone();
+            let open_btn_toast = row_toast.clone();
             let tail_btn_db = row_db.clone();
             let tail_btn_workspace = row_workspace.clone();
             let tail_btn_buffer = row_buffer.clone();
             let tail_btn_record = row_record.clone();
+            let tail_btn_toast = row_toast.clone();
             open_btn.connect_clicked(move |_| {
                 open_btn_combo.set_active_id(Some(&open_btn_record.id.to_string()));
                 open_btn_jump_pages
@@ -1443,6 +1501,7 @@ fn set_terminal_history_browser(
                     open_btn_workspace.clone(),
                     open_btn_record.clone(),
                     open_btn_buffer.clone(),
+                    open_btn_toast.clone(),
                 );
             });
 
@@ -1460,6 +1519,7 @@ fn set_terminal_history_browser(
                     tail_btn_workspace.clone(),
                     tail_btn_record.id,
                     tail_btn_buffer.clone(),
+                    tail_btn_toast.clone(),
                 );
             });
 
@@ -1472,6 +1532,7 @@ fn set_terminal_history_browser(
             let head_btn_combo = row_combo_for_head_btn.clone();
             let head_btn_latest_line = latest_line;
             let head_btn_jump_pages = jump_history_pages.clone();
+            let head_btn_toast = row_toast.clone();
             head_btn.connect_clicked(move |_| {
                 head_btn_combo.set_active_id(Some(&head_btn_record.id.to_string()));
                 head_btn_jump_pages
@@ -1482,6 +1543,7 @@ fn set_terminal_history_browser(
                     head_btn_workspace.clone(),
                     head_btn_record.id,
                     head_btn_buffer.clone(),
+                    head_btn_toast.clone(),
                 );
             });
 
@@ -1494,6 +1556,7 @@ fn set_terminal_history_browser(
             let jump_latest_btn_combo = row_combo_for_jump_latest_btn.clone();
             let jump_latest_btn_line = latest_line;
             let jump_latest_pages = jump_history_pages.clone();
+            let jump_latest_btn_toast = row_toast.clone();
             jump_latest_btn.connect_clicked(move |_| {
                 jump_latest_btn_combo.set_active_id(Some(&jump_latest_btn_record.id.to_string()));
                 jump_latest_pages
@@ -1506,6 +1569,7 @@ fn set_terminal_history_browser(
                     jump_latest_btn_line,
                     TERMINAL_LINE_JUMP_CONTEXT,
                     jump_latest_btn_buffer.clone(),
+                    jump_latest_btn_toast.clone(),
                 );
             });
 
@@ -1518,6 +1582,7 @@ fn set_terminal_history_browser(
             let jump_prev_btn_combo = row_combo_for_jump_prev_btn.clone();
             let jump_prev_pages = jump_history_pages.clone();
             let jump_prev_line = latest_line;
+            let jump_prev_btn_toast = row_toast.clone();
             jump_prev_btn.connect_clicked(move |_| {
                 jump_prev_btn_combo.set_active_id(Some(&jump_prev_btn_record.id.to_string()));
                 let existing_line = jump_prev_pages
@@ -1539,6 +1604,7 @@ fn set_terminal_history_browser(
                     line_number,
                     TERMINAL_LINE_JUMP_CONTEXT,
                     jump_prev_btn_buffer.clone(),
+                    jump_prev_btn_toast.clone(),
                 );
             });
 
@@ -1551,6 +1617,7 @@ fn set_terminal_history_browser(
             let jump_next_btn_combo = row_combo_for_jump_next_btn.clone();
             let jump_next_pages = jump_history_pages.clone();
             let jump_next_line = latest_line;
+            let jump_next_btn_toast = row_toast.clone();
             jump_next_btn.connect_clicked(move |_| {
                 jump_next_btn_combo.set_active_id(Some(&jump_next_btn_record.id.to_string()));
                 let existing_line = jump_next_pages
@@ -1570,6 +1637,7 @@ fn set_terminal_history_browser(
                     line_number,
                     TERMINAL_LINE_JUMP_CONTEXT,
                     jump_next_btn_buffer.clone(),
+                    jump_next_btn_toast.clone(),
                 );
             });
 
@@ -1696,6 +1764,7 @@ fn rebuild_terminal_tabs(
     workspace_name: String,
     transcript_buffer: TextBuffer,
     active_index: Option<usize>,
+    toast_manager: ToastManager,
 ) {
     while let Some(child) = terminal_tabs.first_child() {
         terminal_tabs.remove(&child);
@@ -1732,6 +1801,7 @@ fn rebuild_terminal_tabs(
         let buffer_for_tab = transcript_buffer.clone();
         let terminal_tab_states_for_tab = terminal_tab_states.clone();
         let index_for_tab = index;
+        let toast_for_tab = toast_manager.clone();
         tab.connect_clicked(move |_| {
             active_pty_combo_for_tab.set_active(Some(index_for_tab as u32));
             set_terminal_tab_active(&tab_buttons_for_tab.borrow(), Some(index_for_tab));
@@ -1748,6 +1818,7 @@ fn rebuild_terminal_tabs(
                     workspace_for_tab.clone(),
                     state.process_id,
                     buffer_for_tab.clone(),
+                    toast_for_tab.clone(),
                 );
             }
         });
@@ -3689,6 +3760,7 @@ mod tests {
     )]
     fn rebuild_terminal_tabs_does_not_panic_on_transient_state_borrow() {
         let _ = gtk::init();
+        let toast_overlay = adw::ToastOverlay::new();
         let terminal_tabs = GBox::new(Orientation::Horizontal, 6);
         let active_pty_combo = ComboBoxText::new();
         let tab_buttons = Rc::new(RefCell::new(Vec::<Button>::new()));
@@ -3708,6 +3780,7 @@ mod tests {
                 "berlin".to_owned(),
                 TextBuffer::new(None),
                 Some(0),
+                ToastManager::new(&toast_overlay),
             );
         }));
         drop(borrow);
