@@ -1144,65 +1144,33 @@ separator {
 .lc-accent-blue .section-title,
 .lc-accent-blue .project-tab-active,
 .lc-accent-blue .card-activity,
-.lc-accent-blue .workspace-title,
-.lc-accent-blue .chat-mode-selected,
-.lc-accent-blue .chat-send-btn-active,
-.lc-accent-blue .chat-user-bubble {
+.lc-accent-blue .workspace-title {
     color: #f5f5f5;
     border-color: #5a5a5a;
-}
-.lc-accent-blue .chat-mode-selected,
-.lc-accent-blue .chat-send-btn-active,
-.lc-accent-blue .chat-user-bubble {
-    background-color: #333333;
 }
 
 .lc-accent-green .section-title,
 .lc-accent-green .project-tab-active,
 .lc-accent-green .card-activity,
-.lc-accent-green .workspace-title,
-.lc-accent-green .chat-mode-selected,
-.lc-accent-green .chat-send-btn-active,
-.lc-accent-green .chat-user-bubble {
+.lc-accent-green .workspace-title {
     color: #f5f5f5;
     border-color: #5a5a5a;
-}
-.lc-accent-green .chat-mode-selected,
-.lc-accent-green .chat-send-btn-active,
-.lc-accent-green .chat-user-bubble {
-    background-color: #333333;
 }
 
 .lc-accent-amber .section-title,
 .lc-accent-amber .project-tab-active,
 .lc-accent-amber .card-activity,
-.lc-accent-amber .workspace-title,
-.lc-accent-amber .chat-mode-selected,
-.lc-accent-amber .chat-send-btn-active,
-.lc-accent-amber .chat-user-bubble {
+.lc-accent-amber .workspace-title {
     color: #fff7ed;
     border-color: #b35c00;
-}
-.lc-accent-amber .chat-mode-selected,
-.lc-accent-amber .chat-send-btn-active,
-.lc-accent-amber .chat-user-bubble {
-    background-color: #b35c00;
 }
 
 .lc-accent-rose .section-title,
 .lc-accent-rose .project-tab-active,
 .lc-accent-rose .card-activity,
-.lc-accent-rose .workspace-title,
-.lc-accent-rose .chat-mode-selected,
-.lc-accent-rose .chat-send-btn-active,
-.lc-accent-rose .chat-user-bubble {
+.lc-accent-rose .workspace-title {
     color: #fff1f2;
     border-color: #be123c;
-}
-.lc-accent-rose .chat-mode-selected,
-.lc-accent-rose .chat-send-btn-active,
-.lc-accent-rose .chat-user-bubble {
-    background-color: #be123c;
 }
 
 .lc-density-compact .nav-row,
@@ -2696,6 +2664,9 @@ mod tests {
         ));
         assert!(css.contains("transition-duration: 160ms"));
         assert!(css.contains(".chat-inline-event-chip"));
+        assert!(!css.contains(".lc-accent-green .chat-send-btn-active"));
+        assert!(!css.contains(".lc-accent-green .chat-user-bubble"));
+        assert!(!css.contains(".lc-accent-green .suggested-action"));
         assert!(!css.contains("#38bdf8"));
         assert!(!css.contains("#2563eb"));
         assert!(!css.contains("#1d4ed8"));

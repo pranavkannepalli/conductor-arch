@@ -473,8 +473,8 @@ const VIEW_COLOR_TOKENS: &[(&str, &str, &str)] = &[
     ("text", "lc-text", "#e4e4e4"),
     ("text_strong", "lc-text-strong", "#f8fafc"),
     ("text_muted", "lc-text-muted", "#8a8a8a"),
-    ("accent", "lc-accent", "#22c55e"),
-    ("accent_fg", "lc-accent-fg", "#052e16"),
+    ("accent", "lc-accent", "#8a8a8a"),
+    ("accent_fg", "lc-accent-fg", "#f5f5f5"),
     ("success", "lc-success", "#84e0a0"),
     ("warning", "lc-warning", "#f59e0b"),
     ("danger", "lc-danger", "#ff8a8a"),
@@ -550,15 +550,6 @@ window.lc-custom-colors,
 .lc-custom-colors .workspace-title {
     color: @lc-accent;
     border-color: @lc-accent;
-}
-
-.lc-custom-colors .chat-mode-selected,
-.lc-custom-colors .chat-send-btn-active,
-.lc-custom-colors .chat-user-bubble,
-.lc-custom-colors .suggested-action {
-    background-color: @lc-accent;
-    border-color: @lc-accent;
-    color: @lc-accent-fg;
 }
 
 .lc-custom-colors .diff-added,
@@ -1731,7 +1722,10 @@ mod tests {
         assert!(css.contains("@define-color lc-accent-lc_custom_colors_test #0ea5e9;"));
         assert!(css.contains("@define-color lc-accent-fg-lc_custom_colors_test #001018;"));
         assert!(css.contains("@define-color lc-bg-lc_custom_colors_test #101820;"));
-        assert!(css.contains(".lc-custom-colors-test .chat-mode-selected"));
+        assert!(!css.contains(".lc-custom-colors-test .chat-mode-selected"));
+        assert!(!css.contains(".lc-custom-colors-test .chat-send-btn-active"));
+        assert!(!css.contains(".lc-custom-colors-test .chat-user-bubble"));
+        assert!(!css.contains(".lc-custom-colors-test .suggested-action"));
         assert!(!css.contains(".lc-custom-colors .chat-mode-selected"));
     }
 
