@@ -57,6 +57,7 @@ const CONTEXT_WARNING_PERCENT: u8 = 70;
 const CONTEXT_COMPACTION_RISK_PERCENT: u8 = 90;
 const CONTEXT_DETAIL_HISTORY_LIMIT: usize = 6;
 const CONTEXT_DETAIL_CONTRIBUTOR_LIMIT: usize = 5;
+const CHAT_SCROLL_BOTTOM_EPSILON: f64 = 48.0;
 static NEXT_CHAT_WAKE_ID: AtomicUsize = AtomicUsize::new(1);
 
 thread_local! {
@@ -66,6 +67,12 @@ thread_local! {
 pub type ExternalThreadSelectionController = Rc<RefCell<Option<Rc<dyn Fn(Option<i64>)>>>>;
 type RefreshChatSurfaceController = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
 type SwitchChatHarnessController = Rc<RefCell<Option<Rc<dyn Fn(SessionKind)>>>>;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ChatScrollSnapshot {
+    value: f64,
+    pinned_to_bottom: bool,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CodexInlineEventKind {
@@ -600,6 +607,7 @@ pub fn agent_session_panel(
         let database_path = database_path.clone();
         let workspace = _workspace_name.to_owned();
         let messages = messages.clone();
+        let scroll = scroll.clone();
         let thread_row = thread_row.clone();
         let record_state = record_state.clone();
         let thread_state = thread_state.clone();
@@ -627,6 +635,7 @@ pub fn agent_session_panel(
         let toast_manager = toast_manager.clone();
         Rc::new(move || {
             debug!(workspace = %workspace, "chat refresh_view start");
+            let chat_scroll = capture_chat_scroll(&scroll);
             let (loaded, loaded_threads) = match WorkspaceStore::open(database_path.clone())
                 .and_then(|store| {
                     let sessions = store.list_sessions(&workspace)?;
@@ -647,6 +656,7 @@ pub fn agent_session_panel(
                     label.set_wrap(true);
                     label.set_xalign(0.0);
                     append_chat_refresh_row(&messages, &label);
+                    restore_chat_scroll_after_refresh(&scroll, chat_scroll);
                     return;
                 }
             };
@@ -869,6 +879,7 @@ pub fn agent_session_panel(
                         label.set_wrap(true);
                         label.set_xalign(0.0);
                         append_chat_refresh_row(&messages, &label);
+                        restore_chat_scroll_after_refresh(&scroll, chat_scroll);
                         return;
                     }
                     let record = maybe_process_id
@@ -967,6 +978,7 @@ pub fn agent_session_panel(
                                     *last_render_signature.borrow_mut() = None;
                                     apply_context_usage_state(&context_usage, None);
                                     append_chat_refresh_row(&messages, &label);
+                                    restore_chat_scroll_after_refresh(&scroll, chat_scroll);
                                     return;
                                 }
                             };
@@ -1044,6 +1056,7 @@ pub fn agent_session_panel(
                                         }
                                     }
                                 }
+                                restore_chat_scroll_after_refresh(&scroll, chat_scroll);
                                 return;
                             }
                         }
@@ -1082,6 +1095,7 @@ pub fn agent_session_panel(
                     empty.set_wrap(true);
                     empty.set_xalign(0.0);
                     append_chat_refresh_row(&messages, &empty);
+                    restore_chat_scroll_after_refresh(&scroll, chat_scroll);
                 }
                 (None, _) => {
                     let signature = chat_render_signature(
@@ -1108,6 +1122,7 @@ pub fn agent_session_panel(
                         session_kind_name(current_kind)
                     );
                     append_chat_refresh_row(&messages, &chat_user_bubble(&prompt));
+                    restore_chat_scroll_after_refresh(&scroll, chat_scroll);
                 }
             }
             debug!(workspace = %workspace, "chat refresh_view complete");
@@ -2023,6 +2038,54 @@ fn append_chat_refresh_row<W: IsA<Widget>>(container: &GBox, child: &W) {
     } else {
         container.append(child);
     }
+}
+
+fn capture_chat_scroll(scroll: &ScrolledWindow) -> ChatScrollSnapshot {
+    let adjustment = scroll.vadjustment();
+    ChatScrollSnapshot {
+        value: adjustment.value(),
+        pinned_to_bottom: chat_scroll_is_pinned_to_bottom(
+            adjustment.value(),
+            adjustment.lower(),
+            adjustment.upper(),
+            adjustment.page_size(),
+        ),
+    }
+}
+
+fn restore_chat_scroll_after_refresh(scroll: &ScrolledWindow, snapshot: ChatScrollSnapshot) {
+    let adjustment = scroll.vadjustment();
+    gtk::glib::idle_add_local_once(move || {
+        let value = restored_chat_scroll_value(
+            snapshot,
+            adjustment.lower(),
+            adjustment.upper(),
+            adjustment.page_size(),
+        );
+        adjustment.set_value(value);
+    });
+}
+
+fn chat_scroll_is_pinned_to_bottom(value: f64, lower: f64, upper: f64, page_size: f64) -> bool {
+    chat_scroll_max_value(lower, upper, page_size) - value <= CHAT_SCROLL_BOTTOM_EPSILON
+}
+
+fn restored_chat_scroll_value(
+    snapshot: ChatScrollSnapshot,
+    lower: f64,
+    upper: f64,
+    page_size: f64,
+) -> f64 {
+    let max_value = chat_scroll_max_value(lower, upper, page_size);
+    if snapshot.pinned_to_bottom {
+        max_value
+    } else {
+        snapshot.value.clamp(lower, max_value)
+    }
+}
+
+fn chat_scroll_max_value(lower: f64, upper: f64, page_size: f64) -> f64 {
+    (upper - page_size).max(lower)
 }
 
 fn reveal_existing_chat_refresh_rows() -> bool {
@@ -7328,6 +7391,34 @@ fix it
     #[test]
     fn chat_refresh_rows_do_not_reveal_existing_messages_on_poll() {
         assert!(!reveal_existing_chat_refresh_rows());
+    }
+
+    #[test]
+    fn chat_scroll_snapshot_pins_when_view_was_near_bottom() {
+        let snapshot = ChatScrollSnapshot {
+            value: 1_954.0,
+            pinned_to_bottom: chat_scroll_is_pinned_to_bottom(1_954.0, 0.0, 2_500.0, 500.0),
+        };
+
+        assert!(snapshot.pinned_to_bottom);
+        assert_eq!(
+            restored_chat_scroll_value(snapshot, 0.0, 3_000.0, 500.0),
+            2_500.0
+        );
+    }
+
+    #[test]
+    fn chat_scroll_snapshot_preserves_scrolled_up_position() {
+        let snapshot = ChatScrollSnapshot {
+            value: 640.0,
+            pinned_to_bottom: chat_scroll_is_pinned_to_bottom(640.0, 0.0, 2_500.0, 500.0),
+        };
+
+        assert!(!snapshot.pinned_to_bottom);
+        assert_eq!(
+            restored_chat_scroll_value(snapshot, 0.0, 3_000.0, 500.0),
+            640.0
+        );
     }
 
     #[test]
