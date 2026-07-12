@@ -5331,18 +5331,20 @@ struct WorkspacePrTopAction {
     kind: WorkspacePrTopActionKind,
 }
 
-fn workspace_pr_primary_action(snapshot: &WorkspacePrStatusSnapshot) -> WorkspacePrTopAction {
+fn workspace_pr_primary_action(
+    snapshot: &WorkspacePrStatusSnapshot,
+) -> Option<WorkspacePrTopAction> {
     let has_conflicts = snapshot
         .summary
         .as_ref()
         .is_some_and(|summary| !summary.conflicting_workspaces.is_empty());
     if has_conflicts {
-        return WorkspacePrTopAction {
+        return Some(WorkspacePrTopAction {
             label: "Resolve Conflicts",
             tooltip: "Queue a prompt to resolve workspace conflicts",
             css_class: "ws-pr-status-failed",
             kind: WorkspacePrTopActionKind::FixBlocked,
-        };
+        });
     }
 
     let changed_files = snapshot
@@ -5351,12 +5353,12 @@ fn workspace_pr_primary_action(snapshot: &WorkspacePrStatusSnapshot) -> Workspac
         .map(|summary| summary.changed_files)
         .unwrap_or_default();
     if changed_files > 0 {
-        return WorkspacePrTopAction {
+        return Some(WorkspacePrTopAction {
             label: "Commit and Push",
             tooltip: "Ask the current chat to commit and push local changes",
             css_class: "ws-pr-status-muted",
             kind: WorkspacePrTopActionKind::CommitAndPush,
-        };
+        });
     }
 
     let needs_push = snapshot
@@ -5365,56 +5367,59 @@ fn workspace_pr_primary_action(snapshot: &WorkspacePrStatusSnapshot) -> Workspac
         .and_then(|summary| summary.branch_push_state.as_ref())
         .is_some_and(|push| push.ahead > 0);
     if needs_push {
-        return WorkspacePrTopAction {
-            label: "Push Branch",
-            tooltip: "Push the workspace branch",
-            css_class: "ws-pr-status-muted",
-            kind: WorkspacePrTopActionKind::Push,
-        };
-    }
-
-    match snapshot.status.as_ref().map(|status| status.kind) {
-        Some(PullRequestStateKind::Ready) => WorkspacePrTopAction {
-            label: "Merge PR",
-            tooltip: "Merge the ready pull request",
-            css_class: "ws-pr-status-ready",
-            kind: WorkspacePrTopActionKind::MergePr,
-        },
-        Some(PullRequestStateKind::Failed) => WorkspacePrTopAction {
-            label: "Fix Checks",
-            tooltip: "Queue a prompt to fix failing checks",
-            css_class: "ws-pr-status-failed",
-            kind: WorkspacePrTopActionKind::FixBlocked,
-        },
-        Some(PullRequestStateKind::Merged) => WorkspacePrTopAction {
-            label: "Merged",
-            tooltip: "Open the merged pull request",
-            css_class: "ws-pr-status-merged",
-            kind: WorkspacePrTopActionKind::ViewPr,
-        },
-        Some(PullRequestStateKind::Pending) => WorkspacePrTopAction {
-            label: "View PR",
-            tooltip: "Open pull request with pending checks",
-            css_class: "ws-pr-status-muted",
-            kind: WorkspacePrTopActionKind::ViewPr,
-        },
-        Some(PullRequestStateKind::Open) => WorkspacePrTopAction {
-            label: "View PR",
-            tooltip: "Open pull request",
-            css_class: "ws-pr-status-muted",
-            kind: WorkspacePrTopActionKind::ViewPr,
-        },
-        None => WorkspacePrTopAction {
+        if snapshot.pr.is_some() {
+            return Some(WorkspacePrTopAction {
+                label: "Push Branch",
+                tooltip: "Push the workspace branch",
+                css_class: "ws-pr-status-muted",
+                kind: WorkspacePrTopActionKind::Push,
+            });
+        }
+        return Some(WorkspacePrTopAction {
             label: "Create PR",
             tooltip: "Ask the current chat to create a pull request",
             css_class: "ws-pr-status-missing",
             kind: WorkspacePrTopActionKind::CreatePr,
-        },
+        });
+    }
+
+    match snapshot.status.as_ref().map(|status| status.kind) {
+        Some(PullRequestStateKind::Ready) => Some(WorkspacePrTopAction {
+            label: "Merge PR",
+            tooltip: "Merge the ready pull request",
+            css_class: "ws-pr-status-ready",
+            kind: WorkspacePrTopActionKind::MergePr,
+        }),
+        Some(PullRequestStateKind::Failed) => Some(WorkspacePrTopAction {
+            label: "Fix Checks",
+            tooltip: "Queue a prompt to fix failing checks",
+            css_class: "ws-pr-status-failed",
+            kind: WorkspacePrTopActionKind::FixBlocked,
+        }),
+        Some(PullRequestStateKind::Merged) => Some(WorkspacePrTopAction {
+            label: "Merged",
+            tooltip: "Open the merged pull request",
+            css_class: "ws-pr-status-merged",
+            kind: WorkspacePrTopActionKind::ViewPr,
+        }),
+        Some(PullRequestStateKind::Pending) => Some(WorkspacePrTopAction {
+            label: "View PR",
+            tooltip: "Open pull request with pending checks",
+            css_class: "ws-pr-status-muted",
+            kind: WorkspacePrTopActionKind::ViewPr,
+        }),
+        Some(PullRequestStateKind::Open) => Some(WorkspacePrTopAction {
+            label: "View PR",
+            tooltip: "Open pull request",
+            css_class: "ws-pr-status-muted",
+            kind: WorkspacePrTopActionKind::ViewPr,
+        }),
+        None => None,
     }
 }
 
-fn workspace_pr_primary_action_label(snapshot: &WorkspacePrStatusSnapshot) -> &'static str {
-    workspace_pr_primary_action(snapshot).label
+fn workspace_pr_primary_action_label(snapshot: &WorkspacePrStatusSnapshot) -> Option<&'static str> {
+    workspace_pr_primary_action(snapshot).map(|action| action.label)
 }
 
 fn connect_create_pr_prompt_button(
@@ -5510,12 +5515,24 @@ fn workspace_pr_status_panel(
     let action = workspace_pr_primary_action(&snapshot);
     let panel = GBox::new(Orientation::Horizontal, 8);
     panel.add_css_class("ws-pr-compact-panel");
-    panel.add_css_class(action.css_class);
-    let title = Label::new(Some(workspace_pr_status_title(&snapshot, action)));
+    panel.add_css_class(
+        action
+            .as_ref()
+            .map(|action| action.css_class)
+            .unwrap_or("ws-pr-status-muted"),
+    );
+    let title = Label::new(Some(match action {
+        Some(action) => workspace_pr_status_title(&snapshot, action),
+        None => "No changes",
+    }));
     title.add_css_class("ws-pr-compact-title");
     title.set_xalign(0.0);
     title.set_hexpand(true);
     panel.append(&title);
+
+    let Some(action) = action else {
+        return panel;
+    };
 
     let feedback = Label::new(None);
     feedback.add_css_class("card-meta");
@@ -8466,26 +8483,24 @@ mod tests {
             status: None,
             summary: Some(test_checks_summary(0, None, Vec::new())),
         };
-        assert_eq!(workspace_pr_primary_action_label(&no_pr), "Create PR");
-        assert_eq!(
-            workspace_pr_primary_action(&no_pr).css_class,
-            "ws-pr-status-missing"
-        );
-        assert_eq!(
-            workspace_pr_status_title(&no_pr, workspace_pr_primary_action(&no_pr)),
-            "No pull request yet"
-        );
+        assert_eq!(workspace_pr_primary_action_label(&no_pr), None);
+        assert!(workspace_pr_primary_action(&no_pr).is_none());
 
         let dirty = WorkspacePrStatusSnapshot {
             pr: None,
             status: None,
             summary: Some(test_checks_summary(3, None, Vec::new())),
         };
-        assert_eq!(workspace_pr_primary_action_label(&dirty), "Commit and Push");
         assert_eq!(
-            workspace_pr_primary_action(&dirty).css_class,
-            "ws-pr-status-muted"
+            workspace_pr_primary_action_label(&dirty),
+            Some("Commit and Push")
         );
+        let dirty_action = workspace_pr_primary_action(&dirty).unwrap();
+        assert_eq!(
+            workspace_pr_status_title(&dirty, dirty_action),
+            "Commit and push branch"
+        );
+        assert_eq!(dirty_action.css_class, "ws-pr-status-muted");
 
         let needs_push = WorkspacePrStatusSnapshot {
             pr: None,
@@ -8502,11 +8517,11 @@ mod tests {
         };
         assert_eq!(
             workspace_pr_primary_action_label(&needs_push),
-            "Push Branch"
+            Some("Create PR")
         );
         assert_eq!(
-            workspace_pr_primary_action(&needs_push).css_class,
-            "ws-pr-status-muted"
+            workspace_pr_primary_action(&needs_push).unwrap().css_class,
+            "ws-pr-status-missing"
         );
 
         let clean_without_upstream = WorkspacePrStatusSnapshot {
@@ -8524,7 +8539,7 @@ mod tests {
         };
         assert_eq!(
             workspace_pr_primary_action_label(&clean_without_upstream),
-            "Create PR"
+            None
         );
 
         let snapshot = WorkspacePrStatusSnapshot {
@@ -8537,9 +8552,12 @@ mod tests {
             summary: Some(test_checks_summary(0, None, Vec::new())),
         };
 
-        assert_eq!(workspace_pr_primary_action_label(&snapshot), "Merge PR");
         assert_eq!(
-            workspace_pr_primary_action(&snapshot).css_class,
+            workspace_pr_primary_action_label(&snapshot),
+            Some("Merge PR")
+        );
+        assert_eq!(
+            workspace_pr_primary_action(&snapshot).unwrap().css_class,
             "ws-pr-status-ready"
         );
 
@@ -8552,9 +8570,12 @@ mod tests {
             }),
             summary: Some(test_checks_summary(0, None, Vec::new())),
         };
-        assert_eq!(workspace_pr_primary_action_label(&blocked), "Fix Checks");
         assert_eq!(
-            workspace_pr_primary_action(&blocked).css_class,
+            workspace_pr_primary_action_label(&blocked),
+            Some("Fix Checks")
+        );
+        assert_eq!(
+            workspace_pr_primary_action(&blocked).unwrap().css_class,
             "ws-pr-status-failed"
         );
 
@@ -8572,11 +8593,11 @@ mod tests {
             )),
         };
         assert_eq!(
-            workspace_pr_primary_action(&conflict).kind,
+            workspace_pr_primary_action(&conflict).unwrap().kind,
             WorkspacePrTopActionKind::FixBlocked
         );
         assert_eq!(
-            workspace_pr_primary_action(&conflict).css_class,
+            workspace_pr_primary_action(&conflict).unwrap().css_class,
             "ws-pr-status-failed"
         );
 
@@ -8589,9 +8610,9 @@ mod tests {
             }),
             summary: Some(test_checks_summary(0, None, Vec::new())),
         };
-        assert_eq!(workspace_pr_primary_action_label(&merged), "Merged");
+        assert_eq!(workspace_pr_primary_action_label(&merged), Some("Merged"));
         assert_eq!(
-            workspace_pr_primary_action(&merged).css_class,
+            workspace_pr_primary_action(&merged).unwrap().css_class,
             "ws-pr-status-merged"
         );
     }
