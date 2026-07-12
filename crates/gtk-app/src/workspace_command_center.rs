@@ -3002,7 +3002,7 @@ fn work_tabs(
         "Branch",
     );
     tabs.add_titled(
-        &workspace_timeline_panel(store, &ws.name),
+        &workspace_timeline_panel(store, &ws.name, state.clone(), tabs.clone()),
         Some("timeline"),
         "Timeline",
     );
@@ -3151,16 +3151,75 @@ fn workspace_branch_panel(
     panel
 }
 
-fn workspace_timeline_panel(store: &WorkspaceStore, name: &str) -> GBox {
+fn workspace_timeline_panel(
+    store: &WorkspaceStore,
+    name: &str,
+    app_state: AppState,
+    workspace_tabs: Stack,
+) -> GBox {
     let panel = GBox::new(Orientation::Vertical, 8);
     panel.add_css_class("command-panel");
     panel.append(&section_title("Timeline"));
-    let text = store
-        .workspace_timeline(name, None)
-        .map(|events| format_workspace_timeline(&events))
-        .unwrap_or_else(|err| format!("Could not load timeline: {err:#}"));
-    panel.append(&text_panel(&text));
+    match store.workspace_timeline(name, None) {
+        Ok(events) if events.is_empty() => {
+            panel.append(&detail_row("Timeline", "No workspace timeline events yet."))
+        }
+        Ok(events) => {
+            let list = GBox::new(Orientation::Vertical, 4);
+            let (visible, hidden) = visible_timeline_events(&events);
+            if hidden > 0 {
+                list.append(&detail_row(
+                    "Timeline",
+                    &format!(
+                        "Showing latest {} events; {hidden} older hidden.",
+                        visible.len()
+                    ),
+                ));
+            }
+            for event in visible {
+                list.append(&workspace_timeline_event_row(
+                    event,
+                    app_state.clone(),
+                    workspace_tabs.clone(),
+                ));
+            }
+            let scroll = ScrolledWindow::new();
+            scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
+            scroll.set_vexpand(true);
+            scroll.set_child(Some(&list));
+            panel.append(&scroll);
+        }
+        Err(err) => panel.append(&detail_row(
+            "Timeline",
+            &format!("Could not load timeline: {err:#}"),
+        )),
+    }
     panel
+}
+
+fn workspace_timeline_event_row(
+    event: &WorkspaceTimelineEvent,
+    app_state: AppState,
+    workspace_tabs: Stack,
+) -> GBox {
+    let row = GBox::new(Orientation::Horizontal, 8);
+    row.add_css_class("ws-git-file-action-row");
+    let label = Label::new(Some(&format_workspace_timeline_event(event)));
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    label.set_wrap(true);
+    row.append(&label);
+
+    if let Some((tab, label)) = timeline_jump_target(event.kind.as_str()) {
+        let button = text_button(label);
+        let target_tab = tab.clone();
+        button.connect_clicked(move |_| {
+            app_state.set_active_workspace_tab(target_tab.clone());
+            workspace_tabs.set_visible_child_name(workspace_tab_stack_name(&target_tab));
+        });
+        row.append(&button);
+    }
+    row
 }
 
 fn workspace_checkpoint_panel(
@@ -5572,13 +5631,73 @@ fn format_workspace_timeline(events: &[WorkspaceTimelineEvent]) -> String {
         return "No workspace timeline events yet.".to_owned();
     }
     let mut out = String::new();
-    for event in events {
+    let (visible, hidden) = visible_timeline_events(events);
+    if hidden > 0 {
         out.push_str(&format!(
-            "#{} {} [{}] {}\n",
-            event.id, event.created_at, event.kind, event.summary
+            "Showing latest {} events; {hidden} older hidden.\n",
+            visible.len()
         ));
     }
+    for event in visible {
+        out.push_str(&format_workspace_timeline_event(event));
+        out.push('\n');
+    }
     out
+}
+
+fn visible_timeline_events(
+    events: &[WorkspaceTimelineEvent],
+) -> (&[WorkspaceTimelineEvent], usize) {
+    const TIMELINE_EVENT_LIMIT: usize = 200;
+    if events.len() <= TIMELINE_EVENT_LIMIT {
+        return (events, 0);
+    }
+    let hidden = events.len() - TIMELINE_EVENT_LIMIT;
+    (&events[hidden..], hidden)
+}
+
+fn format_workspace_timeline_event(event: &WorkspaceTimelineEvent) -> String {
+    let jump = timeline_jump_target(event.kind.as_str())
+        .map(|(_, label)| format!(" -> {label}"))
+        .unwrap_or_default();
+    format!(
+        "#{} {} [{}] {}{}",
+        event.id, event.created_at, event.kind, event.summary, jump
+    )
+}
+
+fn timeline_jump_target(kind: &str) -> Option<(WorkspaceTab, &'static str)> {
+    if kind.contains("check")
+        || kind.contains("run")
+        || kind.contains("setup")
+        || kind.contains("failed")
+    {
+        return Some((WorkspaceTab::Checks, "Open Checks"));
+    }
+    if kind.contains("git")
+        || kind.contains("branch")
+        || kind.contains("commit")
+        || kind.contains("file.")
+        || kind.contains("base_ref")
+    {
+        return Some((WorkspaceTab::Changes, "Open Changes"));
+    }
+    if kind.contains("review") || kind.contains("pull_request") || kind.contains("pr.") {
+        return Some((WorkspaceTab::Review, "Open Review"));
+    }
+    if kind.contains("checkpoint") || kind.contains("archive") {
+        return Some((WorkspaceTab::Checkpoints, "Open Checkpoints"));
+    }
+    if kind.contains("chat")
+        || kind.contains("prompt")
+        || kind.contains("assistant")
+        || kind.contains("tool")
+        || kind.contains("skill")
+        || kind.contains("session")
+    {
+        return Some((WorkspaceTab::Chats, "Open Chat"));
+    }
+    None
 }
 
 fn ws_checks_visual_header(store: &WorkspaceStore, name: &str) -> GBox {
@@ -8501,8 +8620,63 @@ mod tests {
 
         assert_eq!(
             text,
-            "#9 2026-07-09T12:00:00Z [branch.renamed] Renamed branch lc/a to lc/b\n"
+            "#9 2026-07-09T12:00:00Z [branch.renamed] Renamed branch lc/a to lc/b -> Open Changes\n"
         );
+    }
+
+    #[test]
+    fn workspace_timeline_formatter_lists_jump_targets() {
+        let text = format_workspace_timeline(&[
+            WorkspaceTimelineEvent {
+                id: 1,
+                workspace_id: 1,
+                workspace_name: "berlin".to_owned(),
+                kind: "prompt.submitted".to_owned(),
+                summary: "Build the fix".to_owned(),
+                created_at: "2026-07-09T12:00:00Z".to_owned(),
+            },
+            WorkspaceTimelineEvent {
+                id: 2,
+                workspace_id: 1,
+                workspace_name: "berlin".to_owned(),
+                kind: "run.failed".to_owned(),
+                summary: "cargo test failed".to_owned(),
+                created_at: "2026-07-09T12:01:00Z".to_owned(),
+            },
+            WorkspaceTimelineEvent {
+                id: 3,
+                workspace_id: 1,
+                workspace_name: "berlin".to_owned(),
+                kind: "pull_request.ready".to_owned(),
+                summary: "PR ready".to_owned(),
+                created_at: "2026-07-09T12:02:00Z".to_owned(),
+            },
+        ]);
+
+        assert!(text.contains("prompt.submitted] Build the fix -> Open Chat"));
+        assert!(text.contains("run.failed] cargo test failed -> Open Checks"));
+        assert!(text.contains("pull_request.ready] PR ready -> Open Review"));
+    }
+
+    #[test]
+    fn workspace_timeline_formatter_trims_long_lists() {
+        let events = (1..=205)
+            .map(|id| WorkspaceTimelineEvent {
+                id,
+                workspace_id: 1,
+                workspace_name: "berlin".to_owned(),
+                kind: "session.event".to_owned(),
+                summary: format!("Event {id}"),
+                created_at: "2026-07-09T12:00:00Z".to_owned(),
+            })
+            .collect::<Vec<_>>();
+
+        let text = format_workspace_timeline(&events);
+
+        assert!(text.starts_with("Showing latest 200 events; 5 older hidden.\n"));
+        assert!(!text.contains("#5 2026-07-09T12:00:00Z"));
+        assert!(text.contains("#6 2026-07-09T12:00:00Z"));
+        assert!(text.contains("#205 2026-07-09T12:00:00Z"));
     }
 
     #[test]
