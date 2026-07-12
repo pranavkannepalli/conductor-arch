@@ -748,6 +748,7 @@ pub fn agent_session_panel(
                     AsyncArchcarMessage::Response(response) => {
                         archcar_changed |= handle_archcar_response(
                             response,
+                            &database_path,
                             &workspace,
                             archcar_bridge.clone(),
                             archcar_ready_cache.as_ref(),
@@ -1424,6 +1425,7 @@ pub fn agent_session_panel(
                         send_input.clone(),
                         visible_input.clone(),
                         kind.clone(),
+                        None,
                     ) {
                         append_session_status_message(
                             &messages_for_send,
@@ -1609,6 +1611,7 @@ pub fn agent_session_panel(
             send_input.clone(),
             visible_input.clone(),
             input_kind,
+            None,
         ) {
             append_session_status_message(
                 &messages_for_send,
@@ -5904,6 +5907,7 @@ enum PendingArchcarAction {
         input: String,
         visible_input: Option<String>,
         kind: ArchcarInputKind,
+        checkpoint_id: Option<i64>,
     },
 }
 
@@ -5992,6 +5996,25 @@ fn flush_pending_archcar_inputs(
             .cloned()
             .unwrap_or_default();
         for (accepted_count, queued_input) in queued.iter().enumerate() {
+            let checkpoint_id = match create_turn_checkpoint_for_send(
+                database_path,
+                workspace,
+                thread_id,
+                Some(record.id),
+                matches!(queued_input.kind, ArchcarInputKind::ReviewPrompt),
+            ) {
+                Ok(checkpoint_id) => Some(checkpoint_id),
+                Err(err) => {
+                    warn!(
+                        workspace = %workspace,
+                        thread_id,
+                        process_id = record.id,
+                        error = %err,
+                        "turn checkpoint creation failed before queued archcar input submitted"
+                    );
+                    None
+                }
+            };
             if !queue_archcar_user_send(
                 bridge,
                 inflight_actions,
@@ -6000,7 +6023,11 @@ fn flush_pending_archcar_inputs(
                 queued_input.input.clone(),
                 queued_input.visible_input.clone(),
                 queued_input.kind.clone(),
+                checkpoint_id,
             ) {
+                if let Some(checkpoint_id) = checkpoint_id {
+                    discard_turn_checkpoint(database_path, workspace, checkpoint_id);
+                }
                 requeue_pending_inputs_from(pending_inputs, thread_id, &queued, accepted_count);
                 warn!(
                     thread_id,
@@ -6018,21 +6045,6 @@ fn flush_pending_archcar_inputs(
             );
             if matches!(queued_input.kind, ArchcarInputKind::ReviewPrompt) {
                 app_state.set_staged_review_prompt(None);
-            }
-            if let Err(err) = create_turn_checkpoint_for_send(
-                database_path,
-                workspace,
-                thread_id,
-                Some(record.id),
-                matches!(queued_input.kind, ArchcarInputKind::ReviewPrompt),
-            ) {
-                warn!(
-                    workspace = %workspace,
-                    thread_id,
-                    process_id = record.id,
-                    error = %err,
-                    "turn checkpoint creation failed after queued archcar input submitted"
-                );
             }
             flushed_any = true;
         }
@@ -6099,6 +6111,7 @@ fn queue_archcar_user_send(
     input: String,
     visible_input: Option<String>,
     kind: ArchcarInputKind,
+    checkpoint_id: Option<i64>,
 ) -> bool {
     let token = bridge.send_input(
         session_id,
@@ -6115,6 +6128,7 @@ fn queue_archcar_user_send(
                 input,
                 visible_input,
                 kind,
+                checkpoint_id,
             },
         );
         true
@@ -6138,6 +6152,19 @@ fn create_turn_checkpoint_for_send(
         prompt_kind,
     )?;
     Ok(checkpoint.id)
+}
+
+fn discard_turn_checkpoint(db_path: &Path, workspace: &str, checkpoint_id: i64) {
+    if let Err(err) = WorkspaceStore::open(db_path)
+        .and_then(|store| store.checkpoint_delete(workspace, checkpoint_id))
+    {
+        warn!(
+            workspace = %workspace,
+            checkpoint_id,
+            error = %err,
+            "turn checkpoint cleanup failed after archcar input rejection"
+        );
+    }
 }
 
 fn update_working_indicator_for_archcar_event(
@@ -6294,6 +6321,7 @@ fn handle_archcar_event(
 
 fn handle_archcar_response(
     response: AsyncArchcarResponse,
+    database_path: &Path,
     workspace: &str,
     bridge: AsyncArchcarBridge,
     ready_cache: &RefCell<HashMap<i64, bool>>,
@@ -6410,6 +6438,7 @@ fn handle_archcar_response(
             input,
             visible_input,
             kind,
+            checkpoint_id,
         } => match response.result {
             Ok(ArchcarResponse::Ack) => {
                 info!(
@@ -6422,6 +6451,9 @@ fn handle_archcar_response(
             }
             Ok(other) => {
                 warn!(thread_id, session_id, kind = ?kind, ?other, "unexpected archcar input response");
+                if let Some(checkpoint_id) = checkpoint_id {
+                    discard_turn_checkpoint(database_path, workspace, checkpoint_id);
+                }
                 queue_archcar_input(pending_inputs, thread_id, input, visible_input, kind);
                 note_archcar_ready(&mut ready_cache.borrow_mut(), session_id, false);
                 let message = format!("Unexpected archcar input response: {other:?}");
@@ -6442,6 +6474,9 @@ fn handle_archcar_response(
             }
             Err(err) => {
                 warn!(thread_id, session_id, kind = ?kind, error = %err, "archcar input send failed");
+                if let Some(checkpoint_id) = checkpoint_id {
+                    discard_turn_checkpoint(database_path, workspace, checkpoint_id);
+                }
                 queue_archcar_input(pending_inputs, thread_id, input, visible_input, kind);
                 note_archcar_ready(&mut ready_cache.borrow_mut(), session_id, false);
                 toast_manager.error(err.clone());

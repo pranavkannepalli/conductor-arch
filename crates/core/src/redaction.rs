@@ -177,6 +177,7 @@ fn redact_assignment_secret(part: &str) -> Option<String> {
         || part.contains(',')
         || part.contains('?')
         || part.contains('&')
+        || part.contains('#')
     {
         return redact_embedded_assignment_secret(part);
     }
@@ -220,7 +221,7 @@ fn find_embedded_assignment_secret(part: &str, start: usize) -> Option<(usize, u
         }
         let separator_index = start + offset;
         let key_start = part[..separator_index]
-            .rfind(['"', '\'', ' ', ',', '{', '[', ';', '?', '&'])
+            .rfind(['"', '\'', ' ', ',', '{', '[', ';', '?', '&', '#'])
             .map(|offset| offset + 1)
             .unwrap_or(0);
         if key_start < start {
@@ -239,7 +240,7 @@ fn find_embedded_assignment_secret(part: &str, start: usize) -> Option<(usize, u
 fn embedded_assignment_value_end(part: &str, value_start: usize) -> usize {
     let quote_or_whitespace_end = part[value_start..]
         .char_indices()
-        .find(|(_, ch)| ch.is_whitespace() || matches!(ch, '"' | '\'' | '&'))
+        .find(|(_, ch)| ch.is_whitespace() || matches!(ch, '"' | '\'' | '&' | '#'))
         .map(|(offset, _)| value_start + offset)
         .unwrap_or(part.len());
 
@@ -248,7 +249,7 @@ fn embedded_assignment_value_end(part: &str, value_start: usize) -> usize {
             part[..key_start]
                 .char_indices()
                 .rev()
-                .find_map(|(index, ch)| matches!(ch, ',' | ';' | '&').then_some(index))
+                .find_map(|(index, ch)| matches!(ch, ',' | ';' | '&' | '#').then_some(index))
                 .unwrap_or(key_start)
         });
 
@@ -414,6 +415,19 @@ mod tests {
         assert_eq!(
             redacted,
             "https://example.test/callback?api_key=[redacted]&token=[redacted]&safe=visible"
+        );
+    }
+
+    #[test]
+    fn redacts_url_fragment_secret_assignments() {
+        let raw = "https://example.test/callback#token=ghp-secret&safe=visible";
+
+        let redacted = redact_sensitive_text(raw);
+
+        assert!(!redacted.contains("ghp-secret"));
+        assert_eq!(
+            redacted,
+            "https://example.test/callback#token=[redacted]&safe=visible"
         );
     }
 }

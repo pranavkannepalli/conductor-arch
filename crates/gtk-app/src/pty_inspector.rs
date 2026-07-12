@@ -327,13 +327,21 @@ fn split_redacted_stream_for_chunks(
     let mut output = Vec::with_capacity(chunks.len());
     let mut raw_cursor = 0;
     let mut cursor = 0;
-    for (position, (_, chunk)) in chunks.iter().enumerate() {
+    let raw_boundaries = chunks
+        .iter()
+        .take(chunks.len().saturating_sub(1))
+        .map(|(_, chunk)| {
+            raw_cursor += chunk.len();
+            raw_cursor
+        })
+        .collect::<Vec<_>>();
+    let redacted_boundaries = redacted_offsets_for_raw_boundaries(raw, redacted, &raw_boundaries);
+    for (position, _) in chunks.iter().enumerate() {
         let is_last = position + 1 == chunks.len();
-        raw_cursor += chunk.len();
         let end = if is_last {
             redacted.len()
         } else {
-            redacted_offset_for_raw_prefix(raw, redacted, raw_cursor).max(cursor)
+            redacted_boundaries[position].max(cursor)
         };
         output.push(redacted[cursor..end].to_owned());
         cursor = end;
@@ -341,19 +349,74 @@ fn split_redacted_stream_for_chunks(
     output
 }
 
-fn redacted_offset_for_raw_prefix(raw: &str, redacted: &str, raw_end: usize) -> usize {
-    let proposed = redact_sensitive_text(&raw[..raw_end])
-        .len()
-        .min(redacted.len());
-    previous_char_boundary(redacted, proposed)
+fn redacted_offsets_for_raw_boundaries(
+    raw: &str,
+    redacted: &str,
+    raw_boundaries: &[usize],
+) -> Vec<usize> {
+    const MARKER: &str = "[redacted]";
+    let mut offsets = Vec::with_capacity(raw_boundaries.len());
+    let mut raw_cursor = 0;
+    let mut redacted_cursor = 0;
+
+    for &boundary in raw_boundaries {
+        while raw_cursor < boundary && raw_cursor < raw.len() && redacted_cursor < redacted.len() {
+            let raw_char = raw[raw_cursor..].chars().next();
+            let redacted_char = redacted[redacted_cursor..].chars().next();
+            if raw_char == redacted_char {
+                advance_char(raw, &mut raw_cursor);
+                advance_char(redacted, &mut redacted_cursor);
+            } else if redacted[redacted_cursor..].starts_with(MARKER) {
+                redacted_cursor += MARKER.len();
+                raw_cursor =
+                    find_redaction_resume_offset(raw, raw_cursor, redacted, redacted_cursor);
+            } else {
+                advance_char(raw, &mut raw_cursor);
+                advance_char(redacted, &mut redacted_cursor);
+            }
+        }
+        offsets.push(redacted_cursor);
+    }
+    offsets
 }
 
-fn previous_char_boundary(value: &str, proposed: usize) -> usize {
-    let mut index = proposed.min(value.len());
-    while !value.is_char_boundary(index) {
-        index -= 1;
+fn find_redaction_resume_offset(
+    raw: &str,
+    raw_start: usize,
+    redacted: &str,
+    redacted_start: usize,
+) -> usize {
+    if redacted_start >= redacted.len() {
+        return raw.len();
     }
-    index
+    let mut best = raw.len();
+    for (offset, _) in raw[raw_start..].char_indices() {
+        let candidate = raw_start + offset;
+        if common_prefix_chars(&raw[candidate..], &redacted[redacted_start..]) >= 4 {
+            return candidate;
+        }
+        if best == raw.len()
+            && raw[candidate..].chars().next() == redacted[redacted_start..].chars().next()
+        {
+            best = candidate;
+        }
+    }
+    best
+}
+
+fn common_prefix_chars(left: &str, right: &str) -> usize {
+    left.chars()
+        .zip(right.chars())
+        .take_while(|(left, right)| left == right)
+        .count()
+}
+
+fn advance_char(value: &str, cursor: &mut usize) {
+    if let Some(ch) = value[*cursor..].chars().next() {
+        *cursor += ch.len_utf8();
+    } else {
+        *cursor = value.len();
+    }
 }
 
 fn normalize_pty_text(raw: &str) -> String {

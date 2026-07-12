@@ -1754,19 +1754,40 @@ fn normalize_agent_screen_message_body(body: &[String]) -> String {
 }
 
 fn is_likely_terminal_soft_wrap(previous: &str, current: &str) -> bool {
-    trailing_wrapped_path_token(previous)
-        .is_some_and(|token| token.ends_with('/') && starts_wordish(current))
+    let Some(token) = previous.split_whitespace().last() else {
+        return false;
+    };
+    if !token.ends_with('/') || !starts_wordish(current) {
+        return false;
+    }
+    is_wrapped_path_or_url_token(token)
+        || (is_wrapped_branch_prefix(token) && starts_branch_wrap_continuation(current))
 }
 
-fn trailing_wrapped_path_token(line: &str) -> Option<&str> {
-    let token = line.split_whitespace().last()?;
+fn is_wrapped_path_or_url_token(token: &str) -> bool {
     let slash_count = token.matches('/').count();
-    (token.starts_with('/')
+    token.starts_with('/')
         || token.starts_with("http://")
         || token.starts_with("https://")
         || token.contains("://")
-        || slash_count >= 2)
-        .then_some(token)
+        || slash_count >= 2
+}
+
+fn is_wrapped_branch_prefix(token: &str) -> bool {
+    let Some(prefix) = token.strip_suffix('/') else {
+        return false;
+    };
+    !prefix.is_empty()
+        && prefix.len() <= 16
+        && prefix
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+}
+
+fn starts_branch_wrap_continuation(line: &str) -> bool {
+    line.split_whitespace()
+        .next()
+        .is_some_and(|token| token.ends_with(','))
 }
 
 fn should_insert_agent_soft_wrap_space(previous: &str) -> bool {
@@ -3053,7 +3074,7 @@ test codex_tui::tests::parses_known_tool_markers_as_inline_events ... ok
             parse_codex_screen_messages(screen),
             vec![ScreenMessage {
                 role: ScreenMessageRole::Agent,
-                content: "Repo state is quiet.\n\nYou’re in /home/kitts/archductor/workspaces/chandelier/hoi-an on branch lc/\nhoi-an, and HEAD matches origin/main at commit 7f7ab37 (Add custom payment\nsplit (#14)). There are no tracked file changes. The only uncommitted thing is\nan untracked .context/ folder with placeholder files:\n\n- .context/brief.md\n- .context/todos.md\n- .context/agent-notes.md\n\nProject-wise, this is a Next.js 16.2.9 / React 19 app for Chandelier\nConsulting with public marketing pages, admin routes, Supabase, and Stripe\nAPIs. The last few merged changes were:\n\n- Add custom payment split\n- simplify client agreement flow\n- Stack projects page layout".to_owned(),
+                content: "Repo state is quiet.\n\nYou’re in /home/kitts/archductor/workspaces/chandelier/hoi-an on branch lc/hoi-an, and HEAD matches origin/main at commit 7f7ab37 (Add custom payment\nsplit (#14)). There are no tracked file changes. The only uncommitted thing is\nan untracked .context/ folder with placeholder files:\n\n- .context/brief.md\n- .context/todos.md\n- .context/agent-notes.md\n\nProject-wise, this is a Next.js 16.2.9 / React 19 app for Chandelier\nConsulting with public marketing pages, admin routes, Supabase, and Stripe\nAPIs. The last few merged changes were:\n\n- Add custom payment split\n- simplify client agreement flow\n- Stack projects page layout".to_owned(),
             }]
         );
     }

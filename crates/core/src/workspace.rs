@@ -4161,6 +4161,20 @@ mutation($threadId: ID!) {{
         Ok(checkpoint)
     }
 
+    pub fn checkpoint_delete(&self, name: &str, checkpoint_id: i64) -> Result<()> {
+        let workspace = self.get_by_name(name)?;
+        let checkpoint = self.get_checkpoint(checkpoint_id)?;
+        anyhow::ensure!(
+            checkpoint.workspace_id == workspace.id,
+            "checkpoint {checkpoint_id} does not belong to workspace {name}"
+        );
+        let _ = git_dynamic(&workspace.path, &["update-ref", "-d", &checkpoint.git_ref]);
+        self.conn
+            .execute("DELETE FROM checkpoints WHERE id = ?1", [checkpoint_id])
+            .with_context(|| format!("delete checkpoint {checkpoint_id}"))?;
+        Ok(())
+    }
+
     fn get_checkpoint(&self, id: i64) -> Result<Checkpoint> {
         self.conn
             .query_row(
