@@ -15,6 +15,7 @@ use linux_archductor_core::settings::{
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SettingsSection {
@@ -79,12 +80,12 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
     let settings_repo_select = ComboBoxText::new();
     settings_repo_select.set_hexpand(true);
     let init_settings_btn = text_button("Initialize");
-    let load_settings_btn = text_button("Load");
     let save_settings_btn = text_button("Save");
     save_settings_btn.add_css_class("suggested-action");
     refresh_repository_select(&settings_repo_select, &paths.database_path, None);
     settings_top.append(&settings_repo_select);
     settings_top.append(&init_settings_btn);
+    settings_top.append(&save_settings_btn);
     settings_toolbar.append(&settings_top);
     body.append(&settings_toolbar);
 
@@ -707,8 +708,17 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
                             .or(settings.customization.automation.build_command.as_deref())
                             .unwrap_or(""),
                     );
-                    run_mode_entry_load
-                        .set_text(settings.scripts.run_mode.as_deref().unwrap_or("concurrent"));
+                    run_mode_entry_load.set_text(
+                        settings
+                            .scripts
+                            .run_mode
+                            .as_deref()
+                            .or_else(|| {
+                                matches!(layer, SettingsLayer::RepositoryShared)
+                                    .then_some("concurrent")
+                            })
+                            .unwrap_or(""),
+                    );
                     spotlight_check_load.set_active(settings.spotlight_testing.unwrap_or(false));
                     privacy_check_load
                         .set_active(settings.enterprise_data_privacy.unwrap_or(false));
@@ -870,11 +880,6 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
             *loading_settings_for_load.borrow_mut() = false;
         })
     };
-    load_settings_btn.connect_clicked({
-        let load_selected_settings = load_selected_settings.clone();
-        move |_| load_selected_settings()
-    });
-
     let load_selected_settings_for_repo = load_selected_settings.clone();
     let loading_settings_for_repo = loading_settings_for_load.clone();
     settings_repo_select.connect_changed(move |_| {
@@ -886,27 +891,48 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
     let local_tab_for_shared = local_tab.clone();
     let loading_settings_for_shared = loading_settings_for_load.clone();
     shared_tab.connect_toggled(move |button| {
-        if !*loading_settings_for_shared.borrow() && button.is_active() {
+        if *loading_settings_for_shared.borrow() {
+            return;
+        }
+        if button.is_active() {
             local_tab_for_shared.set_active(false);
             load_selected_settings_for_shared();
+        } else if !local_tab_for_shared.is_active() {
+            button.set_active(true);
         }
     });
     let load_selected_settings_for_local = load_selected_settings.clone();
     let shared_tab_for_local = shared_tab.clone();
     let loading_settings_for_local = loading_settings_for_load.clone();
     local_tab.connect_toggled(move |button| {
-        if !*loading_settings_for_local.borrow() && button.is_active() {
+        if *loading_settings_for_local.borrow() {
+            return;
+        }
+        if button.is_active() {
             shared_tab_for_local.set_active(false);
             load_selected_settings_for_local();
+        } else if !shared_tab_for_local.is_active() {
+            button.set_active(true);
         }
     });
 
     let autosave = {
         let save_settings_btn = save_settings_btn.clone();
         let loading_settings = loading_settings_for_load.clone();
+        let pending_autosave = Rc::new(RefCell::new(None::<gtk::glib::SourceId>));
         Rc::new(move || {
             if !*loading_settings.borrow() {
-                save_settings_btn.emit_clicked();
+                if let Some(source_id) = pending_autosave.borrow_mut().take() {
+                    source_id.remove();
+                }
+                let save_settings_btn = save_settings_btn.clone();
+                let pending_autosave_for_timeout = pending_autosave.clone();
+                let source_id =
+                    gtk::glib::timeout_add_local_once(Duration::from_millis(600), move || {
+                        *pending_autosave_for_timeout.borrow_mut() = None;
+                        save_settings_btn.emit_clicked();
+                    });
+                *pending_autosave.borrow_mut() = Some(source_id);
             }
         })
     };
@@ -956,7 +982,7 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
             settings_result.set_text("Repository name is required.");
             return;
         }
-        let layer = selected_settings_layer(&shared_tab, &local_tab);
+        let layer = selected_settings_layer(&local_tab);
         let repo_path = match repository_root(&db_path_save_settings, &repo_name) {
             Ok(path) => path,
             Err(err) => {
@@ -1023,6 +1049,23 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
             parse_text_lines(&text_buffer_text(&command_presets_view.1));
         customization.view.notification_rules =
             parse_text_lines(&text_buffer_text(&notifications_view.1));
+        let prompt_settings = PromptSettings {
+            new_workspace: optional_buffer_text(&prompt_views[0].1),
+            general: optional_buffer_text(&prompt_views[1].1),
+            continue_work: optional_buffer_text(&prompt_views[2].1),
+            summarize_session: optional_buffer_text(&prompt_views[3].1),
+            handoff: optional_buffer_text(&prompt_views[4].1),
+            code_review: optional_buffer_text(&prompt_views[5].1),
+            create_pr: optional_buffer_text(&prompt_views[6].1),
+            fix_errors: optional_buffer_text(&prompt_views[7].1),
+            resolve_merge_conflicts: optional_buffer_text(&prompt_views[8].1),
+            rename_branch: optional_buffer_text(&prompt_views[9].1),
+            commit_generation: optional_buffer_text(&prompt_views[10].1),
+            test_fixing: optional_buffer_text(&prompt_views[11].1),
+            refactor_style: optional_buffer_text(&prompt_views[12].1),
+            setup_script: optional_buffer_text(&prompt_views[13].1),
+            run_script: optional_buffer_text(&prompt_views[14].1),
+        };
         let settings = RepositorySettings {
             file_include_globs: if file_globs_view.2.is_editable() {
                 text_buffer_text(&file_globs_view.1)
@@ -1034,8 +1077,16 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
             } else {
                 current_file_globs
             },
-            spotlight_testing: Some(spotlight_check.is_active()),
-            enterprise_data_privacy: Some(privacy_check.is_active()),
+            spotlight_testing: bool_setting_for_layer(
+                layer,
+                current_settings.spotlight_testing,
+                spotlight_check.is_active(),
+            ),
+            enterprise_data_privacy: bool_setting_for_layer(
+                layer,
+                current_settings.enterprise_data_privacy,
+                privacy_check.is_active(),
+            ),
             scripts: ScriptSettings {
                 setup: optional_entry_text(&setup_entry),
                 run: optional_entry_text(&run_entry),
@@ -1044,28 +1095,11 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
                 lint: lint_command,
                 typecheck: typecheck_command,
                 build: build_command,
-                run_mode: optional_entry_text(&run_mode_entry)
-                    .or_else(|| Some("concurrent".to_owned())),
+                run_mode: run_mode_setting_for_layer(layer, optional_entry_text(&run_mode_entry)),
             },
             environment_variables: parse_environment_lines(&text_buffer_text(&env_view.1)),
             prompt_pack: current_settings.prompt_pack,
-            prompts: Some(PromptSettings {
-                new_workspace: optional_buffer_text(&prompt_views[0].1),
-                general: optional_buffer_text(&prompt_views[1].1),
-                continue_work: optional_buffer_text(&prompt_views[2].1),
-                summarize_session: optional_buffer_text(&prompt_views[3].1),
-                handoff: optional_buffer_text(&prompt_views[4].1),
-                code_review: optional_buffer_text(&prompt_views[5].1),
-                create_pr: optional_buffer_text(&prompt_views[6].1),
-                fix_errors: optional_buffer_text(&prompt_views[7].1),
-                resolve_merge_conflicts: optional_buffer_text(&prompt_views[8].1),
-                rename_branch: optional_buffer_text(&prompt_views[9].1),
-                commit_generation: optional_buffer_text(&prompt_views[10].1),
-                test_fixing: optional_buffer_text(&prompt_views[11].1),
-                refactor_style: optional_buffer_text(&prompt_views[12].1),
-                setup_script: optional_buffer_text(&prompt_views[13].1),
-                run_script: optional_buffer_text(&prompt_views[14].1),
-            }),
+            prompts: (!prompt_settings_is_empty(&prompt_settings)).then_some(prompt_settings),
             providers: ProviderSettings {
                 claude_code_executable_path: optional_entry_text(&claude_path_entry),
                 codex_executable_path: optional_entry_text(&codex_path_entry),
@@ -1080,9 +1114,21 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
                 },
             },
             git: GitSettings {
-                delete_branch_on_archive: Some(delete_branch_check.is_active()),
-                archive_on_merge: Some(archive_on_merge_check.is_active()),
-                worktree_push_auto_setup_remote: Some(auto_upstream_check.is_active()),
+                delete_branch_on_archive: bool_setting_for_layer(
+                    layer,
+                    current_settings.git.delete_branch_on_archive,
+                    delete_branch_check.is_active(),
+                ),
+                archive_on_merge: bool_setting_for_layer(
+                    layer,
+                    current_settings.git.archive_on_merge,
+                    archive_on_merge_check.is_active(),
+                ),
+                worktree_push_auto_setup_remote: bool_setting_for_layer(
+                    layer,
+                    current_settings.git.worktree_push_auto_setup_remote,
+                    auto_upstream_check.is_active(),
+                ),
                 branch_prefix_type: optional_entry_text(&branch_prefix_type_entry),
                 branch_prefix: optional_entry_text(&branch_prefix_entry),
             },
@@ -1268,12 +1314,48 @@ fn selected_repository_name(select: &ComboBoxText) -> String {
         .unwrap_or_default()
 }
 
-fn selected_settings_layer(_shared: &ToggleButton, local: &ToggleButton) -> SettingsLayer {
+fn selected_settings_layer(local: &ToggleButton) -> SettingsLayer {
     if local.is_active() {
         SettingsLayer::LocalOverride
     } else {
         SettingsLayer::RepositoryShared
     }
+}
+
+fn bool_setting_for_layer(
+    layer: SettingsLayer,
+    current: Option<bool>,
+    active: bool,
+) -> Option<bool> {
+    match layer {
+        SettingsLayer::RepositoryShared => Some(active),
+        SettingsLayer::LocalOverride => current.map(|_| active).or_else(|| active.then_some(true)),
+    }
+}
+
+fn run_mode_setting_for_layer(layer: SettingsLayer, value: Option<String>) -> Option<String> {
+    match layer {
+        SettingsLayer::RepositoryShared => value.or_else(|| Some("concurrent".to_owned())),
+        SettingsLayer::LocalOverride => value,
+    }
+}
+
+fn prompt_settings_is_empty(settings: &PromptSettings) -> bool {
+    settings.new_workspace.is_none()
+        && settings.general.is_none()
+        && settings.continue_work.is_none()
+        && settings.summarize_session.is_none()
+        && settings.handoff.is_none()
+        && settings.code_review.is_none()
+        && settings.create_pr.is_none()
+        && settings.fix_errors.is_none()
+        && settings.resolve_merge_conflicts.is_none()
+        && settings.rename_branch.is_none()
+        && settings.commit_generation.is_none()
+        && settings.test_fixing.is_none()
+        && settings.refactor_style.is_none()
+        && settings.setup_script.is_none()
+        && settings.run_script.is_none()
 }
 
 fn refresh_repository_select(
@@ -1368,6 +1450,38 @@ mod tests {
                 "notifications",
                 "advanced"
             ]
+        );
+    }
+
+    #[test]
+    fn local_bool_settings_preserve_unset_inherited_values() {
+        assert_eq!(
+            bool_setting_for_layer(SettingsLayer::LocalOverride, None, false),
+            None
+        );
+        assert_eq!(
+            bool_setting_for_layer(SettingsLayer::LocalOverride, None, true),
+            Some(true)
+        );
+        assert_eq!(
+            bool_setting_for_layer(SettingsLayer::LocalOverride, Some(true), false),
+            Some(false)
+        );
+        assert_eq!(
+            bool_setting_for_layer(SettingsLayer::RepositoryShared, None, false),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn local_run_mode_settings_preserve_unset_values() {
+        assert_eq!(
+            run_mode_setting_for_layer(SettingsLayer::LocalOverride, None),
+            None
+        );
+        assert_eq!(
+            run_mode_setting_for_layer(SettingsLayer::RepositoryShared, None),
+            Some("concurrent".to_owned())
         );
     }
 

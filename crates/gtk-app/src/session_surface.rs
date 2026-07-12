@@ -5039,7 +5039,7 @@ fn flush_pending_archcar_inputs(
                     process_id = record.id,
                     "archcar control send failed; requeued pending controls"
                 );
-                break;
+                return flushed_any;
             }
             debug!(
                 thread_id,

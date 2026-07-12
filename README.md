@@ -455,9 +455,10 @@ Power users should be able to tune attention and speed:
 - Repository-specific terminal presets.
 - Import/export for settings bundles and prompt packs.
 
-The current implemented settings format is TOML. The Projects settings page and
-the Settings page edit common repository fields directly and include an
-advanced TOML block for the `[customization]` sections. Workspace creation already honors
+The current implemented settings format is TOML. The Projects settings page
+and Settings page edit common repository fields directly and include an
+advanced TOML block for the `[customization]` sections. Workspace creation
+already honors
 `customization.workspace_defaults.base_branch`, `branch_prefix`, and
 `port_block_size`. Runtime setup/run/archive scripts, terminal commands, and
 agent sessions honor `working_directory`. PR merge honors

@@ -1036,11 +1036,20 @@ fn attach_workspace_row_context_menu(
         let popover = popover.downgrade();
         let menu_open = menu_open.clone();
         let sync_menu_revealer = sync_menu_revealer.clone();
-        menu_btn.connect_clicked(move |_| {
+        let row_for_menu = row.clone();
+        menu_btn.connect_clicked(move |button| {
             if let Some(popover) = popover.upgrade() {
                 menu_open.set(true);
                 sync_menu_revealer();
-                popover.set_pointing_to(None);
+                let rect = button.compute_bounds(&row_for_menu).map(|bounds| {
+                    gtk::gdk::Rectangle::new(
+                        bounds.x().round() as i32,
+                        bounds.y().round() as i32,
+                        bounds.width().ceil().max(1.0) as i32,
+                        bounds.height().ceil().max(1.0) as i32,
+                    )
+                });
+                popover.set_pointing_to(rect.as_ref());
                 popover.popup();
             }
         });

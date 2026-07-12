@@ -234,8 +234,8 @@ fn resolve_git_repository_root(path: &Path) -> Result<PathBuf> {
 
 fn path_from_git_stdout(stdout: Vec<u8>) -> Result<PathBuf> {
     let stdout = stdout
-        .strip_suffix(b"\n")
-        .or_else(|| stdout.strip_suffix(b"\r\n"))
+        .strip_suffix(b"\r\n")
+        .or_else(|| stdout.strip_suffix(b"\n"))
         .unwrap_or(&stdout);
     #[cfg(unix)]
     {
@@ -373,5 +373,12 @@ mod tests {
         assert_eq!(saved.root_path, repo_path.canonicalize().unwrap());
         assert!(repo_path.join(".archductor/settings.toml").exists());
         assert!(!subdir.join(".archductor/settings.toml").exists());
+    }
+
+    #[test]
+    fn path_from_git_stdout_strips_crlf_as_one_suffix() {
+        let path = path_from_git_stdout(b"/tmp/demo\r\n".to_vec()).unwrap();
+
+        assert_eq!(path, PathBuf::from("/tmp/demo"));
     }
 }
