@@ -17,6 +17,7 @@ struct InspectorSessionInput {
     id: i64,
     workspace: String,
     command: String,
+    log_path: PathBuf,
     pid: Option<u32>,
     status: ProcessStatus,
     started_at: String,
@@ -49,6 +50,7 @@ struct InspectorSessionRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct InspectorSessionDetail {
     session_id: Option<i64>,
+    log_path: String,
     raw_chunks: Vec<RawChunk>,
     normalized_text: String,
     events: Vec<InspectorEventRow>,
@@ -160,6 +162,7 @@ fn session_input_from_process(
         id: process.id,
         workspace: workspace.to_owned(),
         command: process.command,
+        log_path: process.log_path,
         pid: (process.pid > 0).then_some(process.pid),
         status: process.status,
         started_at: process.started_at,
@@ -225,6 +228,7 @@ fn session_detail(session: &InspectorSessionInput) -> InspectorSessionDetail {
         .collect::<Vec<_>>();
     InspectorSessionDetail {
         session_id: Some(session.id),
+        log_path: session.log_path.display().to_string(),
         raw_chunks,
         normalized_text,
         events,
@@ -235,6 +239,7 @@ fn session_detail(session: &InspectorSessionInput) -> InspectorSessionDetail {
 fn empty_session_detail() -> InspectorSessionDetail {
     InspectorSessionDetail {
         session_id: None,
+        log_path: "n/a".to_owned(),
         raw_chunks: Vec::new(),
         normalized_text: String::new(),
         events: Vec::new(),
@@ -400,6 +405,95 @@ fn diagnostics(session: &InspectorSessionInput) -> InspectorDiagnostics {
     }
 }
 
+fn diagnostic_bundle_text(detail: &InspectorSessionDetail) -> String {
+    let mut out = String::new();
+    out.push_str("Archductor PTY diagnostic bundle\n");
+    out.push_str(&format!("App version: {}\n", env!("CARGO_PKG_VERSION")));
+    out.push_str(&format!(
+        "Session: {}\n",
+        detail
+            .session_id
+            .map(|id| format!("#{id}"))
+            .unwrap_or_else(|| "n/a".to_owned())
+    ));
+    out.push_str(&format!("Raw log path: {}\n\n", detail.log_path));
+
+    out.push_str("Process metadata\n");
+    out.push_str(&format!("PID: {}\n", detail.diagnostics.pid));
+    out.push_str(&format!("Command: {}\n", detail.diagnostics.command));
+    out.push_str(&format!(
+        "Workspace: {}\n",
+        detail.diagnostics.cwd_or_workspace
+    ));
+    out.push_str(&format!("Started: {}\n", detail.diagnostics.start_time));
+    out.push_str(&format!("Exit code: {}\n", detail.diagnostics.exit_code));
+    out.push_str(&format!("Signal: {}\n", detail.diagnostics.signal));
+    out.push_str(&format!("State: {}\n", detail.diagnostics.session_state));
+    out.push_str(&format!(
+        "Last action: {}\n\n",
+        detail.diagnostics.last_lifecycle_action
+    ));
+
+    out.push_str("Lifecycle\n");
+    for item in &detail.diagnostics.lifecycle {
+        out.push_str(&format!("- {item}\n"));
+    }
+
+    out.push_str("\nState transitions\n");
+    let state_rows = detail
+        .events
+        .iter()
+        .filter(|event| event.filter == EventFilter::StateTransitions)
+        .collect::<Vec<_>>();
+    if state_rows.is_empty() {
+        out.push_str("- None recorded.\n");
+    } else {
+        for event in state_rows {
+            out.push_str(&format!(
+                "- #{} {} {}\n{}\n",
+                event.sequence, event.timestamp, event.status, event.rendered_text
+            ));
+        }
+    }
+
+    out.push_str("\nParsed events\n");
+    if detail.events.is_empty() {
+        out.push_str("- None recorded.\n");
+    } else {
+        for event in &detail.events {
+            out.push_str(&format!(
+                "- #{} {} {:?} {} {}\n{}\n",
+                event.sequence,
+                event.timestamp,
+                event.filter,
+                event.source_chunk,
+                event.status,
+                event.rendered_text
+            ));
+        }
+    }
+
+    out.push_str("\nRaw output (redacted)\n");
+    if detail.raw_chunks.is_empty() {
+        out.push_str("No raw output.\n");
+    } else {
+        for chunk in &detail.raw_chunks {
+            out.push_str(&format!("chunk {}\n{}\n", chunk.index, chunk.text));
+        }
+    }
+
+    out.push_str("\nNormalized output (redacted)\n");
+    if detail.normalized_text.is_empty() {
+        out.push_str("No normalized output.\n");
+    } else {
+        out.push_str(&detail.normalized_text);
+        if !detail.normalized_text.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    out
+}
+
 fn signal_label(exit_code: Option<i32>) -> String {
     match exit_code {
         Some(code) if code >= 128 => format!("signal {}", code - 128),
@@ -467,6 +561,7 @@ fn render_inspector_model(model: PtyInspectorModel) -> GBox {
     center_stack.add_named(&raw_scroll, Some("raw"));
     center_stack.add_named(&normalized_scroll, Some("normalized"));
     center_stack.set_visible_child_name("raw");
+    let selected_detail = Rc::new(RefCell::new(model.selected.clone()));
     let center = GBox::new(Orientation::Vertical, 8);
     let toolbar = GBox::new(Orientation::Horizontal, 6);
     let raw_toggle = CheckButton::with_label("Raw chunks (redacted)");
@@ -510,6 +605,16 @@ fn render_inspector_model(model: PtyInspectorModel) -> GBox {
             }
         });
     }
+    let export_btn = Button::with_label("Copy diagnostic bundle");
+    {
+        let selected_detail = Rc::clone(&selected_detail);
+        export_btn.connect_clicked(move |_| {
+            let bundle = diagnostic_bundle_text(&selected_detail.borrow());
+            if let Some(display) = gtk::gdk::Display::default() {
+                display.clipboard().set_text(&bundle);
+            }
+        });
+    }
     let jump_btn = Button::with_label("Jump to latest");
     let pause_toggle = CheckButton::with_label("Pause auto-scroll");
     toolbar.append(&raw_toggle);
@@ -517,6 +622,7 @@ fn render_inspector_model(model: PtyInspectorModel) -> GBox {
     toolbar.append(&pause_toggle);
     toolbar.append(&clear_btn);
     toolbar.append(&copy_btn);
+    toolbar.append(&export_btn);
     toolbar.append(&jump_btn);
     center.append(&toolbar);
     center.append(&center_stack);
@@ -530,7 +636,6 @@ fn render_inspector_model(model: PtyInspectorModel) -> GBox {
         &model.selected.events,
         &all_event_filters(),
     );
-    let selected_detail = Rc::new(RefCell::new(model.selected.clone()));
     let active_filters = Rc::new(RefCell::new(all_event_filters()));
     right.append(&event_filters_panel(
         &events_container,
@@ -772,6 +877,7 @@ mod tests {
     use super::*;
     use linux_archductor_core::session_event::{
         SessionCommandOutputStatus, SessionEvent, SessionEventPayload, SessionEventSource,
+        SessionEventStatus,
     };
     use linux_archductor_core::workspace::ProcessStatus;
 
@@ -781,6 +887,7 @@ mod tests {
             id: 7,
             workspace: "berlin".to_owned(),
             command: "ARCHDUCTOR_TOKEN=secret codex --model gpt-5".to_owned(),
+            log_path: PathBuf::from("/tmp/session-7.log"),
             pid: Some(4242),
             status: ProcessStatus::Running,
             started_at: "2026-07-05T12:00:00Z".to_owned(),
@@ -842,6 +949,7 @@ mod tests {
             id: 9,
             workspace: "oslo".to_owned(),
             command: "codex".to_owned(),
+            log_path: PathBuf::from("/tmp/session-9.log"),
             pid: Some(2222),
             status: ProcessStatus::Running,
             started_at: "2026-07-06T12:00:00Z".to_owned(),
@@ -883,6 +991,7 @@ mod tests {
             id: 10,
             workspace: "milan".to_owned(),
             command: "codex".to_owned(),
+            log_path: PathBuf::from("/tmp/session-10.log"),
             pid: Some(3333),
             status: ProcessStatus::Stopped,
             started_at: "2026-07-06T12:00:00Z".to_owned(),
@@ -935,6 +1044,62 @@ mod tests {
         assert!(raw_text.contains("TOKEN=[redacted]"));
         assert!(model.selected.normalized_text.contains("Bearer [redacted]"));
         assert!(rendered_events.contains("api_key: [redacted]"));
+    }
+
+    #[test]
+    fn diagnostic_bundle_includes_redacted_debug_data() {
+        let session = InspectorSessionInput {
+            id: 11,
+            workspace: "zurich".to_owned(),
+            command: "TOKEN=command-secret codex".to_owned(),
+            log_path: PathBuf::from("/tmp/session-11.log"),
+            pid: Some(4444),
+            status: ProcessStatus::Running,
+            started_at: "2026-07-06T12:00:00Z".to_owned(),
+            ended_at: None,
+            exit_code: None,
+            raw_output: String::new(),
+            raw_chunks: raw_chunks_from_log("TOKEN=raw-secret\n"),
+            events: vec![
+                SessionEvent::new(
+                    SessionEventSource::Runtime,
+                    Some("running".to_owned()),
+                    SessionEventPayload::StatusChange {
+                        status: SessionEventStatus::Running,
+                        message: Some("session running".to_owned()),
+                    },
+                )
+                .with_sequence(1)
+                .with_occurred_at_ms(100),
+                SessionEvent::new(
+                    SessionEventSource::Runtime,
+                    Some("api_key=event-secret".to_owned()),
+                    SessionEventPayload::CommandOutput {
+                        title: "env".to_owned(),
+                        output: "api_key=event-secret".to_owned(),
+                        status: SessionCommandOutputStatus::Succeeded,
+                    },
+                )
+                .with_sequence(2)
+                .with_occurred_at_ms(120),
+            ],
+        };
+        let model = build_inspector_model(vec![session]);
+
+        let bundle = diagnostic_bundle_text(&model.selected);
+
+        assert!(bundle.contains("Archductor PTY diagnostic bundle"));
+        assert!(bundle.contains("App version:"));
+        assert!(bundle.contains("Session: #11"));
+        assert!(bundle.contains("Raw log path: /tmp/session-11.log"));
+        assert!(bundle.contains("Process metadata"));
+        assert!(bundle.contains("State transitions"));
+        assert!(bundle.contains("Parsed events"));
+        assert!(bundle.contains("Raw output (redacted)"));
+        assert!(bundle.contains("TOKEN=[redacted]"));
+        for leaked in ["command-secret", "raw-secret", "event-secret"] {
+            assert!(!bundle.contains(leaked), "{leaked} leaked in bundle");
+        }
     }
 
     #[test]
