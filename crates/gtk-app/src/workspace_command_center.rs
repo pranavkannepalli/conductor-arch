@@ -5055,9 +5055,118 @@ fn workspace_last_turn_changes_text(db_path: &Path, name: &str) -> String {
 
 fn workspace_checks_and_todos_text(store: &WorkspaceStore, name: &str) -> String {
     let mut out = workspace_checks_text(store, name);
+    out.push_str("\n\nWorkspace Context Estimate\n");
+    out.push_str(&workspace_context_estimate_text(store, name));
     out.push_str("\n\nTodos\n");
     out.push_str(&workspace_todos_text(store, name));
     out
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct WorkspaceContextEstimate {
+    thread_count: usize,
+    message_count: usize,
+    event_count: usize,
+    transcript_bytes: usize,
+    estimated_tokens: u64,
+    threads: Vec<WorkspaceThreadContextEstimate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceThreadContextEstimate {
+    title: String,
+    provider: String,
+    message_count: usize,
+    event_count: usize,
+    transcript_bytes: usize,
+    estimated_tokens: u64,
+}
+
+fn workspace_context_estimate_text(store: &WorkspaceStore, name: &str) -> String {
+    match workspace_context_estimate(store, name) {
+        Ok(estimate) => format_workspace_context_estimate(&estimate),
+        Err(err) => format!("Could not estimate context usage: {err:#}\n"),
+    }
+}
+
+fn workspace_context_estimate(
+    store: &WorkspaceStore,
+    name: &str,
+) -> anyhow::Result<WorkspaceContextEstimate> {
+    let threads = store.list_chat_threads(name)?;
+    let mut estimate = WorkspaceContextEstimate {
+        thread_count: threads.len(),
+        ..Default::default()
+    };
+    for thread in threads {
+        let messages = store.list_chat_messages(thread.id)?;
+        let events = store.list_chat_events(thread.id)?;
+        let transcript_bytes = messages
+            .iter()
+            .map(|message| message.content.len())
+            .sum::<usize>()
+            + events
+                .iter()
+                .map(|event| event.title.len() + event.body.len() + event.payload_json.len())
+                .sum::<usize>();
+        let thread_estimate = WorkspaceThreadContextEstimate {
+            title: thread.title,
+            provider: thread.provider,
+            message_count: messages.len(),
+            event_count: events.len(),
+            transcript_bytes,
+            estimated_tokens: estimate_tokens_from_bytes(transcript_bytes),
+        };
+        estimate.message_count += thread_estimate.message_count;
+        estimate.event_count += thread_estimate.event_count;
+        estimate.transcript_bytes += thread_estimate.transcript_bytes;
+        estimate.estimated_tokens += thread_estimate.estimated_tokens;
+        estimate.threads.push(thread_estimate);
+    }
+    Ok(estimate)
+}
+
+fn format_workspace_context_estimate(estimate: &WorkspaceContextEstimate) -> String {
+    let mut out = format!(
+        "{} estimated tokens from {} persisted bytes across {} threads, {} messages, {} events.\nEstimate method: persisted transcript/event bytes divided by 4, rounded up.\n",
+        format_context_number(estimate.estimated_tokens),
+        format_context_number(estimate.transcript_bytes as u64),
+        format_context_number(estimate.thread_count as u64),
+        format_context_number(estimate.message_count as u64),
+        format_context_number(estimate.event_count as u64),
+    );
+    if estimate.threads.is_empty() {
+        out.push_str("No chat transcripts recorded.\n");
+        return out;
+    }
+    for thread in &estimate.threads {
+        out.push_str(&format!(
+            "- {} [{}]: {} tokens, {} bytes, {} messages, {} events\n",
+            thread.title,
+            thread.provider,
+            format_context_number(thread.estimated_tokens),
+            format_context_number(thread.transcript_bytes as u64),
+            format_context_number(thread.message_count as u64),
+            format_context_number(thread.event_count as u64),
+        ));
+    }
+    out
+}
+
+fn estimate_tokens_from_bytes(bytes: usize) -> u64 {
+    ((bytes as u64) + 3) / 4
+}
+
+fn format_context_number(value: u64) -> String {
+    let raw = value.to_string();
+    let mut out = String::new();
+    for (index, ch) in raw.chars().rev().enumerate() {
+        if index > 0 && index % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out.chars().rev().collect()
 }
 
 fn workspace_todos_text(store: &WorkspaceStore, name: &str) -> String {
@@ -7939,6 +8048,32 @@ mod tests {
         };
 
         assert_eq!(state.active_tab_name(), "setup");
+    }
+
+    #[test]
+    fn workspace_context_estimate_formats_workspace_and_thread_totals() {
+        let estimate = WorkspaceContextEstimate {
+            thread_count: 2,
+            message_count: 3,
+            event_count: 1,
+            transcript_bytes: 12_345,
+            estimated_tokens: estimate_tokens_from_bytes(12_345),
+            threads: vec![WorkspaceThreadContextEstimate {
+                title: "Fix parser".to_owned(),
+                provider: "codex".to_owned(),
+                message_count: 2,
+                event_count: 1,
+                transcript_bytes: 40,
+                estimated_tokens: estimate_tokens_from_bytes(40),
+            }],
+        };
+
+        let text = format_workspace_context_estimate(&estimate);
+
+        assert!(text.contains("3,087 estimated tokens"));
+        assert!(text.contains("12,345 persisted bytes"));
+        assert!(text.contains("persisted transcript/event bytes divided by 4"));
+        assert!(text.contains("- Fix parser [codex]: 10 tokens, 40 bytes, 2 messages, 1 events"));
     }
 
     #[test]
