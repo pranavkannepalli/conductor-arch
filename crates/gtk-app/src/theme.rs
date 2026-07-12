@@ -1626,45 +1626,62 @@ window.lc-theme-dark,
     color: #a8a8a8;
 }
 .ws-pr-compact-panel {
+    min-height: 42px;
     padding: 10px 12px;
     border-bottom: 1px solid #232323;
     background-color: #181818;
 }
+.ws-pr-compact-panel.ws-pr-status-muted,
 .ws-pr-compact-panel.ws-pr-status-missing {
-    border-left: 3px solid #3a3a3a;
+    background-color: #181818;
+    border-bottom-color: #232323;
 }
 .ws-pr-compact-panel.ws-pr-status-pending {
-    border-left: 3px solid #3a3a3a;
+    background-color: #181818;
+    border-bottom-color: #2d2d2d;
 }
 .ws-pr-compact-panel.ws-pr-status-ready {
-    border-left: 3px solid #84e0a0;
+    background-color: #14251a;
+    border-bottom-color: #214b2d;
 }
 .ws-pr-compact-panel.ws-pr-status-failed {
-    border-left: 3px solid #ff8a8a;
+    background-color: #2a1718;
+    border-bottom-color: #5c2529;
 }
 .ws-pr-compact-panel.ws-pr-status-merged {
-    border-left: 3px solid #c6a3ff;
+    background-color: #251935;
+    border-bottom-color: #533379;
 }
 .ws-pr-compact-title {
     font-size: 13px;
     font-weight: 700;
     color: #e6e6e6;
 }
+.ws-pr-action-button {
+    min-height: 32px;
+    padding: 0 14px;
+}
+.ws-pr-action-button.ws-pr-status-muted,
+.ws-pr-action-button.ws-pr-status-missing,
 .ws-pr-action-button.ws-pr-status-pending {
     background-color: #262626;
     color: #a8a8a8;
+    border-color: #3a3a3a;
 }
 .ws-pr-action-button.ws-pr-status-ready {
-    background-color: #163522;
-    color: #84e0a0;
+    background-color: #1f6b39;
+    color: #f1fff4;
+    border-color: #2c874b;
 }
 .ws-pr-action-button.ws-pr-status-failed {
-    background-color: #3a1a1a;
-    color: #ff8a8a;
+    background-color: #8d2e34;
+    color: #fff5f5;
+    border-color: #b3444b;
 }
 .ws-pr-action-button.ws-pr-status-merged {
-    background-color: #311d46;
-    color: #c6a3ff;
+    background-color: #6d3fa0;
+    color: #fbf7ff;
+    border-color: #8655bd;
 }
 .ws-changes-menu-btn,
 .ws-run-collapse-btn {

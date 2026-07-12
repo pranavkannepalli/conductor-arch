@@ -5216,6 +5216,7 @@ impl PullRequestStatusSummary {
 struct WorkspacePrStatusSnapshot {
     pr: Option<PullRequest>,
     status: Option<PullRequestStatusSummary>,
+    summary: Option<linux_archductor_core::workspace::ChecksSummary>,
 }
 
 pub(crate) fn pull_request_status_summary(
@@ -5284,29 +5285,119 @@ fn workspace_pr_status_snapshot(
     workspace_name: &str,
 ) -> WorkspacePrStatusSnapshot {
     let pr = store.pull_request(workspace_name).ok().flatten();
+    let summary = store.checks_summary(workspace_name).ok();
     let status = pr
         .as_ref()
         .map(|pr| workspace_pull_request_status_summary(store, workspace_name, pr));
-    WorkspacePrStatusSnapshot { pr, status }
+    WorkspacePrStatusSnapshot {
+        pr,
+        status,
+        summary,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkspacePrTopActionKind {
+    CreatePr,
+    CommitAndPush,
+    Push,
+    MergePr,
+    FixBlocked,
+    ViewPr,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WorkspacePrTopAction {
+    label: &'static str,
+    tooltip: &'static str,
+    css_class: &'static str,
+    kind: WorkspacePrTopActionKind,
+}
+
+fn workspace_pr_primary_action(snapshot: &WorkspacePrStatusSnapshot) -> WorkspacePrTopAction {
+    let has_conflicts = snapshot
+        .summary
+        .as_ref()
+        .is_some_and(|summary| !summary.conflicting_workspaces.is_empty());
+    if has_conflicts {
+        return WorkspacePrTopAction {
+            label: "Resolve Conflicts",
+            tooltip: "Queue a prompt to resolve workspace conflicts",
+            css_class: "ws-pr-status-failed",
+            kind: WorkspacePrTopActionKind::FixBlocked,
+        };
+    }
+
+    let changed_files = snapshot
+        .summary
+        .as_ref()
+        .map(|summary| summary.changed_files)
+        .unwrap_or_default();
+    if changed_files > 0 {
+        return WorkspacePrTopAction {
+            label: "Commit and Push",
+            tooltip: "Ask the current chat to commit and push local changes",
+            css_class: "ws-pr-status-muted",
+            kind: WorkspacePrTopActionKind::CommitAndPush,
+        };
+    }
+
+    let needs_push = snapshot
+        .summary
+        .as_ref()
+        .and_then(|summary| summary.branch_push_state.as_ref())
+        .is_some_and(|push| push.ahead > 0);
+    if needs_push {
+        return WorkspacePrTopAction {
+            label: "Push Branch",
+            tooltip: "Push the workspace branch",
+            css_class: "ws-pr-status-muted",
+            kind: WorkspacePrTopActionKind::Push,
+        };
+    }
+
+    match snapshot.status.as_ref().map(|status| status.kind) {
+        Some(PullRequestStateKind::Ready) => WorkspacePrTopAction {
+            label: "Merge PR",
+            tooltip: "Merge the ready pull request",
+            css_class: "ws-pr-status-ready",
+            kind: WorkspacePrTopActionKind::MergePr,
+        },
+        Some(PullRequestStateKind::Failed) => WorkspacePrTopAction {
+            label: "Fix Checks",
+            tooltip: "Queue a prompt to fix failing checks",
+            css_class: "ws-pr-status-failed",
+            kind: WorkspacePrTopActionKind::FixBlocked,
+        },
+        Some(PullRequestStateKind::Merged) => WorkspacePrTopAction {
+            label: "Merged",
+            tooltip: "Open the merged pull request",
+            css_class: "ws-pr-status-merged",
+            kind: WorkspacePrTopActionKind::ViewPr,
+        },
+        Some(PullRequestStateKind::Pending) => WorkspacePrTopAction {
+            label: "View PR",
+            tooltip: "Open pull request with pending checks",
+            css_class: "ws-pr-status-muted",
+            kind: WorkspacePrTopActionKind::ViewPr,
+        },
+        Some(PullRequestStateKind::Open) => WorkspacePrTopAction {
+            label: "View PR",
+            tooltip: "Open pull request",
+            css_class: "ws-pr-status-muted",
+            kind: WorkspacePrTopActionKind::ViewPr,
+        },
+        None => WorkspacePrTopAction {
+            label: "Create PR",
+            tooltip: "Ask the current chat to create a pull request",
+            css_class: "ws-pr-status-missing",
+            kind: WorkspacePrTopActionKind::CreatePr,
+        },
+    }
 }
 
 fn workspace_pr_primary_action_label(snapshot: &WorkspacePrStatusSnapshot) -> &'static str {
-    if snapshot.pr.is_some() {
-        "View PR"
-    } else {
-        "Create PR"
-    }
-}
-
-fn workspace_pr_primary_action_tooltip(snapshot: &WorkspacePrStatusSnapshot) -> &'static str {
-    match snapshot.status.as_ref().map(|status| status.kind) {
-        Some(PullRequestStateKind::Pending) => "Open pull request with pending checks",
-        Some(PullRequestStateKind::Ready) => "Open pull request ready to merge",
-        Some(PullRequestStateKind::Failed) => "Open pull request with failing checks",
-        Some(PullRequestStateKind::Merged) => "Open merged pull request",
-        Some(PullRequestStateKind::Open) => "Open pull request",
-        None => "Ask the current chat to create a pull request",
-    }
+    workspace_pr_primary_action(snapshot).label
 }
 
 fn connect_create_pr_prompt_button(
@@ -5324,6 +5415,72 @@ fn connect_create_pr_prompt_button(
     });
 }
 
+fn connect_commit_and_push_prompt_button(
+    button: &Button,
+    db_path: PathBuf,
+    workspace_name: String,
+    state: AppState,
+    refresh_hub: RefreshHub,
+) {
+    button.connect_clicked(move |_| {
+        let prompt = workspace_commit_and_push_chat_prompt(&db_path, &workspace_name);
+        state.queue_pending_chat_prompt(prompt);
+        state.set_active_workspace_tab(WorkspaceTab::Chats);
+        refresh_hub.refresh(RefreshScope::Workspace);
+    });
+}
+
+fn connect_fix_blocked_prompt_button(
+    button: &Button,
+    db_path: PathBuf,
+    workspace_name: String,
+    state: AppState,
+    feedback: &Label,
+    toast_overlay: &ToastOverlay,
+) {
+    let feedback_for_fix = feedback.clone();
+    let toast_for_fix = toast_overlay.clone();
+    button.connect_clicked(move |_| {
+        let prompt = WorkspaceStore::open(db_path.clone())
+            .and_then(|store| store.pull_request_checks_agent_prompt(&workspace_name))
+            .unwrap_or_else(|_| workspace_conflict_resolution_prompt(&db_path, &workspace_name));
+        state.queue_pending_chat_prompt(prompt);
+        state.set_active_workspace_tab(WorkspaceTab::Chats);
+        apply_action_feedback(
+            &feedback_for_fix,
+            &toast_for_fix,
+            "Queued a prompt for the selected chat.",
+            true,
+        );
+    });
+}
+
+fn connect_merge_pr_button(
+    button: &Button,
+    db_path: &Path,
+    workspace_name: &str,
+    feedback: &Label,
+    toast_overlay: &ToastOverlay,
+    refresh_hub: RefreshHub,
+) {
+    let db_for_merge = db_path.to_path_buf();
+    let workspace_for_merge = workspace_name.to_owned();
+    let feedback_for_merge = feedback.clone();
+    let toast_for_merge = toast_overlay.clone();
+    button.connect_clicked(move |_| {
+        let result = WorkspaceStore::open(db_for_merge.clone()).and_then(|store| {
+            store.merge_and_maybe_archive_pull_request(&workspace_for_merge, Some("squash"))
+        });
+        apply_action_feedback(
+            &feedback_for_merge,
+            &toast_for_merge,
+            &pull_request_merge_and_archive_feedback(result),
+            true,
+        );
+        refresh_hub.refresh(RefreshScope::All);
+    });
+}
+
 fn workspace_pr_status_panel(
     db_path: &Path,
     store: &WorkspaceStore,
@@ -5333,85 +5490,90 @@ fn workspace_pr_status_panel(
     toast_overlay: &ToastOverlay,
 ) -> GBox {
     let snapshot = workspace_pr_status_snapshot(store, workspace_name);
-    let panel = GBox::new(Orientation::Vertical, 8);
+    let action = workspace_pr_primary_action(&snapshot);
+    let panel = GBox::new(Orientation::Horizontal, 8);
     panel.add_css_class("ws-pr-compact-panel");
-    if let Some(status) = snapshot.status.as_ref() {
-        panel.add_css_class(status.css_class);
-    } else {
-        panel.add_css_class("ws-pr-status-missing");
-    }
-
-    let top = GBox::new(Orientation::Horizontal, 8);
-    top.set_hexpand(true);
-    let title = Label::new(Some(workspace_pr_status_title(&snapshot)));
+    panel.add_css_class(action.css_class);
+    let title = Label::new(Some(workspace_pr_status_title(&snapshot, action)));
     title.add_css_class("ws-pr-compact-title");
     title.set_xalign(0.0);
     title.set_hexpand(true);
-    top.append(&title);
-
-    if let Some(status) = snapshot.status.as_ref() {
-        let badge = Label::new(Some(&status.label));
-        badge.add_css_class("ws-pr-status");
-        badge.add_css_class(status.css_class);
-        top.append(&badge);
-    }
-    panel.append(&top);
-
-    let detail_text = workspace_pr_status_detail(&snapshot);
-    let detail = Label::new(Some(&detail_text));
-    detail.add_css_class("card-meta");
-    detail.set_xalign(0.0);
-    detail.set_wrap(true);
-    panel.append(&detail);
+    panel.append(&title);
 
     let feedback = Label::new(None);
     feedback.add_css_class("card-meta");
     feedback.set_xalign(0.0);
     feedback.set_wrap(true);
 
-    let branch_row = make_action_row();
-    let push_btn = secondary_button("Push branch");
-    let force_push_btn = destructive_button("Force Push Lease");
-    connect_push_branch_button(&push_btn, db_path, workspace_name, &feedback, toast_overlay);
-    connect_force_push_button(
-        &force_push_btn,
-        db_path,
-        workspace_name,
-        &feedback,
-        toast_overlay,
-    );
-    branch_row.append(&push_btn);
-    branch_row.append(&force_push_btn);
-    panel.append(&branch_row);
-
-    if let Some(pr) = snapshot.pr.as_ref() {
-        let row = make_action_row();
-        let view_btn = secondary_button("View PR");
-        let url = pr.url.clone();
-        view_btn.connect_clicked(move |_| open_external_url(&url));
-        row.append(&view_btn);
-        panel.append(&row);
-    } else {
-        let row = make_action_row();
-        let create_btn = secondary_button("Create PR");
-        create_btn.add_css_class("suggested-action");
-        create_btn.set_tooltip_text(Some(workspace_pr_primary_action_tooltip(&snapshot)));
-        connect_create_pr_prompt_button(
-            &create_btn,
+    let primary_btn = secondary_button(action.label);
+    primary_btn.add_css_class("ws-pr-action-button");
+    primary_btn.add_css_class(action.css_class);
+    primary_btn.set_tooltip_text(Some(action.tooltip));
+    match action.kind {
+        WorkspacePrTopActionKind::CreatePr => connect_create_pr_prompt_button(
+            &primary_btn,
             db_path.to_path_buf(),
             workspace_name.to_owned(),
             state.clone(),
-            refresh_hub,
-        );
-        row.append(&create_btn);
-        panel.append(&row);
+            refresh_hub.clone(),
+        ),
+        WorkspacePrTopActionKind::CommitAndPush => connect_commit_and_push_prompt_button(
+            &primary_btn,
+            db_path.to_path_buf(),
+            workspace_name.to_owned(),
+            state.clone(),
+            refresh_hub.clone(),
+        ),
+        WorkspacePrTopActionKind::Push => {
+            connect_push_branch_button(
+                &primary_btn,
+                db_path,
+                workspace_name,
+                &feedback,
+                toast_overlay,
+            );
+        }
+        WorkspacePrTopActionKind::MergePr => connect_merge_pr_button(
+            &primary_btn,
+            db_path,
+            workspace_name,
+            &feedback,
+            toast_overlay,
+            refresh_hub.clone(),
+        ),
+        WorkspacePrTopActionKind::FixBlocked => connect_fix_blocked_prompt_button(
+            &primary_btn,
+            db_path.to_path_buf(),
+            workspace_name.to_owned(),
+            state.clone(),
+            &feedback,
+            toast_overlay,
+        ),
+        WorkspacePrTopActionKind::ViewPr => {
+            if let Some(pr) = snapshot.pr.as_ref() {
+                let url = pr.url.clone();
+                primary_btn.connect_clicked(move |_| open_external_url(&url));
+            }
+        }
     }
-    panel.append(&feedback);
+    panel.append(&primary_btn);
 
     panel
 }
 
-fn workspace_pr_status_title(snapshot: &WorkspacePrStatusSnapshot) -> &'static str {
+fn workspace_pr_status_title(
+    snapshot: &WorkspacePrStatusSnapshot,
+    action: WorkspacePrTopAction,
+) -> &'static str {
+    match action.kind {
+        WorkspacePrTopActionKind::CommitAndPush => return "Commit and push branch",
+        WorkspacePrTopActionKind::Push => return "Push branch",
+        WorkspacePrTopActionKind::CreatePr => return "No pull request yet",
+        WorkspacePrTopActionKind::FixBlocked if action.css_class == "ws-pr-status-failed" => {
+            return "Blocked";
+        }
+        _ => {}
+    }
     match snapshot.status.as_ref().map(|status| status.kind) {
         Some(PullRequestStateKind::Pending) => "Checks pending",
         Some(PullRequestStateKind::Ready) => "Ready to merge",
@@ -5419,22 +5581,6 @@ fn workspace_pr_status_title(snapshot: &WorkspacePrStatusSnapshot) -> &'static s
         Some(PullRequestStateKind::Merged) => "Pull request merged",
         Some(PullRequestStateKind::Open) => "Pull request open",
         None => "No pull request yet",
-    }
-}
-
-fn workspace_pr_status_detail(snapshot: &WorkspacePrStatusSnapshot) -> String {
-    match (snapshot.pr.as_ref(), snapshot.status.as_ref()) {
-        (Some(pr), Some(status)) => match status.kind {
-            PullRequestStateKind::Pending => {
-                format!("PR #{} is waiting on GitHub checks.", pr.number)
-            }
-            PullRequestStateKind::Ready => format!("PR #{} is clear to merge.", pr.number),
-            PullRequestStateKind::Failed => format!("PR #{} needs fixes.", pr.number),
-            PullRequestStateKind::Merged => format!("PR #{} has been merged.", pr.number),
-            PullRequestStateKind::Open => format!("PR #{} is open.", pr.number),
-        },
-        (Some(pr), None) => format!("PR #{} is recorded.", pr.number),
-        (None, _) => "Use Create PR when the branch is ready.".to_owned(),
     }
 }
 
@@ -5577,6 +5723,22 @@ fn workspace_create_pr_chat_prompt_from_parts(
         prompt.push_str(context_brief);
     }
     prompt
+}
+
+fn workspace_commit_and_push_chat_prompt(_db_path: &Path, name: &str) -> String {
+    format!(
+        "Commit and push workspace {name}.\n\n\
+         Review staged, unstaged, and untracked changes. Make the smallest coherent commit for \
+         the current work, push the workspace branch, and report the commit plus push result."
+    )
+}
+
+fn workspace_conflict_resolution_prompt(_db_path: &Path, name: &str) -> String {
+    format!(
+        "Resolve the blockers for workspace {name} before PR/merge.\n\n\
+         Inspect workspace conflicts, failing checks, and branch state. Make the smallest safe \
+         fix, rerun the relevant verification, and report what changed."
+    )
 }
 
 fn workspace_script_prompt(db_path: &Path, name: &str, script_key: &str, label: &str) -> String {
@@ -7736,6 +7898,56 @@ mod tests {
         }
     }
 
+    fn test_workspace() -> Workspace {
+        Workspace {
+            id: 1,
+            repository_id: 2,
+            name: "berlin".to_owned(),
+            path: std::path::PathBuf::from("/tmp/berlin"),
+            branch: "lc/berlin".to_owned(),
+            base_ref: "main".to_owned(),
+            port_base: 4200,
+            status: "active".to_owned(),
+            archived_at: None,
+            created_at: "then".to_owned(),
+            updated_at: "now".to_owned(),
+        }
+    }
+
+    fn test_pull_request(state: &str) -> linux_archductor_core::workspace::PullRequest {
+        linux_archductor_core::workspace::PullRequest {
+            id: 1,
+            workspace_id: 2,
+            provider: "github".to_owned(),
+            number: 42,
+            url: "https://github.com/example/demo/pull/42".to_owned(),
+            state: state.to_owned(),
+            created_at: "then".to_owned(),
+            updated_at: "now".to_owned(),
+        }
+    }
+
+    fn test_checks_summary(
+        changed_files: usize,
+        branch_push_state: Option<linux_archductor_core::workspace::BranchPushState>,
+        conflicting_workspaces: Vec<(String, Vec<String>)>,
+    ) -> linux_archductor_core::workspace::ChecksSummary {
+        linux_archductor_core::workspace::ChecksSummary {
+            workspace: test_workspace(),
+            changed_files,
+            run_status: None,
+            session_status: None,
+            check_status: None,
+            active_sessions: 0,
+            pull_request: None,
+            open_todos: 0,
+            total_todos: 0,
+            branch_push_state,
+            open_review_comments: 0,
+            conflicting_workspaces,
+        }
+    }
+
     #[test]
     fn workspace_tab_stack_name_maps_palette_targets_to_tabs() {
         assert_eq!(
@@ -8204,30 +8416,139 @@ mod tests {
     }
 
     #[test]
-    fn pr_primary_action_switches_to_view_when_pr_exists() {
+    fn pr_primary_action_switches_by_workspace_state() {
+        let no_pr = WorkspacePrStatusSnapshot {
+            pr: None,
+            status: None,
+            summary: Some(test_checks_summary(0, None, Vec::new())),
+        };
+        assert_eq!(workspace_pr_primary_action_label(&no_pr), "Create PR");
+        assert_eq!(
+            workspace_pr_primary_action(&no_pr).css_class,
+            "ws-pr-status-missing"
+        );
+        assert_eq!(
+            workspace_pr_status_title(&no_pr, workspace_pr_primary_action(&no_pr)),
+            "No pull request yet"
+        );
+
+        let dirty = WorkspacePrStatusSnapshot {
+            pr: None,
+            status: None,
+            summary: Some(test_checks_summary(3, None, Vec::new())),
+        };
+        assert_eq!(workspace_pr_primary_action_label(&dirty), "Commit and Push");
+        assert_eq!(
+            workspace_pr_primary_action(&dirty).css_class,
+            "ws-pr-status-muted"
+        );
+
+        let needs_push = WorkspacePrStatusSnapshot {
+            pr: None,
+            status: None,
+            summary: Some(test_checks_summary(
+                0,
+                Some(linux_archductor_core::workspace::BranchPushState {
+                    ahead: 2,
+                    behind: 0,
+                    has_upstream: true,
+                }),
+                Vec::new(),
+            )),
+        };
+        assert_eq!(
+            workspace_pr_primary_action_label(&needs_push),
+            "Push Branch"
+        );
+        assert_eq!(
+            workspace_pr_primary_action(&needs_push).css_class,
+            "ws-pr-status-muted"
+        );
+
+        let clean_without_upstream = WorkspacePrStatusSnapshot {
+            pr: None,
+            status: None,
+            summary: Some(test_checks_summary(
+                0,
+                Some(linux_archductor_core::workspace::BranchPushState {
+                    ahead: 0,
+                    behind: 0,
+                    has_upstream: false,
+                }),
+                Vec::new(),
+            )),
+        };
+        assert_eq!(
+            workspace_pr_primary_action_label(&clean_without_upstream),
+            "Create PR"
+        );
+
         let snapshot = WorkspacePrStatusSnapshot {
-            pr: Some(linux_archductor_core::workspace::PullRequest {
-                id: 1,
-                workspace_id: 2,
-                provider: "github".to_owned(),
-                number: 42,
-                url: "https://github.com/example/demo/pull/42".to_owned(),
-                state: "OPEN".to_owned(),
-                created_at: "then".to_owned(),
-                updated_at: "now".to_owned(),
-            }),
+            pr: Some(test_pull_request("OPEN")),
             status: Some(PullRequestStatusSummary {
-                label: "checks pending".to_owned(),
-                css_class: "ws-pr-status-pending",
-                kind: PullRequestStateKind::Pending,
+                label: "ready to merge".to_owned(),
+                css_class: "ws-pr-status-ready",
+                kind: PullRequestStateKind::Ready,
             }),
+            summary: Some(test_checks_summary(0, None, Vec::new())),
         };
 
-        assert_eq!(workspace_pr_primary_action_label(&snapshot), "View PR");
-        assert_eq!(workspace_pr_status_title(&snapshot), "Checks pending");
+        assert_eq!(workspace_pr_primary_action_label(&snapshot), "Merge PR");
         assert_eq!(
-            workspace_pr_primary_action_tooltip(&snapshot),
-            "Open pull request with pending checks"
+            workspace_pr_primary_action(&snapshot).css_class,
+            "ws-pr-status-ready"
+        );
+
+        let blocked = WorkspacePrStatusSnapshot {
+            pr: Some(test_pull_request("OPEN")),
+            status: Some(PullRequestStatusSummary {
+                label: "checks failed".to_owned(),
+                css_class: "ws-pr-status-failed",
+                kind: PullRequestStateKind::Failed,
+            }),
+            summary: Some(test_checks_summary(0, None, Vec::new())),
+        };
+        assert_eq!(workspace_pr_primary_action_label(&blocked), "Fix Checks");
+        assert_eq!(
+            workspace_pr_primary_action(&blocked).css_class,
+            "ws-pr-status-failed"
+        );
+
+        let conflict = WorkspacePrStatusSnapshot {
+            pr: Some(test_pull_request("OPEN")),
+            status: Some(PullRequestStatusSummary {
+                label: "ready to merge".to_owned(),
+                css_class: "ws-pr-status-ready",
+                kind: PullRequestStateKind::Ready,
+            }),
+            summary: Some(test_checks_summary(
+                0,
+                None,
+                vec![("paris".to_owned(), vec!["src/main.rs".to_owned()])],
+            )),
+        };
+        assert_eq!(
+            workspace_pr_primary_action(&conflict).kind,
+            WorkspacePrTopActionKind::FixBlocked
+        );
+        assert_eq!(
+            workspace_pr_primary_action(&conflict).css_class,
+            "ws-pr-status-failed"
+        );
+
+        let merged = WorkspacePrStatusSnapshot {
+            pr: Some(test_pull_request("merged")),
+            status: Some(PullRequestStatusSummary {
+                label: "merged".to_owned(),
+                css_class: "ws-pr-status-merged",
+                kind: PullRequestStateKind::Merged,
+            }),
+            summary: Some(test_checks_summary(0, None, Vec::new())),
+        };
+        assert_eq!(workspace_pr_primary_action_label(&merged), "Merged");
+        assert_eq!(
+            workspace_pr_primary_action(&merged).css_class,
+            "ws-pr-status-merged"
         );
     }
 
