@@ -5034,9 +5034,23 @@ fn workspace_untracked_changes_text(db_path: &Path, name: &str) -> String {
 }
 
 fn workspace_last_turn_changes_text(db_path: &Path, name: &str) -> String {
-    WorkspaceStore::open(db_path)
-        .and_then(|store| store.git_show_commit(name, "HEAD"))
-        .unwrap_or_else(|err| format!("Last turn changes\nCould not read HEAD commit: {err:#}\n"))
+    let result =
+        WorkspaceStore::open(db_path).and_then(|store| store.latest_turn_checkpoint_diff(name));
+    match result {
+        Ok(Some((checkpoint, diff))) if diff.trim().is_empty() => format!(
+            "Last turn changes\nCheckpoint #{} {}\nNo changes since this turn started.\n",
+            checkpoint.id, checkpoint.created_at
+        ),
+        Ok(Some((checkpoint, diff))) => format!(
+            "Last turn changes\nCheckpoint #{} {}\n{}\n",
+            checkpoint.id, checkpoint.created_at, diff
+        ),
+        Ok(None) => {
+            "Last turn changes\nNo turn checkpoint yet. Send a chat prompt to create one.\n"
+                .to_owned()
+        }
+        Err(err) => format!("Last turn changes\nCould not read turn diff: {err:#}\n"),
+    }
 }
 
 fn workspace_checks_and_todos_text(store: &WorkspaceStore, name: &str) -> String {

@@ -1292,6 +1292,24 @@ pub fn agent_session_panel(
             selected_record_id = selected_record.as_ref().map(|record| record.id),
             "session send stage: selected thread record"
         );
+        if let Err(err) = create_turn_checkpoint_for_send(
+            &db_for_send,
+            &workspace_for_send,
+            thread_id,
+            selected_record.as_ref().map(|record| record.id),
+            staged_review,
+        ) {
+            warn!(
+                workspace = %workspace_for_send,
+                thread_id,
+                error = %err,
+                "turn checkpoint creation failed before session send"
+            );
+            append_session_status_message(
+                &messages_for_send,
+                &format!("[checkpoint] Could not create turn checkpoint: {err:#}"),
+            );
+        }
         if matches!(selected_kind, SessionKind::Codex) {
             let running_record = thread_records
                 .iter()
@@ -1946,6 +1964,11 @@ fn parse_session_transcript_inline_event(
     if let Some(event) = read_file_inline_event(role, header, body) {
         return Some(event);
     }
+    if role == SessionTranscriptRole::Tool {
+        if let Some(event) = raw_write_tool_inline_event(header, body) {
+            return Some(event);
+        }
+    }
     let event = if role == SessionTranscriptRole::Tool && is_raw_file_change_event_line(header) {
         CoreCodexInlineEvent::FileChange(parse_codex_file_change_block(body)?)
     } else {
@@ -2459,6 +2482,78 @@ fn inline_event_chip_name(event: &CodexInlineEvent) -> String {
         .unwrap_or_else(|| event.title.clone())
 }
 
+fn raw_write_tool_inline_event(header: &str, body: &str) -> Option<CodexInlineEvent> {
+    if !raw_tool_event_collects_body(header) {
+        return None;
+    }
+    let title = header
+        .trim()
+        .strip_prefix('•')
+        .map(str::trim_start)
+        .unwrap_or_else(|| header.trim())
+        .to_owned();
+    Some(CodexInlineEvent {
+        kind: CodexInlineEventKind::Tool,
+        title,
+        subtitle: Some("Tool call".to_owned()),
+        body: Some(body.to_owned()),
+        path: raw_tool_event_path(header),
+        status: codex_event_status_from_line(body),
+    })
+}
+
+fn raw_tool_event_path(header: &str) -> Option<PathBuf> {
+    let trimmed = header
+        .trim()
+        .strip_prefix('•')
+        .map(str::trim_start)
+        .unwrap_or_else(|| header.trim());
+    let (_, rest) = trimmed.split_once(' ')?;
+    raw_tool_target_looks_path_like(rest).then(|| {
+        PathBuf::from(
+            rest.split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim_matches(|ch: char| {
+                    matches!(ch, '`' | '"' | '\'' | ',' | ';' | '(' | ')' | '[' | ']')
+                }),
+        )
+    })
+}
+
+fn inline_event_body_preview(event: &CodexInlineEvent, body: &str) -> InlineEventBodyPreview {
+    if inline_event_expands_body_by_default(event) {
+        let full = body.trim().to_owned();
+        return InlineEventBodyPreview {
+            preview: full.clone(),
+            full,
+            truncated: false,
+        };
+    }
+    truncate_inline_event_body(body, 320)
+}
+
+fn inline_event_expands_body_by_default(event: &CodexInlineEvent) -> bool {
+    let title = event.title.to_ascii_lowercase();
+    let body = event
+        .body
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    [
+        "write ",
+        "edit ",
+        "create ",
+        "update ",
+        "functions.apply_patch",
+        "functions.write_stdin",
+        "apply_patch",
+        "write_stdin",
+    ]
+    .iter()
+    .any(|marker| title.contains(marker) || body.contains(marker))
+}
+
 fn truncate_inline_event_body(body: &str, max_chars: usize) -> InlineEventBodyPreview {
     let full = body.trim().to_owned();
     if full.chars().count() <= max_chars {
@@ -2673,14 +2768,15 @@ fn inline_event_widget(event: &CodexInlineEvent) -> Widget {
     }
     root.set_hexpand(true);
 
-    let toggle = ToggleButton::with_label(&inline_event_chip_label(event, false));
+    let expand_by_default = inline_event_expands_body_by_default(event);
+    let toggle = ToggleButton::with_label(&inline_event_chip_label(event, expand_by_default));
     toggle.add_css_class("chat-inline-event-chip");
     toggle.set_halign(Align::Start);
     toggle.set_tooltip_text(Some(&inline_event_tooltip(event)));
     root.append(&toggle);
 
     let body_text = inline_event_body_text(event);
-    let body_preview = truncate_inline_event_body(&body_text, 320);
+    let body_preview = inline_event_body_preview(event, &body_text);
     let body = Label::new(Some(&body_preview.preview));
     body.add_css_class("chat-inline-event-body");
     body.set_selectable(true);
@@ -2690,9 +2786,10 @@ fn inline_event_widget(event: &CodexInlineEvent) -> Widget {
     let body_revealer = Revealer::new();
     body_revealer.set_transition_type(RevealerTransitionType::SlideDown);
     body_revealer.set_transition_duration(180);
-    body_revealer.set_reveal_child(false);
+    body_revealer.set_reveal_child(expand_by_default);
     body_revealer.set_child(Some(&body));
     root.append(&body_revealer);
+    toggle.set_active(expand_by_default);
 
     toggle.connect_toggled({
         let body = body.clone();
@@ -4625,6 +4722,7 @@ fn collect_session_role_event(
         && !header.starts_with("[tool ")
         && !header.starts_with("Ran ")
         && !header.starts_with("Read ")
+        && !raw_tool_event_collects_body(header)
     {
         return (header.to_owned(), start + 1);
     }
@@ -4640,6 +4738,17 @@ fn collect_session_role_event(
         index += 1;
     }
     (body.join("\n"), index)
+}
+
+fn raw_tool_event_collects_body(header: &str) -> bool {
+    let trimmed = header.trim_start_matches('•').trim_start();
+    if trimmed.contains("functions.apply_patch") || trimmed.contains("functions.write_stdin") {
+        return true;
+    }
+    let Some((verb, _)) = trimmed.split_once(' ') else {
+        return false;
+    };
+    matches!(verb, "Write" | "Edit" | "Create" | "Update")
 }
 
 fn collect_file_change_event(lines: &[&str], start: usize) -> (String, usize) {
@@ -5088,7 +5197,11 @@ fn is_raw_skill_event_line(line: &str) -> bool {
 }
 
 fn is_raw_tool_event_line(line: &str) -> bool {
-    let trimmed = line.trim();
+    let trimmed = line
+        .trim()
+        .strip_prefix('•')
+        .map(str::trim_start)
+        .unwrap_or_else(|| line.trim());
     if trimmed
         .strip_prefix("Ran ")
         .is_some_and(|command| !command.trim().is_empty())
@@ -5603,6 +5716,23 @@ fn queue_archcar_user_send(
     } else {
         false
     }
+}
+
+fn create_turn_checkpoint_for_send(
+    db_path: &Path,
+    workspace: &str,
+    thread_id: i64,
+    session_id: Option<i64>,
+    staged_review: bool,
+) -> anyhow::Result<i64> {
+    let prompt_kind = if staged_review { "review" } else { "user" };
+    let checkpoint = WorkspaceStore::open(db_path.to_path_buf())?.checkpoint_create_turn_start(
+        workspace,
+        thread_id,
+        session_id,
+        prompt_kind,
+    )?;
+    Ok(checkpoint.id)
 }
 
 fn update_working_indicator_for_archcar_event(
@@ -6554,6 +6684,47 @@ fix it
         assert_eq!(long.preview, "abcd...");
         assert!(long.truncated);
         assert_eq!(long.full, "abcdef");
+    }
+
+    #[test]
+    fn write_inline_event_body_preview_keeps_full_body() {
+        let full = format!("Write src/main.rs\n{}", "x".repeat(500));
+        let event = CodexInlineEvent {
+            kind: CodexInlineEventKind::Tool,
+            title: "Write src/main.rs".to_owned(),
+            subtitle: None,
+            body: Some(full.clone()),
+            path: None,
+            status: CodexInlineEventStatus::Complete,
+        };
+
+        let preview = inline_event_body_preview(&event, &full);
+
+        assert_eq!(preview.preview, full);
+        assert_eq!(preview.full, full);
+        assert!(!preview.truncated);
+        assert!(inline_event_expands_body_by_default(&event));
+    }
+
+    #[test]
+    fn transcript_groups_raw_write_event_with_full_body() {
+        let transcript =
+            "Write src/main.rs\nfn main() {\n    println!(\"hi\");\n}\n[session exited]\n";
+
+        let events = parse_session_transcript_events(transcript);
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].role, SessionTranscriptRole::Tool);
+        assert_eq!(
+            events[0].body,
+            "Write src/main.rs\nfn main() {\n    println!(\"hi\");\n}"
+        );
+        let inline_events = session_transcript_inline_events(&events[0]);
+        assert_eq!(inline_events.len(), 1);
+        assert_eq!(
+            inline_events[0].body.as_deref(),
+            Some(events[0].body.as_str())
+        );
     }
 
     #[test]

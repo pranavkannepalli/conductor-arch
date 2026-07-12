@@ -4004,19 +4004,61 @@ mutation($threadId: ID!) {{
         let message = message.trim();
         anyhow::ensure!(!message.is_empty(), "checkpoint message is required");
         let workspace = self.get_by_name(name)?;
-        let now = timestamp();
-        let git_ref = format!("refs/linux-archductor/checkpoints/{}/{now}", workspace.id);
-        // Create the ref pointing at the current HEAD of the workspace branch
-        let head = git_output_dynamic(&workspace.path, &["rev-parse", "HEAD"])?;
-        let head = head.trim();
-        git_dynamic(&workspace.path, &["update-ref", &git_ref, head])?;
+        let checkpoint = create_worktree_checkpoint_commit(&workspace, message, "manual")?;
 
         self.conn.execute(
             "INSERT INTO checkpoints (workspace_id, session_id, git_ref, message, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![workspace.id, session_id, git_ref, message, now],
+            params![
+                workspace.id,
+                session_id,
+                checkpoint.git_ref,
+                message,
+                checkpoint.created_at
+            ],
         )?;
         self.get_checkpoint(self.conn.last_insert_rowid())
+    }
+
+    pub fn checkpoint_create_turn_start(
+        &self,
+        name: &str,
+        thread_id: i64,
+        session_id: Option<i64>,
+        prompt_kind: &str,
+    ) -> Result<Checkpoint> {
+        let prompt_kind = prompt_kind.trim();
+        let prompt_kind = if prompt_kind.is_empty() {
+            "user"
+        } else {
+            prompt_kind
+        };
+        let message = format!("Turn start: thread #{thread_id} {prompt_kind}");
+        let workspace = self.get_by_name(name)?;
+        let checkpoint = create_worktree_checkpoint_commit(&workspace, &message, "turn")?;
+
+        self.conn.execute(
+            "INSERT INTO checkpoints (workspace_id, session_id, git_ref, message, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                workspace.id,
+                session_id,
+                checkpoint.git_ref,
+                message,
+                checkpoint.created_at
+            ],
+        )?;
+        let checkpoint = self.get_checkpoint(self.conn.last_insert_rowid())?;
+        self.record_workspace_event(
+            workspace.id,
+            &workspace.name,
+            "checkpoint.turn_start",
+            &format!(
+                "Created turn checkpoint #{} for thread #{thread_id}",
+                checkpoint.id
+            ),
+        )?;
+        Ok(checkpoint)
     }
 
     pub fn checkpoint_list(&self, name: &str) -> Result<Vec<Checkpoint>> {
@@ -4029,6 +4071,19 @@ mutation($threadId: ID!) {{
             .query_map([workspace.id], row_to_checkpoint)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(checkpoints)
+    }
+
+    pub fn latest_turn_checkpoint_diff(&self, name: &str) -> Result<Option<(Checkpoint, String)>> {
+        let workspace = self.get_by_name(name)?;
+        let checkpoint = self
+            .checkpoint_list(name)?
+            .into_iter()
+            .find(|checkpoint| checkpoint.message.starts_with("Turn start:"));
+        let Some(checkpoint) = checkpoint else {
+            return Ok(None);
+        };
+        let diff = diff_worktree_against_ref(&workspace, &checkpoint.git_ref)?;
+        Ok(Some((checkpoint, diff)))
     }
 
     pub fn checkpoint_restore(&self, name: &str, checkpoint_id: i64) -> Result<Checkpoint> {
@@ -7687,6 +7742,63 @@ fn root_tracked_patch(root_path: &Path) -> Result<String> {
     )?;
     let _ = fs::remove_file(&index_path);
     Ok(current_patch)
+}
+
+struct CreatedCheckpointRef {
+    git_ref: String,
+    created_at: String,
+}
+
+fn create_worktree_checkpoint_commit(
+    workspace: &Workspace,
+    message: &str,
+    ref_kind: &str,
+) -> Result<CreatedCheckpointRef> {
+    let now = timestamp();
+    let ref_suffix = timestamp_nanos();
+    let git_ref = format!(
+        "refs/linux-archductor/checkpoints/{}/{ref_kind}-{ref_suffix}",
+        workspace.id
+    );
+    let index_path = std::env::temp_dir().join(format!(
+        "linux-archductor-checkpoint-index-{}-{ref_suffix}",
+        workspace.id
+    ));
+    let result = (|| -> Result<CreatedCheckpointRef> {
+        let tree = worktree_snapshot_tree(&workspace.path, &index_path)?;
+        let head = git_output_dynamic(&workspace.path, &["rev-parse", "HEAD"])?;
+        let commit = git_commit_tree(&workspace.path, tree.trim(), head.trim(), message)?;
+        git_dynamic(&workspace.path, &["update-ref", &git_ref, commit.trim()])?;
+        Ok(CreatedCheckpointRef {
+            git_ref,
+            created_at: now,
+        })
+    })();
+    let _ = fs::remove_file(&index_path);
+    result
+}
+
+fn diff_worktree_against_ref(workspace: &Workspace, base_ref: &str) -> Result<String> {
+    let now = timestamp_nanos();
+    let index_path = std::env::temp_dir().join(format!(
+        "linux-archductor-turn-diff-index-{}-{now}",
+        workspace.id
+    ));
+    let result = (|| -> Result<String> {
+        let tree = worktree_snapshot_tree(&workspace.path, &index_path)?;
+        git_output_dynamic(
+            &workspace.path,
+            &["diff", "--binary", base_ref, tree.trim()],
+        )
+    })();
+    let _ = fs::remove_file(&index_path);
+    result
+}
+
+fn worktree_snapshot_tree(cwd: &Path, index_path: &Path) -> Result<String> {
+    git_with_index(cwd, index_path, &["read-tree", "HEAD"])?;
+    git_with_index(cwd, index_path, &["add", "-A"])?;
+    git_with_index_output(cwd, index_path, &["write-tree"])
 }
 
 fn spotlight_conflict_detail(current_patch: &str, expected_patch: &str) -> String {
@@ -16418,6 +16530,101 @@ spotlight_testing = true
         let list = store.checkpoint_list("berlin").unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].id, cp.id);
+    }
+
+    #[test]
+    fn checkpoint_create_snapshots_dirty_worktree_and_untracked_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        fs::write(workspace.path.join("README.md"), "dirty readme\n").unwrap();
+        fs::write(workspace.path.join("new.txt"), "new file\n").unwrap();
+
+        let cp = store
+            .checkpoint_create("berlin", "dirty state", None)
+            .unwrap();
+
+        let readme = git_output_dynamic(
+            &workspace.path,
+            &["show", &format!("{}:README.md", cp.git_ref)],
+        )
+        .unwrap();
+        let new_file = git_output_dynamic(
+            &workspace.path,
+            &["show", &format!("{}:new.txt", cp.git_ref)],
+        )
+        .unwrap();
+
+        assert_eq!(readme, "dirty readme\n");
+        assert_eq!(new_file, "new file\n");
+    }
+
+    #[test]
+    fn latest_turn_checkpoint_diff_compares_current_worktree_to_turn_start() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        fs::write(workspace.path.join("README.md"), "turn start\n").unwrap();
+        store
+            .checkpoint_create_turn_start("berlin", 42, None, "user")
+            .unwrap();
+        fs::write(workspace.path.join("README.md"), "turn end\n").unwrap();
+        fs::write(workspace.path.join("created.txt"), "created during turn\n").unwrap();
+
+        let (checkpoint, diff) = store
+            .latest_turn_checkpoint_diff("berlin")
+            .unwrap()
+            .unwrap();
+
+        assert!(checkpoint.message.starts_with("Turn start: thread #42"));
+        assert!(diff.contains("-turn start"));
+        assert!(diff.contains("+turn end"));
+        assert!(diff.contains("created.txt"));
+        assert!(diff.contains("+created during turn"));
     }
 
     #[test]
