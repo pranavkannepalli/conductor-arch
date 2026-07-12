@@ -145,21 +145,30 @@ fn simple_workspace_shell(
     shell.set_hexpand(true);
     shell.set_overflow(gtk::Overflow::Hidden);
 
-    // Horizontal split: center (flex) + right (fixed 300px)
-    let split = Paned::new(Orientation::Horizontal);
-    split.set_wide_handle(false);
-    split.set_resize_start_child(true);
-    split.set_resize_end_child(true);
-    split.set_shrink_start_child(true);
-    split.set_shrink_end_child(true);
-    split.set_position(split_position_for_ratio(
+    let outer_split = Paned::new(Orientation::Horizontal);
+    outer_split.set_wide_handle(false);
+    outer_split.set_resize_start_child(true);
+    outer_split.set_resize_end_child(true);
+    outer_split.set_shrink_start_child(true);
+    outer_split.set_shrink_end_child(true);
+    outer_split.set_position(260);
+    outer_split.set_vexpand(true);
+
+    // Horizontal split: center (flex) + right review/context panel.
+    let main_split = Paned::new(Orientation::Horizontal);
+    main_split.set_wide_handle(false);
+    main_split.set_resize_start_child(true);
+    main_split.set_resize_end_child(true);
+    main_split.set_shrink_start_child(true);
+    main_split.set_shrink_end_child(true);
+    main_split.set_position(split_position_for_ratio(
         1280,
         WORKSPACE_SPLIT_START_WEIGHT,
         WORKSPACE_SPLIT_END_WEIGHT,
         WORKSPACE_SPLIT_MIN_START,
         WORKSPACE_SPLIT_MIN_END,
     ));
-    split.set_vexpand(true);
+    main_split.set_vexpand(true);
     let right_panel_handle = Rc::new(RefCell::new(None::<GBox>));
     let collapse_right_panel: Rc<dyn Fn()> = {
         let right_panel_handle = right_panel_handle.clone();
@@ -180,7 +189,10 @@ fn simple_workspace_shell(
         collapse_right_panel,
         ToastManager::new(&toast_overlay),
     );
-    split.set_start_child(Some(&center));
+    main_split.set_start_child(Some(&center));
+
+    let left = ws_left_navigation_panel(db_path, store, ws, open_file.clone());
+    outer_split.set_start_child(Some(&left));
 
     // Right: file list + run console
     let right = ws_right_panel(
@@ -196,9 +208,10 @@ fn simple_workspace_shell(
         collapse_sidebar,
     );
     *right_panel_handle.borrow_mut() = Some(right.clone());
-    split.set_end_child(Some(&right));
+    main_split.set_end_child(Some(&right));
+    outer_split.set_end_child(Some(&main_split));
 
-    shell.append(&split);
+    shell.append(&outer_split);
     shell
 }
 
@@ -1192,7 +1205,46 @@ where
     }
 }
 
-// ── Right panel (file list + run console) ───────────────────────
+// ── Left/right workspace panels ─────────────────────────────────
+
+fn ws_left_navigation_panel(
+    db_path: &Path,
+    store: &WorkspaceStore,
+    ws: &Workspace,
+    open_file: Rc<dyn Fn(&str)>,
+) -> GBox {
+    let panel = GBox::new(Orientation::Vertical, 0);
+    panel.add_css_class("ws-left-panel");
+    panel.set_width_request(240);
+    panel.set_vexpand(true);
+    panel.set_overflow(gtk::Overflow::Hidden);
+
+    let stack = Stack::new();
+    stack.set_vexpand(true);
+    let switcher = StackSwitcher::new();
+    switcher.set_stack(Some(&stack));
+    switcher.add_css_class("panel-switcher");
+    panel.append(&switcher);
+
+    stack.add_titled(
+        &ws_simple_file_list(db_path, ws, open_file),
+        Some("files"),
+        "Files",
+    );
+    let git_text = store
+        .diff_file_summaries(&ws.name)
+        .map(|summaries| format_diff_file_summary(&summaries))
+        .unwrap_or_else(|err| format!("Could not read git changes: {err:#}\n"));
+    stack.add_titled(&text_panel(&git_text), Some("git"), "Git");
+    stack.add_titled(
+        &text_panel(&workspace_todos_text(store, &ws.name)),
+        Some("todos"),
+        "Todos",
+    );
+    stack.set_visible_child_name("files");
+    panel.append(&stack);
+    panel
+}
 
 fn ws_right_panel(
     db_path: &Path,
