@@ -460,6 +460,11 @@ pub fn agent_session_panel(
     left_group.append(&provider_model_btn);
     left_group.append(&thinking_btn);
 
+    let record_state = Rc::new(RefCell::new(Vec::<ProcessRecord>::new()));
+    let selected_session: Rc<RefCell<Option<i64>>> = Rc::new(RefCell::new(None));
+    let active_sessions: Rc<RefCell<HashSet<i64>>> = Rc::new(RefCell::new(HashSet::new()));
+    let last_output = Rc::new(RefCell::new(HashMap::<i64, Instant>::new()));
+
     let right_group = GBox::new(Orientation::Horizontal, 8);
     right_group.set_halign(Align::End);
     right_group.set_hexpand(false);
@@ -479,13 +484,116 @@ pub fn agent_session_panel(
             );
         }
     });
-
     let send_btn = icon_button("send-symbolic", "Send message");
     send_btn.add_css_class("chat-send-btn");
     send_btn.set_tooltip_text(Some("Send message"));
+    let interrupt_btn = session_secondary_button("Interrupt");
+    interrupt_btn.set_tooltip_text(Some("Interrupt the active Codex session"));
+    interrupt_btn.connect_clicked({
+        let database_path = database_path.clone();
+        let workspace_name = _workspace_name.to_owned();
+        let selected_thread = selected_thread.clone();
+        let selected_harness = selected_harness.clone();
+        let record_state = record_state.clone();
+        let active_sessions = active_sessions.clone();
+        let last_output = last_output.clone();
+        let archcar_bridge = archcar_bridge.clone();
+        let refresh_chat_surface = refresh_chat_surface.clone();
+        move |_| {
+            let Some(thread_id) = *selected_thread.borrow() else {
+                return;
+            };
+            let Some(session_id) = running_session_for_thread(
+                &record_state.borrow(),
+                thread_id,
+                *selected_harness.borrow(),
+            ) else {
+                return;
+            };
+            let _ = archcar_bridge.kill_session(session_id);
+            let _ = stop_active_chat_session(
+                &database_path,
+                &workspace_name,
+                session_id,
+                &active_sessions,
+                &last_output,
+            );
+            if let Some(refresh) = refresh_chat_surface.borrow().as_ref().cloned() {
+                refresh();
+            }
+        }
+    });
+    let continue_btn = session_secondary_button("Continue");
+    continue_btn.set_tooltip_text(Some("Send a continue prompt"));
+    continue_btn.connect_clicked({
+        let input_view = input_view.clone();
+        let send_btn = send_btn.clone();
+        move |_| {
+            input_view.buffer().set_text(continue_agent_prompt());
+            input_view.grab_focus();
+            send_btn.emit_clicked();
+        }
+    });
+    let retry_btn = session_secondary_button("Retry");
+    retry_btn.set_tooltip_text(Some("Ask the agent to retry the last high-level action"));
+    retry_btn.connect_clicked({
+        let input_view = input_view.clone();
+        let send_btn = send_btn.clone();
+        move |_| {
+            input_view.buffer().set_text(retry_agent_prompt());
+            input_view.grab_focus();
+            send_btn.emit_clicked();
+        }
+    });
+    let restart_btn = session_secondary_button("Restart");
+    restart_btn.set_tooltip_text(Some("Restart Codex for the selected thread"));
+    restart_btn.connect_clicked({
+        let database_path = database_path.clone();
+        let workspace_name = _workspace_name.to_owned();
+        let selected_thread = selected_thread.clone();
+        let selected_harness = selected_harness.clone();
+        let record_state = record_state.clone();
+        let active_sessions = active_sessions.clone();
+        let last_output = last_output.clone();
+        let archcar_bridge = archcar_bridge.clone();
+        let inflight_archcar_actions = inflight_archcar_actions.clone();
+        let refresh_chat_surface = refresh_chat_surface.clone();
+        move |_| {
+            let Some(thread_id) = *selected_thread.borrow() else {
+                return;
+            };
+            if let Some(session_id) = running_session_for_thread(
+                &record_state.borrow(),
+                thread_id,
+                *selected_harness.borrow(),
+            ) {
+                let _ = archcar_bridge.kill_session(session_id);
+                let _ = stop_active_chat_session(
+                    &database_path,
+                    &workspace_name,
+                    session_id,
+                    &active_sessions,
+                    &last_output,
+                );
+            }
+            let _ = request_archcar_ensure(
+                &archcar_bridge,
+                inflight_archcar_actions.as_ref(),
+                workspace_name.clone(),
+                Some(thread_id),
+            );
+            if let Some(refresh) = refresh_chat_surface.borrow().as_ref().cloned() {
+                refresh();
+            }
+        }
+    });
 
     right_group.append(&new_chat_btn);
     right_group.append(&context_usage);
+    right_group.append(&interrupt_btn);
+    right_group.append(&continue_btn);
+    right_group.append(&retry_btn);
+    right_group.append(&restart_btn);
     right_group.append(&send_btn);
 
     toolbar.append(&left_group);
@@ -494,11 +602,19 @@ pub fn agent_session_panel(
     let sync_live_controls_fn: Rc<dyn Fn()> = Rc::new({
         let selected_harness = selected_harness.clone();
         let thinking_btn = thinking_btn.clone();
+        let interrupt_btn = interrupt_btn.clone();
+        let continue_btn = continue_btn.clone();
+        let retry_btn = retry_btn.clone();
+        let restart_btn = restart_btn.clone();
         move || {
             let controls = visible_live_controls_for_provider(session_kind_provider(
                 *selected_harness.borrow(),
             ));
             thinking_btn.set_visible(controls.iter().any(|control| control == "thinking"));
+            interrupt_btn.set_visible(controls.iter().any(|control| control == "interrupt"));
+            continue_btn.set_visible(controls.iter().any(|control| control == "continue"));
+            retry_btn.set_visible(controls.iter().any(|control| control == "retry"));
+            restart_btn.set_visible(controls.iter().any(|control| control == "restart"));
         }
     });
     *sync_live_controls.borrow_mut() = Some(sync_live_controls_fn.clone());
@@ -510,7 +626,6 @@ pub fn agent_session_panel(
     chat_overlay.add_overlay(&composer_wrap);
     chat_overlay.set_measure_overlay(&composer_wrap, false);
 
-    let record_state = Rc::new(RefCell::new(Vec::<ProcessRecord>::new()));
     let last_render_signature = Rc::new(RefCell::new(None::<ChatRenderSignature>));
     let buffer = input_view.buffer();
     let buffer_for_update = buffer.clone();
@@ -562,9 +677,6 @@ pub fn agent_session_panel(
     });
     update_composer_state();
 
-    let selected_session: Rc<RefCell<Option<i64>>> = Rc::new(RefCell::new(None));
-    let active_sessions: Rc<RefCell<HashSet<i64>>> = Rc::new(RefCell::new(HashSet::new()));
-    let last_output = Rc::new(RefCell::new(HashMap::<i64, Instant>::new()));
     let refresh_chat_surface_for_view = refresh_chat_surface.clone();
 
     let refresh_view = {
@@ -3769,11 +3881,38 @@ fn visible_live_controls_for_provider(provider: &str) -> Vec<String> {
             "provider".to_owned(),
             "model".to_owned(),
             "thinking".to_owned(),
+            "interrupt".to_owned(),
+            "continue".to_owned(),
+            "retry".to_owned(),
+            "restart".to_owned(),
         ],
         "claude" => vec!["provider".to_owned()],
         "shell" => vec!["provider".to_owned()],
         _ => vec!["provider".to_owned()],
     }
+}
+
+fn continue_agent_prompt() -> &'static str {
+    "Continue from the current context. Keep momentum and call out any blocker."
+}
+
+fn retry_agent_prompt() -> &'static str {
+    "Retry the last failed or incomplete high-level action. If nothing is retryable, explain why."
+}
+
+fn running_session_for_thread(
+    records: &[ProcessRecord],
+    thread_id: i64,
+    kind: SessionKind,
+) -> Option<i64> {
+    records
+        .iter()
+        .find(|record| {
+            record.chat_thread_id == Some(thread_id)
+                && record.status == ProcessStatus::Running
+                && session_kind_matches_record(record, kind)
+        })
+        .map(|record| record.id)
 }
 
 fn resolve_or_create_thread_id_for_send<F>(
@@ -6251,6 +6390,17 @@ mod tests {
         }
     }
 
+    fn process_record_with_thread(
+        id: i64,
+        status: ProcessStatus,
+        thread_id: Option<i64>,
+        command: &str,
+    ) -> ProcessRecord {
+        let mut record = session_record(id, command, status, None);
+        record.chat_thread_id = thread_id;
+        record
+    }
+
     #[test]
     fn harness_selection_updates_state_before_switch_callback() {
         let selected_harness = RefCell::new(SessionKind::Codex);
@@ -6523,8 +6673,43 @@ fix it
 
         assert!(controls.contains(&"model".to_owned()));
         assert!(controls.contains(&"thinking".to_owned()));
+        assert!(controls.contains(&"interrupt".to_owned()));
+        assert!(controls.contains(&"continue".to_owned()));
+        assert!(controls.contains(&"retry".to_owned()));
+        assert!(controls.contains(&"restart".to_owned()));
         assert!(!controls.contains(&"goal".to_owned()));
         assert!(!controls.contains(&"attach".to_owned()));
+        assert!(!visible_live_controls_for_provider("claude").contains(&"interrupt".to_owned()));
+    }
+
+    #[test]
+    fn agent_control_prompts_are_actionable() {
+        assert!(continue_agent_prompt().contains("Continue"));
+        assert!(retry_agent_prompt().contains("Retry"));
+        assert!(retry_agent_prompt().contains("nothing is retryable"));
+    }
+
+    #[test]
+    fn running_session_for_thread_selects_matching_live_process() {
+        let records = vec![
+            process_record_with_thread(1, ProcessStatus::Stopped, Some(7), "codex"),
+            process_record_with_thread(2, ProcessStatus::Running, Some(8), "codex"),
+            process_record_with_thread(3, ProcessStatus::Running, Some(7), "shell"),
+            process_record_with_thread(4, ProcessStatus::Running, Some(7), "codex"),
+        ];
+
+        assert_eq!(
+            running_session_for_thread(&records, 7, SessionKind::Codex),
+            Some(4)
+        );
+        assert_eq!(
+            running_session_for_thread(&records, 7, SessionKind::Shell),
+            Some(3)
+        );
+        assert_eq!(
+            running_session_for_thread(&records, 99, SessionKind::Codex),
+            None
+        );
     }
 
     #[test]
