@@ -23,9 +23,9 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use tracing::error;
 
-const WORKSPACE_SPLIT_MIN_START: i32 = 420;
+const WORKSPACE_SPLIT_MIN_START: i32 = 280;
 const WORKSPACE_SPLIT_MIN_END: i32 = 260;
-const WORKSPACE_SPLIT_INITIAL_CENTER_WIDTH: i32 = 1_040;
+const WORKSPACE_SPLIT_INITIAL_CENTER_WIDTH: i32 = 820;
 const WORKSPACE_RIGHT_PANEL_DEFAULT_WIDTH: i32 = 340;
 const WS_CHAT_TAB_LIMIT: usize = 10;
 const DIFF_RENDER_LIMIT_BYTES: usize = 200_000;
@@ -8229,9 +8229,36 @@ mod tests {
 
     #[test]
     fn split_position_for_ratio_prefers_chat_dominant_layout_and_clamps() {
-        assert_eq!(split_position_for_ratio(1280, 7, 3, 420, 260), 896);
-        assert_eq!(split_position_for_ratio(700, 7, 3, 420, 260), 440);
-        assert_eq!(split_position_for_ratio(500, 7, 3, 420, 260), 420);
+        assert_eq!(
+            split_position_for_ratio(
+                1280,
+                7,
+                3,
+                WORKSPACE_SPLIT_MIN_START,
+                WORKSPACE_SPLIT_MIN_END
+            ),
+            896
+        );
+        assert_eq!(
+            split_position_for_ratio(
+                700,
+                7,
+                3,
+                WORKSPACE_SPLIT_MIN_START,
+                WORKSPACE_SPLIT_MIN_END
+            ),
+            440
+        );
+        assert_eq!(
+            split_position_for_ratio(
+                500,
+                7,
+                3,
+                WORKSPACE_SPLIT_MIN_START,
+                WORKSPACE_SPLIT_MIN_END
+            ),
+            280
+        );
     }
 
     #[test]

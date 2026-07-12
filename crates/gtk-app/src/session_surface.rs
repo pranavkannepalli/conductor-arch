@@ -4418,6 +4418,8 @@ fn mode_menu_child(icon_name: &str, text_label: &str) -> GBox {
     };
     let text = Label::new(Some(text_label));
     text.add_css_class("chat-mode-label");
+    text.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    text.set_max_width_chars(14);
     let arrow = Image::from_icon_name(resolve_icon_name("pan-down-symbolic"));
     arrow.add_css_class("chat-mode-arrow");
     shell.append(&icon);
@@ -4592,6 +4594,8 @@ fn editor_picker_set_button_child(button: &Button, choice: &EditorChoice) {
     icon.add_css_class("chat-editor-icon");
     let text = Label::new(Some(&choice.name));
     text.add_css_class("chat-editor-label");
+    text.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    text.set_max_width_chars(8);
     let arrow = Image::from_icon_name(resolve_icon_name("pan-down-symbolic"));
     arrow.add_css_class("chat-mode-arrow");
     shell.append(&icon);
