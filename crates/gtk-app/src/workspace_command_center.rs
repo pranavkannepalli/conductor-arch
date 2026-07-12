@@ -23,10 +23,10 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use tracing::error;
 
-const WORKSPACE_SPLIT_START_WEIGHT: i32 = 5;
+const WORKSPACE_SPLIT_START_WEIGHT: i32 = 7;
 const WORKSPACE_SPLIT_END_WEIGHT: i32 = 3;
-const WORKSPACE_SPLIT_MIN_START: i32 = 360;
-const WORKSPACE_SPLIT_MIN_END: i32 = 280;
+const WORKSPACE_SPLIT_MIN_START: i32 = 420;
+const WORKSPACE_SPLIT_MIN_END: i32 = 260;
 const WS_CHAT_TAB_LIMIT: usize = 10;
 const DIFF_RENDER_LIMIT_BYTES: usize = 200_000;
 const WORKSPACE_TURN_DIFF_LIMIT: usize = 25;
@@ -151,7 +151,7 @@ fn simple_workspace_shell(
     let main_split = Paned::new(Orientation::Horizontal);
     main_split.set_wide_handle(false);
     main_split.set_resize_start_child(true);
-    main_split.set_resize_end_child(true);
+    main_split.set_resize_end_child(false);
     main_split.set_shrink_start_child(true);
     main_split.set_shrink_end_child(true);
     main_split.set_position(split_position_for_ratio(
@@ -8233,10 +8233,10 @@ mod tests {
     }
 
     #[test]
-    fn split_position_for_ratio_prefers_five_to_three_layout_and_clamps() {
-        assert_eq!(split_position_for_ratio(1280, 5, 3, 360, 280), 800);
-        assert_eq!(split_position_for_ratio(700, 5, 3, 360, 280), 420);
-        assert_eq!(split_position_for_ratio(500, 5, 3, 360, 280), 360);
+    fn split_position_for_ratio_prefers_chat_dominant_layout_and_clamps() {
+        assert_eq!(split_position_for_ratio(1280, 7, 3, 420, 260), 896);
+        assert_eq!(split_position_for_ratio(700, 7, 3, 420, 260), 440);
+        assert_eq!(split_position_for_ratio(500, 7, 3, 420, 260), 420);
     }
 
     #[test]
