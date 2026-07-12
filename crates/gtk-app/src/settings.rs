@@ -13,6 +13,7 @@ use linux_archductor_core::settings::{
     RepositorySettings, ScriptSettings, SettingsLayer,
 };
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
@@ -68,6 +69,11 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
     settings_result.set_xalign(0.0);
     settings_result.set_hexpand(true);
     settings_result.set_wrap(true);
+    let bool_edits: Rc<RefCell<HashSet<&'static str>>> = Rc::new(RefCell::new(HashSet::new()));
+    let loaded_settings_target: Rc<RefCell<Option<(String, SettingsLayer)>>> =
+        Rc::new(RefCell::new(None));
+    let forced_save_target: Rc<RefCell<Option<(String, SettingsLayer)>>> =
+        Rc::new(RefCell::new(None));
     settings_tabs_row.append(&shared_tab);
     settings_tabs_row.append(&local_tab);
     settings_tabs_row.append(&settings_result);
@@ -569,6 +575,8 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
     let settings_result_load = settings_result.clone();
     let loading_settings_load = Rc::new(RefCell::new(false));
     let loading_settings_for_load = loading_settings_load.clone();
+    let bool_edits_load = bool_edits.clone();
+    let loaded_settings_target_load = loaded_settings_target.clone();
     let setup_entry_load = setup_entry.clone();
     let run_entry_load = run_entry.clone();
     let archive_entry_load = archive_entry.clone();
@@ -612,6 +620,8 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
         let shared_tab_load = shared_tab_load.clone();
         let local_tab_load = local_tab_load.clone();
         let loading_settings_for_load = loading_settings_for_load.clone();
+        let bool_edits_load = bool_edits_load.clone();
+        let loaded_settings_target_load = loaded_settings_target_load.clone();
         let setup_entry_load = setup_entry_load.clone();
         let run_entry_load = run_entry_load.clone();
         let archive_entry_load = archive_entry_load.clone();
@@ -649,9 +659,11 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
             let repo_name = selected_repository_name(&settings_repo_select_load);
             if repo_name.is_empty() {
                 settings_result_load.set_text("Select a repository.");
+                *loaded_settings_target_load.borrow_mut() = None;
                 return;
             }
             *loading_settings_for_load.borrow_mut() = true;
+            bool_edits_load.borrow_mut().clear();
             let layer = if local_tab_load.is_active() {
                 SettingsLayer::LocalOverride
             } else {
@@ -669,6 +681,7 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
                         .map(|inspection| (repo_path, settings, inspection))
                 }) {
                 Ok((repo_path, settings, inspection)) => {
+                    *loaded_settings_target_load.borrow_mut() = Some((repo_name.clone(), layer));
                     setup_entry_load.set_text(settings.scripts.setup.as_deref().unwrap_or(""));
                     run_entry_load.set_text(settings.scripts.run.as_deref().unwrap_or(""));
                     archive_entry_load.set_text(settings.scripts.archive.as_deref().unwrap_or(""));
@@ -882,19 +895,41 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
     };
     let load_selected_settings_for_repo = load_selected_settings.clone();
     let loading_settings_for_repo = loading_settings_for_load.clone();
+    let pending_autosave: Rc<RefCell<Option<gtk::glib::SourceId>>> = Rc::new(RefCell::new(None));
+    let pending_autosave_target: Rc<RefCell<Option<(String, SettingsLayer)>>> =
+        Rc::new(RefCell::new(None));
+    let flush_pending_autosave = {
+        let pending_autosave = pending_autosave.clone();
+        let pending_autosave_target = pending_autosave_target.clone();
+        let forced_save_target = forced_save_target.clone();
+        let save_settings_btn = save_settings_btn.clone();
+        Rc::new(move || {
+            if let Some(source_id) = pending_autosave.borrow_mut().take() {
+                source_id.remove();
+                if let Some(target) = pending_autosave_target.borrow_mut().take() {
+                    *forced_save_target.borrow_mut() = Some(target);
+                    save_settings_btn.emit_clicked();
+                }
+            }
+        })
+    };
+    let flush_pending_autosave_for_repo = flush_pending_autosave.clone();
     settings_repo_select.connect_changed(move |_| {
         if !*loading_settings_for_repo.borrow() {
+            flush_pending_autosave_for_repo();
             load_selected_settings_for_repo();
         }
     });
     let load_selected_settings_for_shared = load_selected_settings.clone();
     let local_tab_for_shared = local_tab.clone();
     let loading_settings_for_shared = loading_settings_for_load.clone();
+    let flush_pending_autosave_for_shared = flush_pending_autosave.clone();
     shared_tab.connect_toggled(move |button| {
         if *loading_settings_for_shared.borrow() {
             return;
         }
         if button.is_active() {
+            flush_pending_autosave_for_shared();
             local_tab_for_shared.set_active(false);
             load_selected_settings_for_shared();
         } else if !local_tab_for_shared.is_active() {
@@ -904,11 +939,13 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
     let load_selected_settings_for_local = load_selected_settings.clone();
     let shared_tab_for_local = shared_tab.clone();
     let loading_settings_for_local = loading_settings_for_load.clone();
+    let flush_pending_autosave_for_local = flush_pending_autosave.clone();
     local_tab.connect_toggled(move |button| {
         if *loading_settings_for_local.borrow() {
             return;
         }
         if button.is_active() {
+            flush_pending_autosave_for_local();
             shared_tab_for_local.set_active(false);
             load_selected_settings_for_local();
         } else if !shared_tab_for_local.is_active() {
@@ -919,17 +956,22 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
     let autosave = {
         let save_settings_btn = save_settings_btn.clone();
         let loading_settings = loading_settings_for_load.clone();
-        let pending_autosave = Rc::new(RefCell::new(None::<gtk::glib::SourceId>));
+        let pending_autosave = pending_autosave.clone();
+        let pending_autosave_target = pending_autosave_target.clone();
+        let loaded_settings_target = loaded_settings_target.clone();
         Rc::new(move || {
             if !*loading_settings.borrow() {
                 if let Some(source_id) = pending_autosave.borrow_mut().take() {
                     source_id.remove();
                 }
+                *pending_autosave_target.borrow_mut() = loaded_settings_target.borrow().clone();
                 let save_settings_btn = save_settings_btn.clone();
                 let pending_autosave_for_timeout = pending_autosave.clone();
+                let pending_autosave_target_for_timeout = pending_autosave_target.clone();
                 let source_id =
                     gtk::glib::timeout_add_local_once(Duration::from_millis(600), move || {
                         *pending_autosave_for_timeout.borrow_mut() = None;
+                        *pending_autosave_target_for_timeout.borrow_mut() = None;
                         save_settings_btn.emit_clicked();
                     });
                 *pending_autosave.borrow_mut() = Some(source_id);
@@ -944,11 +986,41 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
     connect_entry_autosave(&typecheck_entry, autosave.clone());
     connect_entry_autosave(&build_entry, autosave.clone());
     connect_entry_autosave(&run_mode_entry, autosave.clone());
-    connect_check_autosave(&spotlight_check, autosave.clone());
-    connect_check_autosave(&privacy_check, autosave.clone());
-    connect_check_autosave(&archive_on_merge_check, autosave.clone());
-    connect_check_autosave(&delete_branch_check, autosave.clone());
-    connect_check_autosave(&auto_upstream_check, autosave.clone());
+    connect_bool_autosave(
+        &spotlight_check,
+        "spotlight_testing",
+        bool_edits.clone(),
+        loading_settings_for_load.clone(),
+        autosave.clone(),
+    );
+    connect_bool_autosave(
+        &privacy_check,
+        "enterprise_data_privacy",
+        bool_edits.clone(),
+        loading_settings_for_load.clone(),
+        autosave.clone(),
+    );
+    connect_bool_autosave(
+        &archive_on_merge_check,
+        "archive_on_merge",
+        bool_edits.clone(),
+        loading_settings_for_load.clone(),
+        autosave.clone(),
+    );
+    connect_bool_autosave(
+        &delete_branch_check,
+        "delete_branch_on_archive",
+        bool_edits.clone(),
+        loading_settings_for_load.clone(),
+        autosave.clone(),
+    );
+    connect_bool_autosave(
+        &auto_upstream_check,
+        "worktree_push_auto_setup_remote",
+        bool_edits.clone(),
+        loading_settings_for_load.clone(),
+        autosave.clone(),
+    );
     connect_entry_autosave(&claude_path_entry, autosave.clone());
     connect_entry_autosave(&codex_path_entry, autosave.clone());
     connect_entry_autosave(&claude_provider_entry, autosave.clone());
@@ -976,13 +1048,24 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
     }
 
     let db_path_save_settings = paths.database_path.clone();
+    let forced_save_target_for_save = forced_save_target.clone();
+    let loaded_settings_target_for_save = loaded_settings_target.clone();
+    let bool_edits_for_save = bool_edits.clone();
     save_settings_btn.connect_clicked(move |_| {
-        let repo_name = selected_repository_name(&settings_repo_select);
+        let save_target = forced_save_target_for_save
+            .borrow_mut()
+            .take()
+            .or_else(|| loaded_settings_target_for_save.borrow().clone());
+        let (repo_name, layer) = save_target.unwrap_or_else(|| {
+            (
+                selected_repository_name(&settings_repo_select),
+                selected_settings_layer(&local_tab),
+            )
+        });
         if repo_name.is_empty() {
             settings_result.set_text("Repository name is required.");
             return;
         }
-        let layer = selected_settings_layer(&local_tab);
         let repo_path = match repository_root(&db_path_save_settings, &repo_name) {
             Ok(path) => path,
             Err(err) => {
@@ -1081,11 +1164,15 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
                 layer,
                 current_settings.spotlight_testing,
                 spotlight_check.is_active(),
+                bool_edits_for_save.borrow().contains("spotlight_testing"),
             ),
             enterprise_data_privacy: bool_setting_for_layer(
                 layer,
                 current_settings.enterprise_data_privacy,
                 privacy_check.is_active(),
+                bool_edits_for_save
+                    .borrow()
+                    .contains("enterprise_data_privacy"),
             ),
             scripts: ScriptSettings {
                 setup: optional_entry_text(&setup_entry),
@@ -1113,16 +1200,23 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
                     layer,
                     current_settings.git.delete_branch_on_archive,
                     delete_branch_check.is_active(),
+                    bool_edits_for_save
+                        .borrow()
+                        .contains("delete_branch_on_archive"),
                 ),
                 archive_on_merge: bool_setting_for_layer(
                     layer,
                     current_settings.git.archive_on_merge,
                     archive_on_merge_check.is_active(),
+                    bool_edits_for_save.borrow().contains("archive_on_merge"),
                 ),
                 worktree_push_auto_setup_remote: bool_setting_for_layer(
                     layer,
                     current_settings.git.worktree_push_auto_setup_remote,
                     auto_upstream_check.is_active(),
+                    bool_edits_for_save
+                        .borrow()
+                        .contains("worktree_push_auto_setup_remote"),
                 ),
                 branch_prefix_type: optional_entry_text(&branch_prefix_type_entry),
                 branch_prefix: optional_entry_text(&branch_prefix_entry),
@@ -1131,6 +1225,7 @@ pub(crate) fn build_settings_page(paths: &AppPaths) -> (GBox, impl Fn() + Clone 
         };
         match save_repository_settings(&repo_path, layer, &settings) {
             Ok(()) => {
+                bool_edits_for_save.borrow_mut().clear();
                 settings_result.set_text(&format!("Saved settings for {}", repo_path.display()))
             }
             Err(err) => settings_result.set_text(&format!("Save failed: {err:#}")),
@@ -1321,10 +1416,17 @@ fn bool_setting_for_layer(
     layer: SettingsLayer,
     current: Option<bool>,
     active: bool,
+    edited: bool,
 ) -> Option<bool> {
     match layer {
         SettingsLayer::RepositoryShared => Some(active),
-        SettingsLayer::LocalOverride => current.map(|_| active).or_else(|| active.then_some(true)),
+        SettingsLayer::LocalOverride => {
+            if edited {
+                Some(active)
+            } else {
+                current
+            }
+        }
     }
 }
 
@@ -1336,21 +1438,7 @@ fn run_mode_setting_for_layer(layer: SettingsLayer, value: Option<String>) -> Op
 }
 
 fn prompt_settings_is_empty(settings: &PromptSettings) -> bool {
-    settings.new_workspace.is_none()
-        && settings.general.is_none()
-        && settings.continue_work.is_none()
-        && settings.summarize_session.is_none()
-        && settings.handoff.is_none()
-        && settings.code_review.is_none()
-        && settings.create_pr.is_none()
-        && settings.fix_errors.is_none()
-        && settings.resolve_merge_conflicts.is_none()
-        && settings.rename_branch.is_none()
-        && settings.commit_generation.is_none()
-        && settings.test_fixing.is_none()
-        && settings.refactor_style.is_none()
-        && settings.setup_script.is_none()
-        && settings.run_script.is_none()
+    settings == &PromptSettings::default()
 }
 
 fn refresh_repository_select(
@@ -1380,8 +1468,19 @@ fn connect_entry_autosave(entry: &Entry, autosave: Rc<dyn Fn()>) {
     entry.connect_changed(move |_| autosave());
 }
 
-fn connect_check_autosave(check: &CheckButton, autosave: Rc<dyn Fn()>) {
-    check.connect_toggled(move |_| autosave());
+fn connect_bool_autosave(
+    check: &CheckButton,
+    field: &'static str,
+    bool_edits: Rc<RefCell<HashSet<&'static str>>>,
+    loading_settings: Rc<RefCell<bool>>,
+    autosave: Rc<dyn Fn()>,
+) {
+    check.connect_toggled(move |_| {
+        if !*loading_settings.borrow() {
+            bool_edits.borrow_mut().insert(field);
+        }
+        autosave();
+    });
 }
 
 fn connect_buffer_autosave(buffer: &gtk::TextBuffer, autosave: Rc<dyn Fn()>) {
@@ -1451,19 +1550,27 @@ mod tests {
     #[test]
     fn local_bool_settings_preserve_unset_inherited_values() {
         assert_eq!(
-            bool_setting_for_layer(SettingsLayer::LocalOverride, None, false),
+            bool_setting_for_layer(SettingsLayer::LocalOverride, None, false, false),
             None
         );
         assert_eq!(
-            bool_setting_for_layer(SettingsLayer::LocalOverride, None, true),
+            bool_setting_for_layer(SettingsLayer::LocalOverride, None, true, true),
             Some(true)
         );
         assert_eq!(
-            bool_setting_for_layer(SettingsLayer::LocalOverride, Some(true), false),
+            bool_setting_for_layer(SettingsLayer::LocalOverride, None, false, true),
             Some(false)
         );
         assert_eq!(
-            bool_setting_for_layer(SettingsLayer::RepositoryShared, None, false),
+            bool_setting_for_layer(SettingsLayer::LocalOverride, Some(true), false, false),
+            Some(true)
+        );
+        assert_eq!(
+            bool_setting_for_layer(SettingsLayer::LocalOverride, Some(true), false, true),
+            Some(false)
+        );
+        assert_eq!(
+            bool_setting_for_layer(SettingsLayer::RepositoryShared, None, false, false),
             Some(false)
         );
     }
