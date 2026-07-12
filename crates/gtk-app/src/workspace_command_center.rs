@@ -3755,6 +3755,9 @@ fn workspace_changes_panel(
     let total_view = workspace_changes_text_view(store, name);
     body_stack.add_named(&total_view, Some("total"));
 
+    let split_view = workspace_split_changes_text_view(store, name);
+    body_stack.add_named(&split_view, Some("split"));
+
     let untracked_view = workspace_untracked_changes_view(db_path, name);
     body_stack.add_named(&untracked_view, Some("untracked"));
 
@@ -3778,6 +3781,7 @@ fn workspace_changes_panel(
 
     for (label, target, scope_text) in [
         ("Total changes", "total", "Total changes"),
+        ("Split diff", "split", "Split diff"),
         ("Untracked changes", "untracked", "Untracked changes"),
         ("Last turn changes", "last_turn", "Last turn changes"),
         ("By commit", "commits", "Changes by commit"),
@@ -4649,6 +4653,79 @@ fn workspace_diff_text_for_path(db_path: &Path, name: &str, path: Option<&str>) 
         .unwrap_or_else(|err| format!("Could not open workspace database: {err:#}\n"))
 }
 
+fn workspace_split_diff_text(store: &WorkspaceStore, name: &str, path: Option<&str>) -> String {
+    let diff = match path {
+        Some(path) => store
+            .unified_diff_against_base(name, Some(Path::new(path)))
+            .unwrap_or_else(|err| format!("Could not read diff for {path}: {err:#}\n")),
+        None => store
+            .unified_diff_against_base(name, None)
+            .unwrap_or_else(|err| format!("Could not read diff: {err:#}\n")),
+    };
+    format_split_diff_text(&diff, Some(DIFF_RENDER_LIMIT_BYTES))
+}
+
+fn format_split_diff_text(diff: &str, limit: Option<usize>) -> String {
+    if diff.trim().is_empty() {
+        return "Split diff\nNo changes.\n".to_owned();
+    }
+    if limit.is_some_and(|limit| diff.len() > limit) {
+        return "Split diff\nDiff is too large for split view. Use Unified or Copy Diff for full context.\n".to_owned();
+    }
+
+    let mut out = String::from("Split diff\nleft: old/base | right: new/workspace\n\n");
+    let mut pending_deleted = std::collections::VecDeque::<String>::new();
+    for line in diff.lines() {
+        if line.starts_with('-') && !line.starts_with("---") {
+            pending_deleted.push_back(line[1..].to_owned());
+        } else if line.starts_with('+') && !line.starts_with("+++") {
+            let right = line[1..].to_owned();
+            let left = pending_deleted.pop_front().unwrap_or_default();
+            push_split_diff_row(&mut out, &left, &right);
+        } else {
+            while let Some(left) = pending_deleted.pop_front() {
+                push_split_diff_row(&mut out, &left, "");
+            }
+            if line.starts_with("diff ")
+                || line.starts_with("index ")
+                || line.starts_with("--- ")
+                || line.starts_with("+++ ")
+                || line.starts_with("@@")
+            {
+                out.push_str(line);
+                out.push('\n');
+            } else if let Some(context) = line.strip_prefix(' ') {
+                push_split_diff_row(&mut out, context, context);
+            } else {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+    }
+    while let Some(left) = pending_deleted.pop_front() {
+        push_split_diff_row(&mut out, &left, "");
+    }
+    out
+}
+
+fn push_split_diff_row(out: &mut String, left: &str, right: &str) {
+    out.push_str(&format!(
+        "{:<72} | {}\n",
+        split_diff_cell(left),
+        split_diff_cell(right)
+    ));
+}
+
+fn split_diff_cell(value: &str) -> String {
+    const CELL_LIMIT: usize = 96;
+    let (visible, truncated) = truncate_text_at_char_boundary(value, CELL_LIMIT);
+    if truncated {
+        format!("{visible}...")
+    } else {
+        visible.to_owned()
+    }
+}
+
 fn workspace_changes_text_view(store: &WorkspaceStore, name: &str) -> ScrolledWindow {
     let view = TextView::new();
     view.set_editable(false);
@@ -4660,6 +4737,23 @@ fn workspace_changes_text_view(store: &WorkspaceStore, name: &str) -> ScrolledWi
     view.set_top_margin(4);
     view.buffer().set_text(&workspace_changes_text(store, name));
     apply_diff_tags(&view.buffer());
+    let scroll = ScrolledWindow::new();
+    scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
+    scroll.set_child(Some(&view));
+    scroll
+}
+
+fn workspace_split_changes_text_view(store: &WorkspaceStore, name: &str) -> ScrolledWindow {
+    let view = TextView::new();
+    view.set_editable(false);
+    view.set_monospace(true);
+    view.set_vexpand(true);
+    view.add_css_class("ws-diff-view");
+    view.set_left_margin(6);
+    view.set_right_margin(6);
+    view.set_top_margin(4);
+    view.buffer()
+        .set_text(&workspace_split_diff_text(store, name, None));
     let scroll = ScrolledWindow::new();
     scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
     scroll.set_child(Some(&view));
@@ -7475,6 +7569,27 @@ mod tests {
         let rendered = format_diff_section("Staged changes", Ok(String::new()), Some(32));
 
         assert_eq!(rendered, "Staged changes\nNo changes.\n");
+    }
+
+    #[test]
+    fn split_diff_pairs_added_and_deleted_lines() {
+        let rendered = format_split_diff_text(
+            "diff --git a/a.txt b/a.txt\n@@ -1,2 +1,2 @@\n-old\n+new\n same\n+added\n",
+            Some(1024),
+        );
+
+        assert!(rendered.contains("old"));
+        assert!(rendered.contains("new"));
+        assert!(rendered.contains("same"));
+        assert!(rendered.contains("added"));
+    }
+
+    #[test]
+    fn split_diff_falls_back_for_large_diffs() {
+        let rendered =
+            format_split_diff_text(&format!("diff --git a/a b/a\n{}", "x".repeat(64)), Some(32));
+
+        assert!(rendered.contains("too large for split view"));
     }
 
     #[test]
