@@ -28,6 +28,7 @@ const WORKSPACE_SPLIT_END_WEIGHT: i32 = 3;
 const WORKSPACE_SPLIT_MIN_START: i32 = 360;
 const WORKSPACE_SPLIT_MIN_END: i32 = 280;
 const WS_CHAT_TAB_LIMIT: usize = 10;
+const DIFF_RENDER_LIMIT_BYTES: usize = 200_000;
 type WorkspaceTabSelector = Rc<dyn Fn(&str)>;
 type ContextMenuItem = (&'static str, Rc<dyn Fn()>);
 
@@ -3960,6 +3961,91 @@ fn workspace_git_file_action_row(
     label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
     row.append(&label);
 
+    let open_btn = text_button("Open");
+    let db_path_for_open = db_path.to_path_buf();
+    let workspace_for_open = name.to_owned();
+    let path_for_open = path.clone();
+    let feedback_for_open = feedback.clone();
+    let toast_for_open = toast_overlay.clone();
+    open_btn.connect_clicked(move |_| {
+        match WorkspaceStore::open(&db_path_for_open)
+            .and_then(|store| store.workspace_path(&workspace_for_open))
+            .map(|workspace_path| workspace_path.join(&path_for_open))
+        {
+            Ok(file_path) if file_path.exists() => {
+                match std::process::Command::new("xdg-open")
+                    .arg(&file_path)
+                    .spawn()
+                {
+                    Ok(_) => apply_action_feedback(
+                        &feedback_for_open,
+                        &toast_for_open,
+                        &format!("Opened {}.", file_path.display()),
+                        true,
+                    ),
+                    Err(err) => apply_action_feedback(
+                        &feedback_for_open,
+                        &toast_for_open,
+                        &format!("Could not open {}: {err}", file_path.display()),
+                        true,
+                    ),
+                }
+            }
+            Ok(file_path) => apply_action_feedback(
+                &feedback_for_open,
+                &toast_for_open,
+                &format!("File does not exist: {}", file_path.display()),
+                true,
+            ),
+            Err(err) => apply_action_feedback(
+                &feedback_for_open,
+                &toast_for_open,
+                &format!("Could not resolve file path: {err:#}"),
+                true,
+            ),
+        }
+    });
+    row.append(&open_btn);
+
+    let copy_diff_btn = text_button("Copy Diff");
+    let db_path_for_copy = db_path.to_path_buf();
+    let workspace_for_copy = name.to_owned();
+    let path_for_copy = path.clone();
+    let feedback_for_copy = feedback.clone();
+    let toast_for_copy = toast_overlay.clone();
+    copy_diff_btn.connect_clicked(move |_| {
+        let result = WorkspaceStore::open(&db_path_for_copy).map(|store| {
+            workspace_diff_text_for_clipboard(&store, &workspace_for_copy, Some(&path_for_copy))
+        });
+        match result {
+            Ok(diff_text) => {
+                if let Some(display) = gtk::gdk::Display::default() {
+                    display.clipboard().set_text(&diff_text);
+                    apply_action_feedback(
+                        &feedback_for_copy,
+                        &toast_for_copy,
+                        &format!("Copied diff for {}.", path_for_copy),
+                        true,
+                    );
+                } else {
+                    apply_action_feedback(
+                        &feedback_for_copy,
+                        &toast_for_copy,
+                        "Could not access clipboard.",
+                        true,
+                    );
+                }
+            }
+            Err(err) => apply_action_feedback(
+                &feedback_for_copy,
+                &toast_for_copy,
+                &format!("Could not copy diff for {}: {err:#}", path_for_copy),
+                true,
+            ),
+        }
+    });
+    row.append(&copy_diff_btn);
+
     let stage_btn = text_button("Stage");
     stage_btn.set_sensitive(!summary.staged || summary.unstaged || summary.untracked);
     connect_git_file_action(
@@ -4101,11 +4187,12 @@ fn workspace_changes_text(store: &WorkspaceStore, name: &str) -> String {
         )),
     }
     out.push_str("\n\nDiff\n");
-    out.push_str(
-        &store
-            .unified_diff_against_base(name, None)
-            .unwrap_or_else(|err| format!("Could not read diff: {err:#}\n")),
-    );
+    out.push_str(&workspace_diff_sections(
+        store,
+        name,
+        None,
+        Some(DIFF_RENDER_LIMIT_BYTES),
+    ));
     out
 }
 
@@ -4126,14 +4213,91 @@ fn workspace_branch_state_text(store: &WorkspaceStore, name: &str) -> String {
 }
 
 fn workspace_diff_text(store: &WorkspaceStore, name: &str, path: Option<&str>) -> String {
-    match path {
-        Some(path) => store
-            .unified_diff_against_base(name, Some(Path::new(path)))
-            .unwrap_or_else(|err| format!("Could not read diff for {path}: {err:#}\n")),
-        None => store
-            .unified_diff_against_base(name, None)
-            .unwrap_or_else(|err| format!("Could not read diff: {err:#}\n")),
+    workspace_diff_sections(store, name, path, Some(DIFF_RENDER_LIMIT_BYTES))
+}
+
+fn workspace_diff_text_for_clipboard(
+    store: &WorkspaceStore,
+    name: &str,
+    path: Option<&str>,
+) -> String {
+    workspace_diff_sections(store, name, path, None)
+}
+
+fn workspace_diff_sections(
+    store: &WorkspaceStore,
+    name: &str,
+    path: Option<&str>,
+    limit: Option<usize>,
+) -> String {
+    let path_ref = path.map(Path::new);
+    let target = path.unwrap_or("workspace");
+    let base_ref = store
+        .workspace_base_ref(name)
+        .unwrap_or_else(|_| "base".to_owned());
+    let mut out = format!("Target: {target}\nBase comparison: {base_ref}\n\n");
+    out.push_str(&format_diff_section(
+        "Base comparison",
+        store.unified_diff_against_base(name, path_ref),
+        limit,
+    ));
+    out.push('\n');
+    out.push_str(&format_diff_section(
+        "Unstaged changes",
+        store.unified_diff(name, path_ref),
+        limit,
+    ));
+    out.push('\n');
+    out.push_str(&format_diff_section(
+        "Staged changes",
+        store.staged_diff(name, path_ref),
+        limit,
+    ));
+    out
+}
+
+fn format_diff_section(
+    title: &str,
+    result: anyhow::Result<String>,
+    limit: Option<usize>,
+) -> String {
+    let text = match result {
+        Ok(text) => text,
+        Err(err) => return format!("{title}\nCould not read diff: {err:#}\n"),
+    };
+    if text.trim().is_empty() {
+        return format!("{title}\nNo changes.\n");
     }
+    match limit {
+        Some(limit) => {
+            let (visible, truncated) = truncate_text_at_char_boundary(&text, limit);
+            if truncated {
+                format!(
+                    "{title}\n{visible}\n[Diff truncated after {limit} bytes. Copy the diff or open the file for full context.]\n"
+                )
+            } else {
+                format!("{title}\n{visible}")
+            }
+        }
+        None => format!("{title}\n{text}"),
+    }
+}
+
+fn truncate_text_at_char_boundary(text: &str, limit: usize) -> (&str, bool) {
+    if text.len() <= limit {
+        return (text, false);
+    }
+    let mut end = 0;
+    for (index, _) in text.char_indices() {
+        if index > limit {
+            break;
+        }
+        end = index;
+    }
+    if end == 0 {
+        end = limit.min(text.len());
+    }
+    (&text[..end], true)
 }
 
 fn workspace_diff_text_for_path(db_path: &Path, name: &str, path: Option<&str>) -> String {
@@ -6952,6 +7116,22 @@ mod tests {
         assert!(rendered.contains("Files changed"));
         assert!(rendered.contains("README.md [staged+unstaged] +2 -1"));
         assert!(rendered.contains("assets/logo.png [untracked] binary"));
+    }
+
+    #[test]
+    fn diff_section_truncates_large_output() {
+        let rendered = format_diff_section("Base comparison", Ok("x".repeat(96)), Some(32));
+
+        assert!(rendered.contains("Base comparison"));
+        assert!(rendered.contains("Diff truncated after 32 bytes"));
+        assert!(rendered.len() < 160);
+    }
+
+    #[test]
+    fn diff_section_reports_empty_diff() {
+        let rendered = format_diff_section("Staged changes", Ok(String::new()), Some(32));
+
+        assert_eq!(rendered, "Staged changes\nNo changes.\n");
     }
 
     #[test]

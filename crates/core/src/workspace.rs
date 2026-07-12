@@ -2706,6 +2706,18 @@ impl WorkspaceStore {
         git_output(&workspace.path, ["diff", "--"])
     }
 
+    pub fn staged_diff(&self, name: &str, path: Option<&Path>) -> Result<String> {
+        let workspace = self.get_by_name(name)?;
+        if let Some(path) = path {
+            let path_value = path.to_string_lossy().to_string();
+            return git_output_dynamic(
+                &workspace.path,
+                &["diff", "--cached", "--", path_value.as_str()],
+            );
+        }
+        git_output(&workspace.path, ["diff", "--cached", "--"])
+    }
+
     pub fn unified_diff_against_base(&self, name: &str, path: Option<&Path>) -> Result<String> {
         let workspace = self.get_by_name(name)?;
         let base_ref = workspace_base_ref(&workspace);
@@ -15509,12 +15521,21 @@ exit 1
 
         fs::write(workspace.path.join("README.md"), "demo\nchanged\n").unwrap();
         store.stage_workspace_file("berlin", "README.md").unwrap();
+        let staged_diff = store
+            .staged_diff("berlin", Some(Path::new("README.md")))
+            .unwrap();
+        assert!(staged_diff.contains("+changed"));
         assert_eq!(
             git_output(&workspace.path, ["diff", "--cached", "--name-only"]).trim(),
             "README.md"
         );
 
         store.unstage_workspace_file("berlin", "README.md").unwrap();
+        assert!(store
+            .staged_diff("berlin", Some(Path::new("README.md")))
+            .unwrap()
+            .trim()
+            .is_empty());
         assert!(
             git_output(&workspace.path, ["diff", "--cached", "--name-only"])
                 .trim()
