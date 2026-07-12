@@ -62,6 +62,7 @@ struct RawChunk {
     index: usize,
     text: String,
     normalized_text: String,
+    raw_normalized_text: String,
     duplicate: bool,
     delayed: bool,
     partial: bool,
@@ -262,20 +263,54 @@ fn raw_chunks_from_log(raw: &str) -> Vec<RawChunk> {
     if raw.is_empty() {
         return Vec::new();
     }
-    let mut previous = String::new();
-    raw.split_inclusive('\n')
+    let chunks = raw
+        .split_inclusive('\n')
         .chain((!raw.ends_with('\n')).then_some(""))
         .filter(|chunk| !chunk.is_empty())
         .enumerate()
-        .map(|(index, chunk)| {
-            let text = redact_sensitive_text(chunk);
+        .map(|(index, chunk)| (index + 1, chunk))
+        .collect::<Vec<_>>();
+    raw_chunks_from_slices(raw, &chunks)
+}
+
+fn raw_chunks_from_records(records: &[PtyChunkRecord]) -> Vec<RawChunk> {
+    let raw = records
+        .iter()
+        .map(|record| record.text.as_str())
+        .collect::<String>();
+    let mut offset = 0;
+    let chunks = records
+        .iter()
+        .map(|record| {
+            let start = offset;
+            offset += record.text.len();
+            (record.sequence as usize, &raw[start..offset])
+        })
+        .collect::<Vec<_>>();
+    raw_chunks_from_slices(&raw, &chunks)
+}
+
+fn raw_chunks_from_slices(raw: &str, chunks: &[(usize, &str)]) -> Vec<RawChunk> {
+    if raw.is_empty() {
+        return Vec::new();
+    }
+    let redacted_prefixes = redacted_prefixes_for_chunks(raw, chunks);
+    let mut previous = String::new();
+    chunks
+        .iter()
+        .enumerate()
+        .map(|(position, (index, chunk))| {
+            let text = redacted_prefixes[position + 1][redacted_prefixes[position].len()..]
+                .to_owned();
             let normalized_text = normalize_pty_text(&text);
+            let raw_normalized_text = normalize_pty_text(chunk);
             let duplicate = !normalized_text.trim().is_empty() && normalized_text == previous;
             previous = normalized_text.clone();
             RawChunk {
-                index: index + 1,
+                index: *index,
                 text,
                 normalized_text,
+                raw_normalized_text,
                 duplicate,
                 delayed: false,
                 partial: !chunk.ends_with('\n'),
@@ -284,25 +319,15 @@ fn raw_chunks_from_log(raw: &str) -> Vec<RawChunk> {
         .collect()
 }
 
-fn raw_chunks_from_records(records: &[PtyChunkRecord]) -> Vec<RawChunk> {
-    let mut previous = String::new();
-    records
-        .iter()
-        .map(|record| {
-            let text = redact_sensitive_text(&record.text);
-            let normalized_text = normalize_pty_text(&text);
-            let duplicate = !normalized_text.trim().is_empty() && normalized_text == previous;
-            previous = normalized_text.clone();
-            RawChunk {
-                index: record.sequence as usize,
-                text,
-                normalized_text,
-                duplicate,
-                delayed: false,
-                partial: !record.text.ends_with('\n'),
-            }
-        })
-        .collect()
+fn redacted_prefixes_for_chunks(raw: &str, chunks: &[(usize, &str)]) -> Vec<String> {
+    let mut prefixes = Vec::with_capacity(chunks.len() + 1);
+    prefixes.push(String::new());
+    let mut end = 0;
+    for (_, chunk) in chunks {
+        end += chunk.len();
+        prefixes.push(redact_sensitive_text(&raw[..end]));
+    }
+    prefixes
 }
 
 fn normalize_pty_text(raw: &str) -> String {
@@ -315,10 +340,10 @@ fn event_row(event: &SessionEvent, chunks: &[RawChunk]) -> InspectorEventRow {
         .raw_text
         .as_deref()
         .and_then(|raw| {
-            let raw = normalize_pty_text(&redact_sensitive_text(raw));
+            let raw = normalize_pty_text(raw);
             chunks
                 .iter()
-                .find(|chunk| chunk.normalized_text.contains(raw.trim()))
+                .find(|chunk| chunk.raw_normalized_text.contains(raw.trim()))
                 .map(|chunk| format!("chunk {}", chunk.index))
         })
         .unwrap_or_else(|| "unmatched".to_owned());
@@ -961,6 +986,7 @@ mod tests {
                     index: 1,
                     text: "\u{1b}[2Jreal".to_owned(),
                     normalized_text: "\u{1b}[2Jreal".to_owned(),
+                    raw_normalized_text: "\u{1b}[2Jreal".to_owned(),
                     duplicate: false,
                     delayed: false,
                     partial: true,
@@ -969,6 +995,7 @@ mod tests {
                     index: 2,
                     text: " chunk\n".to_owned(),
                     normalized_text: " chunk\n".to_owned(),
+                    raw_normalized_text: " chunk\n".to_owned(),
                     duplicate: false,
                     delayed: false,
                     partial: false,
@@ -1044,6 +1071,57 @@ mod tests {
         assert!(raw_text.contains("TOKEN=[redacted]"));
         assert!(model.selected.normalized_text.contains("Bearer [redacted]"));
         assert!(rendered_events.contains("api_key: [redacted]"));
+    }
+
+    #[test]
+    fn inspector_redacts_secrets_split_across_chunk_boundaries() {
+        let chunks = vec![
+            PtyChunkRecord {
+                id: 1,
+                process_id: 1,
+                sequence: 1,
+                occurred_at_ms: 10,
+                stream: "stdout".to_owned(),
+                text: "TOKEN=".to_owned(),
+                created_at: "now".to_owned(),
+            },
+            PtyChunkRecord {
+                id: 2,
+                process_id: 1,
+                sequence: 2,
+                occurred_at_ms: 11,
+                stream: "stdout".to_owned(),
+                text: "split-secret\n".to_owned(),
+                created_at: "now".to_owned(),
+            },
+        ];
+
+        let rendered = raw_chunks_from_records(&chunks)
+            .into_iter()
+            .map(|chunk| chunk.text)
+            .collect::<String>();
+
+        assert_eq!(rendered, "TOKEN=[redacted]\n");
+        assert!(!rendered.contains("split-secret"));
+    }
+
+    #[test]
+    fn event_source_chunk_uses_raw_text_before_redacted_matching() {
+        let chunks = raw_chunks_from_log("TOKEN=first-secret\nTOKEN=second-secret\n");
+        let event = SessionEvent::new(
+            SessionEventSource::Runtime,
+            Some("TOKEN=second-secret".to_owned()),
+            SessionEventPayload::CommandOutput {
+                title: "env".to_owned(),
+                output: "TOKEN=second-secret".to_owned(),
+                status: SessionCommandOutputStatus::Succeeded,
+            },
+        );
+
+        let row = event_row(&event, &chunks);
+
+        assert_eq!(row.source_chunk, "chunk 2");
+        assert!(!row.rendered_text.contains("second-secret"));
     }
 
     #[test]

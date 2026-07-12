@@ -2934,6 +2934,7 @@ fn work_tabs(
         .map(|defaults| terminal::terminal_command_presets(&defaults.command_palette_presets))
         .unwrap_or_else(|_| terminal::terminal_command_presets(&[]));
 
+    let work_detail_tabs = Stack::new();
     tabs.add_titled(
         &changes_checks_review_tabs(
             db_path,
@@ -2942,6 +2943,7 @@ fn work_tabs(
             state.clone(),
             refresh_hub.clone(),
             toast_overlay.clone(),
+            work_detail_tabs.clone(),
         ),
         Some("work"),
         "Changes",
@@ -3004,7 +3006,13 @@ fn work_tabs(
         "Branch",
     );
     tabs.add_titled(
-        &workspace_timeline_panel(store, &ws.name, state.clone(), tabs.clone()),
+        &workspace_timeline_panel(
+            store,
+            &ws.name,
+            state.clone(),
+            tabs.clone(),
+            work_detail_tabs.clone(),
+        ),
         Some("timeline"),
         "Timeline",
     );
@@ -3158,6 +3166,7 @@ fn workspace_timeline_panel(
     name: &str,
     app_state: AppState,
     workspace_tabs: Stack,
+    work_detail_tabs: Stack,
 ) -> GBox {
     let panel = GBox::new(Orientation::Vertical, 8);
     panel.add_css_class("command-panel");
@@ -3183,6 +3192,7 @@ fn workspace_timeline_panel(
                     event,
                     app_state.clone(),
                     workspace_tabs.clone(),
+                    work_detail_tabs.clone(),
                 ));
             }
             let scroll = ScrolledWindow::new();
@@ -3203,6 +3213,7 @@ fn workspace_timeline_event_row(
     event: &WorkspaceTimelineEvent,
     app_state: AppState,
     workspace_tabs: Stack,
+    work_detail_tabs: Stack,
 ) -> GBox {
     let row = GBox::new(Orientation::Horizontal, 8);
     row.add_css_class("ws-git-file-action-row");
@@ -3218,6 +3229,13 @@ fn workspace_timeline_event_row(
         button.connect_clicked(move |_| {
             app_state.set_active_workspace_tab(target_tab.clone());
             workspace_tabs.set_visible_child_name(workspace_tab_stack_name(&target_tab));
+            if matches!(
+                target_tab,
+                WorkspaceTab::Changes | WorkspaceTab::Checks | WorkspaceTab::Review
+            ) {
+                work_detail_tabs
+                    .set_visible_child_name(changes_checks_review_tab_stack_name(&target_tab));
+            }
         });
         row.append(&button);
     }
@@ -3370,9 +3388,9 @@ fn changes_checks_review_tabs(
     app_state: AppState,
     refresh_hub: RefreshHub,
     toast_overlay: ToastOverlay,
+    tabs: Stack,
 ) -> GBox {
     let panel = GBox::new(Orientation::Vertical, 8);
-    let tabs = Stack::new();
     tabs.set_vexpand(true);
     let switcher = StackSwitcher::new();
     switcher.set_stack(Some(&tabs));
@@ -4221,6 +4239,7 @@ fn append_hunk_rows(
                 unsupported_reason: Some(format!("{err:#}")),
             }]
         });
+    let total_hunks = hunks.len();
     for hunk in hunks.into_iter().take(8) {
         panel.append(&workspace_git_hunk_action_row(
             db_path,
@@ -4230,6 +4249,15 @@ fn append_hunk_rows(
             refresh_hub.clone(),
             toast_overlay.clone(),
             feedback,
+        ));
+    }
+    if total_hunks > 8 {
+        panel.append(&detail_row(
+            "Hunks",
+            &format!(
+                "{} additional hunks omitted here. Use file-level actions for the full file.",
+                total_hunks - 8
+            ),
         ));
     }
 }
@@ -4814,11 +4842,43 @@ fn format_split_diff_text(diff: &str, limit: Option<usize>) -> String {
                 out.push('\n');
             }
         }
+        if let Some(limit) = limit {
+            if out.len() > limit {
+                return truncate_owned_with_marker(
+                    out,
+                    limit,
+                    "\n[Split diff truncated after rendered output limit. Use Unified or Copy Diff for full context.]\n",
+                );
+            }
+        }
     }
     while let Some(left) = pending_deleted.pop_front() {
         push_split_diff_row(&mut out, &left, "");
+        if let Some(limit) = limit {
+            if out.len() > limit {
+                return truncate_owned_with_marker(
+                    out,
+                    limit,
+                    "\n[Split diff truncated after rendered output limit. Use Unified or Copy Diff for full context.]\n",
+                );
+            }
+        }
     }
     out
+}
+
+fn truncate_owned_with_marker(mut value: String, limit: usize, marker: &str) -> String {
+    if value.len() + marker.len() <= limit {
+        value.push_str(marker);
+        return value;
+    }
+    let mut end = limit.saturating_sub(marker.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value.truncate(end);
+    value.push_str(marker);
+    value
 }
 
 fn push_split_diff_row(out: &mut String, left: &str, right: &str) {
@@ -5124,29 +5184,19 @@ fn workspace_context_estimate(
     store: &WorkspaceStore,
     name: &str,
 ) -> anyhow::Result<WorkspaceContextEstimate> {
-    let threads = store.list_chat_threads(name)?;
+    let threads = store.chat_thread_context_summaries(name)?;
     let mut estimate = WorkspaceContextEstimate {
         thread_count: threads.len(),
         ..Default::default()
     };
     for thread in threads {
-        let messages = store.list_chat_messages(thread.id)?;
-        let events = store.list_chat_events(thread.id)?;
-        let transcript_bytes = messages
-            .iter()
-            .map(|message| message.content.len())
-            .sum::<usize>()
-            + events
-                .iter()
-                .map(|event| event.title.len() + event.body.len() + event.payload_json.len())
-                .sum::<usize>();
         let thread_estimate = WorkspaceThreadContextEstimate {
             title: thread.title,
             provider: thread.provider,
-            message_count: messages.len(),
-            event_count: events.len(),
-            transcript_bytes,
-            estimated_tokens: estimate_tokens_from_bytes(transcript_bytes),
+            message_count: thread.message_count,
+            event_count: thread.event_count,
+            transcript_bytes: thread.transcript_bytes,
+            estimated_tokens: estimate_tokens_from_bytes(thread.transcript_bytes),
         };
         estimate.message_count += thread_estimate.message_count;
         estimate.event_count += thread_estimate.event_count;
@@ -5910,6 +5960,63 @@ fn check_status_icon(key: &str, val: &str) -> (&'static str, &'static str) {
     }
 }
 
+fn connect_force_push_button(
+    force_push_btn: &Button,
+    db_path: &Path,
+    name: &str,
+    feedback: &Label,
+    toast_overlay: &ToastOverlay,
+) {
+    let db_for_force_push = db_path.to_path_buf();
+    let workspace_for_force_push = name.to_owned();
+    let feedback_for_force_push = feedback.clone();
+    let toast_for_force_push = toast_overlay.clone();
+    let force_confirmed = Rc::new(RefCell::new(false));
+    let force_confirmed_for_click = force_confirmed.clone();
+    let force_push_btn_for_click = force_push_btn.clone();
+    force_push_btn.connect_clicked(move |_| {
+        if !*force_confirmed_for_click.borrow() {
+            *force_confirmed_for_click.borrow_mut() = true;
+            force_push_btn_for_click.set_label("Confirm Force Push");
+            apply_action_feedback(
+                &feedback_for_force_push,
+                &toast_for_force_push,
+                "Click Confirm Force Push to run git push --force-with-lease.",
+                true,
+            );
+            return;
+        }
+        force_push_btn_for_click.set_sensitive(false);
+        match WorkspaceStore::open(db_for_force_push.clone())
+            .and_then(|store| store.force_push_branch_with_lease(&workspace_for_force_push))
+        {
+            Ok(output) => {
+                let message = output
+                    .lines()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty())
+                    .map(|line| format!("Force pushed with lease: {line}"))
+                    .unwrap_or_else(|| "Force pushed with lease.".to_owned());
+                apply_action_feedback(
+                    &feedback_for_force_push,
+                    &toast_for_force_push,
+                    &message,
+                    true,
+                );
+            }
+            Err(err) => {
+                force_push_btn_for_click.set_sensitive(true);
+                apply_action_feedback(
+                    &feedback_for_force_push,
+                    &toast_for_force_push,
+                    &push_branch_error_feedback(&err),
+                    true,
+                );
+            }
+        }
+    });
+}
+
 fn workspace_check_runner_panel(
     db_path: &Path,
     store: &WorkspaceStore,
@@ -6434,6 +6541,19 @@ fn workspace_checks_panel(
                     actions.append(&top_row);
                 }
             }
+            if !matches!(status_summary.kind, PullRequestStateKind::Merged) {
+                let force_row = make_action_row();
+                let force_push_btn = destructive_button("Force Push Lease");
+                connect_force_push_button(
+                    &force_push_btn,
+                    db_path,
+                    name,
+                    &feedback,
+                    &toast_overlay,
+                );
+                force_row.append(&force_push_btn);
+                actions.append(&force_row);
+            }
             header.append(&actions);
         }
         None => {
@@ -6485,6 +6605,7 @@ fn workspace_checks_panel(
             let draft_check = CheckButton::with_label("Draft");
             let push_btn = secondary_button(action_labels[0]);
             let force_push_btn = destructive_button("Force Push Lease");
+            connect_force_push_button(&force_push_btn, db_path, name, &feedback, &toast_overlay);
             let create_btn = text_button(action_labels[1]);
             create_btn.add_css_class("suggested-action");
             let body_buffer = body_view.buffer();
@@ -6512,55 +6633,6 @@ fn workspace_checks_panel(
                         &push_branch_error_feedback(&err),
                         true,
                     ),
-                }
-            });
-
-            let db_for_force_push = db_path.to_path_buf();
-            let workspace_for_force_push = name.to_owned();
-            let feedback_for_force_push = feedback.clone();
-            let toast_for_force_push = toast_overlay.clone();
-            let force_confirmed = Rc::new(RefCell::new(false));
-            let force_confirmed_for_click = force_confirmed.clone();
-            let force_push_btn_for_click = force_push_btn.clone();
-            force_push_btn.connect_clicked(move |_| {
-                if !*force_confirmed_for_click.borrow() {
-                    *force_confirmed_for_click.borrow_mut() = true;
-                    force_push_btn_for_click.set_label("Confirm Force Push");
-                    apply_action_feedback(
-                        &feedback_for_force_push,
-                        &toast_for_force_push,
-                        "Click Confirm Force Push to run git push --force-with-lease.",
-                        true,
-                    );
-                    return;
-                }
-                force_push_btn_for_click.set_sensitive(false);
-                match WorkspaceStore::open(db_for_force_push.clone())
-                    .and_then(|store| store.force_push_branch_with_lease(&workspace_for_force_push))
-                {
-                    Ok(output) => {
-                        let message = output
-                            .lines()
-                            .map(str::trim)
-                            .find(|line| !line.is_empty())
-                            .map(|line| format!("Force pushed with lease: {line}"))
-                            .unwrap_or_else(|| "Force pushed with lease.".to_owned());
-                        apply_action_feedback(
-                            &feedback_for_force_push,
-                            &toast_for_force_push,
-                            &message,
-                            true,
-                        );
-                    }
-                    Err(err) => {
-                        force_push_btn_for_click.set_sensitive(true);
-                        apply_action_feedback(
-                            &feedback_for_force_push,
-                            &toast_for_force_push,
-                            &push_branch_error_feedback(&err),
-                            true,
-                        );
-                    }
                 }
             });
 
@@ -7652,6 +7724,7 @@ fn latest_check_agent_prompt(store: &WorkspaceStore, name: &str) -> anyhow::Resu
         .next()
         .ok_or_else(|| anyhow::anyhow!("No local check runs recorded"))?;
     let output = store.read_latest_check_log(name)?;
+    let output = bounded_check_prompt_output(&output);
     Ok(format!(
         "Address the latest local check output for workspace {name}. If it failed, make the smallest safe fix and rerun the relevant check.\n\nProcess #{}: {}\nStatus: {}\nExit: {}\nStarted: {}\n\nOutput:\n```text\n{}\n```",
         record.id,
@@ -7659,8 +7732,25 @@ fn latest_check_agent_prompt(store: &WorkspaceStore, name: &str) -> anyhow::Resu
         record.status.as_str(),
         exit_code_label(record.exit_code),
         record.started_at,
-        output.trim()
+        output
     ))
+}
+
+fn bounded_check_prompt_output(output: &str) -> String {
+    const MAX_BYTES: usize = 32 * 1024;
+    let trimmed = output.trim();
+    if trimmed.len() <= MAX_BYTES {
+        return trimmed.to_owned();
+    }
+    let mut start = trimmed.len() - MAX_BYTES;
+    while start < trimmed.len() && !trimmed.is_char_boundary(start) {
+        start += 1;
+    }
+    format!(
+        "[output truncated to last {} KiB]\n{}",
+        MAX_BYTES / 1024,
+        &trimmed[start..]
+    )
 }
 
 fn tail_lines(text: &str, max_lines: usize) -> String {

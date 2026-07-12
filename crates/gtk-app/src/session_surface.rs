@@ -1404,24 +1404,26 @@ pub fn agent_session_panel(
             selected_record_id = selected_record.as_ref().map(|record| record.id),
             "session send stage: selected thread record"
         );
-        if let Err(err) = create_turn_checkpoint_for_send(
-            &db_for_send,
-            &workspace_for_send,
-            thread_id,
-            selected_record.as_ref().map(|record| record.id),
-            staged_review,
-        ) {
-            warn!(
-                workspace = %workspace_for_send,
+        let persist_turn_checkpoint = || {
+            if let Err(err) = create_turn_checkpoint_for_send(
+                &db_for_send,
+                &workspace_for_send,
                 thread_id,
-                error = %err,
-                "turn checkpoint creation failed before session send"
-            );
-            append_session_status_message(
-                &messages_for_send,
-                &format!("[checkpoint] Could not create turn checkpoint: {err:#}"),
-            );
-        }
+                selected_record.as_ref().map(|record| record.id),
+                staged_review,
+            ) {
+                warn!(
+                    workspace = %workspace_for_send,
+                    thread_id,
+                    error = %err,
+                    "turn checkpoint creation failed after session send queued"
+                );
+                append_session_status_message(
+                    &messages_for_send,
+                    &format!("[checkpoint] Could not create turn checkpoint: {err:#}"),
+                );
+            }
+        };
         if matches!(selected_kind, SessionKind::Codex) {
             let running_record = thread_records
                 .iter()
@@ -1482,6 +1484,7 @@ pub fn agent_session_panel(
                         );
                         return;
                     }
+                    persist_turn_checkpoint();
                     mark_thread_working(working_threads_for_send.as_ref(), thread_id);
                     if staged_review {
                         app_state_for_send.set_staged_review_prompt(None);
@@ -1520,6 +1523,7 @@ pub fn agent_session_panel(
                         ArchcarInputKind::User
                     },
                 );
+                persist_turn_checkpoint();
                 apply_codex_startup_signal(
                     &mut codex_startup_states_for_send.borrow_mut(),
                     CodexStartupSignal::Loading { thread_id },
@@ -1644,14 +1648,21 @@ pub fn agent_session_panel(
         } else {
             ArchcarInputKind::User
         };
-        queue_archcar_user_send(
+        if !queue_archcar_user_send(
             &archcar_bridge_for_send,
             inflight_archcar_actions_for_send.as_ref(),
             thread_id,
             process_id,
             command.clone(),
             input_kind,
-        );
+        ) {
+            append_session_status_message(
+                &messages_for_send,
+                "[archcar] Request channel is closed. Reopen the workspace or restart the app.",
+            );
+            return;
+        }
+        persist_turn_checkpoint();
         if staged_review {
             app_state_for_send.set_staged_review_prompt(None);
         }
@@ -2647,23 +2658,21 @@ fn inline_event_body_preview(event: &CodexInlineEvent, body: &str) -> InlineEven
 
 fn inline_event_expands_body_by_default(event: &CodexInlineEvent) -> bool {
     let title = event.title.to_ascii_lowercase();
+    let normalized_title = title
+        .trim_start()
+        .trim_start_matches('•')
+        .trim_start();
     let body = event
         .body
         .as_deref()
         .unwrap_or_default()
         .to_ascii_lowercase();
-    [
-        "write ",
-        "edit ",
-        "create ",
-        "update ",
-        "functions.apply_patch",
-        "functions.write_stdin",
-        "apply_patch",
-        "write_stdin",
-    ]
-    .iter()
-    .any(|marker| title.contains(marker) || body.contains(marker))
+    ["write ", "edit ", "create ", "update "]
+        .iter()
+        .any(|marker| normalized_title.starts_with(marker))
+        || ["apply_patch", "write_stdin"]
+            .iter()
+            .any(|marker| title.contains(marker) || body.contains(marker))
 }
 
 fn truncate_inline_event_body(body: &str, max_chars: usize) -> InlineEventBodyPreview {
@@ -3169,7 +3178,9 @@ fn context_compaction_events(
             ));
         }
     }
-    detections.truncate(CONTEXT_DETAIL_HISTORY_LIMIT);
+    if detections.len() > CONTEXT_DETAIL_HISTORY_LIMIT {
+        detections.drain(0..detections.len() - CONTEXT_DETAIL_HISTORY_LIMIT);
+    }
     detections
 }
 
@@ -3406,6 +3417,9 @@ fn show_context_details_popover(
     body.append(&actions);
 
     popover.set_child(Some(&body));
+    popover.connect_closed(|popover| {
+        popover.unparent();
+    });
     popover.popup();
 }
 
@@ -3414,7 +3428,7 @@ fn context_usage_display_state(usage: Option<CodexContextUsage>) -> ContextUsage
         return ContextUsageDisplayState {
             percent_label: "--".to_owned(),
             css_class: "chat-context-usage-empty",
-            tooltip: "Context usage unknown".to_owned(),
+            tooltip: "Context usage unknown. Click for details.".to_owned(),
         };
     };
     let css_class = if usage.percent < CONTEXT_WARNING_PERCENT {
@@ -4880,14 +4894,17 @@ fn collect_session_role_event(
 }
 
 fn raw_tool_event_collects_body(header: &str) -> bool {
-    let trimmed = header.trim_start_matches('•').trim_start();
+    let trimmed = header
+        .trim_start()
+        .trim_start_matches('•')
+        .trim_start();
     if trimmed.contains("functions.apply_patch") || trimmed.contains("functions.write_stdin") {
         return true;
     }
     let Some((verb, _)) = trimmed.split_once(' ') else {
         return false;
     };
-    matches!(verb, "Write" | "Edit" | "Create" | "Update")
+    matches!(verb, "Write" | "Edit" | "Create")
 }
 
 fn collect_file_change_event(lines: &[&str], start: usize) -> (String, usize) {
@@ -6913,11 +6930,22 @@ fix it
     }
 
     #[test]
+    fn transcript_groups_indented_bullet_tool_event_with_body() {
+        let transcript = "  • Write src/main.rs\nfn main() {}\n[session exited]\n";
+
+        let events = parse_session_transcript_events(transcript);
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].role, SessionTranscriptRole::Tool);
+        assert_eq!(events[0].body, "• Write src/main.rs\nfn main() {}");
+    }
+
+    #[test]
     fn context_usage_display_state_maps_percent_and_tooltips() {
         let empty = context_usage_display_state(None);
         assert_eq!(empty.percent_label, "--");
         assert_eq!(empty.css_class, "chat-context-usage-empty");
-        assert_eq!(empty.tooltip, "Context usage unknown");
+        assert_eq!(empty.tooltip, "Context usage unknown. Click for details.");
 
         let normal = context_usage_display_state(Some(CodexContextUsage {
             used_tokens: Some(68_000),

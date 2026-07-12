@@ -722,6 +722,15 @@ pub struct ChatEventRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatThreadContextSummary {
+    pub title: String,
+    pub provider: String,
+    pub message_count: usize,
+    pub event_count: usize,
+    pub transcript_bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkedDirectory {
     pub id: i64,
     pub workspace_id: i64,
@@ -3060,13 +3069,14 @@ impl WorkspaceStore {
 
     pub fn force_push_branch_with_lease(&self, name: &str) -> Result<String> {
         let workspace = self.get_by_name(name)?;
+        let repository = self.load_repository_by_id(workspace.repository_id)?;
         let output = git_output_dynamic(
             &workspace.path,
             &[
                 "push",
                 "--force-with-lease",
                 "-u",
-                "origin",
+                repository.remote_name.as_str(),
                 workspace.branch.as_str(),
             ],
         )?;
@@ -3825,7 +3835,9 @@ mutation($threadId: ID!) {{
         workspace: &Workspace,
     ) -> Result<Option<PullRequest>> {
         if let Some(pr) = self.pull_request_by_workspace_id(workspace.id)? {
-            return Ok(Some(pr));
+            if pr.state == "open" {
+                return Ok(Some(pr));
+            }
         }
         let output = command_output(
             &workspace.path,
@@ -5296,6 +5308,51 @@ mutation($threadId: ID!) {{
         Ok(threads)
     }
 
+    pub fn chat_thread_context_summaries(
+        &self,
+        workspace_name: &str,
+    ) -> Result<Vec<ChatThreadContextSummary>> {
+        let workspace = self.get_by_name(workspace_name)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT
+                t.title,
+                t.provider,
+                COALESCE(m.message_count, 0),
+                COALESCE(m.message_bytes, 0),
+                COALESCE(e.event_count, 0),
+                COALESCE(e.event_bytes, 0)
+             FROM chat_threads t
+             LEFT JOIN (
+                SELECT thread_id, COUNT(*) AS message_count, SUM(LENGTH(content)) AS message_bytes
+                FROM chat_messages
+                GROUP BY thread_id
+             ) m ON m.thread_id = t.id
+             LEFT JOIN (
+                SELECT thread_id, COUNT(*) AS event_count, SUM(LENGTH(payload_json)) AS event_bytes
+                FROM chat_events
+                GROUP BY thread_id
+             ) e ON e.thread_id = t.id
+             WHERE t.workspace_id = ?1
+             ORDER BY t.updated_at DESC, t.id DESC",
+        )?;
+        let rows = stmt
+            .query_map([workspace.id], |row| {
+                let message_count: i64 = row.get(2)?;
+                let message_bytes: i64 = row.get(3)?;
+                let event_count: i64 = row.get(4)?;
+                let event_bytes: i64 = row.get(5)?;
+                Ok(ChatThreadContextSummary {
+                    title: row.get(0)?,
+                    provider: row.get(1)?,
+                    message_count: message_count.max(0) as usize,
+                    event_count: event_count.max(0) as usize,
+                    transcript_bytes: message_bytes.max(0) as usize + event_bytes.max(0) as usize,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     pub fn get_chat_thread_record(&self, thread_id: i64) -> Result<ChatThreadRecord> {
         self.get_chat_thread(thread_id)
     }
@@ -6533,7 +6590,7 @@ fn spawn_process_monitor(db_path: PathBuf, process_id: i64, mut child: Child) {
             return;
         };
         let now = timestamp();
-        let _ = conn.execute(
+        let updated = conn.execute(
             "UPDATE processes
              SET status = ?1, ended_at = ?2, exit_code = ?3
              WHERE id = ?4 AND status = 'running'",
@@ -6544,7 +6601,9 @@ fn spawn_process_monitor(db_path: PathBuf, process_id: i64, mut child: Child) {
                 process_id
             ],
         );
-        let _ = record_process_exit_timeline_event(&conn, process_id, status.code());
+        if matches!(updated, Ok(1)) {
+            let _ = record_process_exit_timeline_event(&conn, process_id, status.code());
+        }
     });
 }
 
@@ -6566,7 +6625,7 @@ fn record_process_exit_timeline_event(
     if !matches!(kind.as_str(), "setup" | "run" | "check") {
         return Ok(());
     }
-    let status = if exit_code.unwrap_or(0) == 0 {
+    let status = if exit_code == Some(0) {
         "completed"
     } else {
         "failed"
@@ -7846,12 +7905,14 @@ fn truncate_text_at_char_boundary(value: String, max_bytes: usize) -> (String, b
     if value.len() <= max_bytes {
         return (value, false);
     }
-    let mut end = max_bytes;
+    const MARKER: &str = "\n[Diff truncated at hard limit]\n";
+    let retain_bytes = max_bytes.saturating_sub(MARKER.len());
+    let mut end = retain_bytes;
     while end > 0 && !value.is_char_boundary(end) {
         end -= 1;
     }
     let mut truncated = value[..end].to_owned();
-    truncated.push_str("\n[Diff truncated at hard limit]\n");
+    truncated.push_str(MARKER);
     (truncated, true)
 }
 
@@ -8559,20 +8620,34 @@ fn load_env_file_refs(
     let mut values = Vec::new();
     for relative in &settings.env_file_refs {
         validate_relative_workspace_path(relative)?;
-        let workspace_file = workspace_path.join(relative);
-        let path = if workspace_file.exists() {
-            workspace_file
+        let path = if workspace_path.join(relative).exists() {
+            resolve_env_file_ref(workspace_path, relative)?
+        } else if repository_root.join(relative).exists() {
+            resolve_env_file_ref(repository_root, relative)?
         } else {
-            repository_root.join(relative)
-        };
-        if !path.exists() {
             anyhow::bail!("env file reference {relative} does not exist");
-        }
+        };
         let contents = fs::read_to_string(&path)
             .with_context(|| format!("read env file {}", path.display()))?;
         values.extend(parse_env_file_contents(relative, &contents)?);
     }
     Ok(values)
+}
+
+fn resolve_env_file_ref(root: &Path, relative: &str) -> Result<PathBuf> {
+    let root = root
+        .canonicalize()
+        .with_context(|| format!("resolve env file root {}", root.display()))?;
+    let path = root.join(relative);
+    let canonical = path
+        .canonicalize()
+        .with_context(|| format!("resolve env file {}", path.display()))?;
+    anyhow::ensure!(
+        canonical.starts_with(&root),
+        "env file reference {relative} resolves outside {}",
+        root.display()
+    );
+    Ok(canonical)
 }
 
 fn parse_env_file_contents(source: &str, contents: &str) -> Result<Vec<(String, OsString)>> {
@@ -8623,7 +8698,7 @@ fn workspace_working_directory(
         return Ok(workspace.path.clone());
     };
     validate_relative_workspace_path(relative)?;
-    let cwd = workspace.path.join(relative);
+    let cwd = resolve_workspace_directory(&workspace.path, relative)?;
     anyhow::ensure!(
         cwd.is_dir(),
         "workspace working_directory {} does not exist in {}",
@@ -8631,6 +8706,22 @@ fn workspace_working_directory(
         workspace.path.display()
     );
     Ok(cwd)
+}
+
+fn resolve_workspace_directory(root: &Path, relative: &str) -> Result<PathBuf> {
+    let root = root
+        .canonicalize()
+        .with_context(|| format!("resolve workspace root {}", root.display()))?;
+    let path = root.join(relative);
+    let canonical = path
+        .canonicalize()
+        .with_context(|| format!("resolve workspace working_directory {}", path.display()))?;
+    anyhow::ensure!(
+        canonical.starts_with(&root),
+        "workspace working_directory {relative} resolves outside {}",
+        root.display()
+    );
+    Ok(canonical)
 }
 
 fn merge_method(
@@ -10538,7 +10629,7 @@ CUSTOM_VALUE = "from-settings"
                 name: Some("demo".to_owned()),
                 root_path: repo_path,
                 default_branch: Some("main".to_owned()),
-                remote_name: "origin".to_owned(),
+                remote_name: "upstream".to_owned(),
                 workspace_parent_path: Some(temp.path().join("workspaces/demo")),
             })
             .unwrap();
@@ -10561,6 +10652,75 @@ CUSTOM_VALUE = "from-settings"
         assert!(!fs::read_to_string(&run.log_path)
             .unwrap()
             .contains("from-file"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_workspace_rejects_env_file_ref_symlink_escape() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
+        fs::write(
+            repo_path.join(".archductor/settings.toml"),
+            r#"
+env_file_refs = ".env.local"
+
+[scripts]
+run = "true"
+"#,
+        )
+        .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", "."])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args([
+                "-c",
+                "user.name=Linux Archductor",
+                "-c",
+                "user.email=linux-archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "add settings",
+            ])
+            .status()
+            .unwrap();
+
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let outside_env = temp.path().join("outside.env");
+        fs::write(&outside_env, "SECRET_TOKEN=outside\n").unwrap();
+        std::os::unix::fs::symlink(&outside_env, workspace.path.join(".env.local")).unwrap();
+
+        let err = store.run_workspace("berlin").unwrap_err();
+
+        assert!(format!("{err:#}").contains("resolves outside"));
     }
 
     #[test]
@@ -14295,7 +14455,7 @@ general = "Keep changes focused."
     fn force_push_branch_with_lease_updates_remote_branch() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
-        let remote_path = temp.path().join("origin.git");
+        let remote_path = temp.path().join("upstream.git");
         Command::new("git")
             .args(["init", "--bare", "--initial-branch", "main"])
             .arg(&remote_path)
@@ -14304,14 +14464,14 @@ general = "Keep changes focused."
         Command::new("git")
             .arg("-C")
             .arg(&repo_path)
-            .args(["remote", "add", "origin"])
+            .args(["remote", "add", "upstream"])
             .arg(&remote_path)
             .status()
             .unwrap();
         Command::new("git")
             .arg("-C")
             .arg(&repo_path)
-            .args(["push", "-u", "origin", "main"])
+            .args(["push", "-u", "upstream", "main"])
             .status()
             .unwrap();
         let db_path = temp.path().join("state.db");
@@ -14322,7 +14482,7 @@ general = "Keep changes focused."
                 name: Some("demo".to_owned()),
                 root_path: repo_path,
                 default_branch: Some("main".to_owned()),
-                remote_name: "origin".to_owned(),
+                remote_name: "upstream".to_owned(),
                 workspace_parent_path: Some(temp.path().join("workspaces/demo")),
             })
             .unwrap();
@@ -14381,6 +14541,15 @@ general = "Keep changes focused."
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn truncate_text_at_char_boundary_reserves_marker_space() {
+        let (diff, truncated) = truncate_text_at_char_boundary("a".repeat(80), 64);
+
+        assert!(truncated);
+        assert!(diff.len() <= 64);
+        assert!(diff.ends_with("[Diff truncated at hard limit]\n"));
     }
 
     #[test]
@@ -16299,6 +16468,68 @@ exit 1
             "Existing PR: https://github.com/example/demo/pull/42"
         );
         assert_eq!(store.pull_request("berlin").unwrap().unwrap().number, 42);
+    }
+
+    #[test]
+    fn create_pull_request_ignores_closed_cached_pr_before_remote_lookup() {
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        let old_path = install_fake_gh(
+            temp.path(),
+            r#"#!/bin/sh
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  printf '[{"url":"https://github.com/example/demo/pull/42"}]\n'
+  exit 0
+fi
+echo "unexpected gh args: $*" >&2
+exit 1
+"#,
+        );
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        store
+            .record_pull_request(workspace.id, "https://github.com/example/demo/pull/41")
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE pull_requests SET state = 'closed' WHERE workspace_id = ?1",
+                [workspace.id],
+            )
+            .unwrap();
+
+        let output = store
+            .create_pull_request("berlin", Some("Title"), Some("Body"), true)
+            .unwrap();
+
+        restore_path(old_path);
+        assert_eq!(
+            output.trim(),
+            "Existing PR: https://github.com/example/demo/pull/42"
+        );
+        let pull_request = store.pull_request("berlin").unwrap().unwrap();
+        assert_eq!(pull_request.number, 42);
+        assert_eq!(pull_request.state, "open");
     }
 
     #[test]

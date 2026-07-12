@@ -920,12 +920,20 @@ pub(crate) fn build_settings_page(
         })
     };
     let load_selected_settings_for_repo = load_selected_settings.clone();
+    let pending_autosave: Rc<RefCell<Option<gtk::glib::SourceId>>> = Rc::new(RefCell::new(None));
+    let pending_autosave_target: Rc<RefCell<Option<(String, SettingsLayer)>>> =
+        Rc::new(RefCell::new(None));
     let db_path_recover_settings = paths.database_path.clone();
     let settings_repo_select_recover = settings_repo_select.clone();
     let local_tab_recover = local_tab.clone();
     let settings_result_recover = settings_result.clone();
     let toast_recover = toast_manager.clone();
     let load_selected_settings_for_recover = load_selected_settings.clone();
+    let pending_autosave_recover = pending_autosave.clone();
+    let pending_autosave_target_recover = pending_autosave_target.clone();
+    let recover_confirmation: Rc<RefCell<Option<(String, SettingsLayer)>>> =
+        Rc::new(RefCell::new(None));
+    let recover_confirmation_for_click = recover_confirmation.clone();
     recover_defaults_btn.connect_clicked(move |_| {
         let repo_name = selected_repository_name(&settings_repo_select_recover);
         if repo_name.is_empty() {
@@ -937,6 +945,15 @@ pub(crate) fn build_settings_page(
             return;
         }
         let layer = selected_settings_layer(&local_tab_recover);
+        let target = (repo_name.clone(), layer);
+        if recover_confirmation_for_click.borrow().as_ref() != Some(&target) {
+            *recover_confirmation_for_click.borrow_mut() = Some(target);
+            settings_result_recover.set_text(&format!(
+                "Click Recover Defaults again to replace {:?} settings for {}.",
+                layer, repo_name
+            ));
+            return;
+        }
         let settings = match recovered_settings_for_layer(layer) {
             Ok(settings) => settings,
             Err(err) => {
@@ -948,6 +965,11 @@ pub(crate) fn build_settings_page(
                 return;
             }
         };
+        if let Some(source_id) = pending_autosave_recover.borrow_mut().take() {
+            source_id.remove();
+        }
+        *pending_autosave_target_recover.borrow_mut() = None;
+        *recover_confirmation_for_click.borrow_mut() = None;
         match repository_root(&db_path_recover_settings, &repo_name).and_then(|repo_path| {
             save_repository_settings(&repo_path, layer, &settings).map(|()| repo_path)
         }) {
@@ -967,9 +989,6 @@ pub(crate) fn build_settings_page(
         }
     });
     let loading_settings_for_repo = loading_settings_for_load.clone();
-    let pending_autosave: Rc<RefCell<Option<gtk::glib::SourceId>>> = Rc::new(RefCell::new(None));
-    let pending_autosave_target: Rc<RefCell<Option<(String, SettingsLayer)>>> =
-        Rc::new(RefCell::new(None));
     let flush_pending_autosave = {
         let pending_autosave = pending_autosave.clone();
         let pending_autosave_target = pending_autosave_target.clone();
