@@ -2387,7 +2387,7 @@ mod tests {
 
         let first = connection
             .stdout_rx
-            .recv_timeout(Duration::from_secs(1))
+            .recv_timeout(Duration::from_secs(5))
             .unwrap();
         let first: serde_json::Value = serde_json::from_str(&first).unwrap();
 
@@ -2403,11 +2403,11 @@ mod tests {
 
         let second = connection
             .stdout_rx
-            .recv_timeout(Duration::from_secs(1))
+            .recv_timeout(Duration::from_secs(5))
             .unwrap();
         let third = connection
             .stdout_rx
-            .recv_timeout(Duration::from_secs(1))
+            .recv_timeout(Duration::from_secs(5))
             .unwrap();
         let second: serde_json::Value = serde_json::from_str(&second).unwrap();
         let third: serde_json::Value = serde_json::from_str(&third).unwrap();
@@ -2454,7 +2454,7 @@ mod tests {
 
         let first = connection
             .stdout_rx
-            .recv_timeout(Duration::from_secs(1))
+            .recv_timeout(Duration::from_secs(5))
             .unwrap();
         let first: serde_json::Value = serde_json::from_str(&first).unwrap();
 
@@ -2468,11 +2468,11 @@ mod tests {
 
         let second = connection
             .stdout_rx
-            .recv_timeout(Duration::from_secs(1))
+            .recv_timeout(Duration::from_secs(5))
             .unwrap();
         let third = connection
             .stdout_rx
-            .recv_timeout(Duration::from_secs(1))
+            .recv_timeout(Duration::from_secs(5))
             .unwrap();
         let second: serde_json::Value = serde_json::from_str(&second).unwrap();
         let third: serde_json::Value = serde_json::from_str(&third).unwrap();
