@@ -1,0 +1,30 @@
+crates/core/src/provider_events.rs
+  s_2fd338f0b53281::t_18719b7200c141 613-614
+  s_2fd338f0b53281::t_b6242b65f98c42 1083-1084
+  s_2fd338f0b53281::t_fd1f33a49da48a 1074-1082,1085-1097
+  s_2fd338f0b53281::t_bdc19df6f9b7f9 595,600,602,604-605,609-612,615,617,725,728-729
+  s_2fd338f0b53281::t_6f828a25bf727c 1073
+crates/core/src/archcar/session.rs
+  s_2fd338f0b53281::t_1e2837585bb87e 1091,1103,1116,1134-1135,1144-1159,1163,1173,1183,1186,1188-1197
+  s_2fd338f0b53281::t_18719b7200c141 720
+  s_2fd338f0b53281::t_bdc19df6f9b7f9 252,285,695-712,775,939,972
+crates/core/src/runtime_session_store.rs
+  s_2fd338f0b53281::t_bdc19df6f9b7f9 78-81,85-86
+  s_2fd338f0b53281::t_18719b7200c141 82-84
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "e518dfe32a86aed5b7f2ba76a2fe6a01d18c6980",
+  "prompts": {},
+  "sessions": {
+    "s_2fd338f0b53281": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5852-b907-7720-b006-3980f27dafb1",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
