@@ -122,7 +122,7 @@ impl ManagedSessionConnection {
         match self {
             Self::Live(session) => session.send_line(input),
             Self::CodexAppServer(_) | Self::ClaudeStream(_) => {
-                anyhow::bail!("provider-native sessions do not accept raw PTY input")
+                anyhow::bail!("provider-native sessions do not accept terminal input")
             }
             Self::Reattached { write, .. } => {
                 write.write_all(input.as_bytes())?;

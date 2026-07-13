@@ -397,22 +397,44 @@ pub struct CodexAppServerMessage {
 impl CodexAppServerMessage {
     pub fn to_provider_event_draft(&self) -> CodexProviderEventDraft {
         let method = self.method.as_deref().unwrap_or("");
+        let name = codex_event_name(method, self.message_kind, &self.value);
         CodexProviderEventDraft {
             provider: CODEX_APP_SERVER_PROVIDER.to_owned(),
             message_kind: self.message_kind,
-            category: classify_codex_method(method, self.message_kind),
-            name: self
-                .method
-                .clone()
-                .unwrap_or_else(|| match self.message_kind {
-                    CodexAppServerMessageKind::Response => "response".to_owned(),
-                    CodexAppServerMessageKind::Unknown => "unknown".to_owned(),
-                    CodexAppServerMessageKind::Notification
-                    | CodexAppServerMessageKind::Request => "unnamed".to_owned(),
-                }),
+            category: classify_codex_method(&name, self.message_kind),
+            name,
             correlation_id: self.id.as_ref().map(json_rpc_id_to_string),
             raw_json: self.raw_json.clone(),
             payload: self.value.clone(),
+        }
+    }
+}
+
+fn codex_event_name(
+    method: &str,
+    message_kind: CodexAppServerMessageKind,
+    payload: &Value,
+) -> String {
+    if let Some(item_type) = string_at_any(payload, &["/params/item/type"]) {
+        if let Some(phase) = method
+            .strip_prefix("item/")
+            .and_then(|value| value.split('/').next())
+        {
+            if matches!(phase, "started" | "completed") {
+                return format!("item/{item_type}/{phase}");
+            }
+        }
+    }
+
+    if !method.is_empty() {
+        method.to_owned()
+    } else {
+        match message_kind {
+            CodexAppServerMessageKind::Response => "response".to_owned(),
+            CodexAppServerMessageKind::Unknown => "unknown".to_owned(),
+            CodexAppServerMessageKind::Notification | CodexAppServerMessageKind::Request => {
+                "unnamed".to_owned()
+            }
         }
     }
 }
@@ -722,8 +744,12 @@ impl CodexProviderEventDraft {
             .and_then(|value| i64::try_from(value).ok()),
             occurred_at_ms: context.occurred_at_ms,
             normalized_payload: json!({
-                "title": self.name,
-                "body": body,
+                "title": codex_event_title(&self.name, kind, &self.payload),
+                "body": if body.is_empty() {
+                    codex_payload_body(&self.payload)
+                } else {
+                    body
+                },
                 "message_kind": self.message_kind,
             }),
             raw_json,
@@ -733,10 +759,143 @@ impl CodexProviderEventDraft {
     }
 }
 
+fn codex_event_title(name: &str, kind: ProviderEventKind, payload: &Value) -> String {
+    match string_at_any(payload, &["/params/item/type"]).as_deref() {
+        Some("agentMessage") => "Assistant".to_owned(),
+        Some("userMessage") => "User input".to_owned(),
+        Some("reasoning") => "Reasoning".to_owned(),
+        Some("plan") => "Plan".to_owned(),
+        Some("commandExecution") => {
+            command_from_payload(payload).unwrap_or_else(|| "Command".to_owned())
+        }
+        Some("fileChange") => "File changes".to_owned(),
+        Some("mcpToolCall") => {
+            tool_title_from_payload(payload).unwrap_or_else(|| "MCP tool".to_owned())
+        }
+        Some("dynamicToolCall") => {
+            tool_title_from_payload(payload).unwrap_or_else(|| "Dynamic tool".to_owned())
+        }
+        Some("webSearch") => "Web search".to_owned(),
+        Some("imageView") => "Image".to_owned(),
+        Some("enteredReviewMode") | Some("exitedReviewMode") => "Review".to_owned(),
+        Some("contextCompaction") => "Context compaction".to_owned(),
+        _ => match kind {
+            ProviderEventKind::AssistantOutput => "Assistant".to_owned(),
+            ProviderEventKind::PlanningReasoning => "Reasoning".to_owned(),
+            ProviderEventKind::CommandProcess => "Command".to_owned(),
+            ProviderEventKind::DiffFileChange => "File changes".to_owned(),
+            ProviderEventKind::Tool => "Tool".to_owned(),
+            ProviderEventKind::Mcp => "MCP tool".to_owned(),
+            ProviderEventKind::ApprovalPermission => "Approval".to_owned(),
+            ProviderEventKind::LimitFailure => "Provider event".to_owned(),
+            _ => name.to_owned(),
+        },
+    }
+}
+
+fn codex_payload_body(payload: &Value) -> String {
+    match string_at_any(payload, &["/params/item/type"]).as_deref() {
+        Some("commandExecution") => return command_body_from_payload(payload).unwrap_or_default(),
+        Some("fileChange") => return file_change_body_from_payload(payload).unwrap_or_default(),
+        Some("mcpToolCall") | Some("dynamicToolCall") | Some("webSearch") | Some("imageView") => {
+            return tool_body_from_payload(payload).unwrap_or_default();
+        }
+        _ => {}
+    }
+
+    string_at_any(
+        payload,
+        &[
+            "/params/item/text",
+            "/params/item/review",
+            "/params/item/summary",
+            "/params/item/content",
+            "/params/item/aggregatedOutput",
+            "/params/item/result",
+            "/params/item/error/message",
+            "/params/item/status",
+            "/params/error/message",
+            "/error/message",
+        ],
+    )
+    .or_else(|| command_body_from_payload(payload))
+    .or_else(|| file_change_body_from_payload(payload))
+    .or_else(|| tool_body_from_payload(payload))
+    .unwrap_or_default()
+}
+
+fn command_body_from_payload(payload: &Value) -> Option<String> {
+    let command = command_from_payload(payload)?;
+    let output = string_at_any(payload, &["/params/item/aggregatedOutput"]);
+    Some(match output {
+        Some(output) if !output.trim().is_empty() => format!("{command}\n{output}"),
+        _ => command,
+    })
+}
+
+fn command_from_payload(payload: &Value) -> Option<String> {
+    payload
+        .pointer("/params/item/command")
+        .and_then(Value::as_array)
+        .map(|parts| {
+            parts
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .filter(|command| !command.trim().is_empty())
+}
+
+fn file_change_body_from_payload(payload: &Value) -> Option<String> {
+    let changes = payload.pointer("/params/item/changes")?.as_array()?;
+    let lines = changes
+        .iter()
+        .filter_map(|change| {
+            let path = change.get("path").and_then(Value::as_str)?;
+            let kind = change
+                .get("kind")
+                .and_then(Value::as_str)
+                .unwrap_or("changed");
+            Some(format!("{kind} {path}"))
+        })
+        .collect::<Vec<_>>();
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+fn tool_body_from_payload(payload: &Value) -> Option<String> {
+    string_at_any(
+        payload,
+        &[
+            "/params/item/arguments",
+            "/params/item/result",
+            "/params/item/error",
+            "/params/item/query",
+            "/params/item/path",
+        ],
+    )
+}
+
+fn tool_title_from_payload(payload: &Value) -> Option<String> {
+    string_at_any(
+        payload,
+        &[
+            "/params/item/tool",
+            "/params/item/server",
+            "/params/item/action",
+            "/params/item/path",
+        ],
+    )
+}
+
 pub fn classify_codex_method(
     method: &str,
-    _message_kind: CodexAppServerMessageKind,
+    message_kind: CodexAppServerMessageKind,
 ) -> CodexProviderEventCategory {
+    if message_kind == CodexAppServerMessageKind::Response && method == "response" {
+        return CodexProviderEventCategory::Unknown;
+    }
+
     if method.is_empty() {
         return CodexProviderEventCategory::Unknown;
     }
@@ -1163,6 +1322,57 @@ mod tests {
             ),
             CodexProviderEventCategory::ApprovalsPermissions
         );
+    }
+
+    #[test]
+    fn item_lifecycle_messages_classify_from_documented_item_type() {
+        let cases = [
+            (
+                r#"{"method":"item/completed","params":{"threadId":"thr_1","turnId":"turn_1","item":{"type":"agentMessage","id":"msg_1","text":"Done."}}}"#,
+                CodexProviderEventCategory::AssistantOutput,
+                "item/agentMessage/completed",
+                "Done.",
+            ),
+            (
+                r#"{"method":"item/started","params":{"threadId":"thr_1","turnId":"turn_1","item":{"type":"reasoning","id":"reason_1","summary":"Checking the mapper."}}}"#,
+                CodexProviderEventCategory::PlanningReasoning,
+                "item/reasoning/started",
+                "Checking the mapper.",
+            ),
+            (
+                r#"{"method":"item/completed","params":{"threadId":"thr_1","turnId":"turn_1","item":{"type":"commandExecution","id":"cmd_1","command":["cargo","test"],"aggregatedOutput":"ok"}}}"#,
+                CodexProviderEventCategory::CommandProcessExecution,
+                "item/commandExecution/completed",
+                "cargo test\nok",
+            ),
+            (
+                r#"{"method":"item/completed","params":{"threadId":"thr_1","turnId":"turn_1","item":{"type":"fileChange","id":"file_1","changes":[{"path":"src/main.rs","kind":"modified","diff":"@@"}],"status":"completed"}}}"#,
+                CodexProviderEventCategory::DiffsFileChanges,
+                "item/fileChange/completed",
+                "modified src/main.rs",
+            ),
+        ];
+
+        for (raw, category, name, body) in cases {
+            let draft = parse_jsonl_message(raw, 1)
+                .unwrap()
+                .to_provider_event_draft();
+
+            assert_eq!(draft.category, category);
+            assert_eq!(draft.name, name);
+            let event =
+                draft.into_provider_event_draft(crate::provider_events::ProviderEventContext {
+                    workspace_id: Some(1),
+                    chat_thread_id: Some(7),
+                    process_id: Some(9),
+                    occurred_at_ms: 42,
+                    schema_version: 1,
+                    adapter_version: "codex-app-server-test".to_owned(),
+                });
+            assert_eq!(event.provider_thread_id.as_deref(), Some("thr_1"));
+            assert_eq!(event.provider_turn_id.as_deref(), Some("turn_1"));
+            assert_eq!(event.normalized_payload["body"], body);
+        }
     }
 
     #[test]

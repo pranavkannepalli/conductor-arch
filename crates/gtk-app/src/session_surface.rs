@@ -2853,8 +2853,16 @@ fn provider_projection_items_for_render(
 ) -> Vec<ProviderProjectionItem> {
     items
         .into_iter()
+        .filter(provider_projection_item_is_relevant_chat_event)
         .filter(|item| !provider_projection_item_has_persisted_message(item, messages))
         .collect()
+}
+
+fn provider_projection_item_is_relevant_chat_event(item: &ProviderProjectionItem) -> bool {
+    !matches!(
+        item.render_class,
+        ProjectionRenderClass::FallbackCard | ProjectionRenderClass::StatusCard
+    )
 }
 
 fn provider_projection_item_has_persisted_message(
@@ -8869,6 +8877,81 @@ I summarized the result.
         assert!(text.contains("Unknown provider event"));
         assert!(text.contains("\"type\": \"future_event\""));
         assert!(text.contains("[redacted]"));
+    }
+
+    #[test]
+    fn normal_chat_provider_projection_hides_raw_and_status_events() {
+        let mut response = provider_event_record(
+            ProviderEventKind::AssistantOutput,
+            ProviderEventPhase::Delta,
+        );
+        response.provider_item_id = Some("msg-1".to_owned());
+        response.normalized_payload = serde_json::json!({
+            "title": "Assistant",
+            "body": "I can fix that."
+        });
+        let mut thought = provider_event_record(
+            ProviderEventKind::PlanningReasoning,
+            ProviderEventPhase::Delta,
+        );
+        thought.provider_item_id = Some("thought-1".to_owned());
+        thought.normalized_payload = serde_json::json!({
+            "title": "Thought",
+            "body": "Need to inspect the event mapper."
+        });
+        let mut tool =
+            provider_event_record(ProviderEventKind::Tool, ProviderEventPhase::Completed);
+        tool.provider_item_id = Some("tool-1".to_owned());
+        tool.normalized_payload = serde_json::json!({
+            "title": "Bash",
+            "body": "cargo test passed"
+        });
+        let mut status = provider_event_record(
+            ProviderEventKind::ThreadSession,
+            ProviderEventPhase::Started,
+        );
+        status.provider_item_id = Some("status-1".to_owned());
+        status.normalized_payload = serde_json::json!({
+            "title": "thread/started",
+            "body": ""
+        });
+        let mut raw =
+            provider_event_record(ProviderEventKind::Unknown, ProviderEventPhase::Unknown);
+        raw.provider_item_id = Some("raw-1".to_owned());
+        raw.normalized_payload = serde_json::json!({
+            "title": "Unknown provider event"
+        });
+        raw.raw_json = serde_json::json!({
+            "id": 7,
+            "result": { "ok": true }
+        });
+
+        let projection = provider_projection_from_records(&[response, thought, tool, status, raw]);
+        let items = provider_projection_items_for_render(projection.items, &[]);
+
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.render_class)
+                .collect::<Vec<_>>(),
+            vec![
+                ProjectionRenderClass::AssistantChat,
+                ProjectionRenderClass::ReasoningCard,
+                ProjectionRenderClass::ToolCard,
+            ]
+        );
+        assert!(items.iter().any(|item| item.body == "I can fix that."));
+        assert!(items
+            .iter()
+            .any(|item| item.body == "Need to inspect the event mapper."));
+        let rendered_text = items
+            .iter()
+            .map(provider_projection_card_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!rendered_text.contains("Unknown provider event"));
+        assert!(!rendered_text.contains("\"result\""));
+        assert!(!rendered_text.contains("thread/started"));
     }
 
     #[test]

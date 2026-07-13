@@ -25,8 +25,8 @@ many terminals.
 ### Runtime And Agents
 
 - Start and stop Shell, Codex, Claude Code, and Cursor sessions.
-- Persist raw PTY chunks, parsed session events, chat threads/messages, process
-  records, and logs.
+- Persist provider events, parsed session events, chat threads/messages,
+  process records, and diagnostic logs.
 - Keep multiple sessions in one workspace separate from multiple workspaces.
 - Reconcile stale processes on restart.
 

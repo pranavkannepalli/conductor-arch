@@ -49,8 +49,9 @@ Relationships:
 - Workspace creation from branch, prompt, GitHub issue, GitHub PR, and Linear
   issue where credentials are available.
 - Durable session/process records that survive app restart.
-- PTY-backed agent sessions with raw output preserved and parsed events stored
-  separately.
+- Provider-native agent sessions for Codex app-server and Claude stream-json,
+  with rendered provider events stored separately from diagnostic transport
+  logs.
 - Workspace terminal, setup/run/stop controls, logs, and process list.
 - Changes/checks/review/todos/conflicts/PR panels with visible failure states.
 - Debug-only PTY Inspector gated by `ARCHDUCTOR_DEBUG`.

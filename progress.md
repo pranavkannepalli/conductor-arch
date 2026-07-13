@@ -16,9 +16,9 @@ Archductor now has a usable app-first loop for one repository:
    `gh` auth.
 9. Restore archived workspaces and inspect older imported upstream Conductor chats.
 
-The GTK app is usable but still rough. Agent sessions run PTY-backed harnesses
-and render structured app-native transcript events, terminal rendering is not a
-full emulator, and several app controls remain unfinished.
+The GTK app is usable but still rough. Agent sessions render Codex app-server
+and Claude stream-json provider events, terminal rendering is not a full
+emulator, and several app controls remain unfinished.
 
 July 6 workspace/review slice now has focused core, CLI, and GTK coverage:
 workspace lifecycle actions, including duplicate, keep persisted event history;
@@ -49,9 +49,9 @@ July 6 core planning slice completed its debugging verification pass on
 2026-07-05: the V1 PTY/runtime model now has an explicit session state machine
 for starting, running,
 streaming, waiting-for-input, tool-running, interrupted, failed, exited, and
-archived states. Codex screen deltas now persist typed `SessionEvent` rows
-beside raw PTY logs and structured chat messages/events, and local history
-prefers those typed events when present. Core Project and Workspace model
+archived states. Provider-native events now persist beside structured chat
+messages/events, and local history prefers typed events when present. Core
+Project and Workspace model
 snapshots expose repository settings, scripts, environment, prompts, workspace
 IDs, branch/worktree paths, session IDs, checkpoint IDs, and review/todo counts.
 Focused verification passed:
@@ -109,8 +109,8 @@ now has focused request-mapping and lifecycle feedback coverage. Linear live
 proof is still blocked until `LINEAR_API_KEY` is set. Broader CLI/GTK suites
 should be run before release artifacts.
 
-Phase 8 was completed on 2026-06-21 for the current PTY-backed harness model:
-selected Shell/Codex/Claude/Cursor sessions render a structured session header
+Phase 8 was completed on 2026-06-21 for the current provider-event harness
+model: selected Shell/Codex/Claude/Cursor sessions render a structured session header
 with kind, status, runtime state, attachment state, event counts, PID,
 start/end/exit metadata, harness options, command, and sanitized transcript
 events. Composer input, staged review prompts, harness/system notices, and
@@ -155,7 +155,7 @@ verification: `cargo test -p archductor-core merge_pull_request -- --nocapture`
 and `cargo test -p archductor-core settings::tests -- --nocapture`.
 
 Phase 9 now has unified local chat history for new Linux sessions: saved
-PTY-backed Shell/Codex/Claude/Cursor session process logs are exposed through a
+Shell/Codex/Claude/Cursor session records are exposed through a
 core history API, the GTK History page merges those local sessions with
 imported macOS Conductor chats, workspace chat panels show local saved
 sessions for the selected worktree, and the CLI has `archductor history
