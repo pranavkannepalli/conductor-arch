@@ -1173,13 +1173,6 @@ separator {
     border-color: #be123c;
 }
 
-.lc-density-compact .nav-row,
-.lc-density-compact .nav-row-active,
-.lc-density-compact .nav-button,
-.lc-density-compact .nav-button-active {
-    padding: 8px 10px;
-}
-
 .lc-density-compact .project-row,
 .lc-density-compact .history-row,
 .lc-density-compact .detail-row,
@@ -1194,13 +1187,6 @@ separator {
 .lc-density-compact .kanban-board,
 .lc-density-compact .page-board {
     padding: 18px 22px;
-}
-
-.lc-density-comfortable .nav-row,
-.lc-density-comfortable .nav-row-active,
-.lc-density-comfortable .nav-button,
-.lc-density-comfortable .nav-button-active {
-    padding: 12px 16px;
 }
 
 .lc-density-comfortable .project-row,
@@ -1219,7 +1205,6 @@ separator {
     padding: 32px;
 }
 
-window.lc-theme-dark,
 .lc-theme-dark .dashboard,
 .lc-theme-dark .page-shell,
 .lc-theme-dark .history-view {
@@ -1227,9 +1212,7 @@ window.lc-theme-dark,
     color: #e4e4e4;
 }
 
-.lc-theme-dark .sidebar,
-.lc-theme-dark .page-header,
-.lc-theme-dark headerbar {
+.lc-theme-dark .page-header {
     background-color: #1e1e1e;
     border-color: #2a2a2a;
 }
@@ -1263,22 +1246,6 @@ window.lc-theme-dark,
     color: #8a8a8a;
 }
 
-.lc-theme-dark .nav-button,
-.lc-theme-dark .nav-row {
-    color: #b4b4b4;
-}
-
-.lc-theme-dark .nav-button-active,
-.lc-theme-dark .nav-row-active,
-.lc-theme-dark .nav-button:hover,
-.lc-theme-dark .workspace-list row:selected,
-.lc-theme-dark .workspace-list row:hover {
-    background-color: #2e2e2e;
-    color: #e4e4e4;
-    border-color: transparent;
-}
-
-.lc-theme-dark .sidebar-search,
 .lc-theme-dark .composer-bar entry,
 .lc-theme-dark entry {
     background-color: #191919;
@@ -2678,5 +2645,22 @@ mod tests {
         assert!(!css.contains("#0f172a"));
         assert!(!css.contains("#1e293b"));
         assert!(!css.contains("#334155"));
+    }
+
+    #[test]
+    fn workspace_view_preferences_do_not_target_sidebar_chrome() {
+        let css = app_css();
+
+        assert!(!css.contains("window.lc-theme-dark"));
+        assert!(!css.contains(".lc-theme-dark .sidebar"));
+        assert!(!css.contains(".lc-theme-dark headerbar"));
+        assert!(!css.contains(".lc-theme-dark .nav-button"));
+        assert!(!css.contains(".lc-theme-dark .nav-row"));
+        assert!(!css.contains(".lc-theme-dark .workspace-list"));
+        assert!(!css.contains(".lc-theme-dark .sidebar-search"));
+        assert!(!css.contains(".lc-density-compact .nav-button"));
+        assert!(!css.contains(".lc-density-compact .nav-row"));
+        assert!(!css.contains(".lc-density-comfortable .nav-button"));
+        assert!(!css.contains(".lc-density-comfortable .nav-row"));
     }
 }

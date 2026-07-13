@@ -24,7 +24,7 @@ mod workspace_command_center;
 
 use crate::buttons::{icon_button, text_button};
 use adw::prelude::*;
-use adw::{Application, ApplicationWindow, ColorScheme, StyleManager};
+use adw::{Application, ApplicationWindow};
 use archductor_core::archcar::server::{reconcile_managed_sessions_on_startup, ArchcarServer};
 use archductor_core::paths::AppPaths;
 use archductor_core::workspace::{ProcessStatus, WorkspaceStore, WorkspaceViewDefaults};
@@ -397,27 +397,21 @@ fn resolve_keybindings(db_path: PathBuf, workspace: Option<&str>) -> Keybindings
 }
 
 fn apply_view_preferences(
-    window: &ApplicationWindow,
+    target: &impl IsA<gtk::Widget>,
     preferences: &ViewPreferences,
     colors_css: &CssProvider,
     color_scope_class: &str,
 ) {
-    let style_manager = StyleManager::default();
-    match preferences.theme {
-        Some(ViewTheme::Light) => style_manager.set_color_scheme(ColorScheme::ForceLight),
-        Some(ViewTheme::Dark) => style_manager.set_color_scheme(ColorScheme::ForceDark),
-        Some(ViewTheme::System) | None => style_manager.set_color_scheme(ColorScheme::Default),
-    }
     colors_css.load_from_data(&view_colors_css(color_scope_class, &preferences.colors));
     for class_name in VIEW_PREFERENCE_CLASSES {
-        window.remove_css_class(class_name);
+        target.remove_css_class(class_name);
     }
-    window.remove_css_class(color_scope_class);
+    target.remove_css_class(color_scope_class);
     for class_name in preferences.css_classes() {
-        window.add_css_class(class_name);
+        target.add_css_class(class_name);
     }
     if !preferences.colors.is_empty() {
-        window.add_css_class(color_scope_class);
+        target.add_css_class(color_scope_class);
     }
 }
 
@@ -645,15 +639,9 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         &view_colors_css,
         STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
-    apply_view_preferences(
-        &window,
-        &initial_view_preferences,
-        &view_colors_css,
-        &color_scope_class,
-    );
     tracing::info!(
         elapsed_ms = startup.elapsed().as_millis(),
-        "gtk startup: styles applied"
+        "gtk startup: styles loaded"
     );
 
     let split = adw::OverlaySplitView::new();
@@ -693,6 +681,16 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
             toast_overlay.clone(),
             collapse_sidebar.clone(),
         );
+    let workspace_preference_scope = GBox::new(Orientation::Vertical, 0);
+    workspace_preference_scope.set_hexpand(true);
+    workspace_preference_scope.set_vexpand(true);
+    workspace_preference_scope.append(&workspace_detail);
+    apply_view_preferences(
+        &workspace_preference_scope,
+        &initial_view_preferences,
+        &view_colors_css,
+        &color_scope_class,
+    );
     tracing::info!(
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: workspace center built"
@@ -768,7 +766,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     main_stack.add_named(&projects_page, Some("projects"));
     main_stack.add_named(&settings_page, Some("settings"));
     main_stack.add_named(&history_page, Some("history"));
-    main_stack.add_named(&workspace_detail, Some("workspace"));
+    main_stack.add_named(&workspace_preference_scope, Some("workspace"));
     if debug_mode {
         main_stack.add_named(
             &pty_inspector::build_pty_inspector_page(app_state.workspace_database_path()),
@@ -786,7 +784,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
 
     let refresh_view_preferences: Rc<dyn Fn()> = {
         let state_for_view = app_state.clone();
-        let window_for_view = window.clone();
+        let workspace_preference_scope = workspace_preference_scope.clone();
         let colors_css_for_view = view_colors_css.clone();
         let color_scope_class = color_scope_class.clone();
         let db_path_for_view = app_state.workspace_database_path();
@@ -796,7 +794,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
             let preferences =
                 resolve_view_preferences(db_path_for_view.clone(), workspace.as_deref());
             apply_view_preferences(
-                &window_for_view,
+                &workspace_preference_scope,
                 &preferences,
                 &colors_css_for_view,
                 &color_scope_class,
