@@ -30,9 +30,9 @@ use archductor_core::workspace::{
 };
 use gtk::prelude::*;
 use gtk::{
-    Align, Box as GBox, Button, CheckButton, ComboBoxText, DrawingArea, Entry, EventControllerKey,
-    GestureClick, Image, Label, Orientation, Overlay, Popover, Revealer, RevealerTransitionType,
-    ScrolledWindow, Spinner, TextBuffer, TextView, ToggleButton, Widget,
+    Adjustment, Align, Box as GBox, Button, CheckButton, ComboBoxText, DrawingArea, Entry,
+    EventControllerKey, GestureClick, Image, Label, Orientation, Overlay, Popover, Revealer,
+    RevealerTransitionType, ScrolledWindow, Spinner, TextBuffer, TextView, ToggleButton, Widget,
 };
 use std::any::Any;
 use std::backtrace::Backtrace;
@@ -73,6 +73,8 @@ const CONTEXT_DETAIL_HISTORY_LIMIT: usize = 6;
 #[cfg(test)]
 const CONTEXT_DETAIL_CONTRIBUTOR_LIMIT: usize = 5;
 const CHAT_SCROLL_BOTTOM_EPSILON: f64 = 48.0;
+const CHAT_SCROLL_RESTORE_LAYOUT_PASSES: u8 = 4;
+const CHAT_SCROLL_RESTORE_LAYOUT_PASS_MS: u64 = 16;
 const CHAT_REFRESH_WAKE_DELAY_MS: u64 = 33;
 static NEXT_CHAT_WAKE_ID: AtomicUsize = AtomicUsize::new(1);
 
@@ -88,6 +90,13 @@ type SwitchChatHarnessController = Rc<RefCell<Option<Rc<dyn Fn(SessionKind)>>>>;
 struct ChatScrollSnapshot {
     value: f64,
     pinned_to_bottom: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChatStatusBannerKind {
+    None,
+    Startup,
+    Working,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1299,12 +1308,17 @@ pub fn agent_session_panel(
                                 || !thread_events.is_empty()
                                 || !provider_events.is_empty()
                             {
+                                let status_banner =
+                                    chat_status_banner_kind(&startup_state, working_elapsed, true);
                                 let signature = chat_render_signature(
                                     current_kind,
                                     Some(thread_id),
                                     active_record,
                                     startup_state.clone(),
-                                    working_elapsed_seconds_for_signature(working_elapsed),
+                                    working_elapsed_seconds_for_status_banner(
+                                        status_banner,
+                                        working_elapsed,
+                                    ),
                                     &current,
                                     &thread_state.borrow(),
                                     &thread_messages,
@@ -1326,16 +1340,12 @@ pub fn agent_session_panel(
                                     &context_usage,
                                     latest_context_usage_from_messages(&thread_messages),
                                 );
-                                if let Some(elapsed) = working_elapsed {
-                                    append_chat_refresh_row(
-                                        &messages,
-                                        &codex_working_indicator_widget(elapsed),
-                                    );
-                                } else if let Some(widget) =
-                                    codex_startup_state_widget(&startup_state)
-                                {
-                                    append_chat_refresh_row(&messages, &widget);
-                                }
+                                append_chat_status_banner(
+                                    &messages,
+                                    status_banner,
+                                    &startup_state,
+                                    working_elapsed,
+                                );
                                 let timeline = merge_chat_timeline_for_render(
                                     thread_messages.clone(),
                                     thread_events,
@@ -1377,24 +1387,30 @@ pub fn agent_session_panel(
                         }
                     }
 
+                    let pending_user_inputs = pending_user_input_texts_for_thread(
+                        thread_id,
+                        pending_archcar_inputs.as_ref(),
+                        queued_chat_inputs.as_ref(),
+                        inflight_archcar_actions.as_ref(),
+                        &[],
+                    );
+                    let status_banner = chat_status_banner_kind(
+                        &startup_state,
+                        working_elapsed,
+                        !pending_user_inputs.is_empty(),
+                    );
                     let signature = chat_render_signature(
                         current_kind,
                         Some(thread_id),
                         active_record,
                         startup_state.clone(),
-                        working_elapsed_seconds_for_signature(working_elapsed),
+                        working_elapsed_seconds_for_status_banner(status_banner, working_elapsed),
                         &current,
                         &thread_state.borrow(),
                         &[],
                         &[],
                         &[],
-                        &pending_user_input_texts_for_thread(
-                            thread_id,
-                            pending_archcar_inputs.as_ref(),
-                            queued_chat_inputs.as_ref(),
-                            inflight_archcar_actions.as_ref(),
-                            &[],
-                        ),
+                        &pending_user_inputs,
                         "structured",
                         "empty",
                         runtime_summary.clone(),
@@ -1404,22 +1420,13 @@ pub fn agent_session_panel(
                     }
                     clear_box(&messages);
                     apply_context_usage_state(&context_usage, None);
-                    if let Some(elapsed) = working_elapsed {
-                        append_chat_refresh_row(
-                            &messages,
-                            &codex_working_indicator_widget(elapsed),
-                        );
-                    } else if let Some(widget) = codex_startup_state_widget(&startup_state) {
-                        append_chat_refresh_row(&messages, &widget);
-                    }
-                    let empty = Label::new(Some("No messages yet."));
-                    let pending_user_inputs = pending_user_input_texts_for_thread(
-                        thread_id,
-                        pending_archcar_inputs.as_ref(),
-                        queued_chat_inputs.as_ref(),
-                        inflight_archcar_actions.as_ref(),
-                        &[],
+                    append_chat_status_banner(
+                        &messages,
+                        status_banner,
+                        &startup_state,
+                        working_elapsed,
                     );
+                    let empty = Label::new(Some("No messages yet."));
                     if pending_user_inputs.is_empty() {
                         empty.add_css_class("chat-agent-text");
                         empty.set_selectable(true);
@@ -2412,19 +2419,52 @@ fn capture_chat_scroll(scroll: &ScrolledWindow) -> ChatScrollSnapshot {
 
 fn restore_chat_scroll_after_refresh(scroll: &ScrolledWindow, snapshot: ChatScrollSnapshot) {
     let adjustment = scroll.vadjustment();
+    schedule_chat_scroll_restore_pass(
+        adjustment,
+        snapshot,
+        chat_scroll_restore_layout_passes(snapshot),
+    );
+}
+
+fn schedule_chat_scroll_restore_pass(
+    adjustment: Adjustment,
+    snapshot: ChatScrollSnapshot,
+    remaining_passes: u8,
+) {
+    if remaining_passes == 0 {
+        return;
+    }
     gtk::glib::idle_add_local_once(move || {
-        let value = restored_chat_scroll_value(
-            snapshot,
-            adjustment.lower(),
-            adjustment.upper(),
-            adjustment.page_size(),
-        );
-        adjustment.set_value(value);
+        apply_chat_scroll_restore(&adjustment, snapshot);
+        if remaining_passes > 1 {
+            // PER-190: One-shot layout settling pass for chat scroll restore;
+            // bounded retries end after the current refresh has stabilized.
+            gtk::glib::timeout_add_local_once(
+                Duration::from_millis(CHAT_SCROLL_RESTORE_LAYOUT_PASS_MS),
+                move || {
+                    schedule_chat_scroll_restore_pass(adjustment, snapshot, remaining_passes - 1);
+                },
+            );
+        }
     });
 }
 
 fn chat_scroll_is_pinned_to_bottom(value: f64, lower: f64, upper: f64, page_size: f64) -> bool {
     chat_scroll_max_value(lower, upper, page_size) - value <= CHAT_SCROLL_BOTTOM_EPSILON
+}
+
+fn apply_chat_scroll_restore(adjustment: &Adjustment, snapshot: ChatScrollSnapshot) {
+    let value = restored_chat_scroll_value(
+        snapshot,
+        adjustment.lower(),
+        adjustment.upper(),
+        adjustment.page_size(),
+    );
+    adjustment.set_value(value);
+}
+
+fn chat_scroll_restore_layout_passes(_snapshot: ChatScrollSnapshot) -> u8 {
+    CHAT_SCROLL_RESTORE_LAYOUT_PASSES
 }
 
 fn restored_chat_scroll_value(
@@ -6147,6 +6187,63 @@ fn working_elapsed_seconds_for_signature(elapsed: Option<Duration>) -> Option<u6
     elapsed.map(|elapsed| elapsed.as_secs())
 }
 
+fn working_elapsed_seconds_for_status_banner(
+    banner: ChatStatusBannerKind,
+    elapsed: Option<Duration>,
+) -> Option<u64> {
+    if banner == ChatStatusBannerKind::Working {
+        working_elapsed_seconds_for_signature(elapsed)
+    } else {
+        None
+    }
+}
+
+fn chat_status_banner_kind(
+    startup_state: &CodexStartupState,
+    working_elapsed: Option<Duration>,
+    has_chat_rows: bool,
+) -> ChatStatusBannerKind {
+    if has_chat_rows {
+        return ChatStatusBannerKind::None;
+    }
+    if working_elapsed.is_some() {
+        return ChatStatusBannerKind::Working;
+    }
+    if codex_startup_state_has_banner(startup_state) {
+        ChatStatusBannerKind::Startup
+    } else {
+        ChatStatusBannerKind::None
+    }
+}
+
+fn codex_startup_state_has_banner(state: &CodexStartupState) -> bool {
+    matches!(
+        state,
+        CodexStartupState::Loading { .. } | CodexStartupState::Error { .. }
+    )
+}
+
+fn append_chat_status_banner(
+    messages: &GBox,
+    banner: ChatStatusBannerKind,
+    startup_state: &CodexStartupState,
+    working_elapsed: Option<Duration>,
+) {
+    match banner {
+        ChatStatusBannerKind::None => {}
+        ChatStatusBannerKind::Startup => {
+            if let Some(widget) = codex_startup_state_widget(startup_state) {
+                append_chat_refresh_row(messages, &widget);
+            }
+        }
+        ChatStatusBannerKind::Working => {
+            if let Some(elapsed) = working_elapsed {
+                append_chat_refresh_row(messages, &codex_working_indicator_widget(elapsed));
+            }
+        }
+    }
+}
+
 fn format_working_elapsed(elapsed: Duration) -> String {
     let total_seconds = elapsed.as_secs();
     let seconds = total_seconds % 60;
@@ -8342,6 +8439,31 @@ fix it
         assert_eq!(
             restored_chat_scroll_value(snapshot, 0.0, 3_000.0, 500.0),
             640.0
+        );
+    }
+
+    #[test]
+    fn chat_scroll_restore_retries_across_late_layout_passes() {
+        let snapshot = ChatScrollSnapshot {
+            value: 640.0,
+            pinned_to_bottom: false,
+        };
+
+        assert_eq!(
+            chat_scroll_restore_layout_passes(snapshot),
+            CHAT_SCROLL_RESTORE_LAYOUT_PASSES
+        );
+    }
+
+    #[test]
+    fn chat_status_banner_does_not_insert_working_row_above_existing_timeline() {
+        assert_eq!(
+            chat_status_banner_kind(
+                &CodexStartupState::Ready,
+                Some(Duration::from_secs(12)),
+                true
+            ),
+            ChatStatusBannerKind::None
         );
     }
 
