@@ -459,7 +459,8 @@ Power users should be able to tune attention and speed:
 - User-editable keybindings.
 - Custom command palette entries.
 - Repository-specific terminal presets.
-- Import/export for settings bundles and prompt packs.
+- Import/export for settings bundles. Prompt packs are file-backed today;
+  richer pack switching/import/export remains a known gap.
 
 The current implemented settings format is TOML. The Projects settings page
 and Settings page edit common repository fields directly and include an
@@ -480,7 +481,7 @@ feeds workspace terminal preset buttons; entries can be known aliases or custom
 `Label=command` / `Label: command` entries. Configured `scripts.test`,
 `scripts.lint`, `scripts.typecheck`, and `scripts.build` are also exposed as
 terminal command presets. Prompt pack metadata is file-backed in settings today;
-pack import/export and switching are tracked TODOs until that workflow exists.
+richer pack switching/import/export and session snapshots remain known gaps.
 Config bootstrap seeds `.archductor/prompt-packs/default.toml` for new projects
 and backfills it for existing projects when missing, so prompt loading always has
 a safe fallback file.
@@ -527,8 +528,8 @@ archductor workspace discard <name>
 archductor workspace delete <name> [--remove-worktree] [--delete-branch]
 archductor workspace rename <name> <new-name>
 
-archductor session start <workspace> --kind shell|codex|claude|cursor
-archductor session open <workspace> --kind shell|codex|claude|cursor
+archductor session start <workspace> --kind shell|codex|claude
+archductor session open <workspace> --kind shell|codex|claude
 archductor session stop <workspace>
 archductor session list <workspace>
 
@@ -574,6 +575,9 @@ archductor checkpoint restore <workspace> <id>
 
 ## Documentation
 
+- [Current progress and known gaps](progress.md)
+- [GUI MVP handoff](docs/conductor-gui-mvp-handoff.md)
+- [MVP scope](docs/mvp-scope.md)
 - [Manual testing checklist](docs/manual-testing-checklist.md)
 - [Local deploy and validation guide](docs/deploy-and-local-test.md)
 - [Archductor docs parity map](docs/archductor-docs-parity-map.md)

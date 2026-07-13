@@ -113,26 +113,24 @@ Cubic:
 
 ## Current Project State
 
-Current state as of the latest progress log:
+Current state lives in `progress.md`; treat that file as the short status
+source. The practical summary:
 
-- Phase 0, Phase 1, and Phase 2 have usable slices.
-- Phase 3 must be treated as incomplete until every item in the Phase 3 section
-  of `docs/conductor-gui-mvp-handoff.md` is proven across core/CLI/GTK where
-  applicable.
-- The GTK app is still a prototype, not a finished MVP.
+- The app has a usable GUI-first loop, but it is still a working prototype, not
+  a finished MVP.
 - GitHub-backed flows require local `gh` auth. Linear-backed flows require
-  `LINEAR_API_KEY`. MCP status currently means config inspection unless live
-  reachability is explicitly tested.
-- Codex chat control now runs through PTYs, not plain pipes.
-- Codex chat recovery now prefers:
-  - exact native resume ID from Codex rollout metadata
-  - structured `chat_threads`
-  - structured `chat_messages`
-  - rendered-screen parsing over raw PTY logs
-- GTK chat is moving from process-first selection to thread-first selection.
+  `LINEAR_API_KEY`.
+- MCP status must be described as config/status inspection unless live
+  reachability was explicitly tested.
+- Codex/Claude session work is PTY/provider-event backed. Prefer structured
+  session events, `chat_threads`, `chat_messages`, and native provider IDs over
+  raw terminal-log inference.
+- CLI session commands currently support Shell, Codex, and Claude. Cursor is a
+  GTK launch path when configured.
 
 Do not describe the project as MVP complete. Do not call packaging
-release-ready until the GUI-first flow works without normal CLI coordination.
+release-ready until the GUI-first flow passes the manual Linux checklist and
+the target package channel has install/launch/upgrade/checksum validation.
 
 ## Product Structure
 
@@ -174,7 +172,8 @@ Agents should understand the repo before editing:
 - `crates/cli`
   - fallback CLI, automation hooks, durable helper paths used by the GTK app
 - `docs`
-  - parity target, specs, plans, manual testing, deployment notes
+  - MVP target, parity map, manual testing, deployment, release notes, UI
+    sketches
 - `.codex/AGENTS.md`
   - Codex-specific working instructions for this repo
 - `claude/CLAUDE.md`
@@ -192,21 +191,19 @@ Current architectural direction:
 
 Follow the handoff phases:
 
-1. Keep docs aligned with the corrected GUI-first MVP.
-2. Split `crates/gtk-app/src/main.rs` into focused modules.
-3. Define explicit app state for selected project, selected workspace, active
-   page/tab, running sessions, and processes.
-4. Replace ad hoc refresh closures with a clear refresh/event model.
-5. Build polished project onboarding and settings.
-6. Finish the workspace command center with real core + CLI + GTK behavior,
-   not placeholder controls.
-7. Add embedded terminal/runtime support.
-8. Add app-native Claude Code, Codex, and Cursor session surfaces.
-9. Build real git/diff/review and GitHub PR/check/merge GUI workflows.
-10. Add command palette, keyboard shortcuts, deep links, provider settings, MCP
-    status, Spotlight testing, Big Terminal Mode, monorepo controls, and linked
-    directory workflows.
-11. Finish history/restore and release validation.
+1. Keep docs aligned with the corrected GUI-first MVP and current `progress.md`.
+2. Finish project onboarding/settings polish and clear managed/user setting
+   separation.
+3. Keep workspace command center behavior real across core, CLI, and GTK where
+   the feature has both surfaces.
+4. Continue splitting large GTK/core files only when it directly reduces active
+   task complexity.
+5. Harden PTY/provider session recovery, archcar runtime ownership, and
+   thread-first chat behavior.
+6. Polish git/diff/review/GitHub PR/check/merge GUI workflows.
+7. Finish prompt-pack switching/import/export, naming templates, hooks, local
+   check runner UI, richer notifications, and deeper layout/theme controls.
+8. Finish release validation on real Linux package channels.
 
 ## Engineering Rules
 

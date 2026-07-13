@@ -37,10 +37,11 @@ you want to test. Run `gh auth login` before GitHub checks. Set
   review, create PR, fix errors, resolve conflicts, rename branch, commit
   generation, test fixing, refactor style, setup script, and run script.
 - [ ] Confirm prompt pack active/version/path fields save to
-  `.archductor/settings.toml`. Mark pack import/export, switching, and session
-  snapshots as TODOs.
-- [ ] Confirm final assembled agent prompts can be previewed or exported before
-  launch, or mark prompt preview as a known gap.
+  `.archductor/settings.toml` and that bootstrap creates
+  `.archductor/prompt-packs/default.toml` when missing.
+- [ ] Confirm richer prompt-pack switching/import/export and session snapshots
+  are documented as known gaps until product controls exist.
+- [ ] Confirm final assembled agent prompts can be previewed before launch.
 - [ ] Configure branch naming, workspace naming, commit style, PR title/body
   template, default merge strategy, and archive-after-merge defaults through
   settings or the advanced customization TOML block.

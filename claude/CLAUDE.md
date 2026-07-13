@@ -4,11 +4,12 @@
 
 Before touching code or docs in this repository, read:
 
-1. `README.md`
+1. `docs/conductor-gui-mvp-handoff.md`
 2. `progress.md`
-3. `docs/manual-testing-checklist.md`
-4. `docs/archductor-docs-parity-map.md`
-5. `docs/deploy-and-local-test.md`
+3. `docs/mvp-scope.md`
+4. `docs/manual-testing-checklist.md`
+5. `docs/archductor-docs-parity-map.md`
+6. `README.md`
 
 Use official Conductor behavior as the parity baseline:
 
@@ -123,34 +124,27 @@ Superpowers and communication:
 
 ## Current State
 
-The app has a usable but rough Archductor loop:
+Current state lives in `progress.md`; treat that file as the short status
+source. The practical summary:
 
+- The app has a usable GUI-first loop, but it is still a working prototype, not
+  a finished MVP.
 - Projects can add/clone repositories, edit shared/local settings, and create
   branch/prompt/GitHub/Linear workspaces.
-- Workspaces are real Git worktrees with `.context` files and stable port
-  ranges.
-- The workspace page can start Shell, Codex, Claude, and Cursor sessions,
-  terminal shells, setup/run scripts, review tabs, checks, todos, and lifecycle
-  actions.
-- The Checks tab can create/refresh PRs, read checks/comments, stage context for
-  agents, merge, and archive after merge when configured.
-
-Known rough edges:
-
-- Agent sessions run PTY-backed harnesses.
-- Codex chat now depends on:
-  - PTY-accurate enter behavior
-  - rendered screen parsing
-  - `chat_threads`
-  - `chat_messages`
-  - native resume ID capture from Codex rollout metadata
-- GTK chat is being migrated from process-first selection to thread-first
-  selection.
-- Terminal rendering is not a full terminal emulator.
-- Broad shortcuts, deep links, monorepo directory selection, linked directories,
-  richer GitHub review-thread sync, and unified local history are incomplete.
-- GitHub-backed flows require local `gh` auth.
-- Linear-backed flows require `LINEAR_API_KEY`.
+- Workspaces are real Git worktrees with `.context` files, timelines, linked
+  directories, stable port ranges, runtime controls, review surfaces, and
+  archive/restore/history paths.
+- The workspace page can start Shell, Codex, Claude, and Cursor session launch
+  paths from GTK. CLI session commands currently support Shell, Codex, and
+  Claude.
+- Agent/session work is PTY/provider-event backed. Prefer structured session
+  events, `chat_threads`, `chat_messages`, and native provider IDs over raw
+  terminal-log inference.
+- Terminal rendering is useful but not a full terminal emulator.
+- GitHub-backed flows require local `gh` auth. Linear-backed flows require
+  `LINEAR_API_KEY`.
+- Packaging is not release-ready until the manual Linux app checklist and
+  target package-channel validation pass.
 
 ## Repository Structure
 
@@ -172,9 +166,9 @@ Before changing architecture, know where things live:
   - fallback CLI
   - session helper flows used by app/runtime paths
 - `docs`
-  - parity target
-  - implementation plans/specs
-  - manual testing and deployment notes
+  - MVP target
+  - parity map
+  - manual testing, deployment, release notes, and UI sketches
 
 Default design direction:
 

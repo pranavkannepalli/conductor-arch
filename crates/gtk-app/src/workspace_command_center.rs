@@ -25,7 +25,7 @@ use tracing::error;
 
 const WORKSPACE_SPLIT_MIN_START: i32 = 280;
 const WORKSPACE_SPLIT_MIN_END: i32 = 260;
-const WORKSPACE_SPLIT_INITIAL_CENTER_WIDTH: i32 = 820;
+const WORKSPACE_SPLIT_DEFAULT_CONTENT_WIDTH: i32 = 1280;
 const WORKSPACE_RIGHT_PANEL_DEFAULT_WIDTH: i32 = 340;
 const WS_CHAT_TAB_LIMIT: usize = 10;
 const DIFF_RENDER_LIMIT_BYTES: usize = 200_000;
@@ -294,7 +294,10 @@ fn simple_workspace_shell(
     main_split.set_resize_end_child(false);
     main_split.set_shrink_start_child(true);
     main_split.set_shrink_end_child(true);
-    main_split.set_position(WORKSPACE_SPLIT_INITIAL_CENTER_WIDTH);
+    main_split.set_position(workspace_split_position_for_width(
+        WORKSPACE_SPLIT_DEFAULT_CONTENT_WIDTH,
+    ));
+    install_workspace_split_ratio(&main_split);
     main_split.set_vexpand(true);
     let right_panel_handle = Rc::new(RefCell::new(None::<GBox>));
     let collapse_right_panel: Rc<dyn Fn()> = {
@@ -353,6 +356,28 @@ fn split_position_for_ratio(
     let preferred = total_width.saturating_mul(start_weight) / total_weight;
     let max_start = (total_width - min_end).max(min_start);
     preferred.clamp(min_start, max_start)
+}
+
+fn workspace_split_position_for_width(total_width: i32) -> i32 {
+    split_position_for_ratio(
+        total_width,
+        5,
+        3,
+        WORKSPACE_SPLIT_MIN_START,
+        WORKSPACE_SPLIT_MIN_END,
+    )
+}
+
+fn install_workspace_split_ratio(split: &Paned) {
+    let last_width = Rc::new(RefCell::new(0));
+    split.add_tick_callback(move |paned, _| {
+        let width = paned.allocated_width();
+        if width > 0 && *last_width.borrow() != width {
+            paned.set_position(workspace_split_position_for_width(width));
+            *last_width.borrow_mut() = width;
+        }
+        gtk::glib::ControlFlow::Continue
+    });
 }
 
 fn make_action_row() -> GBox {
@@ -8456,37 +8481,10 @@ mod tests {
     }
 
     #[test]
-    fn split_position_for_ratio_prefers_chat_dominant_layout_and_clamps() {
-        assert_eq!(
-            split_position_for_ratio(
-                1280,
-                7,
-                3,
-                WORKSPACE_SPLIT_MIN_START,
-                WORKSPACE_SPLIT_MIN_END
-            ),
-            896
-        );
-        assert_eq!(
-            split_position_for_ratio(
-                700,
-                7,
-                3,
-                WORKSPACE_SPLIT_MIN_START,
-                WORKSPACE_SPLIT_MIN_END
-            ),
-            440
-        );
-        assert_eq!(
-            split_position_for_ratio(
-                500,
-                7,
-                3,
-                WORKSPACE_SPLIT_MIN_START,
-                WORKSPACE_SPLIT_MIN_END
-            ),
-            280
-        );
+    fn workspace_split_position_uses_five_three_center_right_ratio() {
+        assert_eq!(workspace_split_position_for_width(1280), 800);
+        assert_eq!(workspace_split_position_for_width(700), 437);
+        assert_eq!(workspace_split_position_for_width(500), 280);
     }
 
     #[test]

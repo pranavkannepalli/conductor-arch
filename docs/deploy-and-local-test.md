@@ -118,7 +118,7 @@ gitignored because they are per-workspace scratch context. Put machine-local
 overrides and secrets in `.archductor/settings.local.toml`.
 If `.worktreeinclude` exists, it takes precedence over `file_include_globs`.
 Check scripts are exposed as workspace terminal command presets today. A
-first-class local check runner is still a TODO.
+first-class local check runner UI remains a known gap.
 
 Repository prompts are part of the customization surface and should be editable
 from the Projects settings UI:
@@ -224,8 +224,8 @@ from known aliases or `Label=command` entries. Configured `scripts.test`,
 `scripts.lint`, `scripts.typecheck`, and `scripts.build` are prepended to those
 terminal presets. Prompt pack metadata is saved in `.archductor/settings.toml`;
 config bootstrap also seeds `.archductor/prompt-packs/default.toml` for new and
-existing projects when missing. Import/export, session snapshots, and pack
-switching are still TODOs. The other fields are merged, saved, and preserved
+existing projects when missing. Richer pack switching/import/export and session
+snapshots remain known gaps. The other fields are merged, saved, and preserved
 for workflow surfaces that use them.
 
 ## 6. CLI Smoke Path

@@ -48,6 +48,7 @@ use std::time::Instant;
 use toast::{ToastManager, ToastMessage};
 
 const APP_ID: &str = "io.github.pranavkannepalli.archductor";
+const APP_SIDEBAR_DEFAULT_WIDTH: f64 = 320.0;
 static NEXT_COLOR_SCOPE_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -650,6 +651,8 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     let split = adw::OverlaySplitView::new();
     split.set_min_sidebar_width(120.0);
     split.set_max_sidebar_width(360.0);
+    split.set_sidebar_width_unit(adw::LengthUnit::Px);
+    split.set_sidebar_width_fraction(APP_SIDEBAR_DEFAULT_WIDTH);
     split.set_pin_sidebar(false);
     split.set_collapsed(false);
     let collapse_sidebar: Rc<dyn Fn()> = {
