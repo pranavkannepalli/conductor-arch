@@ -2033,7 +2033,7 @@ popover.context-menu-popover arrow {
     padding: 22px 24px 180px;
 }
 .chat-user-row {
-    margin-bottom: 22px;
+    margin-bottom: 10px;
 }
 .chat-user-bubble {
     background-color: #2e2e2e;
@@ -2046,12 +2046,19 @@ popover.context-menu-popover arrow {
 .chat-agent-text {
     color: #c6c6c6;
     line-height: 1.55;
-    margin-bottom: 18px;
+    margin-bottom: 10px;
+}
+.chat-reasoning-text {
+    color: #8f8f8f;
+    font-size: 13px;
+    line-height: 1.45;
+    margin: 0 0 8px 0;
 }
 .chat-inline-event {
     background-color: transparent;
     border: none;
     border-radius: 0;
+    margin-bottom: 8px;
     padding: 0;
 }
 .chat-inline-event-chip {
@@ -2691,6 +2698,10 @@ mod tests {
         ));
         assert!(css.contains("transition-duration: 160ms"));
         assert!(css.contains(".chat-inline-event-chip"));
+        assert!(css.contains(".chat-reasoning-text"));
+        assert!(css.contains(".chat-user-row {\n    margin-bottom: 10px;"));
+        assert!(css.contains(".chat-inline-event {\n    background-color: transparent;"));
+        assert!(css.contains("margin-bottom: 8px;"));
         assert!(!css.contains(".lc-accent-green .chat-send-btn-active"));
         assert!(!css.contains(".lc-accent-green .chat-user-bubble"));
         assert!(!css.contains(".lc-accent-green .suggested-action"));

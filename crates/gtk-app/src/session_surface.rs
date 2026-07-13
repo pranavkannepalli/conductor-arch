@@ -2971,8 +2971,19 @@ fn provider_projection_items_for_render(
         .into_iter()
         .filter(provider_projection_item_is_relevant_chat_event)
         .filter(|item| item.render_class != ProjectionRenderClass::HookCard)
+        .filter(provider_projection_item_has_renderable_content)
         .filter(|item| !provider_projection_item_has_persisted_message(item, messages))
         .collect()
+}
+
+fn provider_projection_item_has_renderable_content(item: &ProviderProjectionItem) -> bool {
+    match item.render_class {
+        ProjectionRenderClass::UserChat => false,
+        ProjectionRenderClass::AssistantChat | ProjectionRenderClass::ReasoningCard => {
+            !item.body.trim().is_empty()
+        }
+        _ => true,
+    }
 }
 
 fn provider_projection_item_has_persisted_message(
@@ -2999,6 +3010,7 @@ fn provider_projection_item_widget(item: &ProviderProjectionItem) -> Widget {
     match item.render_class {
         ProjectionRenderClass::UserChat => chat_user_bubble(&item.body).upcast(),
         ProjectionRenderClass::AssistantChat => provider_projection_text_widget(&item.body),
+        ProjectionRenderClass::ReasoningCard => provider_projection_reasoning_widget(item),
         _ => {
             let container = GBox::new(Orientation::Vertical, 4);
             container.set_hexpand(true);
@@ -3016,6 +3028,24 @@ fn provider_projection_item_widget(item: &ProviderProjectionItem) -> Widget {
             container.upcast()
         }
     }
+}
+
+fn provider_projection_reasoning_text(item: &ProviderProjectionItem) -> Option<String> {
+    let body = item.body.trim();
+    (!body.is_empty()).then(|| body.to_owned())
+}
+
+fn provider_projection_reasoning_widget(item: &ProviderProjectionItem) -> Widget {
+    let label = Label::new(None);
+    label.set_markup(&chat_text_markup(
+        &provider_projection_reasoning_text(item).unwrap_or_default(),
+    ));
+    label.add_css_class("chat-reasoning-text");
+    label.set_selectable(true);
+    label.set_wrap(true);
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    label.upcast()
 }
 
 fn provider_projection_item_shows_status_chrome(item: &ProviderProjectionItem) -> bool {
@@ -9991,7 +10021,7 @@ I summarized the result.
     }
 
     #[test]
-    fn provider_user_chat_rows_are_skipped_when_persisted_message_exists() {
+    fn provider_user_chat_rows_are_skipped_because_persisted_messages_own_user_bubbles() {
         let mut user_event =
             provider_event_record(ProviderEventKind::UserInput, ProviderEventPhase::Completed);
         user_event.normalized_payload = serde_json::json!({
@@ -10010,7 +10040,68 @@ I summarized the result.
             updated_at: "now".to_owned(),
         }];
 
+        let items_without_message =
+            provider_projection_items_for_render(projection.items.clone(), &[]);
         let items = provider_projection_items_for_render(projection.items, &messages);
+
+        assert!(items_without_message.is_empty());
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn provider_empty_user_chat_rows_are_skipped() {
+        let mut user_event =
+            provider_event_record(ProviderEventKind::UserInput, ProviderEventPhase::Completed);
+        user_event.provider_item_id = Some("user-empty".to_owned());
+        user_event.normalized_payload = serde_json::json!({
+            "title": "User",
+            "body": "   "
+        });
+        let projection = provider_projection_from_records(&[user_event]);
+
+        let items = provider_projection_items_for_render(projection.items, &[]);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn provider_reasoning_renders_only_exposed_reasoning_text() {
+        let mut reasoning = provider_event_record(
+            ProviderEventKind::PlanningReasoning,
+            ProviderEventPhase::Delta,
+        );
+        reasoning.provider_item_id = Some("thought-1".to_owned());
+        reasoning.normalized_payload = serde_json::json!({
+            "title": "Reasoning",
+            "body": "Need to inspect the event mapper."
+        });
+        let projection = provider_projection_from_records(&[reasoning]);
+        let item = &projection.items[0];
+
+        assert_eq!(item.render_class, ProjectionRenderClass::ReasoningCard);
+        assert_eq!(
+            provider_projection_reasoning_text(item).as_deref(),
+            Some("Need to inspect the event mapper.")
+        );
+        assert!(!provider_projection_reasoning_text(item)
+            .unwrap()
+            .contains("Reasoning"));
+    }
+
+    #[test]
+    fn provider_empty_reasoning_rows_are_skipped() {
+        let mut reasoning = provider_event_record(
+            ProviderEventKind::PlanningReasoning,
+            ProviderEventPhase::Delta,
+        );
+        reasoning.provider_item_id = Some("thought-empty".to_owned());
+        reasoning.normalized_payload = serde_json::json!({
+            "title": "Reasoning",
+            "body": ""
+        });
+        let projection = provider_projection_from_records(&[reasoning]);
+
+        let items = provider_projection_items_for_render(projection.items, &[]);
 
         assert!(items.is_empty());
     }
