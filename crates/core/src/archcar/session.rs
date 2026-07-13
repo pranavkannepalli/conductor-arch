@@ -1,5 +1,7 @@
+use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command as ProcessCommand, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -29,7 +31,8 @@ use crate::pty::PtySession;
 use crate::runtime_session_store::RuntimeSessionStore;
 use crate::session_state::{AgentSessionState, SessionStateMachine};
 use crate::workspace::{
-    ProcessStatus, SessionHarnessOptions, SessionKind, SessionLaunch, WorkspaceStore,
+    ChatThreadRecord, ProcessStatus, SessionHarnessOptions, SessionKind, SessionLaunch,
+    WorkspaceStore,
 };
 use serde_json::json;
 
@@ -223,9 +226,9 @@ pub fn spawn_managed_session(
     let launch = build_thread_session_launch(
         &store,
         &workspace,
+        &thread_record,
         kind,
         harness,
-        thread_record.native_thread_id.as_deref(),
         controller.as_ref(),
     )?;
     spawn_live_managed_session(LiveSessionStart {
@@ -544,9 +547,9 @@ pub fn spawn_managed_session_for_thread(
     let launch = build_thread_session_launch(
         &store,
         &workspace,
+        &thread_record,
         kind,
         harness,
-        thread_record.native_thread_id.as_deref(),
         controller.as_ref(),
     )?;
     spawn_live_managed_session(LiveSessionStart {
@@ -565,16 +568,16 @@ pub fn spawn_managed_session_for_thread(
 fn build_thread_session_launch(
     store: &WorkspaceStore,
     workspace: &str,
+    thread_record: &ChatThreadRecord,
     kind: SessionKind,
     harness: SessionHarnessOptions,
-    native_thread_id: Option<&str>,
     controller: &dyn HarnessController,
 ) -> Result<crate::workspace::SessionLaunch> {
     if kind == SessionKind::Codex {
-        return codex_app_server_session_launch(store, workspace, harness, native_thread_id);
+        return codex_app_server_session_launch(store, workspace, thread_record, harness);
     }
     if kind == SessionKind::Claude {
-        return claude_stream_session_launch(store, workspace, harness, native_thread_id);
+        return claude_stream_session_launch(store, workspace, thread_record, harness);
     }
     controller.build_launch(store, workspace, harness)
 }
@@ -582,8 +585,8 @@ fn build_thread_session_launch(
 fn codex_app_server_session_launch(
     store: &WorkspaceStore,
     workspace: &str,
+    thread_record: &ChatThreadRecord,
     harness: SessionHarnessOptions,
-    native_thread_id: Option<&str>,
 ) -> Result<crate::workspace::SessionLaunch> {
     let mut launch = store.session_launch_with_options(
         workspace,
@@ -595,15 +598,16 @@ fn codex_app_server_session_launch(
         .map(|arg| (*arg).to_owned())
         .collect();
     launch.harness_metadata = non_interactive_harness_metadata("codex-app-server", &harness);
-    launch.session_resume_id = native_thread_id.map(ToOwned::to_owned);
+    launch.session_resume_id = thread_record.native_thread_id.clone();
+    assign_provider_native_thread_port(store, workspace, thread_record, &mut launch)?;
     Ok(launch)
 }
 
 fn claude_stream_session_launch(
     store: &WorkspaceStore,
     workspace: &str,
+    thread_record: &ChatThreadRecord,
     harness: SessionHarnessOptions,
-    native_thread_id: Option<&str>,
 ) -> Result<crate::workspace::SessionLaunch> {
     let mut launch = store.session_launch_with_options(
         workspace,
@@ -612,15 +616,104 @@ fn claude_stream_session_launch(
     )?;
     launch.args = build_claude_stream_args(&ClaudeStreamLaunchConfig {
         persistent_input: true,
-        resume: native_thread_id.map(ToOwned::to_owned),
+        resume: thread_record.native_thread_id.clone(),
         permission_mode: claude_stream_permission_mode(&harness),
         model: sanitize_harness_text(harness.model.as_deref()),
         effort: claude_stream_effort_mode(&harness),
         append_system_prompt: None,
     });
     launch.harness_metadata = non_interactive_harness_metadata("claude-stream-json", &harness);
-    launch.session_resume_id = native_thread_id.map(ToOwned::to_owned);
+    launch.session_resume_id = thread_record.native_thread_id.clone();
+    assign_provider_native_thread_port(store, workspace, thread_record, &mut launch)?;
     Ok(launch)
+}
+
+const PROVIDER_NATIVE_PORT_SLOTS: u16 = 10;
+const PROVIDER_NATIVE_PORT_METADATA_KEY: &str = "port";
+
+fn assign_provider_native_thread_port(
+    store: &WorkspaceStore,
+    workspace: &str,
+    thread_record: &ChatThreadRecord,
+    launch: &mut SessionLaunch,
+) -> Result<()> {
+    let port = provider_native_thread_port(store, workspace, thread_record.id)?;
+    set_launch_env(launch, "ARCHDUCTOR_PORT", OsString::from(port.to_string()));
+    launch.harness_metadata = append_metadata_entry(
+        launch.harness_metadata.take(),
+        PROVIDER_NATIVE_PORT_METADATA_KEY,
+        &port.to_string(),
+    );
+    Ok(())
+}
+
+fn provider_native_thread_port(
+    store: &WorkspaceStore,
+    workspace: &str,
+    thread_id: i64,
+) -> Result<u16> {
+    provider_native_thread_port_with_checker(store, workspace, thread_id, tcp_port_available)
+}
+
+fn provider_native_thread_port_with_checker(
+    store: &WorkspaceStore,
+    workspace: &str,
+    thread_id: i64,
+    port_available: impl Fn(u16) -> bool,
+) -> Result<u16> {
+    let workspace_record = store.get_workspace_record_by_name(workspace)?;
+    let occupied_ports = store
+        .list_sessions(workspace)?
+        .into_iter()
+        .filter(|process| {
+            process.status == ProcessStatus::Running && process.chat_thread_id != Some(thread_id)
+        })
+        .filter_map(|process| {
+            metadata_value(
+                process.session_harness_metadata.as_deref(),
+                PROVIDER_NATIVE_PORT_METADATA_KEY,
+            )
+            .and_then(|value| value.parse::<u16>().ok())
+        })
+        .collect::<std::collections::HashSet<_>>();
+
+    for slot in 0..PROVIDER_NATIVE_PORT_SLOTS {
+        let port = workspace_record.port_base.saturating_add(slot);
+        if occupied_ports.contains(&port) {
+            continue;
+        }
+        if port_available(port) {
+            return Ok(port);
+        }
+    }
+
+    anyhow::bail!(
+        "no available provider-native ports in reserved block {}-{} for workspace {workspace}",
+        workspace_record.port_base,
+        workspace_record
+            .port_base
+            .saturating_add(PROVIDER_NATIVE_PORT_SLOTS.saturating_sub(1))
+    )
+}
+
+fn tcp_port_available(port: u16) -> bool {
+    TcpListener::bind(("127.0.0.1", port)).is_ok()
+}
+
+fn set_launch_env(launch: &mut SessionLaunch, key: &str, value: OsString) {
+    if let Some((_, existing)) = launch.env.iter_mut().find(|(name, _)| name == key) {
+        *existing = value;
+    } else {
+        launch.env.push((key.to_owned(), value));
+    }
+}
+
+fn append_metadata_entry(metadata: Option<String>, key: &str, value: &str) -> Option<String> {
+    let entry = format!("{key}={value}");
+    match metadata {
+        Some(metadata) if !metadata.trim().is_empty() => Some(format!("{metadata};{entry}")),
+        _ => Some(entry),
+    }
 }
 
 fn non_interactive_harness_metadata(
@@ -1800,7 +1893,7 @@ fn terminal_device_path_for_pid(process_id: u32) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use crate::repository::{AddRepository, RepositoryStore};
-    use crate::workspace::CreateWorkspace;
+    use crate::workspace::{CreateWorkspace, ProcessRecord};
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
 
@@ -2015,25 +2108,32 @@ mod tests {
     fn managed_codex_sessions_launch_app_server_not_terminal_ui() {
         let temp = tempfile::tempdir().unwrap();
         let store = seeded_workspace_store(temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
 
         let launch = codex_app_server_session_launch(
             &store,
             "berlin",
+            &thread,
             SessionHarnessOptions {
                 model: Some("gpt-5.4".to_owned()),
                 approval_mode: Some("never".to_owned()),
                 reasoning_mode: Some("high".to_owned()),
                 ..SessionHarnessOptions::default()
             },
-            None,
         )
         .unwrap();
 
         assert_eq!(launch.program, PathBuf::from("codex"));
         assert_eq!(launch.args, vec!["app-server"]);
+        let port = launch.env_value("ARCHDUCTOR_PORT").unwrap();
+        let expected_metadata = format!(
+            "harness=codex-app-server;model=gpt-5.4;approval=never;reasoning=high;port={port}"
+        );
         assert_eq!(
             launch.harness_metadata.as_deref(),
-            Some("harness=codex-app-server;model=gpt-5.4;approval=never;reasoning=high")
+            Some(expected_metadata.as_str())
         );
         assert!(launch.session_resume_id.is_none());
     }
@@ -2151,17 +2251,23 @@ mod tests {
     fn managed_claude_sessions_launch_stream_json_not_interactive_ui() {
         let temp = tempfile::tempdir().unwrap();
         let store = seeded_workspace_store(temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "claude", "Claude", None)
+            .unwrap();
+        let thread = store
+            .update_chat_thread_native_id(thread.id, "claude-session-1")
+            .unwrap();
 
         let launch = claude_stream_session_launch(
             &store,
             "berlin",
+            &thread,
             SessionHarnessOptions {
                 model: Some("claude-sonnet-5".to_owned()),
                 approval_mode: Some("never".to_owned()),
                 reasoning_mode: Some("low".to_owned()),
                 ..SessionHarnessOptions::default()
             },
-            Some("claude-session-1"),
         )
         .unwrap();
 
@@ -2186,13 +2292,103 @@ mod tests {
                 "low",
             ]
         );
+        let port = launch.env_value("ARCHDUCTOR_PORT").unwrap();
+        let expected_metadata = format!(
+            "harness=claude-stream-json;model=claude-sonnet-5;approval=never;reasoning=low;port={port}"
+        );
         assert_eq!(
             launch.harness_metadata.as_deref(),
-            Some("harness=claude-stream-json;model=claude-sonnet-5;approval=never;reasoning=low")
+            Some(expected_metadata.as_str())
         );
         assert_eq!(
             launch.session_resume_id.as_deref(),
             Some("claude-session-1")
+        );
+    }
+
+    #[test]
+    fn provider_native_thread_launches_use_all_reserved_ports_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = seeded_workspace_store(temp.path());
+        let threads = (0..10)
+            .map(|index| {
+                let provider = if index % 2 == 0 { "codex" } else { "claude" };
+                store
+                    .create_chat_thread("berlin", provider, &format!("Chat {index}"), None)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+
+        let ports = threads
+            .iter()
+            .map(|thread| {
+                let port =
+                    provider_native_thread_port_with_checker(&store, "berlin", thread.id, |_| true)
+                        .unwrap();
+                record_running_thread_session_with_port(&store, thread, port);
+                port.to_string()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            ports,
+            vec!["3000", "3001", "3002", "3003", "3004", "3005", "3006", "3007", "3008", "3009"]
+        );
+
+        let eleventh = store
+            .create_chat_thread("berlin", "codex", "Chat 10", None)
+            .unwrap();
+        assert!(
+            provider_native_thread_port_with_checker(&store, "berlin", eleventh.id, |_| true)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn provider_native_thread_launch_reuses_released_reserved_port() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = seeded_workspace_store(temp.path());
+        let first = store
+            .create_chat_thread("berlin", "codex", "First", None)
+            .unwrap();
+        let second = store
+            .create_chat_thread("berlin", "codex", "Second", None)
+            .unwrap();
+        let first_process = record_running_thread_session_with_port(&store, &first, 3000);
+        record_running_thread_session_with_port(&store, &second, 3001);
+        store
+            .mark_session_process_exited(first_process.id, Some(0))
+            .unwrap();
+        store.close_chat_thread(first.id).unwrap();
+        let replacement = store
+            .create_chat_thread("berlin", "claude", "Replacement", None)
+            .unwrap();
+
+        assert_eq!(
+            provider_native_thread_port_with_checker(&store, "berlin", replacement.id, |_| true)
+                .unwrap(),
+            3000
+        );
+    }
+
+    #[test]
+    fn provider_native_thread_launch_skips_unavailable_reserved_ports() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = seeded_workspace_store(temp.path());
+        let first = store
+            .create_chat_thread("berlin", "codex", "First", None)
+            .unwrap();
+        record_running_thread_session_with_port(&store, &first, 3000);
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
+
+        assert_eq!(
+            provider_native_thread_port_with_checker(&store, "berlin", thread.id, |port| {
+                port != 3001
+            })
+            .unwrap(),
+            3002
         );
     }
 
@@ -2323,9 +2519,11 @@ mod tests {
         let launch = build_thread_session_launch(
             &store,
             "berlin",
+            &store
+                .create_chat_thread("berlin", "codex", "Codex", None)
+                .unwrap(),
             SessionKind::Codex,
             SessionHarnessOptions::default(),
-            None,
             controller.as_ref(),
         )
         .unwrap();
@@ -2343,9 +2541,14 @@ mod tests {
         let launch = build_thread_session_launch(
             &store,
             "berlin",
+            &store
+                .create_chat_thread("berlin", "codex", "Codex", None)
+                .and_then(|thread| {
+                    store.update_chat_thread_native_id(thread.id, "codex-native-thread")
+                })
+                .unwrap(),
             SessionKind::Codex,
             SessionHarnessOptions::default(),
-            Some("codex-native-thread"),
             controller.as_ref(),
         )
         .unwrap();
@@ -2462,6 +2665,30 @@ mod tests {
 
     fn seeded_workspace_store(root: &Path) -> WorkspaceStore {
         seeded_workspace_store_with_logs(root, &root.join("logs"))
+    }
+
+    fn record_running_thread_session_with_port(
+        store: &WorkspaceStore,
+        thread: &ChatThreadRecord,
+        port: u16,
+    ) -> ProcessRecord {
+        let kind = match thread.provider.as_str() {
+            "codex" => SessionKind::Codex,
+            "claude" => SessionKind::Claude,
+            other => panic!("unexpected provider {other}"),
+        };
+        let mut launch = store.session_launch("berlin", kind).unwrap();
+        launch.harness_metadata = Some(format!(
+            "harness={};port={port}",
+            match kind {
+                SessionKind::Codex => "codex-app-server",
+                SessionKind::Claude => "claude-stream-json",
+                SessionKind::Shell => "shell",
+            }
+        ));
+        store
+            .record_session_process_for_thread("berlin", thread.id, &launch, std::process::id())
+            .unwrap()
     }
 
     fn seeded_workspace_store_with_logs(root: &Path, logs_dir: &Path) -> WorkspaceStore {
