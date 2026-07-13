@@ -249,6 +249,7 @@ struct RuntimeProviderEventInput<'a> {
     session_id: i64,
     thread_id: i64,
     identity_suffix: Option<&'a str>,
+    provider_sequence: Option<u64>,
     phase: ProviderEventPhase,
     event_kind: ProviderEventKind,
     subtype: &'a str,
@@ -281,7 +282,7 @@ fn runtime_provider_event(input: RuntimeProviderEventInput<'_>) -> ProviderEvent
         phase: input.phase,
         kind: input.event_kind,
         provider_subtype: Some(input.subtype.to_owned()),
-        provider_sequence: None,
+        provider_sequence: input.provider_sequence.map(|sequence| sequence as i64),
         occurred_at_ms: ProviderEventContext::runtime(
             None,
             Some(input.thread_id),
@@ -691,9 +692,24 @@ fn run_session_loop(
     let mut last_persisted_screen_fingerprint = None;
     let mut native_thread_id_resolved = false;
     let runtime_store = RuntimeSessionStore::new(db_path.clone());
-    let mut user_input_sequence = runtime_store
-        .count_runtime_input_provider_events(started.session_id)
-        .unwrap_or(0);
+    let mut user_input_sequence =
+        match runtime_store.max_runtime_input_provider_sequence(started.session_id) {
+            Ok(sequence) => sequence,
+            Err(err) => {
+                warn!(
+                    session_id = started.session_id,
+                    thread_id = started.thread_id,
+                    error = %format!("{err:#}"),
+                    "archcar could not seed runtime input sequence"
+                );
+                let _ = event_tx.send(ArchcarEvent::SessionError {
+                    session_id: Some(started.session_id),
+                    thread_id: Some(started.thread_id),
+                    message: format!("Could not seed runtime input sequence: {err:#}"),
+                });
+                return;
+            }
+        };
     append_runtime_provider_event(
         &runtime_store,
         runtime_provider_event(RuntimeProviderEventInput {
@@ -701,6 +717,7 @@ fn run_session_loop(
             session_id: started.session_id,
             thread_id: started.thread_id,
             identity_suffix: None,
+            provider_sequence: None,
             phase: ProviderEventPhase::Started,
             event_kind: ProviderEventKind::ThreadSession,
             subtype: "session_started",
@@ -755,6 +772,7 @@ fn run_session_loop(
                             session_id: current.session_id,
                             thread_id: current.thread_id,
                             identity_suffix: Some(&user_input_identity),
+                            provider_sequence: Some(user_input_sequence),
                             phase: ProviderEventPhase::Started,
                             event_kind: ProviderEventKind::UserInput,
                             subtype: match kind {
@@ -918,6 +936,7 @@ fn run_session_loop(
                         session_id: current.session_id,
                         thread_id: current.thread_id,
                         identity_suffix: None,
+                        provider_sequence: None,
                         phase: ProviderEventPhase::Completed,
                         event_kind: ProviderEventKind::ThreadSession,
                         subtype: "session_started",
@@ -950,6 +969,7 @@ fn run_session_loop(
                         session_id: current.session_id,
                         thread_id: current.thread_id,
                         identity_suffix: None,
+                        provider_sequence: None,
                         phase: ProviderEventPhase::Failed,
                         event_kind: ProviderEventKind::ThreadSession,
                         subtype: "session_started",
@@ -1068,6 +1088,7 @@ mod tests {
             session_id: 7,
             thread_id: 11,
             identity_suffix: Some("input-1"),
+            provider_sequence: Some(1),
             phase: ProviderEventPhase::Started,
             event_kind: ProviderEventKind::UserInput,
             subtype: "user_input",
@@ -1079,6 +1100,7 @@ mod tests {
             session_id: 7,
             thread_id: 11,
             identity_suffix: Some("input-2"),
+            provider_sequence: Some(2),
             phase: ProviderEventPhase::Started,
             event_kind: ProviderEventKind::UserInput,
             subtype: "user_input",
@@ -1091,7 +1113,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_provider_input_sequence_resumes_from_persisted_events() {
+    fn runtime_provider_input_sequence_resumes_from_highest_persisted_sequence() {
         let temp = tempfile::tempdir().unwrap();
         let store = seeded_workspace_store(temp.path());
         let thread = store
@@ -1103,19 +1125,14 @@ mod tests {
             .unwrap();
         let db_path = temp.path().join("state.db");
         let first_runtime_store = RuntimeSessionStore::new(db_path.clone());
-        let first_suffix = user_input_identity_suffix(
-            first_runtime_store
-                .count_runtime_input_provider_events(process.id)
-                .unwrap()
-                + 1,
-        );
         append_runtime_provider_event(
             &first_runtime_store,
             runtime_provider_event(RuntimeProviderEventInput {
                 kind: SessionKind::Codex,
                 session_id: process.id,
                 thread_id: thread.id,
-                identity_suffix: Some(&first_suffix),
+                identity_suffix: Some("input-1"),
+                provider_sequence: Some(1),
                 phase: ProviderEventPhase::Started,
                 event_kind: ProviderEventKind::UserInput,
                 subtype: "user_input",
@@ -1124,10 +1141,26 @@ mod tests {
             }),
             "test_first_input",
         );
+        append_runtime_provider_event(
+            &first_runtime_store,
+            runtime_provider_event(RuntimeProviderEventInput {
+                kind: SessionKind::Codex,
+                session_id: process.id,
+                thread_id: thread.id,
+                identity_suffix: Some("input-3"),
+                provider_sequence: Some(3),
+                phase: ProviderEventPhase::Started,
+                event_kind: ProviderEventKind::UserInput,
+                subtype: "user_input",
+                title: "User input",
+                body: "third",
+            }),
+            "test_third_input",
+        );
 
         let restored_runtime_store = RuntimeSessionStore::new(db_path);
         let restored_sequence = restored_runtime_store
-            .count_runtime_input_provider_events(process.id)
+            .max_runtime_input_provider_sequence(process.id)
             .unwrap();
         let second_suffix = user_input_identity_suffix(restored_sequence + 1);
         append_runtime_provider_event(
@@ -1137,6 +1170,7 @@ mod tests {
                 session_id: process.id,
                 thread_id: thread.id,
                 identity_suffix: Some(&second_suffix),
+                provider_sequence: Some(restored_sequence + 1),
                 phase: ProviderEventPhase::Started,
                 event_kind: ProviderEventKind::UserInput,
                 subtype: "user_input",
@@ -1146,13 +1180,21 @@ mod tests {
             "test_second_input",
         );
 
-        assert_eq!(first_suffix, "input-1");
-        assert_eq!(second_suffix, "input-2");
+        assert_eq!(second_suffix, "input-4");
         assert_eq!(
             restored_runtime_store
-                .count_runtime_input_provider_events(process.id)
+                .max_runtime_input_provider_sequence(process.id)
                 .unwrap(),
-            2
+            4
+        );
+        assert_eq!(
+            crate::provider_events::ProviderEventStore::new(temp.path().join("state.db"))
+                .list_for_chat_thread(thread.id)
+                .unwrap()
+                .into_iter()
+                .filter(|event| event.kind == ProviderEventKind::UserInput)
+                .count(),
+            3
         );
     }
 

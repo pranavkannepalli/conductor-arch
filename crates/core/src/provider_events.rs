@@ -592,24 +592,29 @@ impl ProviderEventStore {
         Ok(rows)
     }
 
-    pub fn count_for_process_subtypes(
+    pub fn max_provider_sequence_for_process_subtypes(
         &self,
         process_id: i64,
         kind: ProviderEventKind,
         subtypes: &[&str],
-    ) -> Result<u64> {
+    ) -> Result<Option<u64>> {
         let conn = self.open()?;
-        let mut count = 0_u64;
+        let mut max_sequence = None;
         for subtype in subtypes {
-            count += conn.query_row(
-                "SELECT COUNT(*)
+            let subtype_max: Option<i64> = conn.query_row(
+                "SELECT MAX(provider_sequence)
                  FROM provider_events
                  WHERE process_id = ?1 AND kind = ?2 AND provider_subtype = ?3",
                 params![process_id, kind.as_str(), subtype],
-                |row| row.get::<_, i64>(0),
-            )? as u64;
+                |row| row.get(0),
+            )?;
+            if let Some(subtype_max) = subtype_max {
+                let subtype_max = subtype_max as u64;
+                max_sequence =
+                    Some(max_sequence.map_or(subtype_max, |current: u64| current.max(subtype_max)));
+            }
         }
-        Ok(count)
+        Ok(max_sequence)
     }
 
     pub fn project_timeline_for_chat_thread(
@@ -717,10 +722,11 @@ fn merge_streaming_payload(
         let Some(incoming_text) = incoming.get(key).and_then(Value::as_str) else {
             continue;
         };
-        if phase != ProviderEventPhase::Delta && incoming_text == existing_text {
+        if incoming_text.len() > existing_text.len() && incoming_text.starts_with(existing_text) {
             continue;
         }
-        if incoming_text.len() > existing_text.len() && incoming_text.starts_with(existing_text) {
+        if phase != ProviderEventPhase::Delta && existing_text.starts_with(incoming_text) {
+            incoming[key] = Value::String(existing_text.to_owned());
             continue;
         }
         incoming[key] = Value::String(format!("{existing_text}{incoming_text}"));
@@ -1062,6 +1068,31 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[test]
+    fn stale_cumulative_snapshots_do_not_duplicate_existing_text() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProviderEventStore::new(temp.path().join("state.db"));
+        create_parent_rows(&store, temp.path());
+        let mut first = draft(
+            ProviderEventKind::AssistantOutput,
+            ProviderEventPhase::Delta,
+        );
+        first.normalized_payload = json!({"title": "Assistant", "text": "hello world"});
+        first.raw_json =
+            json!({"method": "agent/message/delta", "params": {"delta": "hello world"}});
+        let mut stale = first.clone();
+        stale.phase = ProviderEventPhase::Progress;
+        stale.provider_event_id = Some("evt-2".to_owned());
+        stale.provider_sequence = Some(2);
+        stale.normalized_payload = json!({"title": "Assistant", "text": "hello"});
+        stale.raw_json = json!({"method": "agent/message/progress", "params": {"text": "hello"}});
+
+        store.upsert_event(&first).unwrap();
+        let latest = store.upsert_event(&stale).unwrap();
+
+        assert_eq!(latest.normalized_payload["text"], "hello world");
     }
 
     #[test]

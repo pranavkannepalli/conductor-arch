@@ -75,12 +75,15 @@ impl RuntimeSessionStore {
         self.provider_event_store.upsert_event(draft)
     }
 
-    pub fn count_runtime_input_provider_events(&self, process_id: i64) -> Result<u64> {
-        self.provider_event_store.count_for_process_subtypes(
-            process_id,
-            ProviderEventKind::UserInput,
-            &["user_input", "review_prompt", "control_command"],
-        )
+    pub fn max_runtime_input_provider_sequence(&self, process_id: i64) -> Result<u64> {
+        Ok(self
+            .provider_event_store
+            .max_provider_sequence_for_process_subtypes(
+                process_id,
+                ProviderEventKind::UserInput,
+                &["user_input", "review_prompt", "control_command"],
+            )?
+            .unwrap_or(0))
     }
 
     pub fn resolve_codex_native_thread_id_for_process(
