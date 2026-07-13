@@ -2991,6 +2991,10 @@ fn append_pending_user_input_rows(container: &GBox, pending_inputs: &[String]) {
 }
 
 fn provider_projection_item_widget(item: &ProviderProjectionItem) -> Widget {
+    if let Some(inline_event) = provider_projection_inline_event(item) {
+        return inline_event_widget(&inline_event);
+    }
+
     match item.render_class {
         ProjectionRenderClass::UserChat => chat_user_bubble(&item.body).upcast(),
         ProjectionRenderClass::AssistantChat => provider_projection_text_widget(&item.body),
@@ -3018,6 +3022,164 @@ fn provider_projection_item_shows_status_chrome(item: &ProviderProjectionItem) -
         item.status,
         ProviderProjectionStatus::Failed | ProviderProjectionStatus::Canceled
     )
+}
+
+fn provider_projection_inline_event(item: &ProviderProjectionItem) -> Option<CodexInlineEvent> {
+    let kind = match item.render_class {
+        ProjectionRenderClass::SkillCard => CodexInlineEventKind::Skill,
+        ProjectionRenderClass::CommandCard
+        | ProjectionRenderClass::ProcessCard
+        | ProjectionRenderClass::FileCard
+        | ProjectionRenderClass::DiffCard
+        | ProjectionRenderClass::ToolCard
+        | ProjectionRenderClass::PluginCard
+        | ProjectionRenderClass::HookCard
+        | ProjectionRenderClass::SubagentCard
+        | ProjectionRenderClass::NestedTranscriptCard
+        | ProjectionRenderClass::BackgroundCard => CodexInlineEventKind::Tool,
+        _ => return None,
+    };
+    let title = provider_projection_display_title(item);
+    let body = provider_projection_inline_event_body(item);
+
+    Some(CodexInlineEvent {
+        kind,
+        title,
+        subtitle: Some(provider_projection_inline_event_subtitle(item).to_owned()),
+        body,
+        path: provider_projection_inline_event_path(item),
+        status: codex_inline_status_from_provider_projection(item.status),
+    })
+}
+
+fn provider_projection_inline_event_subtitle(item: &ProviderProjectionItem) -> &'static str {
+    match item.render_class {
+        ProjectionRenderClass::CommandCard => "Command",
+        ProjectionRenderClass::ProcessCard => "Process",
+        ProjectionRenderClass::FileCard => "File",
+        ProjectionRenderClass::DiffCard => "Diff",
+        ProjectionRenderClass::ToolCard => "Tool",
+        ProjectionRenderClass::SkillCard => "Skill",
+        ProjectionRenderClass::PluginCard => "Plugin",
+        ProjectionRenderClass::HookCard => "Hook",
+        ProjectionRenderClass::SubagentCard => "Subagent",
+        ProjectionRenderClass::NestedTranscriptCard => "Nested transcript",
+        ProjectionRenderClass::BackgroundCard => "Background task",
+        _ => "Provider item",
+    }
+}
+
+fn provider_projection_inline_event_body(item: &ProviderProjectionItem) -> Option<String> {
+    let body = item.body.trim();
+    if !body.is_empty() {
+        return Some(provider_projection_plain_body(body));
+    }
+    item.raw_payload
+        .as_deref()
+        .and_then(provider_projection_payload_action_body)
+}
+
+fn provider_projection_plain_body(body: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .map(|value| provider_projection_plain_payload_lines(&value, 0).join("\n"))
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| body.to_owned())
+}
+
+fn provider_projection_payload_action_body(raw_payload: &str) -> Option<String> {
+    let payload = serde_json::from_str::<serde_json::Value>(raw_payload).ok()?;
+    let mut lines = Vec::new();
+
+    if let Some(server) =
+        provider_projection_string_at_any(&payload, &["/params/item/server", "/params/server"])
+    {
+        lines.push(format!("server: {server}"));
+    }
+    if let Some(command) = provider_projection_string_at_any(
+        &payload,
+        &["/params/item/command", "/params/command", "/command"],
+    ) {
+        lines.push(format!("command: {command}"));
+    }
+    if let Some(arguments) = provider_projection_value_at_any(
+        &payload,
+        &[
+            "/params/item/arguments",
+            "/params/arguments",
+            "/arguments",
+            "/params/input",
+            "/input",
+        ],
+    ) {
+        let arguments = provider_projection_plain_payload_lines(arguments, 0);
+        if !arguments.is_empty() {
+            lines.push("arguments:".to_owned());
+            lines.extend(arguments.into_iter().map(|line| format!("  {line}")));
+        }
+    }
+
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+fn provider_projection_plain_payload_lines(value: &serde_json::Value, depth: usize) -> Vec<String> {
+    match value {
+        serde_json::Value::Object(map) => map
+            .iter()
+            .flat_map(|(key, value)| match value {
+                serde_json::Value::Object(_) | serde_json::Value::Array(_) if depth < 2 => {
+                    let mut lines = vec![format!("{key}:")];
+                    lines.extend(
+                        provider_projection_plain_payload_lines(value, depth + 1)
+                            .into_iter()
+                            .map(|line| format!("  {line}")),
+                    );
+                    lines
+                }
+                _ => provider_projection_display_json_value(value)
+                    .map(|value| vec![format!("{key}: {value}")])
+                    .unwrap_or_default(),
+            })
+            .collect(),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .filter_map(provider_projection_display_json_value)
+            .map(|value| format!("- {value}"))
+            .collect(),
+        _ => provider_projection_display_json_value(value)
+            .map(|value| vec![value])
+            .unwrap_or_default(),
+    }
+}
+
+fn provider_projection_inline_event_path(item: &ProviderProjectionItem) -> Option<PathBuf> {
+    match item.render_class {
+        ProjectionRenderClass::FileCard | ProjectionRenderClass::DiffCard => {
+            let candidate = item
+                .body
+                .lines()
+                .next()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| item.title.trim());
+            Some(PathBuf::from(candidate))
+        }
+        _ => None,
+    }
+}
+
+fn codex_inline_status_from_provider_projection(
+    status: ProviderProjectionStatus,
+) -> CodexInlineEventStatus {
+    match status {
+        ProviderProjectionStatus::Pending | ProviderProjectionStatus::Running => {
+            CodexInlineEventStatus::Loading
+        }
+        ProviderProjectionStatus::Complete => CodexInlineEventStatus::Complete,
+        ProviderProjectionStatus::Failed | ProviderProjectionStatus::Canceled => {
+            CodexInlineEventStatus::Failed
+        }
+    }
 }
 
 fn provider_projection_card_text(item: &ProviderProjectionItem) -> String {
@@ -3130,18 +3292,7 @@ fn provider_projection_display_json_value(value: &serde_json::Value) -> Option<S
 fn provider_projection_card_shows_raw_details(item: &ProviderProjectionItem) -> bool {
     matches!(
         item.render_class,
-        ProjectionRenderClass::CommandCard
-            | ProjectionRenderClass::ProcessCard
-            | ProjectionRenderClass::FileCard
-            | ProjectionRenderClass::DiffCard
-            | ProjectionRenderClass::ToolCard
-            | ProjectionRenderClass::SkillCard
-            | ProjectionRenderClass::PluginCard
-            | ProjectionRenderClass::HookCard
-            | ProjectionRenderClass::SubagentCard
-            | ProjectionRenderClass::NestedTranscriptCard
-            | ProjectionRenderClass::BackgroundCard
-            | ProjectionRenderClass::PromptCard
+        ProjectionRenderClass::PromptCard
             | ProjectionRenderClass::WebCard
             | ProjectionRenderClass::ImageCard
             | ProjectionRenderClass::ErrorCard
@@ -9470,7 +9621,7 @@ I summarized the result.
     }
 
     #[test]
-    fn provider_projection_action_card_text_shows_status_with_redacted_raw_payload() {
+    fn provider_projection_action_card_text_hides_raw_payload() {
         let mut record = provider_event_record(
             ProviderEventKind::CommandProcess,
             ProviderEventPhase::Failed,
@@ -9492,8 +9643,8 @@ I summarized the result.
             "status-error"
         );
         assert!(!text.contains("raw-secret"));
-        assert!(text.contains("\"type\": \"command\""));
-        assert!(text.contains("[redacted]"));
+        assert!(!text.contains("\"type\": \"command\""));
+        assert!(!text.contains("[redacted]"));
     }
 
     #[test]
@@ -9511,13 +9662,66 @@ I summarized the result.
         assert!(!provider_projection_item_shows_status_chrome(item));
         let text = provider_projection_card_text(item);
         assert!(text.starts_with("Read\ncrates/core/src/lib.rs"));
-        assert!(text.contains("\"type\": \"tool_result\""));
+        assert!(!text.contains("\"type\": \"tool_result\""));
         assert!(!text.contains("Running"));
         assert!(!text.contains("Streaming"));
     }
 
     #[test]
-    fn provider_projection_action_cards_include_raw_details_when_body_is_incomplete() {
+    fn provider_projection_action_items_render_as_inline_event_chips_without_json() {
+        let mut record = provider_event_record(ProviderEventKind::Mcp, ProviderEventPhase::Started);
+        record.provider_subtype = Some("item/mcpToolCall/started".to_owned());
+        record.normalized_payload = serde_json::json!({
+            "title": "get_wiki_page",
+            "body": ""
+        });
+        record.raw_json = serde_json::json!({
+            "method": "item/mcpToolCall/started",
+            "params": {
+                "item": {
+                    "type": "mcpToolCall",
+                    "server": "cubic",
+                    "tool": "get_wiki_page",
+                    "arguments": {
+                        "page": "Project Context"
+                    }
+                }
+            }
+        });
+        let projection = provider_projection_from_records(&[record]);
+
+        let inline = provider_projection_inline_event(&projection.items[0]).unwrap();
+
+        assert_eq!(inline.kind, CodexInlineEventKind::Tool);
+        assert_eq!(inline.title, "get_wiki_page");
+        assert_eq!(inline_event_chip_label(&inline, false), "+ get_wiki_page");
+        let body = inline_event_body_text(&inline);
+        assert!(body.contains("Project Context"));
+        assert!(!body.contains("\"method\""));
+        assert!(!body.contains("\"params\""));
+    }
+
+    #[test]
+    fn provider_projection_completed_structured_tool_output_is_plain_text() {
+        let mut record =
+            provider_event_record(ProviderEventKind::Mcp, ProviderEventPhase::Completed);
+        record.provider_subtype = Some("item/mcpToolCall/completed".to_owned());
+        record.normalized_payload = serde_json::json!({
+            "title": "get_wiki_page",
+            "body": "{\n  \"ok\": true,\n  \"page\": \"Project Context\"\n}"
+        });
+        let projection = provider_projection_from_records(&[record]);
+
+        let inline = provider_projection_inline_event(&projection.items[0]).unwrap();
+
+        assert_eq!(
+            inline_event_body_text(&inline),
+            "ok: true\npage: Project Context"
+        );
+    }
+
+    #[test]
+    fn provider_projection_action_cards_hide_raw_details_when_body_is_incomplete() {
         let mut record = provider_event_record(ProviderEventKind::Mcp, ProviderEventPhase::Started);
         record.provider_subtype = Some("item/mcpToolCall/started".to_owned());
         record.normalized_payload = serde_json::json!({
@@ -9542,8 +9746,8 @@ I summarized the result.
         let text = provider_projection_card_text(&projection.items[0]);
 
         assert!(text.contains("get_wiki_page"));
-        assert!(text.contains("\"page\": \"Project Context\""));
-        assert!(text.contains("\"server\": \"cubic\""));
+        assert!(!text.contains("\"page\": \"Project Context\""));
+        assert!(!text.contains("\"server\": \"cubic\""));
     }
 
     #[test]
@@ -9577,8 +9781,29 @@ I summarized the result.
         assert_eq!(item.render_class, ProjectionRenderClass::HookCard);
         let text = provider_projection_card_text(item);
         assert!(text.starts_with("PreToolUse\nBash: cargo test"));
-        assert!(text.contains("\"type\": \"tool_result\""));
+        assert!(!text.contains("\"type\": \"tool_result\""));
         assert!(!provider_projection_item_shows_status_chrome(item));
+    }
+
+    #[test]
+    fn subagent_projection_items_render_as_collapsible_inline_output() {
+        let mut record = provider_event_record(
+            ProviderEventKind::SubagentCollaboration,
+            ProviderEventPhase::Completed,
+        );
+        record.normalized_payload = serde_json::json!({
+            "title": "Review agent",
+            "body": "Found 2 issues"
+        });
+        let projection = provider_projection_from_records(&[record]);
+
+        let inline = provider_projection_inline_event(&projection.items[0]).unwrap();
+
+        assert_eq!(inline.kind, CodexInlineEventKind::Tool);
+        assert_eq!(inline.title, "Review agent");
+        assert_eq!(inline.subtitle.as_deref(), Some("Subagent"));
+        assert_eq!(inline_event_chip_label(&inline, false), "+ Review agent");
+        assert_eq!(inline_event_body_text(&inline), "Found 2 issues");
     }
 
     #[test]
