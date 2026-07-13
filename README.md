@@ -43,7 +43,7 @@ The current app supports the core Archductor loop, with some rough edges:
 - Give each workspace its own Git worktree, branch, `.context` directory, and
   stable `ARCHDUCTOR_PORT` range.
 - Run multiple workspaces for the same repository in parallel.
-- Start multiple Shell, Codex, Claude Code, or Cursor sessions inside one
+- Start multiple Shell, Codex, or Claude Code sessions inside one
   workspace.
 - Use an embedded workspace terminal, setup/run/stop controls, logs, and process
   lists.
@@ -78,7 +78,7 @@ application, and full Archductor visual parity are still in progress.
    project entry for that codebase.
 3. Configure repository scripts and settings if the project needs them.
 4. Create a workspace for the next task.
-5. Start Codex, Claude Code, Cursor, or a shell from the workspace page.
+5. Start Codex, Claude Code, or a shell from the workspace page.
 6. Work in the agent chat or embedded terminal.
 7. Review changes, todos, comments, checks, and conflicts in the workspace.
 8. Create a PR from the Checks tab.

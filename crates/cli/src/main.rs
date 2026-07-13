@@ -1461,7 +1461,7 @@ fn archcar_role_label(role: &str) -> String {
     match role {
         "user" => "You".to_owned(),
         "agent" | "assistant" => "Assistant".to_owned(),
-        other => title_case_label(other),
+        other => sentence_case_label(other),
     }
 }
 
@@ -1472,7 +1472,7 @@ fn archcar_message_content_without_duplicate_title<'a>(label: &str, content: &'a
         .unwrap_or(content)
 }
 
-fn title_case_label(value: &str) -> String {
+fn sentence_case_label(value: &str) -> String {
     let label = value.replace(['_', '-'], " ");
     let mut chars = label.chars();
     let Some(first) = chars.next() else {

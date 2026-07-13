@@ -851,7 +851,9 @@ fn parse_file_change_action(line: &str) -> Option<(CodexFileChangeAction, &str)>
         return Some((CodexFileChangeAction::Edited, rest));
     }
     if let Some(rest) = line.strip_prefix("changed ") {
-        return Some((CodexFileChangeAction::Edited, rest));
+        if !rest.is_empty() && !rest.chars().any(char::is_whitespace) {
+            return Some((CodexFileChangeAction::Edited, rest));
+        }
     }
     if let Some(rest) = line.strip_prefix("Deleted ") {
         return Some((CodexFileChangeAction::Deleted, rest));
@@ -2011,6 +2013,10 @@ mod tests {
                 deletions: None,
                 lines: Vec::new(),
             }))
+        );
+        assert_eq!(
+            parse_codex_inline_event("changed plans after reading the tests"),
+            None
         );
         assert_eq!(
             parse_codex_inline_event("Added docs/superpowers/plans/manual.md"),

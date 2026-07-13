@@ -11,7 +11,7 @@ make the normal loop usable from GTK:
 1. Add or clone a project repository.
 2. Configure project settings that affect workspaces and agents.
 3. Create one or more workspaces as Git worktrees.
-4. Run Shell, Codex, Claude Code, or Cursor sessions inside a workspace.
+4. Run Shell, Codex, or Claude Code sessions inside a workspace.
 5. Inspect terminal/session state, logs, todos, diffs, checks, comments, and PR
    state.
 6. Send review/check/comment context back to an agent.
@@ -50,7 +50,7 @@ Relationships:
   issue where credentials are available.
 - Durable session/process records that survive app restart.
 - Provider-native agent sessions for Codex app-server and Claude stream-json,
-  with rendered provider events stored separately from diagnostic transport
+  with canonical provider events persisted separately from diagnostic transport
   logs.
 - Workspace terminal, setup/run/stop controls, logs, and process list.
 - Changes/checks/review/todos/conflicts/PR panels with visible failure states.

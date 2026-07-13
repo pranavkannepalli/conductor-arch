@@ -2710,6 +2710,14 @@ textview:focus,
 mod tests {
     use super::app_css;
 
+    fn selector_block<'a>(css: &'a str, selector: &str) -> &'a str {
+        let needle = format!("{selector} {{");
+        let start = css.find(&needle).expect("selector exists in CSS");
+        let rest = &css[start..];
+        let end = rest.find("\n}").expect("selector block closes");
+        &rest[..end]
+    }
+
     #[test]
     fn refreshed_theme_exposes_graphite_palette_fonts_and_neutral_focus_color() {
         let css = app_css();
@@ -2737,11 +2745,12 @@ mod tests {
         ));
         assert!(css.contains("transition-duration: 160ms"));
         assert!(css.contains(".chat-inline-event-chip"));
-        assert!(css.contains("border-radius: 5px;"));
-        assert!(css.contains("font-size: 10px;"));
-        assert!(css.contains("min-height: 14px;"));
-        assert!(css.contains("padding: 0 2px;"));
-        assert!(css.contains("min-width: 0;"));
+        let chip_block = selector_block(css, ".chat-inline-event-chip");
+        assert!(chip_block.contains("border-radius: 5px;"));
+        assert!(chip_block.contains("font-size: 10px;"));
+        assert!(chip_block.contains("min-height: 14px;"));
+        assert!(chip_block.contains("padding: 0 2px;"));
+        assert!(chip_block.contains("min-width: 0;"));
         assert!(css.contains("button.chat-inline-event-chip"));
         assert!(css.contains(".chat-inline-event-chip label"));
         assert!(css.contains("margin: 0;"));
@@ -2751,8 +2760,9 @@ mod tests {
         assert!(css.contains(".chat-reasoning-text"));
         assert!(css.contains(".chat-user-row {\n    margin-bottom: 10px;"));
         assert!(css.contains(".chat-agent-text {\n    color: #c6c6c6;\n    line-height: 1.55;\n    margin-bottom: 0;"));
-        assert!(css.contains(".chat-inline-event {\n    background-color: transparent;"));
-        assert!(css.contains("margin-bottom: 0;"));
+        let inline_event_block = selector_block(css, ".chat-inline-event");
+        assert!(inline_event_block.contains("background-color: transparent;"));
+        assert!(inline_event_block.contains("margin-bottom: 0;"));
         assert!(!css.contains(".lc-accent-green .chat-send-btn-active"));
         assert!(!css.contains(".lc-accent-green .chat-user-bubble"));
         assert!(!css.contains(".lc-accent-green .suggested-action"));
@@ -2775,9 +2785,13 @@ mod tests {
         assert!(!css.contains(".lc-theme-dark headerbar"));
         assert!(!css.contains(".lc-theme-light headerbar"));
         assert!(!css.contains(".lc-theme-dark .nav-button"));
+        assert!(!css.contains(".lc-theme-light .nav-button"));
         assert!(!css.contains(".lc-theme-dark .nav-row"));
+        assert!(!css.contains(".lc-theme-light .nav-row"));
         assert!(!css.contains(".lc-theme-dark .workspace-list"));
+        assert!(!css.contains(".lc-theme-light .workspace-list"));
         assert!(!css.contains(".lc-theme-dark .sidebar-search"));
+        assert!(!css.contains(".lc-theme-light .sidebar-search"));
         assert!(!css.contains(".lc-density-compact .sidebar"));
         assert!(!css.contains(".lc-density-comfortable .sidebar"));
         assert!(!css.contains(".lc-density-compact .nav-button"));

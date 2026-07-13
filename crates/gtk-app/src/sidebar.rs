@@ -833,7 +833,9 @@ fn attach_workspace_row_context_menu(
             );
         });
     }
-    menu.append(&rename_btn);
+    if workspace_status != "failed" {
+        menu.append(&rename_btn);
+    }
 
     let duplicate_btn = menu_text_button("Duplicate");
     {
@@ -917,10 +919,12 @@ fn attach_workspace_row_context_menu(
             );
         });
     }
-    menu.append(&duplicate_btn);
+    if workspace_status != "failed" {
+        menu.append(&duplicate_btn);
+    }
 
-    for (label, destructive, action) in [("Archive", false, "archive"), ("Delete", true, "delete")]
-    {
+    let workspace_actions = workspace_context_actions(&workspace_status);
+    for (label, destructive, action) in workspace_actions {
         let item = menu_text_button(label);
         if destructive {
             item.add_css_class("destructive-action");
@@ -985,7 +989,8 @@ fn attach_workspace_row_context_menu(
                         let stack = stack.clone();
                         let row = row.clone();
                         let workspace_name = workspace_name.clone();
-                        let delete_branch_after_delete = workspace_status != "failed";
+	                        let force_delete_workspace = workspace_status == "failed";
+	                        let delete_branch_after_delete = workspace_status != "failed";
                         let window = window.clone();
                         let toast_manager = toast_manager.clone();
                         if action == "delete" {
@@ -996,8 +1001,13 @@ fn attach_workspace_row_context_menu(
                                     let db_path = state.workspace_database_path().to_path_buf();
                                     let workspace_name = workspace_name.clone();
                                     move || {
-                                        WorkspaceStore::open(db_path)
-                                            .and_then(|store| store.delete(&workspace_name, false, false))
+	                                        WorkspaceStore::open(db_path).and_then(|store| {
+	                                            store.delete(
+	                                                &workspace_name,
+	                                                force_delete_workspace,
+	                                                delete_branch_after_delete,
+	                                            )
+	                                        })
                                             .map_err(|err| format!("{err:#}"))
                                     }
                                 },
@@ -1427,6 +1437,14 @@ fn workspace_status_allows_sidebar_actions(status: &str) -> bool {
     matches!(status, "active" | "failed")
 }
 
+fn workspace_context_actions(status: &str) -> Vec<(&'static str, bool, &'static str)> {
+    if status == "failed" {
+        vec![("Delete", true, "delete")]
+    } else {
+        vec![("Archive", false, "archive"), ("Delete", true, "delete")]
+    }
+}
+
 fn section_header_row(
     name: &str,
     _workspace_count: usize,
@@ -1536,7 +1554,7 @@ fn relative_time(ts: &str) -> String {
 mod tests {
     use super::{
         primary_sidebar_nav_labels, sidebar_should_restore_workspace_selection,
-        workspace_status_allows_sidebar_actions,
+        workspace_context_actions, workspace_status_allows_sidebar_actions,
     };
     use crate::state::AppPage;
 
@@ -1571,5 +1589,17 @@ mod tests {
         assert!(workspace_status_allows_sidebar_actions("active"));
         assert!(workspace_status_allows_sidebar_actions("failed"));
         assert!(!workspace_status_allows_sidebar_actions("archived"));
+    }
+
+    #[test]
+    fn failed_workspace_rows_offer_only_safe_delete_action() {
+        assert_eq!(
+            workspace_context_actions("failed"),
+            vec![("Delete", true, "delete")]
+        );
+        assert_eq!(
+            workspace_context_actions("active"),
+            vec![("Archive", false, "archive"), ("Delete", true, "delete")]
+        );
     }
 }

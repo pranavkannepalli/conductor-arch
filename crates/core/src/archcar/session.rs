@@ -5,7 +5,7 @@ use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command as ProcessCommand, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -93,6 +93,20 @@ struct ProviderProcessConnection {
     cwd: PathBuf,
     model: Option<String>,
     approval_policy: Option<String>,
+    reasoning_mode: Option<String>,
+    effort_mode: Option<String>,
+    personality: Option<String>,
+}
+
+static PROVIDER_NATIVE_SESSION_LAUNCH_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn provider_native_session_launch_guard(kind: SessionKind) -> Option<MutexGuard<'static, ()>> {
+    matches!(kind, SessionKind::Codex | SessionKind::Claude).then(|| {
+        PROVIDER_NATIVE_SESSION_LAUNCH_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    })
 }
 
 impl ManagedSessionConnection {
@@ -213,6 +227,7 @@ pub fn spawn_managed_session(
     harness: SessionHarnessOptions,
     event_tx: Sender<ArchcarEvent>,
 ) -> Result<SessionHandle> {
+    let _provider_native_launch_guard = provider_native_session_launch_guard(kind);
     let store = WorkspaceStore::open_with_logs(db_path.clone(), logs_dir.clone())?;
     let controller = controller_for_kind(kind);
     if let Some((connection, snapshot_state)) = adopt_running_session(&store, &workspace, kind)? {
@@ -346,6 +361,9 @@ fn spawn_provider_native_managed_session(start: LiveSessionStart<'_>) -> Result<
         cwd: start.launch.cwd.clone(),
         model: model_from_harness_metadata(start.launch.harness_metadata.as_deref()),
         approval_policy: approval_from_harness_metadata(start.launch.harness_metadata.as_deref()),
+        reasoning_mode: reasoning_from_harness_metadata(start.launch.harness_metadata.as_deref()),
+        effort_mode: effort_from_harness_metadata(start.launch.harness_metadata.as_deref()),
+        personality: personality_from_harness_metadata(start.launch.harness_metadata.as_deref()),
     };
     let connection = match start.kind {
         SessionKind::Codex => ManagedSessionConnection::CodexAppServer(connection),
@@ -534,6 +552,7 @@ pub fn spawn_managed_session_for_thread(
     harness: SessionHarnessOptions,
     event_tx: Sender<ArchcarEvent>,
 ) -> Result<SessionHandle> {
+    let _provider_native_launch_guard = provider_native_session_launch_guard(kind);
     let store = WorkspaceStore::open_with_logs(db_path.clone(), logs_dir.clone())?;
     let thread_record = store.get_chat_thread_record(thread_id)?;
     let workspace_record = store.get_workspace_record_by_name(&workspace)?;
@@ -744,6 +763,9 @@ fn non_interactive_harness_metadata(
     if let Some(value) = sanitize_harness_text(harness.effort_mode.as_deref()) {
         entries.push(format!("effort={}", sanitize_metadata_value(&value)));
     }
+    if let Some(value) = sanitize_harness_text(harness.codex_personality.as_deref()) {
+        entries.push(format!("personality={}", sanitize_metadata_value(&value)));
+    }
     Some(entries.join(";"))
 }
 
@@ -802,6 +824,18 @@ fn approval_from_harness_metadata(metadata: Option<&str>) -> Option<String> {
         Some(other) => Some(other.to_owned()),
         None => None,
     }
+}
+
+fn reasoning_from_harness_metadata(metadata: Option<&str>) -> Option<String> {
+    metadata_value(metadata, "reasoning")
+}
+
+fn effort_from_harness_metadata(metadata: Option<&str>) -> Option<String> {
+    metadata_value(metadata, "effort")
+}
+
+fn personality_from_harness_metadata(metadata: Option<&str>) -> Option<String> {
+    metadata_value(metadata, "personality")
 }
 
 fn codex_sandbox_for_approval(approval_policy: Option<&str>) -> Option<&'static str> {
@@ -1460,6 +1494,7 @@ fn run_codex_app_server_session_loop(
         mark_provider_session_failed(&runtime_store, &snapshot, &event_tx, &started, err);
         return;
     }
+    let mut startup_phase = CodexStartupPhase::InitializePending;
     let startup_request_id = 2_u64;
     let mut provider_thread_id = connection.native_thread_id.clone();
     let mut user_input_sequence = runtime_store
@@ -1477,9 +1512,59 @@ fn run_codex_app_server_session_loop(
             match parse_jsonl_message(&line, connection.next_read_line) {
                 Ok(message) => {
                     persist_codex_app_server_message(&runtime_store, &message, &started);
+                    if startup_phase == CodexStartupPhase::InitializePending
+                        && codex_response_id(&message) == Some(1)
+                    {
+                        if let Some(error) = codex_response_error(&message) {
+                            let _ = connection.child.kill();
+                            mark_provider_session_failed(
+                                &runtime_store,
+                                &snapshot,
+                                &event_tx,
+                                &started,
+                                error,
+                            );
+                            return;
+                        }
+                        if let Err(err) =
+                            continue_codex_app_server_startup_after_initialize(&mut connection)
+                        {
+                            let _ = connection.child.kill();
+                            mark_provider_session_failed(
+                                &runtime_store,
+                                &snapshot,
+                                &event_tx,
+                                &started,
+                                err,
+                            );
+                            return;
+                        }
+                        startup_phase = CodexStartupPhase::ThreadPending;
+                        info!(
+                            session_id = started.session_id,
+                            thread_id = started.thread_id,
+                            "started codex app-server lifecycle"
+                        );
+                    }
+                    if startup_phase == CodexStartupPhase::ThreadPending
+                        && codex_response_id(&message) == Some(startup_request_id)
+                    {
+                        if let Some(error) = codex_response_error(&message) {
+                            let _ = connection.child.kill();
+                            mark_provider_session_failed(
+                                &runtime_store,
+                                &snapshot,
+                                &event_tx,
+                                &started,
+                                error,
+                            );
+                            return;
+                        }
+                    }
                     if let Some(native_id) =
                         codex_thread_id_from_startup_response(&message, startup_request_id)
                     {
+                        startup_phase = CodexStartupPhase::Ready;
                         provider_thread_id = Some(native_id.clone());
                         connection.native_thread_id = Some(native_id.clone());
                         let _ = runtime_store
@@ -1524,22 +1609,12 @@ fn run_codex_app_server_session_loop(
                         });
                         continue;
                     };
-                    user_input_sequence += 1;
-                    persist_runtime_user_input(
-                        &runtime_store,
-                        &started,
-                        &input,
-                        visible_input.as_deref(),
-                        &kind,
-                        user_input_sequence,
-                    );
-                    if let Ok(mut state) = snapshot.lock() {
-                        state.ready = false;
-                        state.runtime_state = AgentSessionState::Running;
-                    }
+                    let next_input_sequence = user_input_sequence + 1;
                     let params = CodexAppServerTurnStartParams {
                         thread_id: thread_id.to_owned(),
-                        input: vec![CodexAppServerUserInput::Text { text: input }],
+                        input: vec![CodexAppServerUserInput::Text {
+                            text: input.clone(),
+                        }],
                         cwd: Some(connection.cwd.clone()),
                         approval_policy: connection.approval_policy.clone(),
                         sandbox_policy: codex_sandbox_for_approval(
@@ -1547,20 +1622,37 @@ fn run_codex_app_server_session_loop(
                         )
                         .map(|_| json!({"type": "dangerFullAccess"})),
                         model: connection.model.clone(),
-                        effort: None,
+                        effort: codex_turn_effort(&connection),
                         summary: None,
-                        personality: None,
+                        personality: connection.personality.clone(),
                     };
                     if let Err(err) = write_turn_start_request_with_id(
                         &mut connection.stdin,
-                        next_turn_request_id(user_input_sequence),
+                        next_turn_request_id(next_input_sequence),
                         &params,
                     ) {
-                        let _ = event_tx.send(ArchcarEvent::SessionError {
-                            session_id: Some(started.session_id),
-                            thread_id: Some(started.thread_id),
-                            message: format!("Codex turn/start failed: {err:#}"),
-                        });
+                        let _ = connection.child.kill();
+                        mark_provider_session_failed(
+                            &runtime_store,
+                            &snapshot,
+                            &event_tx,
+                            &started,
+                            format!("Codex turn/start failed: {err:#}"),
+                        );
+                    } else {
+                        user_input_sequence = next_input_sequence;
+                        persist_runtime_user_input(
+                            &runtime_store,
+                            &started,
+                            &input,
+                            visible_input.as_deref(),
+                            &kind,
+                            user_input_sequence,
+                        );
+                        if let Ok(mut state) = snapshot.lock() {
+                            state.ready = false;
+                            state.runtime_state = AgentSessionState::Running;
+                        }
                     }
                 }
                 SessionCommand::Kill => {
@@ -1676,32 +1768,36 @@ fn run_claude_stream_session_loop(
                     visible_input,
                     kind,
                 } => {
-                    user_input_sequence += 1;
-                    persist_runtime_user_input(
-                        &runtime_store,
-                        &started,
-                        &input,
-                        visible_input.as_deref(),
-                        &kind,
-                        user_input_sequence,
-                    );
-                    if let Ok(mut state) = snapshot.lock() {
-                        state.ready = false;
-                        state.runtime_state = AgentSessionState::Running;
-                    }
                     let payload = json!({
                         "type": "user",
                         "message": {
                             "role": "user",
-                            "content": [{"type": "text", "text": input}],
+                            "content": [{"type": "text", "text": input.clone()}],
                         },
                     });
                     if let Err(err) = write_provider_json_line(&mut connection.stdin, &payload) {
-                        let _ = event_tx.send(ArchcarEvent::SessionError {
-                            session_id: Some(started.session_id),
-                            thread_id: Some(started.thread_id),
-                            message: format!("Claude stream input failed: {err:#}"),
-                        });
+                        let _ = connection.child.kill();
+                        mark_provider_session_failed(
+                            &runtime_store,
+                            &snapshot,
+                            &event_tx,
+                            &started,
+                            format!("Claude stream input failed: {err:#}"),
+                        );
+                    } else {
+                        user_input_sequence += 1;
+                        persist_runtime_user_input(
+                            &runtime_store,
+                            &started,
+                            &input,
+                            visible_input.as_deref(),
+                            &kind,
+                            user_input_sequence,
+                        );
+                        if let Ok(mut state) = snapshot.lock() {
+                            state.ready = false;
+                            state.runtime_state = AgentSessionState::Running;
+                        }
                     }
                 }
                 SessionCommand::Kill => {
@@ -1738,7 +1834,7 @@ fn run_claude_stream_session_loop(
 
 fn start_codex_app_server_lifecycle(
     connection: &mut ProviderProcessConnection,
-    started: &SessionSnapshot,
+    _started: &SessionSnapshot,
 ) -> Result<()> {
     write_initialize_request_with_id(
         &mut connection.stdin,
@@ -1749,7 +1845,19 @@ fn start_codex_app_server_lifecycle(
             client_version: Some(env!("CARGO_PKG_VERSION").to_owned()),
             workspace_root: None,
         },
-    )?;
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodexStartupPhase {
+    InitializePending,
+    ThreadPending,
+    Ready,
+}
+
+fn continue_codex_app_server_startup_after_initialize(
+    connection: &mut ProviderProcessConnection,
+) -> Result<()> {
     write_initialized_notification(&mut connection.stdin)?;
     if let Some(native_thread_id) = connection.native_thread_id.as_deref() {
         write_provider_json_line(
@@ -1778,11 +1886,6 @@ fn start_codex_app_server_lifecycle(
             },
         )?;
     }
-    info!(
-        session_id = started.session_id,
-        thread_id = started.thread_id,
-        "started codex app-server lifecycle"
-    );
     Ok(())
 }
 
@@ -1791,15 +1894,7 @@ fn persist_codex_app_server_message(
     message: &CodexAppServerMessage,
     started: &SessionSnapshot,
 ) {
-    let event =
-        message
-            .to_provider_event_draft()
-            .into_provider_event_draft(ProviderEventContext::runtime(
-                None,
-                Some(started.thread_id),
-                Some(started.session_id),
-                "codex-app-server",
-            ));
+    let event = codex_app_server_provider_event_for_session(message, started);
     if let Err(err) = runtime_store.append_provider_event(&event) {
         warn!(
             session_id = started.session_id,
@@ -1810,11 +1905,44 @@ fn persist_codex_app_server_message(
     }
 }
 
+fn codex_app_server_provider_event_for_session(
+    message: &CodexAppServerMessage,
+    started: &SessionSnapshot,
+) -> ProviderEventDraft {
+    let mut event =
+        message
+            .to_provider_event_draft()
+            .into_provider_event_draft(ProviderEventContext::runtime(
+                None,
+                Some(started.thread_id),
+                Some(started.session_id),
+                "codex-app-server",
+            ));
+    if let Some(provider_event_id) = event.provider_event_id.take() {
+        event.provider_event_id = Some(format!("{}:{provider_event_id}", started.session_id));
+    }
+    event
+}
+
+fn codex_response_id(message: &CodexAppServerMessage) -> Option<u64> {
+    message.id.as_ref().and_then(|id| id.as_u64())
+}
+
+fn codex_response_error(message: &CodexAppServerMessage) -> Option<String> {
+    let error = message.value.get("error")?;
+    let message = error
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| error.as_str())
+        .unwrap_or("Codex app-server request failed");
+    Some(message.to_owned())
+}
+
 fn codex_thread_id_from_startup_response(
     message: &CodexAppServerMessage,
     startup_request_id: u64,
 ) -> Option<String> {
-    (message.id.as_ref().and_then(|id| id.as_u64()) == Some(startup_request_id))
+    (codex_response_id(message) == Some(startup_request_id))
         .then(|| {
             message
                 .value
@@ -1823,6 +1951,13 @@ fn codex_thread_id_from_startup_response(
                 .map(ToOwned::to_owned)
         })
         .flatten()
+}
+
+fn codex_turn_effort(connection: &ProviderProcessConnection) -> Option<String> {
+    connection
+        .effort_mode
+        .clone()
+        .or_else(|| connection.reasoning_mode.clone())
 }
 
 fn persist_runtime_user_input(
@@ -1916,6 +2051,7 @@ fn mark_provider_session_failed(
         "provider_native_session_error",
     );
     if let Ok(mut state) = snapshot.lock() {
+        state.ready = false;
         state.runtime_state = AgentSessionState::Failed;
     }
     let _ = event_tx.send(ArchcarEvent::SessionError {
@@ -2221,7 +2357,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_app_server_lifecycle_writes_initialize_initialized_thread_start() {
+    fn codex_app_server_lifecycle_waits_for_initialize_response_before_thread_start() {
         let mut child = ProcessCommand::new("bash")
             .args(["-lc", "cat"])
             .stdin(Stdio::piped())
@@ -2240,6 +2376,9 @@ mod tests {
             cwd: PathBuf::from("/tmp/workspace"),
             model: Some("gpt-5.4".to_owned()),
             approval_policy: Some("never".to_owned()),
+            reasoning_mode: None,
+            effort_mode: None,
+            personality: None,
         };
         let snapshot =
             running_session_snapshot(7, 11, "berlin".to_owned(), SessionKind::Codex, 123, false);
@@ -2250,6 +2389,18 @@ mod tests {
             .stdout_rx
             .recv_timeout(Duration::from_secs(1))
             .unwrap();
+        let first: serde_json::Value = serde_json::from_str(&first).unwrap();
+
+        assert_eq!(first["method"], "initialize");
+        assert_eq!(first["id"], 1);
+        assert!(first.get("jsonrpc").is_none());
+        assert!(connection
+            .stdout_rx
+            .recv_timeout(Duration::from_millis(100))
+            .is_err());
+
+        continue_codex_app_server_startup_after_initialize(&mut connection).unwrap();
+
         let second = connection
             .stdout_rx
             .recv_timeout(Duration::from_secs(1))
@@ -2258,13 +2409,9 @@ mod tests {
             .stdout_rx
             .recv_timeout(Duration::from_secs(1))
             .unwrap();
-        let first: serde_json::Value = serde_json::from_str(&first).unwrap();
         let second: serde_json::Value = serde_json::from_str(&second).unwrap();
         let third: serde_json::Value = serde_json::from_str(&third).unwrap();
 
-        assert_eq!(first["method"], "initialize");
-        assert_eq!(first["id"], 1);
-        assert!(first.get("jsonrpc").is_none());
         assert_eq!(second, json!({"method": "initialized", "params": {}}));
         assert_eq!(third["method"], "thread/start");
         assert_eq!(third["id"], 2);
@@ -2296,6 +2443,9 @@ mod tests {
             cwd: PathBuf::from("/tmp/workspace"),
             model: None,
             approval_policy: None,
+            reasoning_mode: None,
+            effort_mode: None,
+            personality: None,
         };
         let snapshot =
             running_session_snapshot(7, 11, "berlin".to_owned(), SessionKind::Codex, 123, false);
@@ -2306,6 +2456,16 @@ mod tests {
             .stdout_rx
             .recv_timeout(Duration::from_secs(1))
             .unwrap();
+        let first: serde_json::Value = serde_json::from_str(&first).unwrap();
+
+        assert_eq!(first["method"], "initialize");
+        assert!(connection
+            .stdout_rx
+            .recv_timeout(Duration::from_millis(100))
+            .is_err());
+
+        continue_codex_app_server_startup_after_initialize(&mut connection).unwrap();
+
         let second = connection
             .stdout_rx
             .recv_timeout(Duration::from_secs(1))
@@ -2314,11 +2474,9 @@ mod tests {
             .stdout_rx
             .recv_timeout(Duration::from_secs(1))
             .unwrap();
-        let first: serde_json::Value = serde_json::from_str(&first).unwrap();
         let second: serde_json::Value = serde_json::from_str(&second).unwrap();
         let third: serde_json::Value = serde_json::from_str(&third).unwrap();
 
-        assert_eq!(first["method"], "initialize");
         assert_eq!(second, json!({"method": "initialized", "params": {}}));
         assert_eq!(third["method"], "thread/resume");
         assert_eq!(third["id"], 2);
@@ -2329,6 +2487,58 @@ mod tests {
         assert!(third["params"].get("sandbox").is_none());
 
         let _ = connection.child.kill();
+    }
+
+    #[test]
+    fn codex_response_event_ids_are_scoped_to_runtime_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = seeded_workspace_store(temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
+        let db_path = temp.path().join("state.db");
+        let message = parse_jsonl_message(r#"{"id":2,"result":{"ok":true}}"#, 1).unwrap();
+        let first_process = record_thread_session_with_port_and_pid(&store, &thread, 43000, 123);
+        let second_process = record_thread_session_with_port_and_pid(&store, &thread, 43001, 456);
+        let first = running_session_snapshot(
+            first_process.id,
+            thread.id,
+            "berlin".to_owned(),
+            SessionKind::Codex,
+            123,
+            false,
+        );
+        let second = running_session_snapshot(
+            second_process.id,
+            thread.id,
+            "berlin".to_owned(),
+            SessionKind::Codex,
+            456,
+            false,
+        );
+
+        let event_store = crate::provider_events::ProviderEventStore::new(db_path);
+        event_store
+            .upsert_event(&codex_app_server_provider_event_for_session(
+                &message, &first,
+            ))
+            .unwrap();
+        event_store
+            .upsert_event(&codex_app_server_provider_event_for_session(
+                &message, &second,
+            ))
+            .unwrap();
+
+        let events = event_store.list_for_chat_thread(thread.id).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events[0].provider_event_id.as_deref(),
+            Some(format!("{}:2", first_process.id).as_str())
+        );
+        assert_eq!(
+            events[1].provider_event_id.as_deref(),
+            Some(format!("{}:2", second_process.id).as_str())
+        );
     }
 
     #[test]
@@ -2351,6 +2561,9 @@ mod tests {
             cwd: PathBuf::from("/tmp/workspace"),
             model: Some("gpt-5.6-sol".to_owned()),
             approval_policy: None,
+            reasoning_mode: None,
+            effort_mode: None,
+            personality: None,
         };
 
         set_provider_connection_model(&mut connection, Some(" gpt-5.6-terra ".to_owned()));

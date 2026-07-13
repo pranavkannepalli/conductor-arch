@@ -206,13 +206,11 @@ fn session_row(session: &InspectorSessionInput) -> InspectorSessionRow {
         parser_state: if session.events.is_empty() && session.provider_events.is_empty() {
             "no parsed events".to_owned()
         } else {
-            format!(
-                "{} events",
-                session.events.len()
-                    + provider_projection_from_records(&session.provider_events)
-                        .items
-                        .len()
-            )
+            let event_count = session.events.len()
+                + provider_projection_from_records(&session.provider_events)
+                    .items
+                    .len();
+            pluralize(event_count, "event")
         },
         last_activity: session
             .ended_at
@@ -1154,6 +1152,12 @@ mod tests {
         assert!(model.selected.diagnostics.command.contains("[redacted]"));
         assert!(!model.selected.diagnostics.command.contains("secret"));
         assert_eq!(model.selected.diagnostics.last_lifecycle_action, "running");
+    }
+
+    #[test]
+    fn pluralize_keeps_single_event_label_singular() {
+        assert_eq!(pluralize(1, "event"), "1 event");
+        assert_eq!(pluralize(2, "event"), "2 events");
     }
 
     #[test]
