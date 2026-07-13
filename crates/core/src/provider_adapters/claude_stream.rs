@@ -14,6 +14,7 @@ pub struct ClaudeStreamLaunchConfig {
     pub persistent_input: bool,
     pub resume: Option<String>,
     pub permission_mode: Option<String>,
+    pub model: Option<String>,
     pub effort: Option<String>,
     pub append_system_prompt: Option<String>,
 }
@@ -37,6 +38,7 @@ pub fn build_claude_stream_args(config: &ClaudeStreamLaunchConfig) -> Vec<String
         "--permission-mode",
         config.permission_mode.as_deref(),
     );
+    push_optional_arg(&mut args, "--model", config.model.as_deref());
     push_optional_arg(&mut args, "--effort", config.effort.as_deref());
     push_optional_arg(
         &mut args,
@@ -503,6 +505,7 @@ mod tests {
             persistent_input: true,
             resume: Some("session-123".to_owned()),
             permission_mode: Some("plan".to_owned()),
+            model: None,
             effort: Some("low".to_owned()),
             append_system_prompt: Some("Archductor context".to_owned()),
         });

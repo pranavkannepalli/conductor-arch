@@ -141,7 +141,7 @@ pub(crate) fn build_app_sidebar(
     nav_group.append(&history_nav_btn);
     if debug_mode {
         let pty_inspector_nav_btn =
-            sidebar_nav_button("utilities-terminal-symbolic", "PTY Inspector");
+            sidebar_nav_button("utilities-terminal-symbolic", "Session Logs");
         {
             let stack_p = stack.clone();
             let state_p = app_state.clone();
@@ -1405,7 +1405,7 @@ fn show_workspace_error_dialog(
 fn primary_sidebar_nav_labels(debug_mode: bool) -> Vec<&'static str> {
     let mut labels = vec!["Dashboard", "History"];
     if debug_mode {
-        labels.push("PTY Inspector");
+        labels.push("Session Logs");
     }
     labels
 }
@@ -1525,14 +1525,14 @@ mod tests {
     use crate::state::AppPage;
 
     #[test]
-    fn primary_sidebar_nav_labels_gate_pty_inspector_under_history() {
+    fn primary_sidebar_nav_labels_gate_session_logs_under_history() {
         assert_eq!(
             primary_sidebar_nav_labels(false),
             vec!["Dashboard", "History"]
         );
         assert_eq!(
             primary_sidebar_nav_labels(true),
-            vec!["Dashboard", "History", "PTY Inspector"]
+            vec!["Dashboard", "History", "Session Logs"]
         );
     }
 

@@ -10753,6 +10753,70 @@ CUSTOM_VALUE = "from-settings"
     }
 
     #[test]
+    fn delete_failed_workspace_preserves_preexisting_branch() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["branch", "lc/broken", "main"])
+            .status()
+            .unwrap();
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let repository_id: i64 = store
+            .conn
+            .query_row(
+                "SELECT id FROM repositories WHERE name = 'demo'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let now = timestamp();
+        store
+            .conn
+            .execute(
+                "INSERT INTO workspaces (
+                    repository_id, name, path, branch, base_ref, port_base,
+                    status, archived_at, created_at, updated_at
+                 ) VALUES (?1, 'broken', ?2, 'lc/broken', 'main', 4200, 'failed', NULL, ?3, ?3)",
+                params![
+                    repository_id,
+                    temp.path()
+                        .join("workspaces/demo/broken")
+                        .to_string_lossy()
+                        .to_string(),
+                    now,
+                ],
+            )
+            .unwrap();
+
+        let deleted = store.delete("broken", true, false).unwrap();
+
+        assert_eq!(deleted.status, "failed");
+        assert!(store.get_by_name("broken").is_err());
+        let branches = Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["branch", "--list", "lc/broken"])
+            .output()
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&branches.stdout).trim().is_empty());
+    }
+
+    #[test]
     fn create_with_explicit_base_ref_skips_default_branch_sync() {
         let temp = tempfile::tempdir().unwrap();
         let remote_path = temp.path().join("origin.git");

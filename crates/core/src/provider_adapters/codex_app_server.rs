@@ -103,7 +103,6 @@ impl CodexAppServerClient {
         write_jsonl(
             &mut self.stdin,
             &json!({
-                "jsonrpc": "2.0",
                 "id": request_id,
                 "method": method,
                 "params": params,
@@ -112,11 +111,24 @@ impl CodexAppServerClient {
         Ok(request_id)
     }
 
+    pub fn send_thread_start(&mut self, params: &CodexAppServerThreadStartParams) -> Result<u64> {
+        let request_id = self.next_request_id;
+        self.next_request_id += 1;
+        write_thread_start_request_with_id(&mut self.stdin, request_id, params)?;
+        Ok(request_id)
+    }
+
+    pub fn send_turn_start(&mut self, params: &CodexAppServerTurnStartParams) -> Result<u64> {
+        let request_id = self.next_request_id;
+        self.next_request_id += 1;
+        write_turn_start_request_with_id(&mut self.stdin, request_id, params)?;
+        Ok(request_id)
+    }
+
     pub fn send_notification(&mut self, method: &str, params: Value) -> Result<()> {
         write_jsonl(
             &mut self.stdin,
             &json!({
-                "jsonrpc": "2.0",
                 "method": method,
                 "params": params,
             }),
@@ -127,7 +139,6 @@ impl CodexAppServerClient {
         write_jsonl(
             &mut self.stdin,
             &json!({
-                "jsonrpc": "2.0",
                 "id": id,
                 "result": result,
             }),
@@ -138,7 +149,6 @@ impl CodexAppServerClient {
         write_jsonl(
             &mut self.stdin,
             &json!({
-                "jsonrpc": "2.0",
                 "id": id,
                 "error": {
                     "code": code,
@@ -170,6 +180,7 @@ impl CodexAppServerClient {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexAppServerInitializeParams {
     pub client_name: String,
+    pub client_title: Option<String>,
     pub client_version: Option<String>,
     pub workspace_root: Option<PathBuf>,
 }
@@ -182,35 +193,26 @@ pub fn write_initialize_request<W: Write>(
     Ok(1)
 }
 
-fn write_initialize_request_with_id<W: Write>(
+pub fn write_initialize_request_with_id<W: Write>(
     writer: &mut W,
     request_id: u64,
     params: &CodexAppServerInitializeParams,
 ) -> Result<()> {
     let mut payload = json!({
-        "jsonrpc": "2.0",
         "id": request_id,
-            "method": "initialize",
-            "params": {
-                "clientInfo": {
-                    "name": params.client_name.clone(),
-                },
-                "capabilities": {},
+        "method": "initialize",
+        "params": {
+            "clientInfo": {
+                "name": params.client_name.clone(),
+            },
         },
     });
 
+    if let Some(title) = &params.client_title {
+        payload["params"]["clientInfo"]["title"] = Value::String(title.clone());
+    }
     if let Some(version) = &params.client_version {
         payload["params"]["clientInfo"]["version"] = Value::String(version.clone());
-    }
-    if let Some(root) = &params.workspace_root {
-        payload["params"]["workspaceFolders"] = json!([{
-            "uri": file_uri(root),
-            "name": root
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("workspace"),
-        }]);
-        payload["params"]["rootUri"] = Value::String(file_uri(root));
     }
 
     write_jsonl(writer, &payload)
@@ -220,10 +222,150 @@ pub fn write_initialized_notification<W: Write>(writer: &mut W) -> Result<()> {
     write_jsonl(
         writer,
         &json!({
-            "jsonrpc": "2.0",
             "method": "initialized",
+            "params": {},
         }),
     )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexAppServerThreadStartParams {
+    pub model: Option<String>,
+    pub cwd: Option<PathBuf>,
+    pub approval_policy: Option<String>,
+    pub sandbox: Option<String>,
+    pub service_name: Option<String>,
+}
+
+impl CodexAppServerThreadStartParams {
+    fn to_value(&self) -> Value {
+        let mut params = serde_json::Map::new();
+        insert_string(&mut params, "model", self.model.as_deref());
+        if let Some(cwd) = &self.cwd {
+            params.insert("cwd".to_owned(), Value::String(native_path_string(cwd)));
+        }
+        insert_string(
+            &mut params,
+            "approvalPolicy",
+            self.approval_policy.as_deref(),
+        );
+        insert_string(&mut params, "sandbox", self.sandbox.as_deref());
+        insert_string(&mut params, "serviceName", self.service_name.as_deref());
+        Value::Object(params)
+    }
+}
+
+pub fn write_thread_start_request<W: Write>(
+    writer: &mut W,
+    params: &CodexAppServerThreadStartParams,
+) -> Result<u64> {
+    write_thread_start_request_with_id(writer, 1, params)?;
+    Ok(1)
+}
+
+pub fn write_thread_start_request_with_id<W: Write>(
+    writer: &mut W,
+    request_id: u64,
+    params: &CodexAppServerThreadStartParams,
+) -> Result<()> {
+    write_jsonl(
+        writer,
+        &json!({
+            "id": request_id,
+            "method": "thread/start",
+            "params": params.to_value(),
+        }),
+    )
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodexAppServerTurnStartParams {
+    pub thread_id: String,
+    pub input: Vec<CodexAppServerUserInput>,
+    pub cwd: Option<PathBuf>,
+    pub approval_policy: Option<String>,
+    pub sandbox_policy: Option<Value>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub summary: Option<String>,
+    pub personality: Option<String>,
+}
+
+impl CodexAppServerTurnStartParams {
+    fn to_value(&self) -> Value {
+        let mut params = serde_json::Map::new();
+        params.insert("threadId".to_owned(), Value::String(self.thread_id.clone()));
+        params.insert(
+            "input".to_owned(),
+            Value::Array(
+                self.input
+                    .iter()
+                    .map(CodexAppServerUserInput::to_value)
+                    .collect(),
+            ),
+        );
+        if let Some(cwd) = &self.cwd {
+            params.insert("cwd".to_owned(), Value::String(native_path_string(cwd)));
+        }
+        insert_string(
+            &mut params,
+            "approvalPolicy",
+            self.approval_policy.as_deref(),
+        );
+        if let Some(sandbox_policy) = &self.sandbox_policy {
+            params.insert("sandboxPolicy".to_owned(), sandbox_policy.clone());
+        }
+        insert_string(&mut params, "model", self.model.as_deref());
+        insert_string(&mut params, "effort", self.effort.as_deref());
+        insert_string(&mut params, "summary", self.summary.as_deref());
+        insert_string(&mut params, "personality", self.personality.as_deref());
+        Value::Object(params)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodexAppServerUserInput {
+    Text { text: String },
+}
+
+impl CodexAppServerUserInput {
+    fn to_value(&self) -> Value {
+        match self {
+            Self::Text { text } => json!({
+                "type": "text",
+                "text": text,
+            }),
+        }
+    }
+}
+
+pub fn write_turn_start_request<W: Write>(
+    writer: &mut W,
+    params: &CodexAppServerTurnStartParams,
+) -> Result<u64> {
+    write_turn_start_request_with_id(writer, 1, params)?;
+    Ok(1)
+}
+
+pub fn write_turn_start_request_with_id<W: Write>(
+    writer: &mut W,
+    request_id: u64,
+    params: &CodexAppServerTurnStartParams,
+) -> Result<()> {
+    write_jsonl(
+        writer,
+        &json!({
+            "id": request_id,
+            "method": "turn/start",
+            "params": params.to_value(),
+        }),
+    )
+}
+
+fn insert_string(map: &mut serde_json::Map<String, Value>, key: &str, value: Option<&str>) {
+    if let Some(value) = value {
+        map.insert(key.to_owned(), Value::String(value.to_owned()));
+    }
 }
 
 fn write_jsonl<W: Write>(writer: &mut W, value: &Value) -> Result<()> {
@@ -321,7 +463,7 @@ fn read_jsonl_message<R: BufRead>(
     }
 }
 
-fn parse_jsonl_message(raw: &str, line_number: usize) -> Result<CodexAppServerMessage> {
+pub fn parse_jsonl_message(raw: &str, line_number: usize) -> Result<CodexAppServerMessage> {
     let value: Value = serde_json::from_str(raw)
         .with_context(|| format!("invalid codex app-server JSONL at line {line_number}"))?;
     let method = value
@@ -838,6 +980,18 @@ fn split_camel_segments(value: &str) -> String {
     output
 }
 
+fn native_path_string(path: &Path) -> String {
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+    path.to_string_lossy().into_owned()
+}
+
+#[cfg(test)]
 fn file_uri(path: &Path) -> String {
     let path = if path.is_absolute() {
         path.to_path_buf()
@@ -849,6 +1003,7 @@ fn file_uri(path: &Path) -> String {
     format!("file://{}", percent_encode_path(&path.to_string_lossy()))
 }
 
+#[cfg(test)]
 fn percent_encode_path(path: &str) -> String {
     let mut encoded = String::new();
     for byte in path.bytes() {
@@ -904,12 +1059,13 @@ mod tests {
     }
 
     #[test]
-    fn json_rpc_initialize_and_initialized_are_written_as_jsonl() {
+    fn initialize_and_initialized_match_codex_app_server_wire_shape() {
         let mut output = Vec::new();
         let request_id = write_initialize_request(
             &mut output,
             &CodexAppServerInitializeParams {
                 client_name: "archductor-test".to_owned(),
+                client_title: Some("Archductor Test".to_owned()),
                 client_version: Some("0.1.0".to_owned()),
                 workspace_root: Some(Path::new("/tmp/workspace").to_path_buf()),
             },
@@ -925,26 +1081,27 @@ mod tests {
             .collect();
 
         assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0]["jsonrpc"], "2.0");
+        assert!(lines[0].get("jsonrpc").is_none());
         assert_eq!(lines[0]["id"], 1);
         assert_eq!(lines[0]["method"], "initialize");
         assert_eq!(lines[0]["params"]["clientInfo"]["name"], "archductor-test");
-        assert_eq!(lines[0]["params"]["capabilities"], json!({}));
-        assert_eq!(
-            lines[0]["params"]["workspaceFolders"][0]["uri"],
-            "file:///tmp/workspace"
-        );
-        assert_eq!(lines[1], json!({"jsonrpc": "2.0", "method": "initialized"}));
+        assert_eq!(lines[0]["params"]["clientInfo"]["title"], "Archductor Test");
+        assert_eq!(lines[0]["params"]["clientInfo"]["version"], "0.1.0");
+        assert!(lines[0]["params"].get("capabilities").is_none());
+        assert!(lines[0]["params"].get("workspaceFolders").is_none());
+        assert!(lines[0]["params"].get("rootUri").is_none());
+        assert_eq!(lines[1], json!({"method": "initialized", "params": {}}));
     }
 
     #[test]
-    fn fake_jsonl_messages_preserve_raw_json_and_classify_methods() {
+    fn current_app_server_messages_preserve_raw_json_and_classify_methods() {
         let input = Cursor::new(
-            r#"{"jsonrpc":"2.0","method":"turn.started","params":{"turn_id":"t1"}}"#.to_owned()
+            r#"{"method":"turn/started","params":{"turn":{"id":"t1"},"threadId":"thr_1"}}"#
+                .to_owned()
                 + "\n"
-                + r#"{"jsonrpc":"2.0","method":"assistant.message.delta","params":{"text":"hi"}}"#
+                + r#"{"method":"item/agentMessage/delta","params":{"threadId":"thr_1","turnId":"t1","itemId":"msg_1","delta":"hi"}}"#
                 + "\n"
-                + r#"{"jsonrpc":"2.0","id":7,"method":"approval.request","params":{"action":"exec"}}"#
+                + r#"{"id":7,"method":"item/commandExecution/requestApproval","params":{"threadId":"thr_1","turnId":"t1","itemId":"cmd_1"}}"#
                 + "\n",
         );
 
@@ -953,13 +1110,13 @@ mod tests {
         assert_eq!(messages.len(), 3);
         assert_eq!(
             messages[0].raw_json,
-            r#"{"jsonrpc":"2.0","method":"turn.started","params":{"turn_id":"t1"}}"#
+            r#"{"method":"turn/started","params":{"turn":{"id":"t1"},"threadId":"thr_1"}}"#
         );
         assert_eq!(
             messages[0].message_kind,
             CodexAppServerMessageKind::Notification
         );
-        assert_eq!(messages[0].method.as_deref(), Some("turn.started"));
+        assert_eq!(messages[0].method.as_deref(), Some("turn/started"));
 
         let drafts: Vec<_> = messages
             .iter()
@@ -982,8 +1139,7 @@ mod tests {
 
     #[test]
     fn response_messages_remain_unknown_without_request_method_context() {
-        let message =
-            parse_jsonl_message(r#"{"jsonrpc":"2.0","id":7,"result":{"ok":true}}"#, 1).unwrap();
+        let message = parse_jsonl_message(r#"{"id":7,"result":{"ok":true}}"#, 1).unwrap();
 
         let draft = message.to_provider_event_draft();
 
@@ -1014,11 +1170,12 @@ mod tests {
         let mut output = Vec::new();
         write_jsonl(
             &mut output,
-            &json!({"jsonrpc": "2.0", "id": "req-1", "result": {"approved": true}}),
+            &json!({"id": "req-1", "result": {"approved": true}}),
         )
         .unwrap();
 
         let line: Value = serde_json::from_slice(&output).unwrap();
+        assert!(line.get("jsonrpc").is_none());
         assert_eq!(line["id"], "req-1");
         assert_eq!(line["result"]["approved"], true);
         assert!(line.get("method").is_none());
@@ -1027,7 +1184,7 @@ mod tests {
     #[test]
     fn provider_event_conversion_maps_tool_events_to_canonical_tool_kind() {
         let message = parse_jsonl_message(
-            r#"{"jsonrpc":"2.0","method":"tool.call.delta","params":{"threadId":"thread-1","itemId":"tool-1","delta":"running"}}"#,
+            r#"{"method":"item/mcpToolCall/progress","params":{"threadId":"thread-1","itemId":"tool-1","delta":"running"}}"#,
             1,
         )
         .unwrap();
@@ -1046,18 +1203,18 @@ mod tests {
         assert_eq!(event.kind, crate::provider_events::ProviderEventKind::Tool);
         assert_eq!(
             event.phase,
-            crate::provider_events::ProviderEventPhase::Delta
+            crate::provider_events::ProviderEventPhase::Progress
         );
         assert_eq!(event.provider_thread_id.as_deref(), Some("thread-1"));
         assert_eq!(event.provider_item_id.as_deref(), Some("tool-1"));
         assert_eq!(event.normalized_payload["body"], "running");
-        assert_eq!(event.raw_json["method"], "tool.call.delta");
+        assert_eq!(event.raw_json["method"], "item/mcpToolCall/progress");
     }
 
     #[test]
     fn provider_event_conversion_preserves_unknown_future_raw_json() {
         let message = parse_jsonl_message(
-            r#"{"jsonrpc":"2.0","method":"future.provider.thing","params":{"new":true}}"#,
+            r#"{"method":"future/provider/thing","params":{"new":true}}"#,
             1,
         )
         .unwrap();
@@ -1082,9 +1239,7 @@ mod tests {
 
     #[test]
     fn invalid_jsonl_reports_line_number_and_keeps_blank_lines_ignored() {
-        let input = Cursor::new(
-            "\n{\"jsonrpc\":\"2.0\",\"method\":\"session.created\"}\nnot-json\n".as_bytes(),
-        );
+        let input = Cursor::new("\n{\"method\":\"thread/started\"}\nnot-json\n".as_bytes());
 
         let error = read_jsonl_messages(input).unwrap_err().to_string();
 
@@ -1106,5 +1261,76 @@ mod tests {
         assert_eq!(command.executable, "codex");
         assert_eq!(command.args, vec!["app-server"]);
         assert_eq!(command.transport, CodexAppServerTransport::StdioJsonl);
+    }
+
+    #[test]
+    fn thread_start_request_uses_documented_params() {
+        let mut output = Vec::new();
+        write_thread_start_request_with_id(
+            &mut output,
+            10,
+            &CodexAppServerThreadStartParams {
+                model: Some("gpt-5.4".to_owned()),
+                cwd: Some(Path::new("/tmp/workspace").to_path_buf()),
+                approval_policy: Some("never".to_owned()),
+                sandbox: Some("workspaceWrite".to_owned()),
+                service_name: Some("archductor".to_owned()),
+            },
+        )
+        .unwrap();
+
+        let line: Value = serde_json::from_slice(&output).unwrap();
+        assert!(line.get("jsonrpc").is_none());
+        assert_eq!(line["id"], 10);
+        assert_eq!(line["method"], "thread/start");
+        assert_eq!(line["params"]["model"], "gpt-5.4");
+        assert_eq!(line["params"]["cwd"], "/tmp/workspace");
+        assert_eq!(line["params"]["approvalPolicy"], "never");
+        assert_eq!(line["params"]["sandbox"], "workspaceWrite");
+        assert_eq!(line["params"]["serviceName"], "archductor");
+    }
+
+    #[test]
+    fn turn_start_request_uses_text_input_items_and_sandbox_policy() {
+        let mut output = Vec::new();
+        write_turn_start_request_with_id(
+            &mut output,
+            30,
+            &CodexAppServerTurnStartParams {
+                thread_id: "thr_123".to_owned(),
+                input: vec![CodexAppServerUserInput::Text {
+                    text: "Run tests".to_owned(),
+                }],
+                cwd: Some(Path::new("/tmp/workspace").to_path_buf()),
+                approval_policy: Some("unlessTrusted".to_owned()),
+                sandbox_policy: Some(json!({
+                    "type": "workspaceWrite",
+                    "writableRoots": ["/tmp/workspace"],
+                    "networkAccess": true,
+                })),
+                model: Some("gpt-5.4".to_owned()),
+                effort: Some("medium".to_owned()),
+                summary: Some("concise".to_owned()),
+                personality: Some("friendly".to_owned()),
+            },
+        )
+        .unwrap();
+
+        let line: Value = serde_json::from_slice(&output).unwrap();
+        assert!(line.get("jsonrpc").is_none());
+        assert_eq!(line["id"], 30);
+        assert_eq!(line["method"], "turn/start");
+        assert_eq!(line["params"]["threadId"], "thr_123");
+        assert_eq!(
+            line["params"]["input"][0],
+            json!({"type": "text", "text": "Run tests"})
+        );
+        assert_eq!(line["params"]["cwd"], "/tmp/workspace");
+        assert_eq!(line["params"]["approvalPolicy"], "unlessTrusted");
+        assert_eq!(line["params"]["sandboxPolicy"]["type"], "workspaceWrite");
+        assert_eq!(line["params"]["model"], "gpt-5.4");
+        assert_eq!(line["params"]["effort"], "medium");
+        assert_eq!(line["params"]["summary"], "concise");
+        assert_eq!(line["params"]["personality"], "friendly");
     }
 }

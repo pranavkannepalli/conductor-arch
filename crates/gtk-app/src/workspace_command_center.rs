@@ -218,7 +218,7 @@ fn workspace_creation_status_shell(
             }
             progress_after_delete.set_text("Deleting...");
             let result = WorkspaceStore::open(db_delete.clone())
-                .and_then(|store| store.delete(&workspace_delete, true, true));
+                .and_then(|store| store.delete(&workspace_delete, true, false));
             match result {
                 Ok(deleted) => {
                     progress_after_delete.set_text(&workspace_delete_feedback(Ok(deleted.clone())));

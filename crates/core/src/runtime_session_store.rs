@@ -61,6 +61,21 @@ impl RuntimeSessionStore {
         }))
     }
 
+    pub fn append_provider_native_output(
+        &self,
+        process_id: i64,
+        transport: &str,
+        raw: &str,
+    ) -> Result<()> {
+        if raw.is_empty() {
+            return Ok(());
+        }
+        self.open()?.append_session_process_output(
+            process_id,
+            &format_provider_native_raw_output(transport, raw),
+        )
+    }
+
     pub fn append_screen_output(
         &self,
         process_id: i64,
@@ -94,6 +109,16 @@ impl RuntimeSessionStore {
             .resolve_codex_native_thread_id_for_process(process_id)
     }
 
+    pub fn update_chat_thread_native_id(
+        &self,
+        thread_id: i64,
+        native_thread_id: &str,
+    ) -> Result<()> {
+        self.open()?
+            .update_chat_thread_native_id(thread_id, native_thread_id)?;
+        Ok(())
+    }
+
     pub fn mark_session_process_exited(
         &self,
         process_id: i64,
@@ -123,6 +148,15 @@ pub(crate) fn format_session_screen_output(kind: SessionKind, screen: &str) -> S
     }
 }
 
+pub(crate) fn format_provider_native_raw_output(transport: &str, raw: &str) -> String {
+    let marker = match transport {
+        "codex-app-server" => "codex-app-server jsonl",
+        "claude-stream-json" => "claude-stream-json",
+        other => other,
+    };
+    format!("[{marker}]\n{raw}\n[/{marker}]\n")
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -149,6 +183,18 @@ mod tests {
         assert!(
             !source.contains(legacy_pipeline),
             "runtime semantic provider persistence must not call the old Codex PTY pipeline"
+        );
+    }
+
+    #[test]
+    fn provider_native_raw_output_uses_non_pty_log_markers() {
+        assert_eq!(
+            super::format_provider_native_raw_output("codex-app-server", "{\"id\":1}"),
+            "[codex-app-server jsonl]\n{\"id\":1}\n[/codex-app-server jsonl]\n"
+        );
+        assert_eq!(
+            super::format_provider_native_raw_output("claude-stream-json", "{\"type\":\"result\"}"),
+            "[claude-stream-json]\n{\"type\":\"result\"}\n[/claude-stream-json]\n"
         );
     }
 }

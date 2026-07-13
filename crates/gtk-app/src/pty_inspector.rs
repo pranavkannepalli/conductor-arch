@@ -542,7 +542,7 @@ fn diagnostics(session: &InspectorSessionInput) -> InspectorDiagnostics {
 
 fn diagnostic_bundle_text(detail: &InspectorSessionDetail) -> String {
     let mut out = String::new();
-    out.push_str("Archductor PTY diagnostic bundle\n");
+    out.push_str("Archductor session log diagnostic bundle\n");
     out.push_str(&format!("App version: {}\n", env!("CARGO_PKG_VERSION")));
     out.push_str(&format!(
         "Session: {}\n",
@@ -652,12 +652,12 @@ fn render_inspector_model(model: PtyInspectorModel) -> GBox {
     root.set_margin_start(16);
     root.set_margin_end(16);
 
-    let title = Label::new(Some("PTY Inspector"));
+    let title = Label::new(Some("Session Logs"));
     title.add_css_class("section-title");
     title.set_xalign(0.0);
     root.append(&title);
     root.append(&small_label(
-        "Debug mode only. Raw PTY logs can contain sensitive data; secret-looking values are redacted before display or copy.",
+        "Debug mode only. Raw session logs can contain sensitive data; secret-looking values are redacted before display or copy.",
     ));
 
     let layout = GBox::new(Orientation::Horizontal, 12);
@@ -669,7 +669,7 @@ fn render_inspector_model(model: PtyInspectorModel) -> GBox {
     session_list.add_css_class("workspace-list");
     session_list.set_selection_mode(SelectionMode::Single);
     if model.sessions.is_empty() {
-        session_list.append(&label_row("No active or recent PTY sessions."));
+        session_list.append(&label_row("No active or recent sessions."));
     } else {
         for session in &model.sessions {
             session_list.append(&session_row_widget(session));
@@ -699,7 +699,7 @@ fn render_inspector_model(model: PtyInspectorModel) -> GBox {
     let selected_detail = Rc::new(RefCell::new(model.selected.clone()));
     let center = GBox::new(Orientation::Vertical, 8);
     let toolbar = GBox::new(Orientation::Horizontal, 6);
-    let raw_toggle = CheckButton::with_label("Raw chunks (redacted)");
+    let raw_toggle = CheckButton::with_label("Raw stream (redacted)");
     raw_toggle.set_active(true);
     let normalized_toggle = CheckButton::with_label("Normalized text");
     normalized_toggle.set_group(Some(&raw_toggle));
@@ -1427,7 +1427,7 @@ mod tests {
 
         let bundle = diagnostic_bundle_text(&model.selected);
 
-        assert!(bundle.contains("Archductor PTY diagnostic bundle"));
+        assert!(bundle.contains("Archductor session log diagnostic bundle"));
         assert!(bundle.contains("App version:"));
         assert!(bundle.contains("Session: #11"));
         assert!(bundle.contains("Raw log path: /tmp/session-11.log"));

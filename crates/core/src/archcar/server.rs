@@ -19,6 +19,7 @@ use crate::archcar::session::{
     restore_managed_session, spawn_managed_session, spawn_managed_session_for_thread, SessionHandle,
 };
 use crate::paths::AppPaths;
+use crate::provider_events::{ProviderEventKind, ProviderEventStore};
 use crate::workspace::{SessionKind, WorkspaceStore};
 
 pub struct ArchcarServer {
@@ -305,22 +306,10 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
         }
         ArchcarRequest::GetSessionMessages { thread_id } => {
             let db_path = state.lock().unwrap().db_path.clone();
-            match WorkspaceStore::open(&db_path)
-                .and_then(|store| store.list_chat_messages(thread_id))
-            {
+            match session_messages_for_thread(&db_path, thread_id) {
                 Ok(messages) => ArchcarResponse::SessionMessages {
                     thread_id,
-                    messages: messages
-                        .into_iter()
-                        .map(|message| ArchcarMessage {
-                            id: message.id,
-                            role: message.role,
-                            content: message.content,
-                            source: message.source,
-                            inline_event: None,
-                            context_usage: None,
-                        })
-                        .collect(),
+                    messages,
                 },
                 Err(err) => ArchcarResponse::Error {
                     message: err.to_string(),
@@ -354,15 +343,58 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
     }
 }
 
+fn session_messages_for_thread(db_path: &Path, thread_id: i64) -> Result<Vec<ArchcarMessage>> {
+    let store = WorkspaceStore::open(db_path)?;
+    let mut messages: Vec<_> = store
+        .list_chat_messages(thread_id)?
+        .into_iter()
+        .map(|message| ArchcarMessage {
+            id: message.id,
+            role: message.role,
+            content: message.content,
+            source: message.source,
+            inline_event: None,
+            context_usage: None,
+        })
+        .collect();
+
+    let mut next_provider_message_id = -1;
+    for item in ProviderEventStore::new(db_path)
+        .project_timeline_for_chat_thread(thread_id)?
+        .into_iter()
+        .filter(|item| item.kind == ProviderEventKind::AssistantOutput)
+    {
+        let content = item.body.trim();
+        if content.is_empty()
+            || messages
+                .iter()
+                .any(|message| message.role == "agent" && message.content == content)
+        {
+            continue;
+        }
+        messages.push(ArchcarMessage {
+            id: next_provider_message_id,
+            role: "agent".to_owned(),
+            content: content.to_owned(),
+            source: "provider_event".to_owned(),
+            inline_event: None,
+            context_usage: None,
+        });
+        next_provider_message_id -= 1;
+    }
+
+    Ok(messages)
+}
+
 fn ensure_default_session(
     state: &Arc<Mutex<ServerState>>,
     workspace: String,
     kind: SessionKind,
     harness: crate::workspace::SessionHarnessOptions,
 ) -> ArchcarResponse {
-    if kind != SessionKind::Codex {
+    if !matches!(kind, SessionKind::Codex | SessionKind::Claude) {
         return ArchcarResponse::Error {
-            message: "only codex auto-spawn is implemented".to_owned(),
+            message: "only codex and claude auto-spawn are implemented".to_owned(),
         };
     }
     let mut guard = state.lock().unwrap();
@@ -476,9 +508,9 @@ fn ensure_chat_thread_session(
     kind: SessionKind,
     harness: crate::workspace::SessionHarnessOptions,
 ) -> ArchcarResponse {
-    if kind != SessionKind::Codex {
+    if !matches!(kind, SessionKind::Codex | SessionKind::Claude) {
         return ArchcarResponse::Error {
-            message: "only codex chat-thread auto-spawn is implemented".to_owned(),
+            message: "only codex and claude chat-thread auto-spawn are implemented".to_owned(),
         };
     }
     let mut guard = state.lock().unwrap();

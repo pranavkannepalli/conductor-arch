@@ -286,7 +286,9 @@ fn parse_deep_link_with_debug_mode(value: &str, debug_mode: bool) -> Result<Laun
         ["dashboard"] => target.page = AppPage::Dashboard,
         ["projects"] | ["repositories"] => target.page = AppPage::Projects,
         ["history"] => target.page = AppPage::History,
-        ["pty-inspector"] | ["pty", "inspector"] if debug_mode => {
+        ["session-logs"] | ["session", "logs"] | ["pty-inspector"] | ["pty", "inspector"]
+            if debug_mode =>
+        {
             target.page = AppPage::PtyInspector;
         }
         ["workspace"] | ["workspaces"] => target.page = AppPage::Workspace,
@@ -324,7 +326,9 @@ fn parse_app_page_with_debug_mode(value: &str, debug_mode: bool) -> Result<AppPa
         "settings" | "config" => Ok(AppPage::Settings),
         "history" | "archive" => Ok(AppPage::History),
         "workspace" | "workspaces" => Ok(AppPage::Workspace),
-        "ptyinspector" | "pty" if debug_mode => Ok(AppPage::PtyInspector),
+        "sessionlogs" | "sessionlog" | "ptyinspector" | "pty" if debug_mode => {
+            Ok(AppPage::PtyInspector)
+        }
         other => Err(format!("unknown page: {other}")),
     }
 }
@@ -1655,22 +1659,27 @@ mod tests {
     }
 
     #[test]
-    fn pty_inspector_route_is_gated_by_debug_mode() {
+    fn session_logs_route_is_gated_by_debug_mode() {
         let err = parse_launch_target_with_debug_mode(
-            ["archductor-gtk", "--page", "pty-inspector"],
+            ["archductor-gtk", "--page", "session-logs"],
             false,
         )
         .unwrap_err();
-        assert_eq!(err, "unknown page: ptyinspector");
+        assert_eq!(err, "unknown page: sessionlogs");
 
-        let target = parse_launch_target_with_debug_mode(
+        let target =
+            parse_launch_target_with_debug_mode(["archductor-gtk", "--page", "session-logs"], true)
+                .unwrap();
+
+        assert_eq!(target.page, AppPage::PtyInspector);
+        assert_eq!(target.workspace, None);
+
+        let legacy_target = parse_launch_target_with_debug_mode(
             ["archductor-gtk", "--page", "pty-inspector"],
             true,
         )
         .unwrap();
-
-        assert_eq!(target.page, AppPage::PtyInspector);
-        assert_eq!(target.workspace, None);
+        assert_eq!(legacy_target.page, AppPage::PtyInspector);
     }
 
     #[test]

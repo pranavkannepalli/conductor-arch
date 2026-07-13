@@ -703,11 +703,31 @@ fn merge_existing_streaming_payload(
         return Ok(draft.normalized_payload.clone());
     };
     let existing = serde_json::from_str(&existing).unwrap_or(Value::Null);
-    Ok(merge_streaming_payload(
-        existing,
-        draft.normalized_payload.clone(),
-        draft.phase,
-    ))
+    let incoming = streaming_merge_incoming_payload(draft);
+    Ok(merge_streaming_payload(existing, incoming, draft.phase))
+}
+
+fn streaming_merge_incoming_payload(draft: &ProviderEventDraft) -> Value {
+    let mut incoming = draft.normalized_payload.clone();
+    if draft.phase != ProviderEventPhase::Delta {
+        return incoming;
+    }
+
+    let Some(delta) = draft
+        .raw_json
+        .pointer("/params/delta")
+        .or_else(|| draft.raw_json.pointer("/delta"))
+        .and_then(Value::as_str)
+    else {
+        return incoming;
+    };
+
+    for key in ["body", "text"] {
+        if incoming.get(key).and_then(Value::as_str).is_some() {
+            incoming[key] = Value::String(delta.to_owned());
+        }
+    }
+    incoming
 }
 
 fn merge_streaming_payload(
@@ -722,10 +742,14 @@ fn merge_streaming_payload(
         let Some(incoming_text) = incoming.get(key).and_then(Value::as_str) else {
             continue;
         };
+        if phase == ProviderEventPhase::Delta {
+            incoming[key] = Value::String(format!("{existing_text}{incoming_text}"));
+            continue;
+        }
         if incoming_text.len() > existing_text.len() && incoming_text.starts_with(existing_text) {
             continue;
         }
-        if phase != ProviderEventPhase::Delta && existing_text.starts_with(incoming_text) {
+        if existing_text.starts_with(incoming_text) {
             incoming[key] = Value::String(existing_text.to_owned());
             continue;
         }
@@ -1068,6 +1092,29 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[test]
+    fn streaming_deltas_append_prefix_overlapping_chunks() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProviderEventStore::new(temp.path().join("state.db"));
+        create_parent_rows(&store, temp.path());
+        let mut first = draft(
+            ProviderEventKind::AssistantOutput,
+            ProviderEventPhase::Delta,
+        );
+        first.normalized_payload = json!({"title": "Assistant", "text": "a"});
+        first.raw_json = json!({"method": "agent/message/delta", "params": {"delta": "a"}});
+        let mut second = first.clone();
+        second.provider_event_id = Some("evt-2".to_owned());
+        second.provider_sequence = Some(2);
+        second.normalized_payload = json!({"title": "Assistant", "text": "abc"});
+        second.raw_json = json!({"method": "agent/message/delta", "params": {"delta": "abc"}});
+
+        store.upsert_event(&first).unwrap();
+        let latest = store.upsert_event(&second).unwrap();
+
+        assert_eq!(latest.normalized_payload["text"], "aabc");
     }
 
     #[test]

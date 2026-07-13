@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 
 use crate::workspace::{SessionHarnessOptions, SessionKind, WorkspaceStore};
 
@@ -50,16 +50,16 @@ impl HarnessController for ClaudeHarnessController {
     }
 
     fn supports_auto_spawn(&self) -> bool {
-        false
+        true
     }
 
     fn build_launch(
         &self,
-        _store: &WorkspaceStore,
-        _workspace: &str,
-        _harness: SessionHarnessOptions,
+        store: &WorkspaceStore,
+        workspace: &str,
+        harness: SessionHarnessOptions,
     ) -> Result<crate::workspace::SessionLaunch> {
-        Err(anyhow!("claude harness not implemented in archcar yet"))
+        store.session_launch_with_options(workspace, SessionKind::Claude, harness)
     }
 }
 
@@ -125,13 +125,16 @@ mod tests {
     }
 
     #[test]
-    fn claude_stub_reports_not_implemented() {
+    fn claude_harness_reports_runtime_capabilities() {
         let temp = tempfile::tempdir().unwrap();
         let db = temp.path().join("test.db");
         let store = WorkspaceStore::open(&db).unwrap();
-        let err = ClaudeHarnessController
+        let controller = ClaudeHarnessController;
+
+        assert_eq!(controller.kind(), SessionKind::Claude);
+        assert!(controller.supports_auto_spawn());
+        assert!(controller
             .build_launch(&store, "berlin", SessionHarnessOptions::default())
-            .unwrap_err();
-        assert!(err.to_string().contains("not implemented"));
+            .is_err());
     }
 }
