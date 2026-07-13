@@ -13,6 +13,8 @@ pub enum ProviderProjectionCategory {
     Plan,
     Reasoning,
     Command,
+    // Forward-compatible categories kept so new provider subtypes can map to
+    // stable render classes without reshaping the public projection model.
     Process,
     FileRead,
     FileWrite,
@@ -266,10 +268,13 @@ pub fn provider_projection_item_text(item: &ProviderProjectionItem) -> String {
 }
 
 fn provider_projection_event_from_record(record: &ProviderEventRecord) -> ProviderProjectionEvent {
+    let category = provider_projection_category(record.kind, record.provider_subtype.as_deref());
+    let raw_payload =
+        provider_projection_category_uses_raw_payload(category).then(|| record.raw_json.clone());
     ProviderProjectionEvent {
         canonical_id: provider_projection_canonical_id(record),
         sequence: record.received_sequence.max(0) as u64,
-        category: provider_projection_category(record.kind, record.provider_subtype.as_deref()),
+        category,
         title: record
             .normalized_payload
             .get("title")
@@ -287,7 +292,7 @@ fn provider_projection_event_from_record(record: &ProviderEventRecord) -> Provid
         stream_state: provider_projection_stream_state(record.phase),
         parent_id: provider_projection_parent_id(record),
         nested_thread_id: record.parent_provider_thread_id.clone(),
-        raw_payload: Some(record.raw_json.clone()),
+        raw_payload,
     }
 }
 
@@ -377,6 +382,34 @@ fn provider_projection_category(
 
 fn subtype_contains_any(subtype: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| subtype.contains(needle))
+}
+
+fn provider_projection_category_uses_raw_payload(category: ProviderProjectionCategory) -> bool {
+    matches!(
+        category,
+        ProviderProjectionCategory::Command
+            | ProviderProjectionCategory::Process
+            | ProviderProjectionCategory::FileRead
+            | ProviderProjectionCategory::FileWrite
+            | ProviderProjectionCategory::FilePatch
+            | ProviderProjectionCategory::FileDiff
+            | ProviderProjectionCategory::McpTool
+            | ProviderProjectionCategory::NativeTool
+            | ProviderProjectionCategory::Skill
+            | ProviderProjectionCategory::Plugin
+            | ProviderProjectionCategory::Hook
+            | ProviderProjectionCategory::Subagent
+            | ProviderProjectionCategory::NestedTranscript
+            | ProviderProjectionCategory::BackgroundTerminal
+            | ProviderProjectionCategory::BackgroundTask
+            | ProviderProjectionCategory::Approval
+            | ProviderProjectionCategory::Question
+            | ProviderProjectionCategory::Web
+            | ProviderProjectionCategory::Image
+            | ProviderProjectionCategory::RateLimit
+            | ProviderProjectionCategory::Error
+            | ProviderProjectionCategory::Unknown
+    )
 }
 
 fn provider_projection_status(phase: ProviderEventPhase) -> ProviderProjectionStatus {
@@ -706,6 +739,24 @@ mod tests {
             projection.items[0].status,
             ProviderProjectionStatus::Complete
         );
+    }
+
+    #[test]
+    fn chat_projection_skips_unused_raw_payload_materialization() {
+        let raw = record(
+            ProviderEventKind::AssistantOutput,
+            ProviderEventPhase::Completed,
+            "assistant",
+        );
+
+        let projection = provider_projection_from_records(&[raw]);
+
+        assert_eq!(
+            projection.items[0].render_class,
+            ProjectionRenderClass::AssistantChat
+        );
+        assert_eq!(projection.items[0].raw_payload, None);
+        assert!(!projection.items[0].inspectable);
     }
 
     #[test]

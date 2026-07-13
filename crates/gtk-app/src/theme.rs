@@ -2033,6 +2033,7 @@ popover.context-menu-popover arrow {
     padding: 22px 24px 180px;
 }
 .chat-user-row {
+    margin-top: 12px;
     margin-bottom: 10px;
 }
 .chat-user-bubble {
@@ -2758,7 +2759,7 @@ mod tests {
         assert!(css.contains(".chat-inline-event-skill .chat-inline-event-chip"));
         assert!(css.contains(".chat-inline-event-subagent .chat-inline-event-chip"));
         assert!(css.contains(".chat-reasoning-text"));
-        assert!(css.contains(".chat-user-row {\n    margin-bottom: 10px;"));
+        assert!(css.contains(".chat-user-row {\n    margin-top: 12px;\n    margin-bottom: 10px;"));
         assert!(css.contains(".chat-agent-text {\n    color: #c6c6c6;\n    line-height: 1.55;\n    margin-bottom: 0;"));
         let inline_event_block = selector_block(css, ".chat-inline-event");
         assert!(inline_event_block.contains("background-color: transparent;"));

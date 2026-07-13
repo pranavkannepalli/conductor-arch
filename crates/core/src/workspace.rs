@@ -12550,6 +12550,70 @@ working_directory = "apps/web"
     }
 
     #[test]
+    fn local_chat_history_messages_skip_provider_native_raw_output_blocks() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let session = store
+            .record_session_process(
+                "berlin",
+                &SessionLaunch {
+                    kind: SessionKind::Codex,
+                    program: PathBuf::from("codex"),
+                    args: Vec::new(),
+                    cwd: temp.path().join("workspaces/demo/berlin"),
+                    env: Vec::new(),
+                    harness_metadata: Some("harness=codex-app-server".to_owned()),
+                    session_resume_id: None,
+                },
+                exited_child_pid(),
+            )
+            .unwrap();
+        store
+            .append_session_process_output(
+                session.id,
+                &format!(
+                    "{}{}agent reply\n",
+                    crate::runtime_session_store::format_provider_native_raw_output(
+                        "codex-app-server",
+                        "{\"id\":1,\"secret\":\"raw\"}",
+                    ),
+                    crate::runtime_session_store::format_provider_native_raw_output(
+                        "claude-stream-json",
+                        "{\"type\":\"result\"}",
+                    ),
+                ),
+            )
+            .unwrap();
+
+        let messages = store.local_chat_history_messages(session.id).unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, "agent");
+        assert_eq!(messages[0].content, "agent reply");
+    }
+
+    #[test]
     fn local_chat_history_messages_keep_codex_screen_snapshots_as_raw_diagnostics() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));

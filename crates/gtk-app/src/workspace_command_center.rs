@@ -369,6 +369,8 @@ fn workspace_split_position_for_width(total_width: i32) -> i32 {
 }
 
 fn install_workspace_split_ratio(split: &Paned) {
+    // Keep the workspace center and detail pane at the product's fixed 5:3
+    // ratio whenever the allocated width changes.
     let last_width = Rc::new(RefCell::new(0));
     split.add_tick_callback(move |paned, _| {
         let width = paned.allocated_width();
