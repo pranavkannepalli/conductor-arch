@@ -850,6 +850,9 @@ fn parse_file_change_action(line: &str) -> Option<(CodexFileChangeAction, &str)>
     if let Some(rest) = line.strip_prefix("Edited ") {
         return Some((CodexFileChangeAction::Edited, rest));
     }
+    if let Some(rest) = line.strip_prefix("changed ") {
+        return Some((CodexFileChangeAction::Edited, rest));
+    }
     if let Some(rest) = line.strip_prefix("Deleted ") {
         return Some((CodexFileChangeAction::Deleted, rest));
     }
@@ -1993,6 +1996,19 @@ mod tests {
                 path: "crates/core/src/codex_tui.rs".to_owned(),
                 additions: Some(12),
                 deletions: Some(3),
+                lines: Vec::new(),
+            }))
+        );
+        assert_eq!(
+            parse_codex_inline_event(
+                "changed /home/kitts/archductor/workspaces/conductor-arch/nanjing/docs/harness-smoke-note.md"
+            ),
+            Some(CodexInlineEvent::FileChange(CodexFileChange {
+                action: CodexFileChangeAction::Edited,
+                path: "/home/kitts/archductor/workspaces/conductor-arch/nanjing/docs/harness-smoke-note.md"
+                    .to_owned(),
+                additions: None,
+                deletions: None,
                 lines: Vec::new(),
             }))
         );

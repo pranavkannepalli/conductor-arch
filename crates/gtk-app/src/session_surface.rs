@@ -3963,9 +3963,11 @@ fn inline_event_chip_name(event: &CodexInlineEvent) -> String {
 }
 
 fn inline_event_title_is_action_label(title: &str) -> bool {
-    ["Ran ", "Read ", "Used ", "Opened "]
-        .iter()
-        .any(|prefix| title.starts_with(prefix))
+    [
+        "Ran ", "Read ", "Used ", "Opened ", "Added ", "Edited ", "Deleted ",
+    ]
+    .iter()
+    .any(|prefix| title.starts_with(prefix))
 }
 
 fn raw_write_tool_inline_event(header: &str, body: &str) -> Option<CodexInlineEvent> {
@@ -6570,6 +6572,14 @@ fn collect_file_change_event(lines: &[&str], start: usize) -> (String, usize) {
 fn is_file_change_detail_line(line: &str) -> bool {
     let trimmed = line.trim_start();
     trimmed.starts_with("@@")
+        || trimmed.starts_with("diff --git")
+        || trimmed.starts_with("index ")
+        || trimmed.starts_with("new file mode ")
+        || trimmed.starts_with("deleted file mode ")
+        || trimmed.starts_with("rename from ")
+        || trimmed.starts_with("rename to ")
+        || trimmed.starts_with("similarity index ")
+        || trimmed.starts_with("dissimilarity index ")
         || trimmed.starts_with("+++")
         || trimmed.starts_with("---")
         || trimmed.starts_with('+')
@@ -7097,11 +7107,10 @@ fn is_raw_file_change_event_line(line: &str) -> bool {
         .strip_prefix('•')
         .map(str::trim_start)
         .unwrap_or_else(|| line.trim());
-    ["Added ", "Edited ", "Deleted "].iter().any(|prefix| {
-        trimmed
-            .strip_prefix(prefix)
-            .is_some_and(raw_tool_target_looks_path_like)
-    })
+    matches!(
+        parse_codex_inline_event(trimmed),
+        Some(CoreCodexInlineEvent::FileChange(_))
+    )
 }
 
 fn raw_tool_target_looks_path_like(rest: &str) -> bool {
@@ -8945,7 +8954,7 @@ fix it
     }
 
     #[test]
-    fn codex_inline_event_chip_label_uses_plus_minus_and_compact_name() {
+    fn codex_inline_event_chip_label_uses_plus_minus_and_action_name() {
         let file_event = CodexInlineEvent {
             kind: CodexInlineEventKind::Tool,
             title: "Edited docs/superpowers/plans/2026-07-03-manual-skill-tool-calls.md".to_owned(),
@@ -8967,11 +8976,11 @@ fix it
 
         assert_eq!(
             inline_event_chip_label(&file_event, false),
-            "+ 2026-07-03-manual-skill-tool-calls.md"
+            "+ Edited docs/superpowers/plans/2026-07-03-manual-skill-tool-calls.md"
         );
         assert_eq!(
             inline_event_chip_label(&file_event, true),
-            "- 2026-07-03-manual-skill-tool-calls.md"
+            "- Edited docs/superpowers/plans/2026-07-03-manual-skill-tool-calls.md"
         );
         assert_eq!(
             inline_event_chip_label(&command_event, false),
@@ -10028,6 +10037,37 @@ I summarized the result.
         assert_eq!(change.lines.len(), 3);
         assert_eq!(change.lines[1].new_line, Some(379));
         assert_eq!(change.lines[1].content, "added");
+    }
+
+    #[test]
+    fn transcript_changed_path_blocks_render_as_edit_events_with_diff_body() {
+        let transcript = "\
+changed /home/kitts/archductor/workspaces/conductor-arch/nanjing/docs/harness-smoke-note.md
+diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
+@@ -1 +1 @@
+-old note
++new note
+";
+
+        let events = parse_session_transcript_events(transcript);
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].role, SessionTranscriptRole::Tool);
+        let inline_events = session_transcript_inline_events(&events[0]);
+        assert_eq!(inline_events.len(), 1);
+        assert_eq!(
+            inline_events[0].title,
+            "Edited /home/kitts/archductor/workspaces/conductor-arch/nanjing/docs/harness-smoke-note.md"
+        );
+        assert_eq!(
+            inline_event_chip_name(&inline_events[0]),
+            inline_events[0].title
+        );
+        assert_eq!(inline_events[0].subtitle.as_deref(), None);
+        let body = inline_events[0].body.as_deref().unwrap();
+        assert!(body.contains("@@ -1 +1 @@"));
+        assert!(body.contains("-old note"));
+        assert!(body.contains("+new note"));
     }
 
     #[test]
