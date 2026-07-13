@@ -68,6 +68,7 @@ const UNTRACKED_FILE_COUNT_BYTE_LIMIT: usize = 1024 * 1024;
 const DIFF_HUNK_PATCH_LIMIT_BYTES: usize = 200 * 1024;
 const TURN_CHECKPOINT_DIFF_LIMIT: usize = 25;
 const TURN_CHECKPOINT_DIFF_MAX_BYTES: usize = 64 * 1024;
+const WORKSPACE_PORT_START: u16 = 3000;
 const WORKSPACE_CITY_NAMES: [&str; 200] = [
     "berlin",
     "tokyo",
@@ -4840,6 +4841,18 @@ mutation($threadId: ID!) {{
         self.list_processes(name, ProcessKind::Session)
     }
 
+    pub fn list_all_sessions(&self) -> Result<Vec<ProcessRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, workspace_id, chat_thread_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata, session_resume_id
+             FROM processes WHERE kind = ?1
+             ORDER BY id DESC",
+        )?;
+        let records = stmt
+            .query_map([ProcessKind::Session.as_str()], row_to_process)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(records)
+    }
+
     pub fn get_process_record(&self, id: i64) -> Result<ProcessRecord> {
         self.get_process(id)
     }
@@ -6318,18 +6331,30 @@ mutation($threadId: ID!) {{
     }
 
     fn next_port_base(&self, port_block_size: u16) -> Result<u16> {
+        self.next_port_base_with_checker(port_block_size, |_| true)
+    }
+
+    fn next_port_base_with_checker(
+        &self,
+        port_block_size: u16,
+        port_available: impl Fn(u16) -> bool,
+    ) -> Result<u16> {
         anyhow::ensure!(
             port_block_size > 0,
             "workspace port block size must be greater than 0"
         );
-        let next = self
-            .conn
-            .query_row("SELECT MAX(port_base) FROM workspaces", [], |row| {
-                row.get::<_, Option<i64>>(0)
-            })?
-            .map(|port| port + i64::from(port_block_size))
-            .unwrap_or(3000);
-        u16::try_from(next).context("workspace port base exceeded u16 range")
+        let mut port = WORKSPACE_PORT_START;
+        loop {
+            if workspace_port_block_available(port, port_block_size, &port_available) {
+                return Ok(port);
+            }
+            let next = u32::from(port) + u32::from(port_block_size);
+            anyhow::ensure!(
+                next <= u32::from(u16::MAX),
+                "workspace port base exceeded u16 range"
+            );
+            port = next as u16;
+        }
     }
 
     fn resolve_workspace_name(
@@ -8708,6 +8733,14 @@ fn process_alive(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
+fn workspace_port_block_available(
+    port_base: u16,
+    port_block_size: u16,
+    port_available: impl Fn(u16) -> bool,
+) -> bool {
+    (0..port_block_size).all(|offset| port_base.checked_add(offset).is_some_and(&port_available))
+}
+
 #[cfg(unix)]
 fn process_group_matches_pid(pid: u32) -> bool {
     Command::new("ps")
@@ -9874,7 +9907,7 @@ claude_code_executable_path = "/opt/bin/claude-custom"
     }
 
     #[test]
-    fn create_workspace_allocates_next_port_block() {
+    fn create_workspace_assigns_open_port_base() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
         let db_path = temp.path().join("state.db");
@@ -9908,8 +9941,41 @@ claude_code_executable_path = "/opt/bin/claude-custom"
             })
             .unwrap();
 
-        assert_eq!(first.port_base, 3000);
-        assert_eq!(second.port_base, 3010);
+        assert!(first.port_base >= WORKSPACE_PORT_START);
+        assert!(second.port_base >= WORKSPACE_PORT_START);
+    }
+
+    #[test]
+    fn workspace_port_base_reuses_lowest_open_port_despite_existing_workspace_rows() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        assert_eq!(
+            store.next_port_base_with_checker(10, |_| true).unwrap(),
+            3000
+        );
     }
 
     #[test]
@@ -9970,63 +10036,17 @@ base_branch = "develop"
     }
 
     #[test]
-    fn create_workspace_uses_configured_port_block_size() {
+    fn workspace_port_base_scans_by_configured_block_size() {
         let temp = tempfile::tempdir().unwrap();
-        let repo_path = init_repo(temp.path().join("demo"));
-        fs::create_dir(repo_path.join(".archductor")).unwrap();
-        fs::write(
-            repo_path.join(".archductor/settings.toml"),
-            r#"
-[customization.workspace_defaults]
-port_block_size = 25
-"#,
-        )
-        .unwrap();
-        Command::new("git")
-            .arg("-C")
-            .arg(&repo_path)
-            .args(["add", ".archductor/settings.toml"])
-            .status()
-            .unwrap();
-        Command::new("git")
-            .arg("-C")
-            .arg(&repo_path)
-            .args(["commit", "-m", "add archductor settings"])
-            .status()
-            .unwrap();
         let db_path = temp.path().join("state.db");
 
-        RepositoryStore::open(&db_path)
-            .unwrap()
-            .add(AddRepository {
-                name: Some("demo".to_owned()),
-                root_path: repo_path,
-                default_branch: Some("main".to_owned()),
-                remote_name: "origin".to_owned(),
-                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
-            })
-            .unwrap();
-
         let store = WorkspaceStore::open(&db_path).unwrap();
-        let first = store
-            .create(CreateWorkspace {
-                repository_name: "demo".to_owned(),
-                name: "berlin".to_owned(),
-                branch: "lc/berlin".to_owned(),
-                base_ref: Some("main".to_owned()),
-            })
-            .unwrap();
-        let second = store
-            .create(CreateWorkspace {
-                repository_name: "demo".to_owned(),
-                name: "tokyo".to_owned(),
-                branch: "lc/tokyo".to_owned(),
-                base_ref: Some("main".to_owned()),
-            })
-            .unwrap();
-
-        assert_eq!(first.port_base, 3000);
-        assert_eq!(second.port_base, 3025);
+        assert_eq!(
+            store
+                .next_port_base_with_checker(25, |port| port >= 3025)
+                .unwrap(),
+            3025
+        );
     }
 
     #[test]

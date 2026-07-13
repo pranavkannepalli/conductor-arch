@@ -265,7 +265,7 @@ fn build_dashboard_card(line: &WorkspaceStatusLine, store: &WorkspaceStore) -> G
                 .as_ref()
                 .and_then(|state| state.attention_label()),
         ),
-        None => format!("{} · port {}", line.repository_name, ws.port_base),
+        None => line.repository_name.clone(),
     };
     let meta_label = Label::new(Some(&meta));
     meta_label.add_css_class("card-meta");

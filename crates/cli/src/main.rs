@@ -771,12 +771,11 @@ fn main() -> Result<()> {
                         })?
                     };
                     println!(
-                        "Created {} at {} (branch: {}, base: {}, port: {})",
+                        "Created {} at {} (branch: {}, base: {})",
                         workspace.name,
                         workspace.path.display(),
                         workspace.branch,
-                        workspace.base_ref,
-                        workspace.port_base
+                        workspace.base_ref
                     );
                 }
                 WorkspaceCommand::List { active } => {
@@ -785,12 +784,11 @@ fn main() -> Result<()> {
                             continue;
                         }
                         println!(
-                            "{}\t{}\t{}\t{}\t{}\t{}",
+                            "{}\t{}\t{}\t{}\t{}",
                             workspace.name,
                             workspace.path.display(),
                             workspace.branch,
                             workspace.base_ref,
-                            workspace.port_base,
                             workspace.status
                         );
                     }

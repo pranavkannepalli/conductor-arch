@@ -2348,7 +2348,6 @@ fn workspace_status_strip(
     strip.add_css_class("command-center-strip");
     strip.add_css_class("workspace-summary-strip");
     strip.append(&metric_card("Status", &ws.status));
-    strip.append(&metric_card("Port", &ws.port_base.to_string()));
     strip.append(&metric_card(
         "Files",
         &checks

@@ -187,7 +187,6 @@ struct WorkspaceHistoryEntry {
     updated_at: String,
     created_at: String,
     archived_at: Option<String>,
-    port_base: u16,
     open_todos: usize,
     active_sessions: usize,
     run_running: bool,
@@ -252,7 +251,6 @@ fn workspace_history_entry(line: &WorkspaceStatusLine) -> WorkspaceHistoryEntry 
         updated_at: line.workspace.updated_at.clone(),
         created_at: line.workspace.created_at.clone(),
         archived_at: line.workspace.archived_at.clone(),
-        port_base: line.workspace.port_base,
         open_todos: line.open_todos,
         active_sessions: line.active_sessions,
         run_running: line.run_running,
@@ -312,7 +310,6 @@ fn workspace_history_detail(workspace: &WorkspaceHistoryEntry) -> String {
          {sessions} active sessions\n\
          Run: {run}\n\
          {pr}\n\
-         Port base: {port_base}\n\
          \n\
          Dates\n\
          Created: {created_at}\n\
@@ -337,7 +334,6 @@ fn workspace_history_detail(workspace: &WorkspaceHistoryEntry) -> String {
             "idle"
         },
         pr = pr,
-        port_base = workspace.port_base,
         created_at = workspace.created_at,
         updated_at = workspace.updated_at,
         archived = archived,

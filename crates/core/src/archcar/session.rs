@@ -628,7 +628,7 @@ fn claude_stream_session_launch(
     Ok(launch)
 }
 
-const PROVIDER_NATIVE_PORT_SLOTS: u16 = 10;
+const PROVIDER_NATIVE_PORT_START: u16 = 3000;
 const PROVIDER_NATIVE_PORT_METADATA_KEY: &str = "port";
 
 fn assign_provider_native_thread_port(
@@ -661,13 +661,14 @@ fn provider_native_thread_port_with_checker(
     thread_id: i64,
     port_available: impl Fn(u16) -> bool,
 ) -> Result<u16> {
-    let workspace_record = store.get_workspace_record_by_name(workspace)?;
+    let _workspace_record = store.get_workspace_record_by_name(workspace)?;
     let occupied_ports = store
-        .list_sessions(workspace)?
+        .list_all_sessions()?
         .into_iter()
         .filter(|process| {
             process.status == ProcessStatus::Running && process.chat_thread_id != Some(thread_id)
         })
+        .filter(|process| terminal_process_alive(process.pid))
         .filter_map(|process| {
             metadata_value(
                 process.session_harness_metadata.as_deref(),
@@ -677,8 +678,7 @@ fn provider_native_thread_port_with_checker(
         })
         .collect::<std::collections::HashSet<_>>();
 
-    for slot in 0..PROVIDER_NATIVE_PORT_SLOTS {
-        let port = workspace_record.port_base.saturating_add(slot);
+    for port in PROVIDER_NATIVE_PORT_START..=u16::MAX {
         if occupied_ports.contains(&port) {
             continue;
         }
@@ -688,11 +688,8 @@ fn provider_native_thread_port_with_checker(
     }
 
     anyhow::bail!(
-        "no available provider-native ports in reserved block {}-{} for workspace {workspace}",
-        workspace_record.port_base,
-        workspace_record
-            .port_base
-            .saturating_add(PROVIDER_NATIVE_PORT_SLOTS.saturating_sub(1))
+        "no available provider-native ports at or above {} for workspace {workspace}",
+        PROVIDER_NATIVE_PORT_START
     )
 }
 
@@ -2337,7 +2334,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_native_thread_launches_use_all_reserved_ports_once() {
+    fn provider_native_thread_launches_continue_past_initial_port_block() {
         let temp = tempfile::tempdir().unwrap();
         let store = seeded_workspace_store(temp.path());
         let threads = (0..10)
@@ -2368,9 +2365,10 @@ mod tests {
         let eleventh = store
             .create_chat_thread("berlin", "codex", "Chat 10", None)
             .unwrap();
-        assert!(
+        assert_eq!(
             provider_native_thread_port_with_checker(&store, "berlin", eleventh.id, |_| true)
-                .is_err()
+                .unwrap(),
+            3010
         );
     }
 
@@ -2398,6 +2396,51 @@ mod tests {
             provider_native_thread_port_with_checker(&store, "berlin", replacement.id, |_| true)
                 .unwrap(),
             3000
+        );
+    }
+
+    #[test]
+    fn provider_native_thread_launch_reuses_stale_reserved_port_after_archcar_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = seeded_workspace_store(temp.path());
+        let stale = store
+            .create_chat_thread("berlin", "codex", "Stale", None)
+            .unwrap();
+        record_thread_session_with_port_and_pid(&store, &stale, 3000, exited_child_pid());
+        let replacement = store
+            .create_chat_thread("berlin", "claude", "Replacement", None)
+            .unwrap();
+
+        assert_eq!(
+            provider_native_thread_port_with_checker(&store, "berlin", replacement.id, |_| true)
+                .unwrap(),
+            3000
+        );
+    }
+
+    #[test]
+    fn provider_native_thread_launch_uses_lowest_free_port_across_workspaces() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = seeded_workspace_store(temp.path());
+        let berlin = store
+            .create_chat_thread("berlin", "codex", "Berlin", None)
+            .unwrap();
+        record_running_thread_session_with_port(&store, &berlin, 3000);
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "tokyo".to_owned(),
+                branch: "lc/tokyo".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let tokyo = store
+            .create_chat_thread("tokyo", "claude", "Tokyo", None)
+            .unwrap();
+
+        assert_eq!(
+            provider_native_thread_port_with_checker(&store, "tokyo", tokyo.id, |_| true).unwrap(),
+            3001
         );
     }
 
@@ -2732,6 +2775,15 @@ mod tests {
         thread: &ChatThreadRecord,
         port: u16,
     ) -> ProcessRecord {
+        record_thread_session_with_port_and_pid(store, thread, port, std::process::id())
+    }
+
+    fn record_thread_session_with_port_and_pid(
+        store: &WorkspaceStore,
+        thread: &ChatThreadRecord,
+        port: u16,
+        pid: u32,
+    ) -> ProcessRecord {
         let kind = match thread.provider.as_str() {
             "codex" => SessionKind::Codex,
             "claude" => SessionKind::Claude,
@@ -2747,7 +2799,7 @@ mod tests {
             }
         ));
         store
-            .record_session_process_for_thread("berlin", thread.id, &launch, std::process::id())
+            .record_session_process_for_thread("berlin", thread.id, &launch, pid)
             .unwrap()
     }
 
