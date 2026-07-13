@@ -241,7 +241,10 @@ pub fn spawn_managed_session(
         ));
     }
     let thread_record = ensure_thread_for_kind(&store, &workspace, kind)?;
-    let launch = build_thread_session_launch(
+    let ThreadSessionLaunch {
+        launch,
+        provider_port_reservation,
+    } = build_thread_session_launch(
         &store,
         &workspace,
         &thread_record,
@@ -257,6 +260,7 @@ pub fn spawn_managed_session(
         thread_id: thread_record.id,
         kind,
         launch,
+        provider_port_reservation,
         controller,
         event_tx,
     })
@@ -270,6 +274,7 @@ struct LiveSessionStart<'a> {
     thread_id: i64,
     kind: SessionKind,
     launch: SessionLaunch,
+    provider_port_reservation: Option<TcpListener>,
     controller: Box<dyn HarnessController>,
     event_tx: Sender<ArchcarEvent>,
 }
@@ -314,6 +319,7 @@ fn spawn_live_managed_session(start: LiveSessionStart<'_>) -> Result<SessionHand
 }
 
 fn spawn_provider_native_managed_session(start: LiveSessionStart<'_>) -> Result<SessionHandle> {
+    let _provider_port_reservation = start.provider_port_reservation;
     let mut command = ProcessCommand::new(&start.launch.program);
     command
         .args(&start.launch.args)
@@ -566,7 +572,10 @@ pub fn spawn_managed_session_for_thread(
         kind
     );
     let controller = controller_for_kind(kind);
-    let launch = build_thread_session_launch(
+    let ThreadSessionLaunch {
+        launch,
+        provider_port_reservation,
+    } = build_thread_session_launch(
         &store,
         &workspace,
         &thread_record,
@@ -582,9 +591,15 @@ pub fn spawn_managed_session_for_thread(
         thread_id,
         kind,
         launch,
+        provider_port_reservation,
         controller,
         event_tx,
     })
+}
+
+struct ThreadSessionLaunch {
+    launch: SessionLaunch,
+    provider_port_reservation: Option<TcpListener>,
 }
 
 fn build_thread_session_launch(
@@ -594,14 +609,17 @@ fn build_thread_session_launch(
     kind: SessionKind,
     harness: SessionHarnessOptions,
     controller: &dyn HarnessController,
-) -> Result<crate::workspace::SessionLaunch> {
+) -> Result<ThreadSessionLaunch> {
     if kind == SessionKind::Codex {
         return codex_app_server_session_launch(store, workspace, thread_record, harness);
     }
     if kind == SessionKind::Claude {
         return claude_stream_session_launch(store, workspace, thread_record, harness);
     }
-    controller.build_launch(store, workspace, harness)
+    Ok(ThreadSessionLaunch {
+        launch: controller.build_launch(store, workspace, harness)?,
+        provider_port_reservation: None,
+    })
 }
 
 fn codex_app_server_session_launch(
@@ -609,7 +627,7 @@ fn codex_app_server_session_launch(
     workspace: &str,
     thread_record: &ChatThreadRecord,
     harness: SessionHarnessOptions,
-) -> Result<crate::workspace::SessionLaunch> {
+) -> Result<ThreadSessionLaunch> {
     let mut launch = store.session_launch_with_options(
         workspace,
         SessionKind::Codex,
@@ -621,8 +639,12 @@ fn codex_app_server_session_launch(
         .collect();
     launch.harness_metadata = non_interactive_harness_metadata("codex-app-server", &harness);
     launch.session_resume_id = thread_record.native_thread_id.clone();
-    assign_provider_native_thread_port(store, workspace, thread_record, &mut launch)?;
-    Ok(launch)
+    let provider_port_reservation =
+        assign_provider_native_thread_port(store, workspace, thread_record, &mut launch)?;
+    Ok(ThreadSessionLaunch {
+        launch,
+        provider_port_reservation: Some(provider_port_reservation),
+    })
 }
 
 fn claude_stream_session_launch(
@@ -630,7 +652,7 @@ fn claude_stream_session_launch(
     workspace: &str,
     thread_record: &ChatThreadRecord,
     harness: SessionHarnessOptions,
-) -> Result<crate::workspace::SessionLaunch> {
+) -> Result<ThreadSessionLaunch> {
     let mut launch = store.session_launch_with_options(
         workspace,
         SessionKind::Claude,
@@ -646,8 +668,12 @@ fn claude_stream_session_launch(
     });
     launch.harness_metadata = non_interactive_harness_metadata("claude-stream-json", &harness);
     launch.session_resume_id = thread_record.native_thread_id.clone();
-    assign_provider_native_thread_port(store, workspace, thread_record, &mut launch)?;
-    Ok(launch)
+    let provider_port_reservation =
+        assign_provider_native_thread_port(store, workspace, thread_record, &mut launch)?;
+    Ok(ThreadSessionLaunch {
+        launch,
+        provider_port_reservation: Some(provider_port_reservation),
+    })
 }
 
 const PROVIDER_NATIVE_PORT_START: u16 = 43000;
@@ -659,8 +685,12 @@ fn assign_provider_native_thread_port(
     workspace: &str,
     thread_record: &ChatThreadRecord,
     launch: &mut SessionLaunch,
-) -> Result<()> {
-    let port = provider_native_thread_port(store, workspace, thread_record.id)?;
+) -> Result<TcpListener> {
+    let reservation = reserve_provider_native_thread_port(store, workspace, thread_record.id)?;
+    let port = reservation
+        .local_addr()
+        .context("read reserved provider-native port")?
+        .port();
     set_launch_env(
         launch,
         PROVIDER_NATIVE_PORT_ENV,
@@ -671,39 +701,38 @@ fn assign_provider_native_thread_port(
         PROVIDER_NATIVE_PORT_METADATA_KEY,
         &port.to_string(),
     );
-    Ok(())
+    Ok(reservation)
 }
 
-fn provider_native_thread_port(
+fn reserve_provider_native_thread_port(
     store: &WorkspaceStore,
     workspace: &str,
     thread_id: i64,
-) -> Result<u16> {
-    provider_native_thread_port_with_checker(store, workspace, thread_id, tcp_port_available)
+) -> Result<TcpListener> {
+    let occupied_ports = provider_native_occupied_ports(store, workspace, thread_id)?;
+    for port in PROVIDER_NATIVE_PORT_START..=u16::MAX {
+        if occupied_ports.contains(&port) {
+            continue;
+        }
+        if let Ok(listener) = TcpListener::bind(("127.0.0.1", port)) {
+            return Ok(listener);
+        }
+    }
+
+    anyhow::bail!(
+        "no available provider-native ports at or above {} for workspace {workspace}",
+        PROVIDER_NATIVE_PORT_START
+    )
 }
 
+#[cfg(test)]
 fn provider_native_thread_port_with_checker(
     store: &WorkspaceStore,
     workspace: &str,
     thread_id: i64,
     port_available: impl Fn(u16) -> bool,
 ) -> Result<u16> {
-    let _workspace_record = store.get_workspace_record_by_name(workspace)?;
-    let occupied_ports = store
-        .list_all_sessions()?
-        .into_iter()
-        .filter(|process| {
-            process.status == ProcessStatus::Running && process.chat_thread_id != Some(thread_id)
-        })
-        .filter(|process| terminal_process_alive(process.pid))
-        .filter_map(|process| {
-            metadata_value(
-                process.session_harness_metadata.as_deref(),
-                PROVIDER_NATIVE_PORT_METADATA_KEY,
-            )
-            .and_then(|value| value.parse::<u16>().ok())
-        })
-        .collect::<std::collections::HashSet<_>>();
+    let occupied_ports = provider_native_occupied_ports(store, workspace, thread_id)?;
 
     for port in PROVIDER_NATIVE_PORT_START..=u16::MAX {
         if occupied_ports.contains(&port) {
@@ -720,8 +749,25 @@ fn provider_native_thread_port_with_checker(
     )
 }
 
-fn tcp_port_available(port: u16) -> bool {
-    TcpListener::bind(("127.0.0.1", port)).is_ok()
+fn provider_native_occupied_ports(
+    store: &WorkspaceStore,
+    workspace: &str,
+    thread_id: i64,
+) -> Result<std::collections::HashSet<u16>> {
+    let _workspace_record = store.get_workspace_record_by_name(workspace)?;
+    Ok(store
+        .list_running_sessions()?
+        .into_iter()
+        .filter(|process| process.chat_thread_id != Some(thread_id))
+        .filter(|process| terminal_process_alive(process.pid))
+        .filter_map(|process| {
+            metadata_value(
+                process.session_harness_metadata.as_deref(),
+                PROVIDER_NATIVE_PORT_METADATA_KEY,
+            )
+            .and_then(|value| value.parse::<u16>().ok())
+        })
+        .collect::<std::collections::HashSet<_>>())
 }
 
 fn set_launch_env(launch: &mut SessionLaunch, key: &str, value: OsString) {
@@ -2329,7 +2375,10 @@ mod tests {
             .create_chat_thread("berlin", "codex", "Codex", None)
             .unwrap();
 
-        let launch = codex_app_server_session_launch(
+        let ThreadSessionLaunch {
+            launch,
+            provider_port_reservation: _reservation,
+        } = codex_app_server_session_launch(
             &store,
             "berlin",
             &thread,
@@ -2599,7 +2648,10 @@ mod tests {
             .update_chat_thread_native_id(thread.id, "claude-session-1")
             .unwrap();
 
-        let launch = claude_stream_session_launch(
+        let ThreadSessionLaunch {
+            launch,
+            provider_port_reservation: _reservation,
+        } = claude_stream_session_launch(
             &store,
             "berlin",
             &thread,
@@ -2703,6 +2755,26 @@ mod tests {
 
         assert!(port > 8080);
         assert!(![3000, 5173, 8080].contains(&port));
+    }
+
+    #[test]
+    fn provider_native_thread_launch_reserves_port_until_process_recorded() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = seeded_workspace_store(temp.path());
+        let first = store
+            .create_chat_thread("berlin", "codex", "First", None)
+            .unwrap();
+        let second = store
+            .create_chat_thread("berlin", "claude", "Second", None)
+            .unwrap();
+
+        let reservation = reserve_provider_native_thread_port(&store, "berlin", first.id).unwrap();
+        assert_eq!(reservation.local_addr().unwrap().port(), 43000);
+
+        let second_reservation =
+            reserve_provider_native_thread_port(&store, "berlin", second.id).unwrap();
+
+        assert_eq!(second_reservation.local_addr().unwrap().port(), 43001);
     }
 
     #[test]
@@ -2952,7 +3024,7 @@ mod tests {
         let store = seeded_workspace_store(temp.path());
         let controller = controller_for_kind(SessionKind::Codex);
 
-        let launch = build_thread_session_launch(
+        let ThreadSessionLaunch { launch, .. } = build_thread_session_launch(
             &store,
             "berlin",
             &store
@@ -2974,7 +3046,7 @@ mod tests {
         let store = seeded_workspace_store(temp.path());
         let controller = controller_for_kind(SessionKind::Codex);
 
-        let launch = build_thread_session_launch(
+        let ThreadSessionLaunch { launch, .. } = build_thread_session_launch(
             &store,
             "berlin",
             &store

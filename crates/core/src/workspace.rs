@@ -4853,6 +4853,24 @@ mutation($threadId: ID!) {{
         Ok(records)
     }
 
+    pub fn list_running_sessions(&self) -> Result<Vec<ProcessRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, workspace_id, chat_thread_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata, session_resume_id
+             FROM processes WHERE kind = ?1 AND status = ?2
+             ORDER BY id DESC",
+        )?;
+        let records = stmt
+            .query_map(
+                [
+                    ProcessKind::Session.as_str(),
+                    ProcessStatus::Running.as_str(),
+                ],
+                row_to_process,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(records)
+    }
+
     pub fn get_process_record(&self, id: i64) -> Result<ProcessRecord> {
         self.get_process(id)
     }
