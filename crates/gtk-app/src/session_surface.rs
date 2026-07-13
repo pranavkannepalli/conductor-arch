@@ -55,7 +55,7 @@ use crate::session_projection::{
     ProviderProjectionEvent, ProviderProjectionItem, ProviderProjectionStatus,
     ProviderProjectionStreamState,
 };
-use crate::state::AppState;
+use crate::state::{AppPage, AppState, AppStateSnapshot};
 use crate::terminal::terminal_display_text;
 use crate::toast::ToastManager;
 
@@ -136,6 +136,51 @@ enum LiveChatSource {
 
 fn live_chat_source() -> LiveChatSource {
     LiveChatSource::StructuredStore
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChatRefreshWorkspaceDecision {
+    Refresh,
+    SkipStaleSurface,
+    ClearDeletedWorkspace,
+}
+
+fn chat_refresh_workspace_decision(
+    workspace_name: &str,
+    snapshot: &AppStateSnapshot,
+    workspace_exists: bool,
+) -> ChatRefreshWorkspaceDecision {
+    if snapshot.selected_workspace.as_deref() != Some(workspace_name)
+        || !matches!(snapshot.active_page, AppPage::Workspace | AppPage::Review)
+    {
+        return ChatRefreshWorkspaceDecision::SkipStaleSurface;
+    }
+    if !workspace_exists {
+        return ChatRefreshWorkspaceDecision::ClearDeletedWorkspace;
+    }
+    ChatRefreshWorkspaceDecision::Refresh
+}
+
+fn workspace_lookup_returned_no_rows(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<rusqlite::Error>(),
+            Some(rusqlite::Error::QueryReturnedNoRows)
+        )
+    })
+}
+
+fn clear_deleted_workspace_surface(
+    app_state: &AppState,
+    workspace_name: &str,
+    thread_row: &GBox,
+    messages: &GBox,
+    context_usage: &ContextUsageWidget,
+) {
+    app_state.remove_workspace_from_navigation(workspace_name, AppPage::Dashboard);
+    clear_box(thread_row);
+    clear_box(messages);
+    apply_context_usage_state(context_usage, None);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -745,6 +790,28 @@ pub fn agent_session_panel(
             let workspace = current_workspace_name.borrow().clone();
             debug!(workspace = %workspace, "chat refresh_view start");
             let chat_scroll = capture_chat_scroll(&scroll);
+            if chat_refresh_workspace_decision(&workspace, &app_state.snapshot(), true)
+                == ChatRefreshWorkspaceDecision::SkipStaleSurface
+            {
+                return;
+            }
+            match WorkspaceStore::open(database_path.clone())
+                .and_then(|store| store.get_workspace_record_by_name(&workspace).map(|_| ()))
+            {
+                Ok(()) => {}
+                Err(err) if workspace_lookup_returned_no_rows(&err) => {
+                    clear_deleted_workspace_surface(
+                        &app_state,
+                        &workspace,
+                        &thread_row,
+                        &messages,
+                        &context_usage,
+                    );
+                    restore_chat_scroll_after_refresh(&scroll, chat_scroll);
+                    return;
+                }
+                Err(_) => {}
+            }
             let (workspace_name, loaded, loaded_threads) = match WorkspaceStore::open(
                 database_path.clone(),
             )
@@ -7158,7 +7225,9 @@ Do not answer this message. Use it only for continuity and wait for the next rea
 mod tests {
     use super::*;
     use crate::archcar_async::AsyncArchcarRequestKind;
+    use crate::state::{AppPage, WorkspaceTab};
     use archductor_core::doctor::SetupCheck;
+    use archductor_core::paths::AppPaths;
     use archductor_core::workspace::ProcessKind;
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -9417,6 +9486,36 @@ Schema confirms the app moved CRM around businesses.";
         assert_eq!(
             session_refresh_error_text("load sessions", &err),
             "[session refresh] load sessions failed: database is locked"
+        );
+    }
+
+    #[test]
+    fn chat_refresh_skips_stale_workspace_surface_after_selection_changes() {
+        let state = AppState::new(
+            AppPaths::from_env(),
+            Some("tokyo".to_owned()),
+            WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+
+        assert_eq!(
+            chat_refresh_workspace_decision("berlin", &state.snapshot(), true),
+            ChatRefreshWorkspaceDecision::SkipStaleSurface
+        );
+    }
+
+    #[test]
+    fn chat_refresh_clears_deleted_selected_workspace_instead_of_showing_session_error() {
+        let state = AppState::new(
+            AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+
+        assert_eq!(
+            chat_refresh_workspace_decision("berlin", &state.snapshot(), false),
+            ChatRefreshWorkspaceDecision::ClearDeletedWorkspace
         );
     }
 
