@@ -2970,6 +2970,7 @@ fn provider_projection_items_for_render(
     items
         .into_iter()
         .filter(provider_projection_item_is_relevant_chat_event)
+        .filter(|item| item.render_class != ProjectionRenderClass::HookCard)
         .filter(|item| !provider_projection_item_has_persisted_message(item, messages))
         .collect()
 }
@@ -3033,13 +3034,12 @@ fn provider_projection_inline_event(item: &ProviderProjectionItem) -> Option<Cod
         | ProjectionRenderClass::DiffCard
         | ProjectionRenderClass::ToolCard
         | ProjectionRenderClass::PluginCard
-        | ProjectionRenderClass::HookCard
         | ProjectionRenderClass::SubagentCard
         | ProjectionRenderClass::NestedTranscriptCard
         | ProjectionRenderClass::BackgroundCard => CodexInlineEventKind::Tool,
         _ => return None,
     };
-    let title = provider_projection_display_title(item);
+    let title = provider_projection_inline_event_title(item);
     let body = provider_projection_inline_event_body(item);
 
     Some(CodexInlineEvent {
@@ -3047,9 +3047,29 @@ fn provider_projection_inline_event(item: &ProviderProjectionItem) -> Option<Cod
         title,
         subtitle: Some(provider_projection_inline_event_subtitle(item).to_owned()),
         body,
-        path: provider_projection_inline_event_path(item),
+        path: None,
         status: codex_inline_status_from_provider_projection(item.status),
     })
+}
+
+fn provider_projection_inline_event_title(item: &ProviderProjectionItem) -> String {
+    let title = provider_projection_display_title(item);
+    let trimmed = title.trim();
+    match item.render_class {
+        ProjectionRenderClass::CommandCard | ProjectionRenderClass::ProcessCard => {
+            format!("Ran {trimmed}")
+        }
+        ProjectionRenderClass::FileCard | ProjectionRenderClass::DiffCard => {
+            format!("Read {trimmed}")
+        }
+        ProjectionRenderClass::SkillCard => format!("Read {trimmed}"),
+        ProjectionRenderClass::PluginCard => format!("Used {trimmed}"),
+        ProjectionRenderClass::ToolCard => format!("Used {trimmed}"),
+        ProjectionRenderClass::SubagentCard => format!("Ran {trimmed}"),
+        ProjectionRenderClass::NestedTranscriptCard => format!("Opened {trimmed}"),
+        ProjectionRenderClass::BackgroundCard => format!("Ran {trimmed}"),
+        _ => title,
+    }
 }
 
 fn provider_projection_inline_event_subtitle(item: &ProviderProjectionItem) -> &'static str {
@@ -3061,7 +3081,6 @@ fn provider_projection_inline_event_subtitle(item: &ProviderProjectionItem) -> &
         ProjectionRenderClass::ToolCard => "Tool",
         ProjectionRenderClass::SkillCard => "Skill",
         ProjectionRenderClass::PluginCard => "Plugin",
-        ProjectionRenderClass::HookCard => "Hook",
         ProjectionRenderClass::SubagentCard => "Subagent",
         ProjectionRenderClass::NestedTranscriptCard => "Nested transcript",
         ProjectionRenderClass::BackgroundCard => "Background task",
@@ -3149,22 +3168,6 @@ fn provider_projection_plain_payload_lines(value: &serde_json::Value, depth: usi
         _ => provider_projection_display_json_value(value)
             .map(|value| vec![value])
             .unwrap_or_default(),
-    }
-}
-
-fn provider_projection_inline_event_path(item: &ProviderProjectionItem) -> Option<PathBuf> {
-    match item.render_class {
-        ProjectionRenderClass::FileCard | ProjectionRenderClass::DiffCard => {
-            let candidate = item
-                .body
-                .lines()
-                .next()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or_else(|| item.title.trim());
-            Some(PathBuf::from(candidate))
-        }
-        _ => None,
     }
 }
 
@@ -3660,7 +3663,7 @@ fn inline_event_body_preview(event: &CodexInlineEvent, body: &str) -> InlineEven
 
 fn inline_event_expands_body_by_default(event: &CodexInlineEvent) -> bool {
     let _ = event;
-    true
+    false
 }
 
 fn truncate_inline_event_body(body: &str, max_chars: usize) -> InlineEventBodyPreview {
@@ -3897,6 +3900,7 @@ fn inline_event_widget(event: &CodexInlineEvent) -> Widget {
     body_revealer.set_transition_type(RevealerTransitionType::None);
     body_revealer.set_transition_duration(0);
     body_revealer.set_reveal_child(expand_by_default);
+    body_revealer.set_visible(expand_by_default);
     body_revealer.set_child(Some(&body));
     root.append(&body_revealer);
     toggle.set_active(expand_by_default);
@@ -3911,11 +3915,13 @@ fn inline_event_widget(event: &CodexInlineEvent) -> Widget {
         move |button| {
             if button.is_active() {
                 body.set_markup(&chat_text_markup(&full));
+                body_revealer.set_visible(true);
                 body_revealer.set_reveal_child(true);
                 button.set_label(&expanded_label);
             } else {
                 body.set_markup(&chat_text_markup(&preview));
                 body_revealer.set_reveal_child(false);
+                body_revealer.set_visible(false);
                 button.set_label(&collapsed_label);
             }
         }
@@ -8566,7 +8572,7 @@ fix it
         assert_eq!(preview.preview, full);
         assert_eq!(preview.full, full);
         assert!(!preview.truncated);
-        assert!(inline_event_expands_body_by_default(&event));
+        assert!(!inline_event_expands_body_by_default(&event));
     }
 
     #[test]
@@ -9693,8 +9699,11 @@ I summarized the result.
         let inline = provider_projection_inline_event(&projection.items[0]).unwrap();
 
         assert_eq!(inline.kind, CodexInlineEventKind::Tool);
-        assert_eq!(inline.title, "get_wiki_page");
-        assert_eq!(inline_event_chip_label(&inline, false), "+ get_wiki_page");
+        assert_eq!(inline.title, "Used get_wiki_page");
+        assert_eq!(
+            inline_event_chip_label(&inline, false),
+            "+ Used get_wiki_page"
+        );
         let body = inline_event_body_text(&inline);
         assert!(body.contains("Project Context"));
         assert!(!body.contains("\"method\""));
@@ -9764,7 +9773,7 @@ I summarized the result.
     }
 
     #[test]
-    fn hook_events_render_as_action_content_without_status_chrome() {
+    fn hook_events_are_hidden_from_normal_chat_projection() {
         let mut record = provider_event_record(
             ProviderEventKind::SkillPluginHook,
             ProviderEventPhase::Progress,
@@ -9776,13 +9785,44 @@ I summarized the result.
         });
         let projection = provider_projection_from_records(&[record]);
 
-        let item = &projection.items[0];
+        let items = provider_projection_items_for_render(projection.items, &[]);
 
-        assert_eq!(item.render_class, ProjectionRenderClass::HookCard);
-        let text = provider_projection_card_text(item);
-        assert!(text.starts_with("PreToolUse\nBash: cargo test"));
-        assert!(!text.contains("\"type\": \"tool_result\""));
-        assert!(!provider_projection_item_shows_status_chrome(item));
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn provider_projection_inline_titles_use_action_verbs() {
+        let cases = [
+            (
+                ProviderEventKind::CommandProcess,
+                None,
+                serde_json::json!({"title": "cargo test", "body": "ok"}),
+                "+ Ran cargo test",
+            ),
+            (
+                ProviderEventKind::FileSystem,
+                Some("read"),
+                serde_json::json!({"title": "README.md", "body": "# Archductor"}),
+                "+ Read README.md",
+            ),
+            (
+                ProviderEventKind::SkillPluginHook,
+                None,
+                serde_json::json!({"title": "skill-creator", "body": "loaded"}),
+                "+ Read skill-creator",
+            ),
+        ];
+
+        for (kind, subtype, payload, label) in cases {
+            let mut record = provider_event_record(kind, ProviderEventPhase::Completed);
+            record.provider_subtype = subtype.map(str::to_owned);
+            record.normalized_payload = payload;
+            let projection = provider_projection_from_records(&[record]);
+            let inline = provider_projection_inline_event(&projection.items[0]).unwrap();
+
+            assert_eq!(inline_event_chip_label(&inline, false), label);
+            assert!(!inline_event_expands_body_by_default(&inline));
+        }
     }
 
     #[test]
@@ -9800,9 +9840,12 @@ I summarized the result.
         let inline = provider_projection_inline_event(&projection.items[0]).unwrap();
 
         assert_eq!(inline.kind, CodexInlineEventKind::Tool);
-        assert_eq!(inline.title, "Review agent");
+        assert_eq!(inline.title, "Ran Review agent");
         assert_eq!(inline.subtitle.as_deref(), Some("Subagent"));
-        assert_eq!(inline_event_chip_label(&inline, false), "+ Review agent");
+        assert_eq!(
+            inline_event_chip_label(&inline, false),
+            "+ Ran Review agent"
+        );
         assert_eq!(inline_event_body_text(&inline), "Found 2 issues");
     }
 
