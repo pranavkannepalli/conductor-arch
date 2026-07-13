@@ -13824,8 +13824,12 @@ working_directory = "apps/worker"
         assert_eq!(
             launch.args,
             vec![
+                "--model".to_owned(),
+                "claude-fable-5".to_owned(),
                 "--resume".to_owned(),
-                "019ef6b1-8a1b-78f0-ae17-0db46572decf".to_owned()
+                "019ef6b1-8a1b-78f0-ae17-0db46572decf".to_owned(),
+                "--append-system-prompt".to_owned(),
+                "[archductor bootstrap for claude]\nmodel: claude-fable-5".to_owned(),
             ]
         );
         assert_eq!(
@@ -13882,6 +13886,8 @@ working_directory = "apps/worker"
             vec![
                 "--no-alt-screen".to_owned(),
                 "--dangerously-bypass-approvals-and-sandbox".to_owned(),
+                "--model".to_owned(),
+                "gpt-5.6-sol".to_owned(),
                 "-c".to_owned(),
                 "check_for_update_on_startup=false".to_owned(),
                 "-c".to_owned(),
