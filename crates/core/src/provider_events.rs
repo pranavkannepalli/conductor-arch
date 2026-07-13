@@ -592,6 +592,26 @@ impl ProviderEventStore {
         Ok(rows)
     }
 
+    pub fn count_for_process_subtypes(
+        &self,
+        process_id: i64,
+        kind: ProviderEventKind,
+        subtypes: &[&str],
+    ) -> Result<u64> {
+        let conn = self.open()?;
+        let mut count = 0_u64;
+        for subtype in subtypes {
+            count += conn.query_row(
+                "SELECT COUNT(*)
+                 FROM provider_events
+                 WHERE process_id = ?1 AND kind = ?2 AND provider_subtype = ?3",
+                params![process_id, kind.as_str(), subtype],
+                |row| row.get::<_, i64>(0),
+            )? as u64;
+        }
+        Ok(count)
+    }
+
     pub fn project_timeline_for_chat_thread(
         &self,
         chat_thread_id: i64,

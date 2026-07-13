@@ -2838,18 +2838,14 @@ fn lifecycle_panel(
                             .map_err(|err| format!("{err:#}"))
                     },
                     move |result| {
-                        let navigation_workspace =
-                            workspace_delete_navigation_target(&result).map(str::to_owned);
                         match result {
                             Ok(deleted) => {
                                 progress_after_delete
                                     .set_text(&workspace_delete_feedback(Ok(deleted.clone())));
-                                if let Some(workspace_name) = navigation_workspace.as_deref() {
-                                    state_after_delete.remove_workspace_from_navigation(
-                                        workspace_name,
-                                        crate::state::AppPage::Dashboard,
-                                    );
-                                }
+                                apply_workspace_delete_navigation_result(
+                                    &state_after_delete,
+                                    &Ok(deleted.clone()),
+                                );
                                 let db_cleanup = db_cleanup_after_delete.clone();
                                 std::thread::spawn(move || {
                                     if let Err(err) =
@@ -7293,6 +7289,15 @@ fn workspace_delete_navigation_target(
         .map(|workspace| workspace.name.as_str())
 }
 
+fn apply_workspace_delete_navigation_result(
+    state: &crate::state::AppState,
+    result: &std::result::Result<Workspace, String>,
+) {
+    if let Some(workspace_name) = workspace_delete_navigation_target(result) {
+        state.remove_workspace_from_navigation(workspace_name, crate::state::AppPage::Dashboard);
+    }
+}
+
 fn merge_blockers_text(
     open_todos: usize,
     open_review_comments: usize,
@@ -9354,5 +9359,42 @@ mod tests {
         let failure: std::result::Result<Workspace, String> =
             Err("worktree remove failed".to_owned());
         assert_eq!(workspace_delete_navigation_target(&failure), None);
+    }
+
+    #[test]
+    fn workspace_delete_navigation_result_mutates_state_only_after_success() {
+        let state = crate::state::AppState::new(
+            archductor_core::paths::AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            crate::state::WorkspaceTab::Chats,
+            crate::state::AppPage::Workspace,
+        );
+        state.set_selected_chat_thread(Some(42));
+        state.navigate_to_page(crate::state::AppPage::History);
+
+        let failure: std::result::Result<Workspace, String> =
+            Err("worktree remove failed".to_owned());
+        apply_workspace_delete_navigation_result(&state, &failure);
+        let failed_snapshot = state.snapshot();
+
+        assert_eq!(
+            failed_snapshot.selected_workspace.as_deref(),
+            Some("berlin")
+        );
+        assert_eq!(failed_snapshot.selected_chat_thread, Some(42));
+        assert_eq!(failed_snapshot.active_page, crate::state::AppPage::History);
+
+        apply_workspace_delete_navigation_result(&state, &Ok(test_workspace()));
+        let success_snapshot = state.snapshot();
+
+        assert_eq!(success_snapshot.selected_workspace, None);
+        assert_eq!(success_snapshot.selected_chat_thread, None);
+        assert_eq!(success_snapshot.active_page, crate::state::AppPage::History);
+        while state.navigate_back() {
+            assert_ne!(
+                state.snapshot().selected_workspace.as_deref(),
+                Some("berlin")
+            );
+        }
     }
 }

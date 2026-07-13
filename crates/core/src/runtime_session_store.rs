@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use anyhow::Result;
 
 use crate::chat_store::ChatStore;
-use crate::provider_events::{ProviderEventDraft, ProviderEventRecord, ProviderEventStore};
+use crate::provider_events::{
+    ProviderEventDraft, ProviderEventKind, ProviderEventRecord, ProviderEventStore,
+};
 use crate::session_pipeline::PtyChunkInput;
 use crate::workspace::{SessionKind, WorkspaceStore};
 
@@ -71,6 +73,14 @@ impl RuntimeSessionStore {
 
     pub fn append_provider_event(&self, draft: &ProviderEventDraft) -> Result<ProviderEventRecord> {
         self.provider_event_store.upsert_event(draft)
+    }
+
+    pub fn count_runtime_input_provider_events(&self, process_id: i64) -> Result<u64> {
+        self.provider_event_store.count_for_process_subtypes(
+            process_id,
+            ProviderEventKind::UserInput,
+            &["user_input", "review_prompt", "control_command"],
+        )
     }
 
     pub fn resolve_codex_native_thread_id_for_process(

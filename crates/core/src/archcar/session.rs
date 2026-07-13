@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tracing::{info, warn};
@@ -621,15 +621,8 @@ fn normalize_codex_working_status_for_fingerprint(line: &str) -> String {
     )
 }
 
-fn runtime_identity_nonce() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0)
-}
-
-fn user_input_identity_suffix(loop_nonce: u128, sequence: u64) -> String {
-    format!("input-{loop_nonce}-{sequence}")
+fn user_input_identity_suffix(sequence: u64) -> String {
+    format!("input-{sequence}")
 }
 
 fn session_ready_for_visible_screen(kind: SessionKind, screen: &str) -> bool {
@@ -697,9 +690,10 @@ fn run_session_loop(
     let mut last_screen = String::new();
     let mut last_persisted_screen_fingerprint = None;
     let mut native_thread_id_resolved = false;
-    let mut user_input_sequence = 0_u64;
-    let user_input_identity_nonce = runtime_identity_nonce();
     let runtime_store = RuntimeSessionStore::new(db_path.clone());
+    let mut user_input_sequence = runtime_store
+        .count_runtime_input_provider_events(started.session_id)
+        .unwrap_or(0);
     append_runtime_provider_event(
         &runtime_store,
         runtime_provider_event(RuntimeProviderEventInput {
@@ -753,8 +747,7 @@ fn run_session_loop(
                         &log_text,
                     );
                     user_input_sequence += 1;
-                    let user_input_identity =
-                        user_input_identity_suffix(user_input_identity_nonce, user_input_sequence);
+                    let user_input_identity = user_input_identity_suffix(user_input_sequence);
                     append_runtime_provider_event(
                         &runtime_store,
                         runtime_provider_event(RuntimeProviderEventInput {
@@ -1095,9 +1088,71 @@ mod tests {
 
         assert_ne!(first.provider_event_id, second.provider_event_id);
         assert_ne!(first.provider_item_id, second.provider_item_id);
-        assert_ne!(
-            user_input_identity_suffix(100, 1),
-            user_input_identity_suffix(200, 1)
+    }
+
+    #[test]
+    fn runtime_provider_input_sequence_resumes_from_persisted_events() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = seeded_workspace_store(temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
+        let launch = store.session_launch("berlin", SessionKind::Codex).unwrap();
+        let process = store
+            .record_session_process_for_thread("berlin", thread.id, &launch, exited_child_pid())
+            .unwrap();
+        let db_path = temp.path().join("state.db");
+        let first_runtime_store = RuntimeSessionStore::new(db_path.clone());
+        let first_suffix = user_input_identity_suffix(
+            first_runtime_store
+                .count_runtime_input_provider_events(process.id)
+                .unwrap()
+                + 1,
+        );
+        append_runtime_provider_event(
+            &first_runtime_store,
+            runtime_provider_event(RuntimeProviderEventInput {
+                kind: SessionKind::Codex,
+                session_id: process.id,
+                thread_id: thread.id,
+                identity_suffix: Some(&first_suffix),
+                phase: ProviderEventPhase::Started,
+                event_kind: ProviderEventKind::UserInput,
+                subtype: "user_input",
+                title: "User input",
+                body: "first",
+            }),
+            "test_first_input",
+        );
+
+        let restored_runtime_store = RuntimeSessionStore::new(db_path);
+        let restored_sequence = restored_runtime_store
+            .count_runtime_input_provider_events(process.id)
+            .unwrap();
+        let second_suffix = user_input_identity_suffix(restored_sequence + 1);
+        append_runtime_provider_event(
+            &restored_runtime_store,
+            runtime_provider_event(RuntimeProviderEventInput {
+                kind: SessionKind::Codex,
+                session_id: process.id,
+                thread_id: thread.id,
+                identity_suffix: Some(&second_suffix),
+                phase: ProviderEventPhase::Started,
+                event_kind: ProviderEventKind::UserInput,
+                subtype: "user_input",
+                title: "User input",
+                body: "second",
+            }),
+            "test_second_input",
+        );
+
+        assert_eq!(first_suffix, "input-1");
+        assert_eq!(second_suffix, "input-2");
+        assert_eq!(
+            restored_runtime_store
+                .count_runtime_input_provider_events(process.id)
+                .unwrap(),
+            2
         );
     }
 
