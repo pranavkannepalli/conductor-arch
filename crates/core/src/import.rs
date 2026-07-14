@@ -38,8 +38,7 @@ struct SourceWorkspace {
 }
 
 pub fn default_conductor_app_database() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
+    crate::platform::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("Library/Application Support/com.conductor.app/conductor.db")
 }
@@ -308,8 +307,7 @@ fn next_port_base(target: &Connection) -> Result<u16> {
 }
 
 fn default_workspace_parent(repo_name: &str) -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
+    crate::platform::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("archductor")
         .join("workspaces")

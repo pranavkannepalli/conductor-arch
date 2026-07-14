@@ -44,7 +44,9 @@ The release workflow must produce:
 - `.deb`
 - `.rpm`
 - AppImage
+- `archductor-<version>-windows-x86_64.zip`
 - `SHA256SUMS`
+- `SHA256SUMS-windows.txt`
 - Trivy release-artifact scan result
 - provenance attestations
 - GitHub release attachments for tag runs
@@ -80,6 +82,7 @@ and rollback or yank paths are validated for that channel.
 | Fedora/openSUSE | `.rpm` installs with `rpm`, `dnf`, or `zypper`, launches GUI, runs `archductor doctor`, and has upgrade/removal notes. |
 | AUR | `PKGBUILD` uses the release tag and real checksum, `makepkg -si` passes on Arch, and update/yank process is documented. |
 | Flatpak | Build result is documented. If published, note broad filesystem access for arbitrary repository paths. |
+| Windows ZIP | Archive contains all GTK runtime files, extracts cleanly, launches GUI and CLI, verifies checksum, upgrades safely, and passes the Windows workflow checklist. Preview until proven on real Windows. |
 
 ## Website Gate
 
@@ -117,4 +120,5 @@ Keep these visible in release notes and the website:
 - prompt pack switching/import/export, naming templates, hooks, local check
   runner UI, and richer notification options are not fully surfaced in the GUI
 - visual parity with macOS Archductor is incomplete
-- Linux is the only launch target for packages
+- Linux is the primary validated package target; the native Windows ZIP is
+  preview-only until its real-machine gate passes

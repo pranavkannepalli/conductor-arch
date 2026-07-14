@@ -4,12 +4,13 @@ Packaging is not the product-readiness gate. These commands validate release
 artifacts, but public release readiness depends on the app workflow in
 `docs/manual-testing-checklist.md`.
 
-Do not call packaging release-ready until the Linux app workflow has been
-manually validated: repository onboarding/settings, workspace creation,
+Do not call packaging release-ready until the app workflow has been manually
+validated on the announced platform: repository onboarding/settings, workspace creation,
 embedded agent sessions, terminal/runtime, diff/review/checks/todos, PR
 merge/archive, history, provider/MCP status, customization settings, and known
-gaps documented. Windows and macOS packages are not release targets until the
-process, PTY, path, and shell abstractions are intentionally ported.
+gaps documented. Native Windows now has intentional process, PTY, path, shell,
+IPC, compile, and ZIP packaging boundaries, but the ZIP remains preview-only
+until its real Windows checklist passes. macOS is not a release target.
 
 ## Build packages locally
 
@@ -118,6 +119,17 @@ flatpak run io.github.pranavkannepalli.archductor
 > **Note:** The Flatpak sandbox requires `--filesystem=host` to access arbitrary
 > repository paths. The app works best installed from AppImage or native packages.
 
+### Windows portable ZIP (preview)
+
+The tag workflow builds `archductor-<version>-windows-x86_64.zip` with the CLI,
+GTK app, archcar sidecar, GTK/libadwaita DLLs, loaders, schemas, icons, and MIME
+data. Extract the full archive before launching `archductor-gtk.exe`; do not
+copy only the executable. The workflow also emits `SHA256SUMS-windows.txt`.
+
+Before promotion beyond preview, validate extraction, GUI launch, CLI doctor,
+project/workspace creation, PTY sessions, provider sessions, stop/restart,
+upgrade-over-extracted-install, and checksum verification on real Windows.
+
 ## CI release
 
 Push a tag to trigger the publish workflow:
@@ -127,8 +139,9 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-The workflow builds tarball + .deb + .rpm + AppImage on `ubuntu-24.04` GitHub
-hosted runners and attaches all artifacts to the GitHub release.
+The workflow builds tarball + .deb + .rpm + AppImage on `ubuntu-24.04` and the
+portable Windows ZIP on `windows-2025`, then attaches the artifacts to the
+GitHub release.
 
 For a manual dry run from the Actions UI, run the `Publish` workflow with an
 explicit version such as `0.1.0`. Manual dispatch does not create a GitHub

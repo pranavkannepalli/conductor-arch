@@ -1748,6 +1748,14 @@ struct TerminalInvocation {
 fn build_terminal_invocation(terminal: &str, command: &str) -> Option<TerminalInvocation> {
     let terminal_key = terminal_key(terminal)?;
     let args = match terminal_key.as_str() {
+        "wt" | "wt.exe" | "windows-terminal" => vec![
+            "new-tab".to_owned(),
+            "cmd.exe".to_owned(),
+            "/D".to_owned(),
+            "/S".to_owned(),
+            "/C".to_owned(),
+            command.to_owned(),
+        ],
         "gnome-terminal" | "kgx" => vec![
             "--".to_owned(),
             "bash".to_owned(),
@@ -1822,7 +1830,10 @@ fn detect_terminal() -> Option<String> {
             return Some(term);
         }
     }
-    [
+    #[cfg(windows)]
+    let candidates = ["wt.exe"];
+    #[cfg(not(windows))]
+    let candidates = [
         "gnome-terminal",
         "kgx",
         "konsole",
@@ -1832,52 +1843,73 @@ fn detect_terminal() -> Option<String> {
         "tilix",
         "terminator",
         "xfce4-terminal",
-    ]
-    .into_iter()
-    .find(|candidate| command_exists(candidate))
-    .map(str::to_owned)
-    .or_else(|| {
-        if cfg!(target_os = "macos") && command_exists("osascript") {
-            Some("macos-terminal".to_owned())
-        } else {
-            None
-        }
-    })
+    ];
+    candidates
+        .into_iter()
+        .find(|candidate| command_exists(candidate))
+        .map(str::to_owned)
+        .or_else(|| {
+            if cfg!(target_os = "macos") && command_exists("osascript") {
+                Some("macos-terminal".to_owned())
+            } else {
+                None
+            }
+        })
 }
 
 fn command_exists(command: &str) -> bool {
-    ProcessCommand::new("which")
-        .arg(command)
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+    doctor::command_exists(command)
 }
 
+#[cfg(not(windows))]
 fn interactive_session_command(launch: &SessionLaunch) -> String {
     format!("exec {}", shell_words(&launch.program, &launch.args))
 }
 
+#[cfg(windows)]
+fn interactive_session_command(launch: &SessionLaunch) -> String {
+    shell_words(&launch.program, &launch.args)
+}
+
 fn render_manual_session_command(launch: &SessionLaunch) -> String {
-    let mut env_parts = Vec::new();
-    for (key, value) in &launch.env {
-        if let Some(value) = value.to_str() {
-            env_parts.push(format!("{key}={}", quote_shell_word(value)));
-        }
+    #[cfg(windows)]
+    {
+        let env = launch
+            .env
+            .iter()
+            .filter_map(|(key, value)| value.to_str().map(|value| format!("set \"{key}={value}\"")))
+            .collect::<Vec<_>>();
+        let mut parts = env;
+        parts.push(format!(
+            "cd /D {}",
+            quote_shell_word(&launch.cwd.to_string_lossy())
+        ));
+        parts.push(interactive_session_command(launch));
+        parts.join(" && ")
     }
-    let launch_command = if env_parts.is_empty() {
-        interactive_session_command(launch)
-    } else {
-        format!(
-            "{} {}",
-            env_parts.join(" "),
+    #[cfg(not(windows))]
+    {
+        let mut env_parts = Vec::new();
+        for (key, value) in &launch.env {
+            if let Some(value) = value.to_str() {
+                env_parts.push(format!("{key}={}", quote_shell_word(value)));
+            }
+        }
+        let launch_command = if env_parts.is_empty() {
             interactive_session_command(launch)
+        } else {
+            format!(
+                "{} {}",
+                env_parts.join(" "),
+                interactive_session_command(launch)
+            )
+        };
+        format!(
+            "cd {} && {}",
+            quote_shell_word(&launch.cwd.to_string_lossy()),
+            launch_command
         )
-    };
-    format!(
-        "cd {} && {}",
-        quote_shell_word(&launch.cwd.to_string_lossy()),
-        launch_command
-    )
+    }
 }
 
 fn session_kind_label(kind: SessionKind) -> &'static str {
@@ -2216,13 +2248,25 @@ fn shell_words(program: &std::path::Path, args: &[String]) -> String {
 }
 
 fn quote_shell_word(value: &str) -> String {
-    if value
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-'))
+    #[cfg(windows)]
     {
-        return value.to_owned();
+        if value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'\\' | b':' | b'.' | b'_' | b'-')
+        }) {
+            return value.to_owned();
+        }
+        format!("\"{}\"", value.replace('"', "\\\""))
     }
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
+    #[cfg(not(windows))]
+    {
+        if value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-'))
+        {
+            return value.to_owned();
+        }
+        format!("'{}'", value.replace('\'', "'\"'\"'"))
+    }
 }
 
 fn escape_applescript_string(value: &str) -> String {
@@ -2316,6 +2360,40 @@ mod tests {
             wezterm.args,
             vec!["start", "--", "bash", "-lc", "cd /tmp && exec codex"]
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_terminal_invocation_uses_native_cmd_shell() {
+        let invocation = build_terminal_invocation("wt.exe", "codex --help").unwrap();
+        assert_eq!(invocation.program, "wt.exe");
+        assert_eq!(
+            invocation.args,
+            vec!["new-tab", "cmd.exe", "/D", "/S", "/C", "codex --help"]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_manual_session_command_sets_env_and_changes_drive() {
+        let launch = SessionLaunch {
+            kind: SessionKind::Codex,
+            program: PathBuf::from("codex.exe"),
+            args: vec!["--model".to_owned(), "gpt-test".to_owned()],
+            cwd: PathBuf::from(r"C:\work space"),
+            env: vec![(
+                "ARCHDUCTOR_WORKSPACE_NAME".to_owned(),
+                OsString::from("berlin"),
+            )],
+            harness_metadata: None,
+            session_resume_id: None,
+        };
+
+        let command = render_manual_session_command(&launch);
+        assert!(command.contains("set \"ARCHDUCTOR_WORKSPACE_NAME=berlin\""));
+        assert!(command.contains("cd /D \"C:\\work space\""));
+        assert!(command.ends_with("codex.exe --model gpt-test"));
+        assert!(!command.contains("exec "));
     }
 
     #[test]

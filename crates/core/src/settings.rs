@@ -2105,34 +2105,46 @@ fn atomic_write_no_symlink(path: &Path, contents: &[u8]) -> Result<()> {
     write_result
 }
 
+struct SettingsWritePermissions {
+    #[cfg(unix)]
+    value: fs::Permissions,
+}
+
 #[cfg(unix)]
-fn settings_write_permissions(path: &Path) -> Result<fs::Permissions> {
+fn settings_write_permissions(path: &Path) -> Result<SettingsWritePermissions> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) => Ok(metadata.permissions()),
+        Ok(metadata) => Ok(SettingsWritePermissions {
+            value: metadata.permissions(),
+        }),
         Err(err) if err.kind() == ErrorKind::NotFound => {
-            if path.file_name().and_then(|name| name.to_str()) == Some("settings.local.toml") {
-                Ok(fs::Permissions::from_mode(0o600))
-            } else {
-                Ok(fs::Permissions::from_mode(0o644))
-            }
+            let value =
+                if path.file_name().and_then(|name| name.to_str()) == Some("settings.local.toml") {
+                    fs::Permissions::from_mode(0o600)
+                } else {
+                    fs::Permissions::from_mode(0o644)
+                };
+            Ok(SettingsWritePermissions { value })
         }
         Err(err) => Err(err).with_context(|| format!("inspect {}", path.display())),
     }
 }
 
 #[cfg(not(unix))]
-fn settings_write_permissions(_path: &Path) -> Result<()> {
-    Ok(())
+fn settings_write_permissions(_path: &Path) -> Result<SettingsWritePermissions> {
+    Ok(SettingsWritePermissions {})
 }
 
 #[cfg(unix)]
-fn set_permissions_if_supported(path: &Path, permissions: fs::Permissions) -> Result<()> {
-    fs::set_permissions(path, permissions)
+fn set_permissions_if_supported(path: &Path, permissions: SettingsWritePermissions) -> Result<()> {
+    fs::set_permissions(path, permissions.value)
         .with_context(|| format!("set permissions {}", path.display()))
 }
 
 #[cfg(not(unix))]
-fn set_permissions_if_supported(_path: &Path, _permissions: ()) -> Result<()> {
+fn set_permissions_if_supported(
+    _path: &Path,
+    _permissions: SettingsWritePermissions,
+) -> Result<()> {
     Ok(())
 }
 

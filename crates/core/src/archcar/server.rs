@@ -1,9 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 
@@ -18,6 +16,7 @@ use crate::archcar::protocol::{
 use crate::archcar::session::{
     restore_managed_session, spawn_managed_session, spawn_managed_session_for_thread, SessionHandle,
 };
+use crate::archcar::transport::{self, LocalListener, LocalStream};
 use crate::paths::AppPaths;
 use crate::provider_events::ProviderEventStore;
 use crate::provider_projection::{
@@ -27,7 +26,7 @@ use crate::provider_projection::{
 use crate::workspace::{SessionKind, WorkspaceStore};
 
 pub struct ArchcarServer {
-    listener: UnixListener,
+    listener: LocalListener,
     state: Arc<Mutex<ServerState>>,
 }
 
@@ -60,25 +59,15 @@ pub fn reconcile_managed_sessions_on_startup(paths: &AppPaths) -> Result<()> {
 }
 
 fn archcar_process_alive(pid: u32) -> bool {
-    Command::new("kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+    crate::platform::process_alive(pid)
 }
 
 impl ArchcarServer {
     pub fn bind(paths: AppPaths) -> Result<Self> {
         fs::create_dir_all(&paths.state_dir)?;
-        let socket_path = paths.archcar_socket_path();
-        if socket_path.exists() {
-            let _ = fs::remove_file(&socket_path);
-        }
-        let listener = UnixListener::bind(&socket_path)
-            .with_context(|| format!("bind archcar socket {}", socket_path.display()))?;
+        let endpoint_path = paths.archcar_endpoint_path();
+        let listener = transport::bind(&endpoint_path)
+            .with_context(|| format!("bind archcar endpoint {}", endpoint_path.display()))?;
         let state = Arc::new(Mutex::new(ServerState {
             db_path: paths.database_path,
             logs_dir: paths.logs_dir,
@@ -102,7 +91,7 @@ impl ArchcarServer {
     }
 }
 
-fn handle_connection(stream: UnixStream, state: Arc<Mutex<ServerState>>) -> Result<()> {
+fn handle_connection(stream: LocalStream, state: Arc<Mutex<ServerState>>) -> Result<()> {
     let mut writer = stream.try_clone()?;
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
@@ -176,7 +165,7 @@ fn log_archcar_rpc(
             message_type,
             summary = %summary,
             payload = %payload,
-            "archcar unix rpc"
+            "archcar local rpc"
         );
     } else {
         info!(
@@ -184,7 +173,7 @@ fn log_archcar_rpc(
             direction,
             message_type,
             summary = %summary,
-            "archcar unix rpc"
+            "archcar local rpc"
         );
     }
 }
@@ -1132,9 +1121,11 @@ mod tests {
     use crate::archcar::protocol::ArchcarInputKind;
     use crate::provider_events::{ProviderEventDraft, ProviderEventKind, ProviderEventPhase};
     use std::fs;
+    #[cfg(unix)]
     use std::os::unix::process::CommandExt;
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
+    #[cfg(unix)]
     use std::time::{Duration, Instant};
 
     use crate::paths::AppPaths;
@@ -1953,6 +1944,7 @@ mod tests {
         path
     }
 
+    #[cfg(unix)]
     #[test]
     fn reconcile_startup_leaves_live_managed_codex_sessions_running() {
         let temp = tempfile::tempdir().unwrap();
@@ -2173,6 +2165,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn spawn_fake_managed_codex_process() -> std::process::Child {
         let mut command = Command::new("bash");
         command
@@ -2185,6 +2178,7 @@ mod tests {
         command.spawn().unwrap()
     }
 
+    #[cfg(unix)]
     fn terminate_test_child(child: &mut std::process::Child) {
         let _ = Command::new("kill")
             .arg("-KILL")
@@ -2201,6 +2195,7 @@ mod tests {
         let _ = child.wait();
     }
 
+    #[cfg(unix)]
     fn wait_for_fake_codex_child_alive(pid: u32) -> bool {
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {
@@ -2221,9 +2216,8 @@ mod tests {
     }
 
     fn exited_child_pid() -> u32 {
-        let mut child = Command::new("sh")
-            .arg("-c")
-            .arg("exit 0")
+        let mut command = crate::platform::shell_command("exit 0");
+        let mut child = command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

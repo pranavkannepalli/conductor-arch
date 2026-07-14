@@ -129,8 +129,10 @@ source. The practical summary:
   GTK launch path when configured.
 
 Do not describe the project as MVP complete. Do not call packaging
-release-ready until the GUI-first flow passes the manual Linux checklist and
-the target package channel has install/launch/upgrade/checksum validation.
+release-ready until the GUI-first flow passes the manual checklist on the
+announced platform and the target package channel has
+install/launch/upgrade/checksum validation. Native Windows is preview-only
+until its checklist passes.
 
 ## Product Structure
 
@@ -188,7 +190,7 @@ Current architectural direction:
 - PTY-backed agent harnesses
 - thread-first chat persistence
 - workspace-centered review/merge loop
-- Linux-first product quality over theoretical portability
+- Linux-primary product quality with enforced native Windows portability
 
 ## Implementation Priorities
 
@@ -206,7 +208,8 @@ Follow the handoff phases:
 6. Polish git/diff/review/GitHub PR/check/merge GUI workflows.
 7. Finish prompt-pack switching/import/export, naming templates, hooks, local
    check runner UI, richer notifications, and deeper layout/theme controls.
-8. Finish release validation on real Linux package channels.
+8. Finish release validation on real Linux package channels and the Windows
+   preview ZIP.
 
 ## Engineering Rules
 

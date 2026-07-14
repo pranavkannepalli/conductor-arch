@@ -218,6 +218,139 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  windows-port:
+    name: Windows native build
+    runs-on: windows-2025
+    timeout-minutes: 40
+    env:
+      CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: C:\msys64\ucrt64\bin\gcc.exe
+      CC_x86_64_pc_windows_gnu: C:\msys64\ucrt64\bin\gcc.exe
+      AR_x86_64_pc_windows_gnu: C:\msys64\ucrt64\bin\ar.exe
+      PKG_CONFIG: C:\msys64\ucrt64\bin\pkg-config.exe
+      PKG_CONFIG_ALLOW_CROSS: "1"
+      PKG_CONFIG_PATH: C:\msys64\ucrt64\lib\pkgconfig
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install Windows GTK toolchain
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-gtk4
+            mingw-w64-ucrt-x86_64-libadwaita
+
+      - name: Add UCRT64 runtime to PATH
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_PATH -Value 'C:\msys64\ucrt64\bin'
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          targets: x86_64-pc-windows-gnu
+
+      - name: Check Windows workspace
+        run: cargo check --workspace --all-targets --target x86_64-pc-windows-gnu --locked
+
+      - name: Build Windows workspace
+        run: cargo build --workspace --target x86_64-pc-windows-gnu --locked
+
+      - name: Smoke Windows local transport
+        run: cargo test -p archductor-core --target x86_64-pc-windows-gnu --locked archcar::transport::tests::local_transport_round_trips
+
+      - name: Smoke Windows platform helpers
+        run: cargo test -p archductor-core --target x86_64-pc-windows-gnu --locked platform::tests
+
+      - name: Smoke Windows CLI adapters
+        run: cargo test -p archductor --target x86_64-pc-windows-gnu --locked windows_
+
+      - name: Smoke Windows CLI
+        run: cargo run -p archductor --target x86_64-pc-windows-gnu --locked -- doctor
+
+  linux-musl:
+    name: Linux musl build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install musl toolchain
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends musl-tools
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Build portable musl binaries
+        run: cargo build -p archductor-core -p archductor -p archcar --target x86_64-unknown-linux-musl --locked
+
+  linux-distros:
+    name: Linux GTK (${{ matrix.family }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - family: debian
+            image: debian:trixie
+          - family: fedora
+            image: fedora:latest
+          - family: arch
+            image: archlinux:latest
+          - family: opensuse
+            image: opensuse/tumbleweed:latest
+          - family: alpine
+            image: alpine:3.23
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - name: Install Debian dependencies
+        if: matrix.family == 'debian'
+        run: |
+          apt-get update -q
+          apt-get install -y --no-install-recommends ca-certificates curl git gcc libgtk-4-dev libadwaita-1-dev pkg-config
+
+      - name: Install Fedora dependencies
+        if: matrix.family == 'fedora'
+        run: dnf install -y ca-certificates curl git gcc gtk4-devel libadwaita-devel pkgconf-pkg-config
+
+      - name: Install Arch dependencies
+        if: matrix.family == 'arch'
+        run: pacman -Syu --noconfirm --needed ca-certificates curl git gcc gtk4 libadwaita pkgconf
+
+      - name: Install openSUSE dependencies
+        if: matrix.family == 'opensuse'
+        run: zypper --non-interactive install ca-certificates curl git gcc gtk4-devel libadwaita-devel pkg-config
+
+      - name: Install Alpine dependencies
+        if: matrix.family == 'alpine'
+        run: apk add --no-cache bash ca-certificates cargo curl gcompat git gcc musl-dev rust gtk4.0-dev libadwaita-dev pkgconf
+
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        if: matrix.family != 'alpine'
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+
+      - name: Check workspace
+        run: cargo check --workspace --all-targets --locked
+
   ci-complete:
     name: CI Complete
     runs-on: ubuntu-24.04
@@ -226,6 +359,9 @@ jobs:
       - dependency-scan
       - workflow-audit
       - codeql
+      - windows-port
+      - linux-musl
+      - linux-distros
     steps:
       - name: Confirm all gates passed
         run: echo "All CI gates passed."

@@ -2480,9 +2480,7 @@ impl WorkspaceStore {
         let started_at = timestamp();
         let mut env = conductor_environment(&settings, &repository, &workspace)?;
         env.extend(self.linked_directory_env(&workspace)?);
-        let output = Command::new("sh")
-            .arg("-c")
-            .arg(command)
+        let output = crate::platform::shell_command(command)
             .current_dir(&cwd)
             .envs(env)
             .stdin(Stdio::null())
@@ -4942,13 +4940,7 @@ mutation($threadId: ID!) {{
         let mut env = conductor_environment(&settings, &repository, &workspace)?;
         env.extend(self.linked_directory_env(&workspace)?);
         let (program, mut args) = match kind {
-            SessionKind::Shell => (
-                std::env::var_os("SHELL")
-                    .filter(|shell| !shell.is_empty())
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| PathBuf::from("/bin/sh")),
-                Vec::new(),
-            ),
+            SessionKind::Shell => (crate::platform::shell_program(), Vec::new()),
             SessionKind::Codex => (
                 settings
                     .providers
@@ -6829,10 +6821,8 @@ mutation($threadId: ID!) {{
         env.extend(self.linked_directory_env(workspace)?);
         env.extend(extra_env.iter().cloned());
 
-        let mut command = Command::new("sh");
+        let mut command = crate::platform::shell_command(script);
         command
-            .arg("-c")
-            .arg(script)
             .current_dir(&cwd)
             .envs(env)
             .stdin(Stdio::null())
@@ -7244,10 +7234,10 @@ fn chat_event_fields(event: &CodexTranscriptEvent) -> Result<ChatEventFields> {
 }
 
 fn find_codex_rollout_session_id(cwd: &Path, started_at: &str) -> Result<Option<String>> {
-    let Some(home) = std::env::var_os("HOME") else {
+    let Some(home) = crate::platform::home_dir() else {
         return Ok(None);
     };
-    let root = PathBuf::from(home).join(".codex/sessions");
+    let root = home.join(".codex/sessions");
     if !root.exists() {
         return Ok(None);
     }
@@ -9111,14 +9101,7 @@ fn git_ignored(repo_path: &Path, relative_path: &Path) -> bool {
 }
 
 fn process_alive(pid: u32) -> bool {
-    Command::new("kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    crate::platform::process_alive(pid)
 }
 
 fn workspace_port_block_available(
@@ -9167,11 +9150,7 @@ fn process_group_matches_pid(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
-#[cfg(not(unix))]
-fn process_group_matches_pid(_pid: u32) -> bool {
-    false
-}
-
+#[cfg(unix)]
 fn stop_process(pid: u32) -> Result<()> {
     // Try SIGTERM to the process group only when the child owns a distinct group.
     let group_ok = if process_group_matches_pid(pid) {
@@ -9223,6 +9202,24 @@ fn stop_process(pid: u32) -> Result<()> {
             .status();
     }
 
+    Ok(())
+}
+
+#[cfg(windows)]
+fn stop_process(pid: u32) -> Result<()> {
+    let _ = crate::platform::terminate_process_tree(pid, false)
+        .with_context(|| format!("stop process tree {pid}"))?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while std::time::Instant::now() < deadline {
+        if !process_alive(pid) {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    if process_alive(pid) {
+        let _ = crate::platform::terminate_process_tree(pid, true)
+            .with_context(|| format!("force stop process tree {pid}"))?;
+    }
     Ok(())
 }
 
@@ -9297,8 +9294,8 @@ fn run_shell_script(
     let cwd = workspace_working_directory(settings, workspace)?;
     let mut env = conductor_environment(settings, repository, workspace)?;
     env.extend(extra_env.iter().cloned());
-    let mut command = Command::new("sh");
-    command.arg("-c").arg(script).current_dir(&cwd).envs(env);
+    let mut command = crate::platform::shell_command(script);
+    command.current_dir(&cwd).envs(env);
 
     let output = command
         .output()

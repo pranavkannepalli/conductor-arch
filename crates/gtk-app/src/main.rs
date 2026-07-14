@@ -205,7 +205,7 @@ fn main() {
 
     let app = Application::builder().application_id(APP_ID).build();
     app.connect_activate(move |app| build_ui(app, launch_target.clone(), debug_mode));
-    app.run();
+    app.run_with_args(&["archductor-gtk"]);
 }
 
 fn parse_launch_target<I, S>(args: I) -> Result<LaunchTarget, String>
@@ -1489,8 +1489,7 @@ pub(crate) fn shell_quote(value: &str) -> String {
 }
 
 pub(crate) fn default_clone_parent() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
+    archductor_core::platform::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("archductor")
         .join("repos")
@@ -1506,63 +1505,81 @@ pub(crate) fn repo_name_from_url(url: &str) -> String {
 }
 
 pub(crate) fn spawn_terminal_command(cmd: &str) {
+    #[cfg(windows)]
+    let full_cmd = format!("{cmd} & echo. & pause");
+    #[cfg(not(windows))]
     let full_cmd = format!("{cmd}; echo; echo '--- Press Enter to close ---'; read");
 
-    #[cfg(target_os = "macos")]
+    #[cfg(windows)]
     {
-        let escaped = full_cmd.replace('\\', "\\\\").replace('"', "\\\"");
-        if std::process::Command::new("osascript")
-            .arg("-e")
-            .arg(format!(
-                "tell application \"Terminal\" to do script \"{}\"",
-                escaped
-            ))
-            .arg("-e")
-            .arg("tell application \"Terminal\" to activate")
+        if std::process::Command::new("wt.exe")
+            .args(["new-tab", "cmd.exe", "/D", "/S", "/C", &full_cmd])
             .spawn()
             .is_ok()
         {
             return;
         }
+        eprintln!("Windows Terminal was not found. Run manually:\n  {cmd}");
     }
 
-    // Respect $TERMINAL env var if set
-    if let Ok(term) = std::env::var("TERMINAL") {
-        if std::process::Command::new(&term)
-            .args(["-e", "bash", "-c", &full_cmd])
-            .spawn()
-            .is_ok()
+    #[cfg(not(windows))]
+    {
+        #[cfg(target_os = "macos")]
         {
-            return;
+            let escaped = full_cmd.replace('\\', "\\\\").replace('"', "\\\"");
+            if std::process::Command::new("osascript")
+                .arg("-e")
+                .arg(format!(
+                    "tell application \"Terminal\" to do script \"{}\"",
+                    escaped
+                ))
+                .arg("-e")
+                .arg("tell application \"Terminal\" to activate")
+                .spawn()
+                .is_ok()
+            {
+                return;
+            }
         }
+
+        // Respect $TERMINAL env var if set
+        if let Ok(term) = std::env::var("TERMINAL") {
+            if std::process::Command::new(&term)
+                .args(["-e", "bash", "-c", &full_cmd])
+                .spawn()
+                .is_ok()
+            {
+                return;
+            }
+        }
+
+        let terminals: &[(&str, &[&str])] = &[
+            ("gnome-terminal", &["--", "bash", "-c"]),
+            ("xterm", &["-e", "bash", "-c"]),
+            ("konsole", &["-e", "bash", "-c"]),
+            ("xfce4-terminal", &["-e", "bash", "-c"]),
+            ("tilix", &["-e", "bash", "-c"]),
+            ("terminator", &["-e", "bash", "-c"]),
+            ("alacritty", &["-e", "bash", "-c"]),
+            ("kitty", &["bash", "-c"]),
+            ("foot", &["bash", "-c"]),
+            ("wezterm", &["start", "--", "bash", "-c"]),
+            ("xterm", &["-e", "bash", "-c"]),
+        ];
+
+        for (term, prefix_args) in terminals {
+            let mut command = std::process::Command::new(term);
+            for arg in *prefix_args {
+                command.arg(arg);
+            }
+            command.arg(&full_cmd);
+            if command.spawn().is_ok() {
+                return;
+            }
+        }
+
+        eprintln!("No terminal emulator found. Run manually:\n  {cmd}");
     }
-
-    let terminals: &[(&str, &[&str])] = &[
-        ("gnome-terminal", &["--", "bash", "-c"]),
-        ("xterm", &["-e", "bash", "-c"]),
-        ("konsole", &["-e", "bash", "-c"]),
-        ("xfce4-terminal", &["-e", "bash", "-c"]),
-        ("tilix", &["-e", "bash", "-c"]),
-        ("terminator", &["-e", "bash", "-c"]),
-        ("alacritty", &["-e", "bash", "-c"]),
-        ("kitty", &["bash", "-c"]),
-        ("foot", &["bash", "-c"]),
-        ("wezterm", &["start", "--", "bash", "-c"]),
-        ("xterm", &["-e", "bash", "-c"]),
-    ];
-
-    for (term, prefix_args) in terminals {
-        let mut command = std::process::Command::new(term);
-        for arg in *prefix_args {
-            command.arg(arg);
-        }
-        command.arg(&full_cmd);
-        if command.spawn().is_ok() {
-            return;
-        }
-    }
-
-    eprintln!("No terminal emulator found. Run manually:\n  {cmd}");
 }
 
 // ── STYLES ────────────────────────────────────────────────────────────────

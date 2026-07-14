@@ -355,3 +355,23 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] Website build for the Linux product subset of `perceo.ai` succeeds and
   publishes matching release downloads, install instructions, supported targets,
   known limits, and GitHub release links.
+
+## Windows Preview Smoke
+
+- [ ] Windows CI builds all workspace targets with MSYS2 UCRT64 GTK4 and
+  libadwaita.
+- [ ] Extract `archductor-<version>-windows-x86_64.zip` on a clean Windows
+  machine and launch `archductor-gtk.exe` without MSYS2 on `PATH`.
+- [ ] Run `archductor.exe doctor`; confirm native Windows/AppData paths and
+  Git, GitHub CLI, SSH, and provider detection.
+- [ ] Add and clone a repository, create a Git worktree workspace, and confirm
+  Windows paths with spaces work.
+- [ ] Run a one-shot command and setup/run scripts through `cmd.exe`; start a
+  Shell, Codex, and Claude PTY session and send input.
+- [ ] Stop runtime/session process trees and confirm no child processes remain.
+- [ ] Quit and relaunch the GTK app; confirm archcar reconnects through its
+  per-user loopback endpoint and persisted state reloads.
+- [ ] Open a workspace folder, external URL, and Windows Terminal session from
+  GTK/CLI controls.
+- [ ] Verify `SHA256SUMS-windows.txt`, replace an older extracted preview with
+  the new bundle, and repeat GUI/CLI launch smoke.

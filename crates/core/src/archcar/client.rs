@@ -1,5 +1,4 @@
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -13,17 +12,18 @@ use crate::archcar::protocol::{
     archcar_event_summary, archcar_request_summary, archcar_response_summary, ArchcarEvent,
     ArchcarRequest, ArchcarResponse, RpcEnvelope,
 };
+use crate::archcar::transport::{self, LocalStream};
 use crate::paths::AppPaths;
 
 #[derive(Clone)]
 pub struct ArchcarClient {
-    socket_path: PathBuf,
+    endpoint_path: PathBuf,
 }
 
 impl ArchcarClient {
     pub fn from_paths(paths: &AppPaths) -> Self {
         Self {
-            socket_path: paths.archcar_socket_path(),
+            endpoint_path: paths.archcar_endpoint_path(),
         }
     }
 
@@ -33,7 +33,7 @@ impl ArchcarClient {
             Ok(response) => Ok(response),
             Err(err) if retryable && response_decode_or_eof_error(&err) => {
                 warn!(
-                    socket_path = %self.socket_path.display(),
+                    endpoint = %self.endpoint_path.display(),
                     error = %err,
                     "archcar response decode failed; retrying idempotent request"
                 );
@@ -52,7 +52,7 @@ impl ArchcarClient {
         };
         let line = serde_json::to_string(&envelope)?;
         log_archcar_rpc(
-            &self.socket_path,
+            &self.endpoint_path,
             &envelope.id,
             "send",
             "request",
@@ -72,7 +72,7 @@ impl ArchcarClient {
         );
         let response: RpcEnvelope<ArchcarResponse> = serde_json::from_str(&line)?;
         log_archcar_rpc(
-            &self.socket_path,
+            &self.endpoint_path,
             &response.id,
             "recv",
             "response",
@@ -90,7 +90,7 @@ impl ArchcarClient {
         };
         let line = serde_json::to_string(&envelope)?;
         log_archcar_rpc(
-            &self.socket_path,
+            &self.endpoint_path,
             &envelope.id,
             "send",
             "request",
@@ -101,7 +101,7 @@ impl ArchcarClient {
         stream.write_all(b"\n")?;
         stream.flush()?;
         let (tx, rx) = std::sync::mpsc::channel();
-        let socket_path = self.socket_path.clone();
+        let endpoint_path = self.endpoint_path.clone();
         std::thread::spawn(move || {
             let mut reader = BufReader::new(stream);
             loop {
@@ -111,7 +111,7 @@ impl ArchcarClient {
                     Ok(_) => match serde_json::from_str::<RpcEnvelope<ArchcarEvent>>(&line) {
                         Ok(event) => {
                             log_archcar_rpc(
-                                &socket_path,
+                                &endpoint_path,
                                 &event.id,
                                 "recv",
                                 "event",
@@ -122,10 +122,10 @@ impl ArchcarClient {
                         }
                         Err(err) => {
                             warn!(
-                                socket_path = %socket_path.display(),
+                                endpoint = %endpoint_path.display(),
                                 error = %err,
                                 bytes = line.len(),
-                                "archcar unix rpc event decode failed"
+                                "archcar local rpc event decode failed"
                             );
                         }
                     },
@@ -136,19 +136,19 @@ impl ArchcarClient {
         Ok(rx)
     }
 
-    fn connect_or_spawn(&self) -> Result<UnixStream> {
-        match UnixStream::connect(&self.socket_path) {
+    fn connect_or_spawn(&self) -> Result<LocalStream> {
+        match transport::connect(&self.endpoint_path) {
             Ok(stream) => Ok(stream),
             Err(first_err) => {
                 self.spawn_sidecar()?;
                 for _ in 0..20 {
-                    match UnixStream::connect(&self.socket_path) {
+                    match transport::connect(&self.endpoint_path) {
                         Ok(stream) => return Ok(stream),
                         Err(_) => thread::sleep(Duration::from_millis(100)),
                     }
                 }
                 Err(first_err)
-                    .with_context(|| format!("connect archcar {}", self.socket_path.display()))
+                    .with_context(|| format!("connect archcar {}", self.endpoint_path.display()))
             }
         }
     }
@@ -211,7 +211,7 @@ fn request_retry_safe_after_response_loss(request: &ArchcarRequest) -> bool {
 }
 
 fn log_archcar_rpc(
-    socket_path: &Path,
+    endpoint_path: &Path,
     rpc_id: &str,
     direction: &str,
     message_type: &str,
@@ -220,22 +220,22 @@ fn log_archcar_rpc(
 ) {
     if let Some(payload) = archcar_rpc_log_payload(raw_payload) {
         info!(
-            socket_path = %socket_path.display(),
+            endpoint = %endpoint_path.display(),
             %rpc_id,
             direction,
             message_type,
             summary = %summary,
             payload = %payload,
-            "archcar unix rpc"
+            "archcar local rpc"
         );
     } else {
         info!(
-            socket_path = %socket_path.display(),
+            endpoint = %endpoint_path.display(),
             %rpc_id,
             direction,
             message_type,
             summary = %summary,
-            "archcar unix rpc"
+            "archcar local rpc"
         );
     }
 }

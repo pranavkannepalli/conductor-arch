@@ -177,3 +177,106 @@ jobs:
             dist/*.rpm
             dist/*.AppImage
             dist/SHA256SUMS
+
+  build-windows-release:
+    name: Build Windows release
+    runs-on: windows-2025
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    env:
+      CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: C:\msys64\ucrt64\bin\gcc.exe
+      CC_x86_64_pc_windows_gnu: C:\msys64\ucrt64\bin\gcc.exe
+      AR_x86_64_pc_windows_gnu: C:\msys64\ucrt64\bin\ar.exe
+      PKG_CONFIG: C:\msys64\ucrt64\bin\pkg-config.exe
+      PKG_CONFIG_ALLOW_CROSS: "1"
+      PKG_CONFIG_PATH: C:\msys64\ucrt64\lib\pkgconfig
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install Windows GTK toolchain
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-gtk4
+            mingw-w64-ucrt-x86_64-libadwaita
+
+      - name: Add UCRT64 runtime to PATH
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_PATH -Value 'C:\msys64\ucrt64\bin'
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          targets: x86_64-pc-windows-gnu
+
+      - name: Derive version
+        id: version
+        shell: pwsh
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
+        run: |
+          if ('${{ github.event_name }}' -eq 'workflow_dispatch') {
+            $version = $env:VERSION_INPUT
+          } else {
+            $version = '${{ github.ref_name }}' -replace '^v', ''
+          }
+          if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$') {
+            throw "version must look like MAJOR.MINOR.PATCH, got: $version"
+          }
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Build Windows binaries
+        run: cargo build --workspace --release --target x86_64-pc-windows-gnu --locked
+
+      - name: Smoke Windows CLI
+        run: .\target\x86_64-pc-windows-gnu\release\archductor.exe doctor
+
+      - name: Assemble portable Windows bundle
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $bundle = "dist\archductor-$env:VERSION-windows-x86_64"
+          New-Item -ItemType Directory -Force -Path $bundle | Out-Null
+          Copy-Item target\x86_64-pc-windows-gnu\release\archductor.exe $bundle
+          Copy-Item target\x86_64-pc-windows-gnu\release\archductor-gtk.exe $bundle
+          Copy-Item target\x86_64-pc-windows-gnu\release\archcar.exe $bundle
+          Copy-Item C:\msys64\ucrt64\bin\*.dll $bundle
+          New-Item -ItemType Directory -Force -Path "$bundle\lib" | Out-Null
+          Copy-Item C:\msys64\ucrt64\lib\gdk-pixbuf-2.0 "$bundle\lib" -Recurse
+          if (Test-Path C:\msys64\ucrt64\lib\gtk-4.0) {
+            Copy-Item C:\msys64\ucrt64\lib\gtk-4.0 "$bundle\lib" -Recurse
+          }
+          New-Item -ItemType Directory -Force -Path "$bundle\share" | Out-Null
+          Copy-Item C:\msys64\ucrt64\share\glib-2.0 "$bundle\share" -Recurse
+          Copy-Item C:\msys64\ucrt64\share\icons "$bundle\share" -Recurse
+          Copy-Item C:\msys64\ucrt64\share\mime "$bundle\share" -Recurse
+          Compress-Archive -Path "$bundle\*" -DestinationPath "$bundle.zip"
+          $archive = Get-Item "$bundle.zip"
+          $hash = (Get-FileHash -Algorithm SHA256 $archive.FullName).Hash.ToLowerInvariant()
+          "$hash  $($archive.Name)" | Set-Content dist\SHA256SUMS-windows.txt
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: archductor-${{ github.ref_name }}-windows
+          path: |
+            dist/*.zip
+            dist/SHA256SUMS-windows.txt
+          if-no-files-found: error
+
+      - name: Attach Windows artifact to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
+        with:
+          files: |
+            dist/*.zip
+            dist/SHA256SUMS-windows.txt

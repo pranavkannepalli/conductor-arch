@@ -9,7 +9,8 @@ pull request, archive the workspace, then start the next task without leaving
 the app.
 
 Inspired by [Conductor](https://conductor.build). This project targets Linux
-desktops with GTK4/libadwaita.
+desktops and native Windows with GTK4/libadwaita. Linux is the primary validated
+target; Windows is currently a preview target.
 
 ## Product Structure
 
@@ -157,6 +158,17 @@ Optional install:
 sudo install -Dm755 target/release/archductor /usr/local/bin/archductor
 sudo install -Dm755 target/release/archductor-gtk /usr/local/bin/archductor-gtk
 ```
+
+### Windows Preview
+
+Tagged releases build `archductor-<version>-windows-x86_64.zip`. Extract the
+whole directory so the GTK DLLs and data directories remain beside
+`archductor-gtk.exe`, then launch that executable. Install Git and GitHub CLI
+with `winget install --id Git.Git --id GitHub.cli`; agent CLIs remain optional.
+
+For source builds, install the MSYS2 UCRT64 GCC, pkgconf, GTK4, and libadwaita
+packages, then build the `x86_64-pc-windows-gnu` target. The CI workflow is the
+canonical build recipe.
 
 ## Requirements
 
@@ -492,17 +504,15 @@ surfaces that consume them.
 
 ## Platform Stance
 
-Linux is the primary target. The code should keep a portable core where
-practical, but product decisions should optimize for Linux desktop quality
-first.
-
-- Linux: primary supported platform.
-- WSL: likely the best first Windows-adjacent target after Linux.
+- Linux: primary supported platform. CI covers glibc, musl, Debian, Fedora,
+  Arch, openSUSE, and Alpine families.
+- Native Windows: preview target with native path, shell, process, IPC, GTK
+  compile, and portable ZIP support. Real package/runtime validation is still
+  required before a stable support claim.
+- WSL: supported as a Linux environment, but it is not a substitute for the
+  native Windows port.
 - macOS: technically possible, but lower priority because the original
   the upstream Conductor app already serves macOS and GTK packaging is less native there.
-- Native Windows: possible later, but process groups, PTYs, paths, shells,
-  signals, and packaging need deliberate platform abstraction before it is a
-  realistic support target.
 
 ## CLI Reference
 
@@ -573,6 +583,9 @@ archductor checkpoint restore <workspace> <id>
 ~/.cache/archductor/
 ~/archductor/workspaces/<repo>/<workspace>/
 ```
+
+On Windows, configuration is stored under `%APPDATA%\Archductor`; database,
+state, logs, and cache data are stored under `%LOCALAPPDATA%\Archductor`.
 
 ## Documentation
 

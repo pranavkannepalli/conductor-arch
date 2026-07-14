@@ -13,6 +13,7 @@ pub mod local_chat;
 pub mod mcp;
 pub mod model_registry;
 pub mod paths;
+pub mod platform;
 pub mod provider_adapters;
 pub mod provider_events;
 pub mod provider_projection;

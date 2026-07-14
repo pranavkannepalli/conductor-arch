@@ -1129,7 +1129,7 @@ fn open_external_url(url: &str) {
     if url.trim().is_empty() {
         return;
     }
-    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    let _ = gtk::gio::AppInfo::launch_default_for_uri(url, None::<&gtk::gio::AppLaunchContext>);
 }
 
 fn connect_ws_tab_surface_clicks(tab: &GBox, select: Rc<dyn Fn()>) {
@@ -2826,7 +2826,12 @@ fn runtime_panel(
 
     let path = ws.path.clone();
     folder_btn.connect_clicked(move |_| {
-        let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
+        if let Ok(uri) = gtk::glib::filename_to_uri(&path, None) {
+            let _ = gtk::gio::AppInfo::launch_default_for_uri(
+                &uri,
+                None::<&gtk::gio::AppLaunchContext>,
+            );
+        }
     });
 
     let launch_row = make_action_row();

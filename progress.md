@@ -1,6 +1,6 @@
 # Progress
 
-Current as of 2026-07-13.
+Current as of 2026-07-14.
 
 ## Current State
 
@@ -56,7 +56,12 @@ paths and known rough edges.
 - GitHub-backed flows use local `gh` auth. Linear-backed workspace creation
   uses `LINEAR_API_KEY`.
 - Release packaging scaffolding for tarball, AppImage, `.deb`, `.rpm`, AUR, and
-  experimental Flatpak.
+  experimental Flatpak, plus a portable native Windows ZIP.
+- Cross-platform process/path/shell boundaries for Windows, including AppData
+  storage, `cmd.exe` scripts, Windows Terminal launch, `taskkill` process-tree
+  shutdown, and loopback archcar IPC.
+- CI compile gates for native Windows, glibc Linux, musl Linux, and GTK builds
+  on Debian, Fedora, Arch, openSUSE, and Alpine families.
 
 ### GTK App
 
@@ -104,9 +109,13 @@ paths and known rough edges.
   broad public launch.
 - Live GitHub validation requires authenticated `gh`; live Linear validation
   requires `LINEAR_API_KEY`.
-- Linux is the only release target. WSL can be considered before native
-  Windows. macOS is lower priority while upstream Conductor covers that
-  platform.
+- Native Windows is a preview target. The workspace compiles there and the
+  release workflow assembles a portable ZIP, but real Windows install/launch,
+  GTK runtime, PTY, provider, upgrade, and checksum smoke remain required
+  before calling the package release-ready.
+- Linux remains the manually validated primary product target. CI covers GNU
+  and musl plus representative distro families; individual package channels
+  still require install/launch/upgrade validation.
 - Release packaging still needs full manual validation on target distros before
   public launch.
 

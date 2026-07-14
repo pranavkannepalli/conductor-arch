@@ -271,8 +271,7 @@ fn detect_default_branch(root_path: &Path, remote_name: &str) -> String {
 }
 
 fn default_workspace_parent(repo_name: &str) -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
+    crate::platform::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("archductor")
         .join("workspaces")

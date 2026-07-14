@@ -26,9 +26,7 @@ pub struct McpStatus {
 }
 
 pub fn workspace_mcp_status(workspace_path: &Path) -> McpStatus {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/root"));
+    let home = crate::platform::home_dir().unwrap_or_else(|| PathBuf::from("."));
     let settings = crate::settings::load_repository_settings(workspace_path).ok();
     let codex_provider = settings
         .as_ref()
@@ -113,11 +111,7 @@ fn is_claude_auth_present(provider: Option<&str>) -> bool {
 }
 
 fn command_exists(command: &str) -> bool {
-    std::process::Command::new("which")
-        .arg(command)
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+    crate::doctor::command_exists(command)
 }
 
 fn read_claude_mcp(path: &Path) -> Vec<McpServer> {

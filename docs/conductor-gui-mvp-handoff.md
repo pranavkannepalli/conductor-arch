@@ -5,7 +5,7 @@ notes that imply a backend-first or CLI-first product are stale.
 
 ## Product Target
 
-Archductor is a Linux desktop control plane for parallel coding agents. V1 must
+Archductor is a Linux and Windows desktop control plane for parallel coding agents. V1 must
 make the normal loop usable from GTK:
 
 1. Add or clone a project repository.
@@ -69,11 +69,11 @@ Relationships:
 - Runtime ownership must keep converging on archcar/local daemon APIs.
 - Codex unsafe approval/sandbox bypass needs explicit policy before broad
   public launch.
-- Manual Linux GUI validation remains required before public release.
+- Manual Linux and Windows GUI validation remains required before announcing
+  the corresponding public package.
 
 ## Non-Goals For V1
 
-- Native Windows app.
 - Remote-control/mobile app.
 - Archductor Cloud.
 - Full Conductor visual parity.

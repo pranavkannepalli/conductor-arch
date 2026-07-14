@@ -185,7 +185,13 @@ pub fn report_from_os_release(os_release: &str) -> DoctorReport {
 }
 
 pub fn report_from_host() -> DoctorReport {
+    #[cfg(windows)]
+    {
+        report_from_os_release("ID=windows")
+    }
+    #[cfg(not(windows))]
     let os_release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
+    #[cfg(not(windows))]
     report_from_os_release(&os_release)
 }
 
@@ -200,7 +206,9 @@ fn parse_os_release(input: &str) -> HashMap<String, String> {
 fn install_command(id: Option<&str>, like: &[String]) -> Option<&'static str> {
     let matches = |needle: &str| id == Some(needle) || like.iter().any(|item| item == needle);
 
-    if matches("ubuntu") || matches("debian") {
+    if matches("windows") {
+        Some("winget install --id Git.Git --id GitHub.cli")
+    } else if matches("ubuntu") || matches("debian") {
         Some("sudo apt update && sudo apt install git gh sqlite3 openssh-client")
     } else if matches("fedora") {
         Some("sudo dnf install git gh sqlite openssh-clients")
@@ -208,6 +216,14 @@ fn install_command(id: Option<&str>, like: &[String]) -> Option<&'static str> {
         Some("sudo pacman -S git github-cli sqlite openssh")
     } else if matches("opensuse") || matches("suse") {
         Some("sudo zypper install git gh sqlite3 openssh")
+    } else if matches("alpine") {
+        Some("sudo apk add git github-cli sqlite openssh-client")
+    } else if matches("gentoo") {
+        Some("sudo emerge --ask dev-vcs/git dev-util/github-cli dev-db/sqlite net-misc/openssh")
+    } else if matches("void") {
+        Some("sudo xbps-install -S git github-cli sqlite openssh")
+    } else if matches("nixos") {
+        Some("nix-shell -p git gh sqlite openssh")
     } else {
         None
     }
@@ -371,15 +387,39 @@ fn path_version_probe_succeeds(path: &Path) -> bool {
     }
 }
 
-fn command_exists(name: &str) -> bool {
+pub fn command_exists(name: &str) -> bool {
     std::env::var_os("PATH")
         .map(|paths| {
             std::env::split_paths(&paths).any(|path| {
-                let candidate = path.join(name);
-                is_executable(&candidate)
+                command_candidates(&path, name)
+                    .into_iter()
+                    .any(|candidate| is_executable(&candidate))
             })
         })
         .unwrap_or(false)
+}
+
+fn command_candidates(path: &Path, name: &str) -> Vec<std::path::PathBuf> {
+    #[cfg(not(windows))]
+    {
+        vec![path.join(name)]
+    }
+    #[cfg(windows)]
+    {
+        let mut candidates = vec![path.join(name)];
+        if Path::new(name).extension().is_none() {
+            let extensions = std::env::var_os("PATHEXT")
+                .and_then(|value| value.into_string().ok())
+                .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".to_owned());
+            candidates.extend(
+                extensions
+                    .split(';')
+                    .filter(|extension| !extension.is_empty())
+                    .map(|extension| path.join(format!("{name}{extension}"))),
+            );
+        }
+        candidates
+    }
 }
 
 #[cfg(unix)]
@@ -427,6 +467,24 @@ ID_LIKE=arch
         assert_eq!(
             report.install_command,
             Some("sudo pacman -S git github-cli sqlite openssh")
+        );
+    }
+
+    #[test]
+    fn selects_apk_guidance_for_alpine() {
+        let report = report_from_os_release("ID=alpine");
+        assert_eq!(
+            report.install_command,
+            Some("sudo apk add git github-cli sqlite openssh-client")
+        );
+    }
+
+    #[test]
+    fn selects_winget_guidance_for_windows() {
+        let report = report_from_os_release("ID=windows");
+        assert_eq!(
+            report.install_command,
+            Some("winget install --id Git.Git --id GitHub.cli")
         );
     }
 

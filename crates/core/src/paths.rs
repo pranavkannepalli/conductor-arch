@@ -13,13 +13,28 @@ pub struct AppPaths {
 
 impl AppPaths {
     pub fn from_env() -> Self {
-        let home = env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."));
+        let home = crate::platform::home_dir().unwrap_or_else(|| PathBuf::from("."));
 
+        #[cfg(windows)]
+        let (config_dir, data_dir, state_dir, cache_dir) = {
+            let roaming = env_path("APPDATA", home.join("AppData/Roaming"));
+            let local = env_path("LOCALAPPDATA", home.join("AppData/Local"));
+            let data = local.join("Archductor");
+            (
+                roaming.join("Archductor"),
+                data.clone(),
+                data.join("state"),
+                data.join("cache"),
+            )
+        };
+
+        #[cfg(not(windows))]
         let config_dir = env_path("XDG_CONFIG_HOME", home.join(".config")).join("archductor");
+        #[cfg(not(windows))]
         let data_dir = env_path("XDG_DATA_HOME", home.join(".local/share")).join("archductor");
+        #[cfg(not(windows))]
         let state_dir = env_path("XDG_STATE_HOME", home.join(".local/state")).join("archductor");
+        #[cfg(not(windows))]
         let cache_dir = env_path("XDG_CACHE_HOME", home.join(".cache")).join("archductor");
 
         Self {
@@ -32,8 +47,12 @@ impl AppPaths {
         }
     }
 
-    pub fn archcar_socket_path(&self) -> PathBuf {
-        self.state_dir.join("archcar.sock")
+    pub fn archcar_endpoint_path(&self) -> PathBuf {
+        #[cfg(windows)]
+        let name = "archcar.endpoint";
+        #[cfg(not(windows))]
+        let name = "archcar.sock";
+        self.state_dir.join(name)
     }
 }
 

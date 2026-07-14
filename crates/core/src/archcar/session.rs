@@ -2248,23 +2248,19 @@ fn write_provider_json_line<W: Write>(writer: &mut W, value: &serde_json::Value)
 }
 
 fn terminal_process_alive(process_id: u32) -> bool {
-    std::process::Command::new("kill")
-        .arg("-0")
-        .arg(process_id.to_string())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+    crate::platform::process_alive(process_id)
 }
 
 fn terminate_process(process_id: u32) {
+    #[cfg(unix)]
     let _ = std::process::Command::new("kill")
         .arg("-TERM")
         .arg(process_id.to_string())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
+    #[cfg(windows)]
+    let _ = crate::platform::terminate_process_tree(process_id, true);
 }
 
 fn terminal_device_path_for_pid(process_id: u32) -> Result<PathBuf> {

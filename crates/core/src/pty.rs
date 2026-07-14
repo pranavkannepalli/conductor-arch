@@ -20,10 +20,7 @@ pub struct PtySession {
 
 impl PtySession {
     pub fn spawn_shell(cwd: &Path, env: Vec<(String, OsString)>) -> Result<Self> {
-        let shell = std::env::var_os("SHELL")
-            .filter(|shell| !shell.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/bin/sh"));
+        let shell = crate::platform::shell_program();
         Self::spawn(shell, Vec::new(), cwd, env, 24, 80)
     }
 
