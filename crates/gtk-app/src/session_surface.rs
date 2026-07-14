@@ -76,6 +76,7 @@ const CHAT_SCROLL_BOTTOM_EPSILON: f64 = 48.0;
 const CHAT_SCROLL_RESTORE_LAYOUT_PASSES: u8 = 4;
 const CHAT_SCROLL_RESTORE_LAYOUT_PASS_MS: u64 = 16;
 const CHAT_REFRESH_WAKE_DELAY_MS: u64 = 33;
+const INLINE_EVENT_BODY_MAX_HEIGHT: i32 = 220;
 static NEXT_CHAT_WAKE_ID: AtomicUsize = AtomicUsize::new(1);
 
 thread_local! {
@@ -4585,12 +4586,16 @@ fn inline_event_widget(event: &CodexInlineEvent) -> Widget {
     body.set_wrap(true);
     body.set_xalign(0.0);
     body.set_margin_top(2);
+    let body_scroll = ScrolledWindow::new();
+    body_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+    body_scroll.set_max_content_height(INLINE_EVENT_BODY_MAX_HEIGHT);
+    body_scroll.set_child(Some(&body));
     let body_revealer = Revealer::new();
     body_revealer.set_transition_type(RevealerTransitionType::None);
     body_revealer.set_transition_duration(0);
     body_revealer.set_reveal_child(expand_by_default);
     body_revealer.set_visible(expand_by_default);
-    body_revealer.set_child(Some(&body));
+    body_revealer.set_child(Some(&body_scroll));
     root.append(&body_revealer);
     toggle.set_active(expand_by_default);
 
@@ -11148,6 +11153,23 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
         assert!(source.contains("let root = GBox::new(Orientation::Vertical, 2);"));
         assert!(source.contains("toggle.set_margin_bottom(1);"));
         assert!(source.contains("body.set_margin_top(2);"));
+    }
+
+    #[test]
+    fn inline_tool_event_body_is_bounded_and_scrollable() {
+        let source = include_str!("session_surface.rs")
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("let body_scroll = ScrolledWindow::new();"));
+        assert!(source.contains(
+            "body_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);"
+        ));
+        assert!(
+            source.contains("body_scroll.set_max_content_height(INLINE_EVENT_BODY_MAX_HEIGHT);")
+        );
+        assert!(source.contains("body_revealer.set_child(Some(&body_scroll));"));
     }
 
     #[test]
