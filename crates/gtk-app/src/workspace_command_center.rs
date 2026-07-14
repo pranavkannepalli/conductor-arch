@@ -1683,11 +1683,11 @@ fn file_tree_icon_name(is_dir: bool, path: &str) -> &'static str {
 }
 
 fn file_tree_indent_margin_start(depth: usize) -> i32 {
-    (depth as i32) * 8
+    (depth as i32) * 12
 }
 
 fn file_tree_row_spacing() -> i32 {
-    2
+    4
 }
 
 fn ws_run_console(
@@ -7399,11 +7399,11 @@ mod tests {
     }
 
     #[test]
-    fn browse_file_tree_uses_tight_filesystem_indentation() {
+    fn browse_file_tree_uses_balanced_filesystem_spacing() {
         assert_eq!(file_tree_indent_margin_start(0), 0);
-        assert_eq!(file_tree_indent_margin_start(1), 8);
-        assert_eq!(file_tree_indent_margin_start(3), 24);
-        assert_eq!(file_tree_row_spacing(), 2);
+        assert_eq!(file_tree_indent_margin_start(1), 12);
+        assert_eq!(file_tree_indent_margin_start(3), 36);
+        assert_eq!(file_tree_row_spacing(), 4);
     }
 
     #[test]

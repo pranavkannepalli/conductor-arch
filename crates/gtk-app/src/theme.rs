@@ -1731,7 +1731,7 @@ separator {
     min-height: 0;
 }
 .ws-dir-row {
-    padding: 0;
+    padding: 1px 3px;
 }
 .ws-folder-icon {
     color: #c39b50;
@@ -1745,7 +1745,7 @@ separator {
     border: none;
     background: transparent;
     color: #777777;
-    font-size: 10px;
+    font-size: 12px;
 }
 .ws-folder-name {
     font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
@@ -1754,7 +1754,7 @@ separator {
     color: #b0b0b0;
 }
 .ws-file-row {
-    padding: 0;
+    padding: 1px 3px;
 }
 .ws-file-icon {
     color: #8091a7;
