@@ -2063,54 +2063,36 @@ popover.context-menu-popover arrow {
     padding: 0;
 }
 .chat-inline-event-chip {
-    background-color: #171717;
-    border: 1px solid #343434;
-    border-radius: 5px;
+    background-color: transparent;
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
     color: #e7e7e7;
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
-    font-size: 10px;
-    font-weight: 600;
-    min-height: 14px;
+    font-family: "Mona Sans", "Inter", "Segoe UI", system-ui, sans-serif;
+    font-size: 13px;
+    font-weight: 500;
+    min-height: 20px;
     min-width: 0;
-    padding: 0 2px;
+    padding: 1px 0;
 }
 button.chat-inline-event-chip {
+    background-color: transparent;
+    border: none;
+    box-shadow: none;
     margin: 0;
-    min-height: 14px;
+    min-height: 20px;
     min-width: 0;
-    padding: 0 2px;
+    padding: 1px 0;
+}
+button.chat-inline-event-chip:hover,
+button.chat-inline-event-chip:checked {
+    background-color: transparent;
+    box-shadow: none;
 }
 .chat-inline-event-chip label {
     margin: 0;
     min-height: 0;
     padding: 0;
-}
-.chat-inline-event-tool .chat-inline-event-chip {
-    border-color: #2dd4bf;
-}
-.chat-inline-event-command .chat-inline-event-chip {
-    border-color: #60a5fa;
-}
-.chat-inline-event-file .chat-inline-event-chip {
-    border-color: #4ade80;
-}
-.chat-inline-event-diff .chat-inline-event-chip {
-    border-color: #e879f9;
-}
-.chat-inline-event-skill .chat-inline-event-chip {
-    border-color: #facc15;
-}
-.chat-inline-event-plugin .chat-inline-event-chip {
-    border-color: #a78bfa;
-}
-.chat-inline-event-subagent .chat-inline-event-chip {
-    border-color: #22d3ee;
-}
-.chat-inline-event-nested .chat-inline-event-chip {
-    border-color: #c084fc;
-}
-.chat-inline-event-background .chat-inline-event-chip {
-    border-color: #94a3b8;
 }
 .chat-inline-event-meta {
     color: #8f8f8f;
@@ -2645,12 +2627,10 @@ textview:focus,
 }
 
 .chat-inline-event-loading .chat-inline-event-chip {
-    border-color: #53617a;
     color: #c5d5f4;
 }
 
 .chat-inline-event-failed .chat-inline-event-chip {
-    border-color: #7f3838;
     color: #f0a8a8;
 }
 
@@ -2747,17 +2727,15 @@ mod tests {
         assert!(css.contains("transition-duration: 160ms"));
         assert!(css.contains(".chat-inline-event-chip"));
         let chip_block = selector_block(css, ".chat-inline-event-chip");
-        assert!(chip_block.contains("border-radius: 5px;"));
-        assert!(chip_block.contains("font-size: 10px;"));
-        assert!(chip_block.contains("min-height: 14px;"));
-        assert!(chip_block.contains("padding: 0 2px;"));
+        assert!(chip_block.contains("background-color: transparent;"));
+        assert!(chip_block.contains("border: none;"));
+        assert!(chip_block.contains("font-size: 13px;"));
+        assert!(chip_block.contains("min-height: 20px;"));
+        assert!(chip_block.contains("padding: 1px 0;"));
         assert!(chip_block.contains("min-width: 0;"));
         assert!(css.contains("button.chat-inline-event-chip"));
         assert!(css.contains(".chat-inline-event-chip label"));
         assert!(css.contains("margin: 0;"));
-        assert!(css.contains(".chat-inline-event-command .chat-inline-event-chip"));
-        assert!(css.contains(".chat-inline-event-skill .chat-inline-event-chip"));
-        assert!(css.contains(".chat-inline-event-subagent .chat-inline-event-chip"));
         assert!(css.contains(".chat-reasoning-text"));
         assert!(css.contains(".chat-user-row {\n    margin-top: 12px;\n    margin-bottom: 10px;"));
         assert!(css.contains(".chat-agent-text {\n    color: #c6c6c6;\n    line-height: 1.55;\n    margin-bottom: 0;"));

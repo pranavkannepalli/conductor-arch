@@ -4174,25 +4174,26 @@ fn inline_event_status_css_class(status: CodexInlineEventStatus) -> Option<&'sta
     }
 }
 
-fn inline_event_chip_label(event: &CodexInlineEvent, expanded: bool) -> String {
-    let marker = if expanded { '-' } else { '+' };
-    format!("{marker} {}", inline_event_chip_name(event))
+fn inline_event_chip_label(event: &CodexInlineEvent, _expanded: bool) -> String {
+    inline_event_chip_name(event)
 }
 
-fn inline_event_chip_markup(event: &CodexInlineEvent, expanded: bool) -> String {
-    let marker = if expanded { "-" } else { "+" };
+fn inline_event_chip_markup(event: &CodexInlineEvent, _expanded: bool) -> String {
     let name = inline_event_chip_name(event);
     let (verb, rest) = inline_event_chip_name_parts(&name);
     let accent = inline_event_type_color(event);
-    let marker = pango_escape_text(marker);
+    let icon = pango_escape_text(inline_event_type_icon(event));
     let verb = pango_escape_text(verb);
     let rest = pango_escape_text(rest);
+    let icon_markup = format!(
+        "<span font_family=\"Commit Mono\" foreground=\"{accent}\" weight=\"700\">{icon}</span>"
+    );
 
     if rest.is_empty() {
-        format!("<span foreground=\"{accent}\" weight=\"700\">{marker} {verb}</span>")
+        format!("{icon_markup} <span foreground=\"{accent}\" weight=\"700\">{verb}</span>")
     } else {
         format!(
-            "<span foreground=\"{accent}\" weight=\"700\">{marker} {verb}</span> <span foreground=\"#e7e7e7\">{rest}</span>"
+            "{icon_markup} <span foreground=\"{accent}\" weight=\"700\">{verb}</span> <span foreground=\"#e7e7e7\">{rest}</span>"
         )
     }
 }
@@ -4229,6 +4230,20 @@ fn inline_event_type_color(event: &CodexInlineEvent) -> &'static str {
         "chat-inline-event-nested" => "#d8b4fe",
         "chat-inline-event-background" => "#cbd5e1",
         _ => "#a7f3d0",
+    }
+}
+
+fn inline_event_type_icon(event: &CodexInlineEvent) -> &'static str {
+    match inline_event_type_css_class(event) {
+        "chat-inline-event-command" => "⌘",
+        "chat-inline-event-file" => "▤",
+        "chat-inline-event-diff" => "±",
+        "chat-inline-event-skill" => "◆",
+        "chat-inline-event-plugin" => "◈",
+        "chat-inline-event-subagent" => "⎇",
+        "chat-inline-event-nested" => "↳",
+        "chat-inline-event-background" => "↻",
+        _ => "◇",
     }
 }
 
@@ -9262,7 +9277,7 @@ fix it
     }
 
     #[test]
-    fn codex_inline_event_chip_label_uses_plus_minus_and_action_name() {
+    fn codex_inline_event_chip_label_uses_action_name() {
         let file_event = CodexInlineEvent {
             kind: CodexInlineEventKind::Tool,
             title: "Edited docs/superpowers/plans/2026-07-03-manual-skill-tool-calls.md".to_owned(),
@@ -9284,20 +9299,20 @@ fix it
 
         assert_eq!(
             inline_event_chip_label(&file_event, false),
-            "+ Edited docs/superpowers/plans/2026-07-03-manual-skill-tool-calls.md"
+            "Edited docs/superpowers/plans/2026-07-03-manual-skill-tool-calls.md"
         );
         assert_eq!(
             inline_event_chip_label(&file_event, true),
-            "- Edited docs/superpowers/plans/2026-07-03-manual-skill-tool-calls.md"
+            "Edited docs/superpowers/plans/2026-07-03-manual-skill-tool-calls.md"
         );
         assert_eq!(
             inline_event_chip_label(&command_event, false),
-            "+ cargo test -p archductor-core codex_tui"
+            "cargo test -p archductor-core codex_tui"
         );
     }
 
     #[test]
-    fn inline_event_chip_markup_colors_action_without_coloring_name() {
+    fn inline_event_chip_markup_uses_type_icon_and_action_text() {
         let command_event = CodexInlineEvent {
             kind: CodexInlineEventKind::Tool,
             title: "Ran cargo test".to_owned(),
@@ -9327,10 +9342,13 @@ fix it
             "chat-inline-event-skill"
         );
         assert!(command_markup.contains("foreground=\"#93c5fd\""));
-        assert!(command_markup.contains("+ Ran"));
+        assert!(command_markup.contains("font_family=\"Commit Mono\""));
+        assert!(command_markup.contains(">⌘</span>"));
+        assert!(command_markup.contains(">Ran</span>"));
         assert!(command_markup.contains("foreground=\"#e7e7e7\">cargo test"));
         assert!(skill_markup.contains("foreground=\"#fcd34d\""));
-        assert!(skill_markup.contains("+ Read"));
+        assert!(skill_markup.contains(">◆</span>"));
+        assert!(skill_markup.contains(">Read</span>"));
         assert!(skill_markup.contains("foreground=\"#e7e7e7\">superpowers:test-driven-development"));
     }
 
@@ -9360,7 +9378,7 @@ fix it
 
     #[test]
     fn inline_event_chip_label_short_names_do_not_request_one_char_width() {
-        let label = "+ Used MCP Loaded";
+        let label = "Used MCP Loaded";
 
         assert_eq!(
             inline_event_chip_label_width_chars(label),
@@ -9406,14 +9424,14 @@ fix it
         assert_eq!(tool.kind, CodexInlineEventKind::Tool);
         assert_eq!(tool.title, "Read result.txt");
         assert_eq!(tool.path.as_deref(), Some(tool_path.as_path()));
-        assert_eq!(inline_event_chip_label(&tool, false), "+ Read result.txt");
+        assert_eq!(inline_event_chip_label(&tool, false), "Read result.txt");
         assert!(inline_event_body_text(&tool).contains("tool file contents"));
         assert_eq!(skill.kind, CodexInlineEventKind::Skill);
         assert_eq!(skill.title, "Read SKILL.md for graphify");
         assert_eq!(skill.path.as_deref(), Some(skill_path.as_path()));
         assert_eq!(
             inline_event_chip_label(&skill, false),
-            "+ Read SKILL.md for graphify"
+            "Read SKILL.md for graphify"
         );
         assert!(inline_event_body_text(&skill).contains("name: graphify"));
     }
@@ -9437,7 +9455,7 @@ fix it
         assert_eq!(read.path.as_deref(), Some(source_path.as_path()));
         assert_eq!(
             inline_event_chip_label(&read, false),
-            "+ Read session_surface.rs"
+            "Read session_surface.rs"
         );
     }
 
@@ -9463,7 +9481,7 @@ fix it
         assert_eq!(read.path.as_deref(), Some(source_path.as_path()));
         assert_eq!(
             inline_event_chip_label(&read, false),
-            "+ Read session_surface.rs"
+            "Read session_surface.rs"
         );
     }
 
@@ -9488,7 +9506,7 @@ fix it
         assert_eq!(read.path.as_deref(), Some(skill_path.as_path()));
         assert_eq!(
             inline_event_chip_label(&read, false),
-            "+ Read SKILL.md for graphify"
+            "Read SKILL.md for graphify"
         );
     }
 
@@ -9523,7 +9541,7 @@ fix it
         assert_eq!(read.path.as_deref(), Some(skill_path.as_path()));
         assert_eq!(
             inline_event_chip_label(&read, false),
-            "+ Read SKILL.md for verification-before-completion"
+            "Read SKILL.md for verification-before-completion"
         );
     }
 
@@ -10889,7 +10907,7 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
         assert_eq!(inline.title, "Used get_wiki_page");
         assert_eq!(
             inline_event_chip_label(&inline, false),
-            "+ Used get_wiki_page"
+            "Used get_wiki_page"
         );
         let body = inline_event_body_text(&inline);
         assert!(body.contains("Project Context"));
@@ -10984,25 +11002,25 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
                 ProviderEventKind::CommandProcess,
                 None,
                 serde_json::json!({"title": "cargo test", "body": "ok"}),
-                "+ Ran cargo test",
+                "Ran cargo test",
             ),
             (
                 ProviderEventKind::FileSystem,
                 Some("read"),
                 serde_json::json!({"title": "README.md", "body": "# Archductor"}),
-                "+ Read README.md",
+                "Read README.md",
             ),
             (
                 ProviderEventKind::FileSystem,
                 Some("read"),
                 serde_json::json!({"title": "/tmp/archductor/session_surface.rs", "body": "fn main() {}"}),
-                "+ Read session_surface.rs",
+                "Read session_surface.rs",
             ),
             (
                 ProviderEventKind::SkillPluginHook,
                 None,
                 serde_json::json!({"title": "skill-creator", "body": "loaded"}),
-                "+ Read skill-creator",
+                "Read skill-creator",
             ),
         ];
 
@@ -11037,7 +11055,7 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
         assert_eq!(inline.subtitle.as_deref(), Some("File preview"));
         assert_eq!(
             inline_event_chip_label(&inline, false),
-            "+ Read session_surface.rs"
+            "Read session_surface.rs"
         );
     }
 
@@ -11060,7 +11078,7 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
         assert_eq!(inline.subtitle.as_deref(), Some("File preview"));
         assert_eq!(
             inline_event_chip_label(&inline, false),
-            "+ Read session_surface.rs"
+            "Read session_surface.rs"
         );
     }
 
@@ -11096,7 +11114,7 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
         assert_eq!(inline.kind, CodexInlineEventKind::Tool);
         assert_eq!(inline.title, "Edited main.rs");
         assert_eq!(inline.subtitle.as_deref(), Some("+1 -1"));
-        assert_eq!(inline_event_chip_label(&inline, false), "+ Edited main.rs");
+        assert_eq!(inline_event_chip_label(&inline, false), "Edited main.rs");
         assert!(inline_event_body_text(&inline).contains("-old"));
         assert!(inline_event_body_text(&inline).contains("+new"));
     }
@@ -11118,10 +11136,7 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
         assert_eq!(inline.kind, CodexInlineEventKind::Tool);
         assert_eq!(inline.title, "Ran Review agent");
         assert_eq!(inline.subtitle.as_deref(), Some("Subagent"));
-        assert_eq!(
-            inline_event_chip_label(&inline, false),
-            "+ Ran Review agent"
-        );
+        assert_eq!(inline_event_chip_label(&inline, false), "Ran Review agent");
         assert_eq!(inline_event_body_text(&inline), "Found 2 issues");
     }
 
