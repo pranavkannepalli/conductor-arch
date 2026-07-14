@@ -2103,18 +2103,18 @@ popover.context-menu-popover arrow {
     font-family: "Mona Sans", "Inter", "Segoe UI", system-ui, sans-serif;
     font-size: 13px;
     font-weight: 500;
-    min-height: 20px;
+    min-height: 22px;
     min-width: 0;
-    padding: 1px 0;
+    padding: 2px 0;
 }
 button.chat-inline-event-chip {
     background-color: transparent;
     border: none;
     box-shadow: none;
     margin: 0;
-    min-height: 20px;
+    min-height: 22px;
     min-width: 0;
-    padding: 1px 0;
+    padding: 2px 0;
 }
 button.chat-inline-event-chip:hover,
 button.chat-inline-event-chip:checked {
@@ -2762,8 +2762,8 @@ mod tests {
         assert!(chip_block.contains("background-color: transparent;"));
         assert!(chip_block.contains("border: none;"));
         assert!(chip_block.contains("font-size: 13px;"));
-        assert!(chip_block.contains("min-height: 20px;"));
-        assert!(chip_block.contains("padding: 1px 0;"));
+        assert!(chip_block.contains("min-height: 22px;"));
+        assert!(chip_block.contains("padding: 2px 0;"));
         assert!(chip_block.contains("min-width: 0;"));
         assert!(css.contains("button.chat-inline-event-chip"));
         assert!(css.contains(".chat-inline-event-chip label"));

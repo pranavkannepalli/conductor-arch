@@ -4539,7 +4539,7 @@ fn extract_local_path(line: &str) -> Option<PathBuf> {
 }
 
 fn inline_events_widget(events: &[CodexInlineEvent]) -> Widget {
-    let group = GBox::new(Orientation::Vertical, 0);
+    let group = GBox::new(Orientation::Vertical, 3);
     group.set_hexpand(true);
     group.set_margin_top(0);
     group.set_margin_bottom(0);
@@ -4550,7 +4550,7 @@ fn inline_events_widget(events: &[CodexInlineEvent]) -> Widget {
 }
 
 fn inline_event_widget(event: &CodexInlineEvent) -> Widget {
-    let root = GBox::new(Orientation::Vertical, 0);
+    let root = GBox::new(Orientation::Vertical, 2);
     root.add_css_class("chat-inline-event");
     root.add_css_class(inline_event_type_css_class(event));
     if let Some(class) = inline_event_status_css_class(event.status) {
@@ -4565,7 +4565,7 @@ fn inline_event_widget(event: &CodexInlineEvent) -> Widget {
     toggle.add_css_class("chat-inline-event-chip");
     toggle.set_halign(Align::Start);
     toggle.set_margin_top(0);
-    toggle.set_margin_bottom(0);
+    toggle.set_margin_bottom(1);
     toggle.set_tooltip_text(Some(&inline_event_tooltip(event)));
     let toggle_label = Label::new(None);
     toggle_label.set_markup(&inline_event_chip_markup(event, expand_by_default));
@@ -4584,7 +4584,7 @@ fn inline_event_widget(event: &CodexInlineEvent) -> Widget {
     body.set_selectable(true);
     body.set_wrap(true);
     body.set_xalign(0.0);
-    body.set_margin_top(0);
+    body.set_margin_top(2);
     let body_revealer = Revealer::new();
     body_revealer.set_transition_type(RevealerTransitionType::None);
     body_revealer.set_transition_duration(0);
@@ -11138,6 +11138,16 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
         assert_eq!(inline.subtitle.as_deref(), Some("Subagent"));
         assert_eq!(inline_event_chip_label(&inline, false), "Ran Review agent");
         assert_eq!(inline_event_body_text(&inline), "Found 2 issues");
+    }
+
+    #[test]
+    fn inline_tool_event_rows_keep_compact_breathing_room() {
+        let source = include_str!("session_surface.rs");
+
+        assert!(source.contains("let group = GBox::new(Orientation::Vertical, 3);"));
+        assert!(source.contains("let root = GBox::new(Orientation::Vertical, 2);"));
+        assert!(source.contains("toggle.set_margin_bottom(1);"));
+        assert!(source.contains("body.set_margin_top(2);"));
     }
 
     #[test]
