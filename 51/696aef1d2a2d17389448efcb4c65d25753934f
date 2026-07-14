@@ -1,0 +1,54 @@
+crates/core/src/archcar/server.rs
+  s_2eaee49d59303c::t_967e92a77073c8 254-282
+crates/core/src/archcar/protocol.rs
+  s_2eaee49d59303c::t_52e8461aab97c0 47-49,160-162
+  s_2eaee49d59303c::t_b6a7a1fad69be7 424-436
+  s_2eaee49d59303c::t_c91d221d60a4b7 423
+crates/gtk-app/src/archcar_async.rs
+  s_2eaee49d59303c::t_76447db4bfc1da 475-477
+  s_2eaee49d59303c::t_54a31b0eb076c3 40-42,196-197
+  s_2eaee49d59303c::t_9826faa052edbd 198,592-600
+  s_2eaee49d59303c::t_7cf548206db533 199,591
+crates/gtk-app/src/session_surface.rs
+  s_2eaee49d59303c::t_6e8f5edf4fc3f9 8318,8322,9546-9547,9550-9575
+  s_2eaee49d59303c::t_9837ac5c147fca 2327-2370,2388-2389,2428,2434-2435,2484-2488
+  s_2eaee49d59303c::t_2c1967bf3fb44a 2506,2539
+  s_2eaee49d59303c::t_4485f49c334926 2295-2298,2310-2313,2315-2322
+  s_2eaee49d59303c::t_76447db4bfc1da 8717-8722,9548-9549
+  s_2eaee49d59303c::t_6a1a683e9ff8a7 2323,8707-8716,8723-8743
+  s_2eaee49d59303c::t_e6846f33bf3b2e 6133-6137,6200-6220,6224-6228,6231-6235,8320,8323
+  s_2eaee49d59303c::t_38f4c70a6af4d2 8119-8122,8304-8316
+  s_2eaee49d59303c::t_6b7804500100a7 2324-2326,6132,8317,8319,8321,8324
+crates/core/src/archcar/session.rs
+  s_2eaee49d59303c::t_e1bb2265b125d0 2091-2111,2239-2242
+  s_2eaee49d59303c::t_cbd5e3cedeefdc 23-27,55
+  s_2eaee49d59303c::t_f4ea82472c17c5 1553-1554,1630-1632,1634,1747-1760,1762-1786,1932
+  s_2eaee49d59303c::t_76447db4bfc1da 1761
+  s_2eaee49d59303c::t_4f6b4a851179fa 1681-1688
+  s_2eaee49d59303c::t_3a121bc6613179 1349
+  s_2eaee49d59303c::t_290a2877b7a399 1697,2090
+crates/core/src/provider_adapters/codex_app_server.rs
+  s_2eaee49d59303c::t_cdacb65ce5c512 369,385-388
+  s_2eaee49d59303c::t_eb6ca05de04801 418-419
+  s_2eaee49d59303c::t_9e0ee88f65edd5 409-417,420-438,1944
+  s_2eaee49d59303c::t_fadea183e0aaa5 1945-1953,1955-1963
+  s_2eaee49d59303c::t_1ee2b4bdde182c 1929,1943
+  s_2eaee49d59303c::t_3e12e3602ee710 1954,1964
+  s_2eaee49d59303c::t_494600b7ad52c7 389
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.13",
+  "base_commit_sha": "51696aef1d2a2d17389448efcb4c65d25753934f",
+  "prompts": {},
+  "sessions": {
+    "s_2eaee49d59303c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5f93-19d2-7930-9984-77958e3a29db",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
