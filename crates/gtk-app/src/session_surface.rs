@@ -801,36 +801,37 @@ pub fn agent_session_panel(
                 queue_status.set_text("");
                 queue_status.set_visible(false);
             }
-            let ready = if *selected_harness.borrow() == SessionKind::Codex {
-                composer_ready_for_codex_thread(
-                    thread_id,
-                    &record_state.borrow(),
-                    archcar_ready_cache.as_ref(),
-                    codex_startup_states.as_ref(),
-                )
+            let codex_thread_ready = if *selected_harness.borrow() == SessionKind::Codex {
+                thread_id.is_none_or(|thread_id| {
+                    codex_thread_ready_for_ui(
+                        thread_id,
+                        &record_state.borrow(),
+                        archcar_ready_cache.as_ref(),
+                        codex_startup_states.borrow().get(&thread_id),
+                    )
+                })
             } else {
                 true
             };
-            if !ready && !has_active_generation {
-                placeholder.set_text("Codex is starting...");
-                placeholder.set_visible(true);
-                set_composer_send_button_action(&send_btn, ComposerAction::Disabled);
-                send_btn.remove_css_class("chat-send-btn-active");
+            let codex_waiting_for_startup = if *selected_harness.borrow() == SessionKind::Codex {
+                !codex_thread_ready && !has_active_generation
             } else {
-                placeholder.set_text("Ask to make changes, @mention files, or run /commands");
-                placeholder.set_visible(!has_text);
-                let action = composer_action_for_state(
-                    has_text,
-                    has_active_generation,
-                    latest_status == Some(ProcessStatus::Stopped),
-                    queued_count,
-                );
-                set_composer_send_button_action(&send_btn, action);
-                if action != ComposerAction::Disabled {
-                    send_btn.add_css_class("chat-send-btn-active");
-                } else {
-                    send_btn.remove_css_class("chat-send-btn-active");
-                }
+                false
+            };
+            placeholder.set_text("Ask to make changes, @mention files, or run /commands");
+            placeholder.set_visible(!has_text);
+            let action = composer_action_for_startup_state(
+                has_text,
+                has_active_generation,
+                latest_status == Some(ProcessStatus::Stopped),
+                queued_count,
+                codex_waiting_for_startup,
+            );
+            set_composer_send_button_action(&send_btn, action);
+            if action != ComposerAction::Disabled {
+                send_btn.add_css_class("chat-send-btn-active");
+            } else {
+                send_btn.remove_css_class("chat-send-btn-active");
             }
             input_view.queue_draw();
         })
@@ -2270,6 +2271,8 @@ pub fn agent_session_panel(
         let selected_thread = selected_thread.clone();
         let selected_harness = selected_harness.clone();
         let record_state = record_state.clone();
+        let archcar_ready_cache = archcar_ready_cache.clone();
+        let codex_startup_states = codex_startup_states.clone();
         let queued_chat_inputs = queued_chat_inputs.clone();
         let working_threads = working_threads.clone();
         let refresh_view = refresh_view.clone();
@@ -2300,11 +2303,27 @@ pub fn agent_session_panel(
             let queued_count = thread_id
                 .map(|thread_id| queued_chat_inputs_count(&queued_chat_inputs, thread_id))
                 .unwrap_or_default();
-            match composer_action_for_state(
+            let codex_thread_ready = if *selected_harness.borrow() == SessionKind::Codex {
+                thread_id.is_none_or(|thread_id| {
+                    codex_thread_ready_for_ui(
+                        thread_id,
+                        &record_state.borrow(),
+                        archcar_ready_cache.as_ref(),
+                        codex_startup_states.borrow().get(&thread_id),
+                    )
+                })
+            } else {
+                true
+            };
+            let codex_waiting_for_startup = *selected_harness.borrow() == SessionKind::Codex
+                && !codex_thread_ready
+                && !has_active_generation;
+            match composer_action_for_startup_state(
                 has_text,
                 has_active_generation,
                 latest_status == Some(ProcessStatus::Stopped),
                 queued_count,
+                codex_waiting_for_startup,
             ) {
                 ComposerAction::Queue => {
                     let Some(thread_id) = thread_id else {
@@ -5966,6 +5985,31 @@ fn composer_action_for_state(
     }
 }
 
+fn composer_action_for_startup_state(
+    has_text: bool,
+    has_active_generation: bool,
+    was_interrupted: bool,
+    queued_count: usize,
+    waiting_for_startup: bool,
+) -> ComposerAction {
+    if waiting_for_startup {
+        if has_text {
+            ComposerAction::Queue
+        } else if queued_count > 0 {
+            ComposerAction::SendQueued
+        } else {
+            ComposerAction::Disabled
+        }
+    } else {
+        composer_action_for_state(
+            has_text,
+            has_active_generation,
+            was_interrupted,
+            queued_count,
+        )
+    }
+}
+
 fn set_composer_send_button_action(button: &Button, action: ComposerAction) {
     let (icon, tooltip, sensitive) = match action {
         ComposerAction::Disabled => ("send-symbolic", "Send message", false),
@@ -7386,17 +7430,16 @@ fn chat_status_banner_kind(
     working_elapsed: Option<Duration>,
     has_chat_rows: bool,
 ) -> ChatStatusBannerKind {
+    if codex_startup_state_has_banner(startup_state) {
+        return ChatStatusBannerKind::Startup;
+    }
     if has_chat_rows {
         return ChatStatusBannerKind::None;
     }
     if working_elapsed.is_some() {
         return ChatStatusBannerKind::Working;
     }
-    if codex_startup_state_has_banner(startup_state) {
-        ChatStatusBannerKind::Startup
-    } else {
-        ChatStatusBannerKind::None
-    }
+    ChatStatusBannerKind::None
 }
 
 fn codex_startup_state_has_banner(state: &CodexStartupState) -> bool {
@@ -8640,30 +8683,6 @@ fn set_codex_ready_state(
     update_composer_state();
 }
 
-fn composer_ready_for_input(has_live_codex_session: bool, codex_ready: bool) -> bool {
-    !has_live_codex_session || codex_ready
-}
-
-fn composer_ready_for_codex_thread(
-    selected_thread_id: Option<i64>,
-    records: &[ProcessRecord],
-    ready_cache: &RefCell<HashMap<i64, bool>>,
-    startup_states: &RefCell<HashMap<i64, CodexStartupState>>,
-) -> bool {
-    let Some(thread_id) = selected_thread_id else {
-        return true;
-    };
-    composer_ready_for_input(
-        thread_has_live_codex_session(records, thread_id),
-        codex_thread_ready_for_ui(
-            thread_id,
-            records,
-            ready_cache,
-            startup_states.borrow().get(&thread_id),
-        ),
-    )
-}
-
 fn session_history_bootstrap_markdown(events: &[SessionTranscriptEvent]) -> Option<String> {
     let history = events
         .iter()
@@ -9225,6 +9244,14 @@ fix it
         assert_eq!(
             composer_action_for_state(false, false, false, 0),
             ComposerAction::Disabled
+        );
+    }
+
+    #[test]
+    fn composer_queues_typed_input_while_codex_session_is_starting() {
+        assert_eq!(
+            composer_action_for_startup_state(true, false, false, 0, true),
+            ComposerAction::Queue
         );
     }
 
@@ -9945,6 +9972,20 @@ fix it
                 true
             ),
             ChatStatusBannerKind::None
+        );
+    }
+
+    #[test]
+    fn chat_status_banner_keeps_codex_starting_message_above_existing_rows() {
+        assert_eq!(
+            chat_status_banner_kind(
+                &CodexStartupState::Loading {
+                    message: "Starting Codex...".to_owned(),
+                },
+                None,
+                true,
+            ),
+            ChatStatusBannerKind::Startup
         );
     }
 
@@ -12108,35 +12149,29 @@ Schema confirms the app moved CRM around businesses.";
     }
 
     #[test]
-    fn composer_ready_for_selected_thread_ignores_other_thread_ready_session() {
+    fn codex_thread_readiness_ignores_other_thread_ready_session() {
         let mut selected = session_record(11, "codex", ProcessStatus::Running, None);
         selected.chat_thread_id = Some(7);
         let mut other = session_record(22, "codex", ProcessStatus::Running, None);
         other.chat_thread_id = Some(8);
+        let records = vec![selected, other];
         let ready_cache = RefCell::new(HashMap::from([(22, true)]));
-        let startup_states = RefCell::new(HashMap::<i64, CodexStartupState>::new());
 
-        let ready = composer_ready_for_codex_thread(
-            Some(7),
-            &[selected, other],
-            &ready_cache,
-            &startup_states,
-        );
-
-        assert!(!ready);
+        assert!(!codex_thread_ready_for_ui(7, &records, &ready_cache, None));
     }
 
     #[test]
-    fn composer_ready_for_selected_thread_uses_thread_ready_state_when_session_ids_drift() {
+    fn codex_thread_ready_state_uses_startup_state_when_session_ids_drift() {
         let mut selected = session_record(59, "codex", ProcessStatus::Running, None);
         selected.chat_thread_id = Some(7);
         let ready_cache = RefCell::new(HashMap::from([(61, true)]));
-        let startup_states = RefCell::new(HashMap::from([(7, CodexStartupState::Ready)]));
 
-        let ready =
-            composer_ready_for_codex_thread(Some(7), &[selected], &ready_cache, &startup_states);
-
-        assert!(ready);
+        assert!(codex_thread_ready_for_ui(
+            7,
+            &[selected],
+            &ready_cache,
+            Some(&CodexStartupState::Ready),
+        ));
     }
 
     #[test]
@@ -12309,13 +12344,6 @@ Schema confirms the app moved CRM around businesses.";
         assert_eq!(*selected.borrow(), Some(41));
         assert_eq!(threads.borrow().len(), 1);
         assert_eq!(threads.borrow()[0].provider, "codex");
-    }
-
-    #[test]
-    fn composer_stays_ready_when_no_live_codex_session_exists() {
-        assert!(composer_ready_for_input(false, false));
-        assert!(!composer_ready_for_input(true, false));
-        assert!(composer_ready_for_input(true, true));
     }
 
     #[test]
