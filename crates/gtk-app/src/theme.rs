@@ -2194,6 +2194,11 @@ button.chat-inline-event-chip:checked {
     padding: 6px 8px 8px;
     background-color: transparent;
 }
+.chat-queue-status {
+    padding: 0 10px 8px;
+    color: #9ca7b7;
+    font-size: 12px;
+}
 .chat-footer-toggle .chat-mode-label,
 .chat-footer-toggle .chat-mode-arrow {
     color: transparent;

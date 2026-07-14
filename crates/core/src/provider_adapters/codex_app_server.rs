@@ -362,6 +362,44 @@ pub fn write_turn_start_request_with_id<W: Write>(
     )
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodexAppServerTurnSteerParams {
+    pub thread_id: String,
+    pub input: Vec<CodexAppServerUserInput>,
+}
+
+impl CodexAppServerTurnSteerParams {
+    fn to_value(&self) -> Value {
+        let mut params = serde_json::Map::new();
+        params.insert("threadId".to_owned(), Value::String(self.thread_id.clone()));
+        params.insert(
+            "input".to_owned(),
+            Value::Array(
+                self.input
+                    .iter()
+                    .map(CodexAppServerUserInput::to_value)
+                    .collect(),
+            ),
+        );
+        Value::Object(params)
+    }
+}
+
+pub fn write_turn_steer_request_with_id<W: Write>(
+    writer: &mut W,
+    request_id: u64,
+    params: &CodexAppServerTurnSteerParams,
+) -> Result<()> {
+    write_jsonl(
+        writer,
+        &json!({
+            "id": request_id,
+            "method": "turn/steer",
+            "params": params.to_value(),
+        }),
+    )
+}
+
 fn insert_string(map: &mut serde_json::Map<String, Value>, key: &str, value: Option<&str>) {
     if let Some(value) = value {
         map.insert(key.to_owned(), Value::String(value.to_owned()));
@@ -1839,5 +1877,31 @@ mod tests {
         assert_eq!(line["params"]["effort"], "medium");
         assert_eq!(line["params"]["summary"], "concise");
         assert_eq!(line["params"]["personality"], "friendly");
+    }
+
+    #[test]
+    fn turn_steer_request_uses_documented_active_turn_method() {
+        let mut output = Vec::new();
+        write_turn_steer_request_with_id(
+            &mut output,
+            31,
+            &CodexAppServerTurnSteerParams {
+                thread_id: "thr_123".to_owned(),
+                input: vec![CodexAppServerUserInput::Text {
+                    text: "Adjust course".to_owned(),
+                }],
+            },
+        )
+        .unwrap();
+
+        let line: Value = serde_json::from_slice(&output).unwrap();
+        assert!(line.get("jsonrpc").is_none());
+        assert_eq!(line["id"], 31);
+        assert_eq!(line["method"], "turn/steer");
+        assert_eq!(line["params"]["threadId"], "thr_123");
+        assert_eq!(
+            line["params"]["input"][0],
+            json!({"type": "text", "text": "Adjust course"})
+        );
     }
 }

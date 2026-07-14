@@ -21,8 +21,9 @@ use crate::provider_adapters::claude_stream::{build_claude_stream_args, ClaudeSt
 use crate::provider_adapters::codex_app_server::{
     parse_jsonl_message, write_initialize_request_with_id, write_initialized_notification,
     write_thread_start_request_with_id, write_turn_start_request_with_id,
-    CodexAppServerInitializeParams, CodexAppServerMessage, CodexAppServerThreadStartParams,
-    CodexAppServerTurnStartParams, CodexAppServerUserInput, CODEX_APP_SERVER_DEFAULT_ARGS,
+    write_turn_steer_request_with_id, CodexAppServerInitializeParams, CodexAppServerMessage,
+    CodexAppServerThreadStartParams, CodexAppServerTurnStartParams, CodexAppServerTurnSteerParams,
+    CodexAppServerUserInput, CODEX_APP_SERVER_DEFAULT_ARGS,
 };
 use crate::provider_events::{
     ProviderEventContext, ProviderEventDraft, ProviderEventKind, ProviderEventPhase,
@@ -1656,34 +1657,50 @@ fn run_codex_app_server_session_loop(
                         continue;
                     };
                     let next_input_sequence = user_input_sequence + 1;
-                    let params = CodexAppServerTurnStartParams {
-                        thread_id: thread_id.to_owned(),
-                        input: vec![CodexAppServerUserInput::Text {
-                            text: input.clone(),
-                        }],
-                        cwd: Some(connection.cwd.clone()),
-                        approval_policy: connection.approval_policy.clone(),
-                        sandbox_policy: codex_sandbox_for_approval(
-                            connection.approval_policy.as_deref(),
+                    let request_id = next_turn_request_id(next_input_sequence);
+                    let active_turn = snapshot.lock().map(|state| !state.ready).unwrap_or(false);
+                    let sandbox_policy =
+                        codex_sandbox_for_approval(connection.approval_policy.as_deref())
+                            .map(|_| json!({"type": "dangerFullAccess"}));
+                    let effort = codex_turn_effort(&connection);
+                    let write_result = if active_turn {
+                        write_turn_steer_request_with_id(
+                            &mut connection.stdin,
+                            request_id,
+                            &CodexAppServerTurnSteerParams {
+                                thread_id: thread_id.to_owned(),
+                                input: vec![CodexAppServerUserInput::Text {
+                                    text: input.clone(),
+                                }],
+                            },
                         )
-                        .map(|_| json!({"type": "dangerFullAccess"})),
-                        model: connection.model.clone(),
-                        effort: codex_turn_effort(&connection),
-                        summary: None,
-                        personality: connection.personality.clone(),
+                    } else {
+                        write_turn_start_request_with_id(
+                            &mut connection.stdin,
+                            request_id,
+                            &CodexAppServerTurnStartParams {
+                                thread_id: thread_id.to_owned(),
+                                input: vec![CodexAppServerUserInput::Text {
+                                    text: input.clone(),
+                                }],
+                                cwd: Some(connection.cwd.clone()),
+                                approval_policy: connection.approval_policy.clone(),
+                                sandbox_policy,
+                                model: connection.model.clone(),
+                                effort,
+                                summary: None,
+                                personality: connection.personality.clone(),
+                            },
+                        )
                     };
-                    if let Err(err) = write_turn_start_request_with_id(
-                        &mut connection.stdin,
-                        next_turn_request_id(next_input_sequence),
-                        &params,
-                    ) {
+                    if let Err(err) = write_result {
                         let _ = connection.child.kill();
                         mark_provider_session_failed(
                             &runtime_store,
                             &snapshot,
                             &event_tx,
                             &started,
-                            format!("Codex turn/start failed: {err:#}"),
+                            format!("Codex turn input failed: {err:#}"),
                         );
                     } else {
                         user_input_sequence = next_input_sequence;
