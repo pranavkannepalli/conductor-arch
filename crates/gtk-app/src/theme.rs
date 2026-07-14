@@ -2101,6 +2101,25 @@ popover.context-menu-popover arrow {
     line-height: 1.4;
     min-height: 42px;
 }
+.chat-queued-row {
+    margin-top: 8px;
+    margin-bottom: 8px;
+    padding: 8px 10px;
+    border: 1px solid #2d2d2d;
+    border-radius: 6px;
+    background-color: #181818;
+}
+.chat-queued-label {
+    color: #8f8f8f;
+    font-size: 11px;
+    font-weight: 600;
+}
+.chat-queued-body {
+    color: #e2e2e2;
+    font-size: 13px;
+    line-height: 1.4;
+    padding: 0;
+}
 .chat-agent-text {
     color: #c6c6c6;
     line-height: 1.55;
@@ -2830,6 +2849,23 @@ mod tests {
         let changes_menu_block = selector_block(css, ".ws-changes-menu-btn,\n.ws-run-collapse-btn");
         assert!(changes_menu_block.contains("font-family: \"Mona Sans\""));
         assert!(changes_menu_block.contains("font-size: 13px;"));
+    }
+
+    #[test]
+    fn queued_chat_rows_are_not_styled_like_sent_user_bubbles() {
+        let css = app_css();
+        let queued_row = selector_block(css, ".chat-queued-row");
+        assert!(queued_row.contains("background-color: #181818;"));
+        assert!(queued_row.contains("border: 1px solid #2d2d2d;"));
+        assert!(queued_row.contains("border-radius: 6px;"));
+
+        let queued_body = selector_block(css, ".chat-queued-body");
+        assert!(queued_body.contains("font-size: 13px;"));
+        assert!(queued_body.contains("padding: 0;"));
+
+        let user_bubble = selector_block(css, ".chat-user-bubble");
+        assert!(user_bubble.contains("background-color: #2e2e2e;"));
+        assert!(!queued_row.contains("background-color: #2e2e2e;"));
     }
 
     #[test]

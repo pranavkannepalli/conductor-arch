@@ -1502,7 +1502,7 @@ pub fn agent_session_panel(
                                         ChatTimelineItem::PendingUserInput(input) => {
                                             append_chat_refresh_row(
                                                 &messages,
-                                                &chat_user_bubble(&input),
+                                                &queued_user_input_row(&input),
                                             );
                                         }
                                         ChatTimelineItem::ProviderProjection(item) => {
@@ -2543,6 +2543,30 @@ fn chat_user_bubble(text: &str) -> GBox {
     row
 }
 
+fn queued_user_input_row(text: &str) -> GBox {
+    let row = GBox::new(Orientation::Vertical, 4);
+    row.set_halign(gtk::Align::Fill);
+    row.set_hexpand(true);
+    row.add_css_class("chat-queued-row");
+
+    let header = Label::new(Some("Queued"));
+    header.add_css_class("chat-queued-label");
+    header.set_xalign(0.0);
+    row.append(&header);
+
+    let body = Label::new(None);
+    body.set_markup(&chat_text_markup(text));
+    body.add_css_class("chat-queued-body");
+    body.set_selectable(true);
+    body.set_wrap(true);
+    body.set_xalign(0.0);
+    body.set_hexpand(true);
+    body.set_halign(gtk::Align::Fill);
+    row.append(&body);
+
+    row
+}
+
 fn append_chat_refresh_row<W: IsA<Widget>>(container: &GBox, child: &W) {
     if reveal_existing_chat_refresh_rows() {
         append_revealed(container, child);
@@ -3424,7 +3448,7 @@ fn apply_provider_projection_agent_metadata(
 
 fn append_pending_user_input_rows(container: &GBox, pending_inputs: &[String]) {
     for input in pending_inputs {
-        append_chat_refresh_row(container, &chat_user_bubble(input));
+        append_chat_refresh_row(container, &queued_user_input_row(input));
     }
 }
 
@@ -10764,6 +10788,30 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
             ChatTimelineItem::ProviderProjection(_)
         ));
         assert!(matches!(timeline[2], ChatTimelineItem::PendingUserInput(_)));
+    }
+
+    #[test]
+    fn pending_user_inputs_render_as_queue_rows_not_sent_bubbles() {
+        let source = include_str!("session_surface.rs");
+        let timeline_branch_start = source
+            .find("ChatTimelineItem::PendingUserInput(input) =>")
+            .unwrap();
+        let timeline_branch_end = source[timeline_branch_start..]
+            .find("ChatTimelineItem::ProviderProjection(item) =>")
+            .map(|offset| timeline_branch_start + offset)
+            .unwrap();
+        let timeline_branch = &source[timeline_branch_start..timeline_branch_end];
+        assert!(timeline_branch.contains("queued_user_input_row(&input)"));
+        assert!(!timeline_branch.contains("chat_user_bubble(&input)"));
+
+        let append_start = source.find("fn append_pending_user_input_rows").unwrap();
+        let append_end = source[append_start..]
+            .find("fn provider_projection_item_widget")
+            .map(|offset| append_start + offset)
+            .unwrap();
+        let append_body = &source[append_start..append_end];
+        assert!(append_body.contains("queued_user_input_row(input)"));
+        assert!(!append_body.contains("chat_user_bubble(input)"));
     }
 
     #[test]
