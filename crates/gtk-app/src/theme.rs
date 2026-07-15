@@ -581,6 +581,32 @@ checkbutton {
     background-color: #101010;
 }
 
+.dashboard .page-board {
+    padding: 16px 20px;
+}
+
+.dashboard .kanban-column {
+    padding: 8px;
+    border: 1px solid #2b2b2b;
+}
+
+.workspace-card-action {
+    padding: 0;
+    background: transparent;
+    border: none;
+    box-shadow: none;
+}
+
+.workspace-card-action .workspace-card {
+    border: 1px solid #303030;
+    box-shadow: none;
+}
+
+.workspace-card-action:focus-visible {
+    outline: 2px solid #aaaaaa;
+    outline-offset: 2px;
+}
+
 .kanban-column-header {
     border-bottom: 1px solid #2b2b2b;
     padding-bottom: 8px;
@@ -3033,6 +3059,27 @@ mod tests {
         assert!(!css.contains(".lc-density-compact .nav-row"));
         assert!(!css.contains(".lc-density-comfortable .nav-button"));
         assert!(!css.contains(".lc-density-comfortable .nav-row"));
+    }
+
+    #[test]
+    fn dashboard_uses_flat_columns_and_actionable_cards() {
+        let css = app_css();
+
+        let board = selector_block(css, ".dashboard .page-board");
+        assert!(board.contains("padding: 16px 20px;"));
+
+        let column = selector_block(css, ".dashboard .kanban-column");
+        assert!(column.contains("padding: 8px;"));
+        assert!(column.contains("border: 1px solid"));
+
+        let action = selector_block(css, ".workspace-card-action");
+        assert!(action.contains("background: transparent;"));
+        assert!(action.contains("border: none;"));
+        assert!(action.contains("box-shadow: none;"));
+
+        let card = selector_block(css, ".workspace-card-action .workspace-card");
+        assert!(card.contains("border: 1px solid"));
+        assert!(card.contains("box-shadow: none;"));
     }
 
     #[test]

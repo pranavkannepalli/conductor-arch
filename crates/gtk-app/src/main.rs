@@ -664,14 +664,35 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     let toast_overlay = adw::ToastOverlay::new();
     let toast_manager = ToastManager::new(&toast_overlay);
     let runtime_error_reporter = Rc::new(RefCell::new(RuntimeErrorReporter::default()));
+    let main_stack_handle: Rc<RefCell<Option<Stack>>> = Rc::new(RefCell::new(None));
+    let refresh_view_preferences_handle = Rc::new(RefCell::new(None::<Rc<dyn Fn()>>));
+    let navigate_workspace: Rc<dyn Fn(String)> = {
+        let app_state = app_state.clone();
+        let main_stack_handle = main_stack_handle.clone();
+        let refresh_view_preferences_handle = refresh_view_preferences_handle.clone();
+        Rc::new(move |workspace_name| {
+            app_state.navigate_to_workspace_with_default_tab(
+                Some(workspace_name),
+                Some(WorkspaceTab::Chats),
+            );
+            if let Some(refresh_view_preferences) =
+                refresh_view_preferences_handle.borrow().as_ref()
+            {
+                refresh_view_preferences();
+            }
+            if let Some(stack) = main_stack_handle.borrow().as_ref() {
+                stack.set_visible_child_name("workspace");
+            }
+        })
+    };
     tracing::info!(
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: building dashboard"
     );
-    let (dashboard, refresh_dashboard) = dashboard::build_dashboard_panel(&app_state.paths);
+    let (dashboard, refresh_dashboard) =
+        dashboard::build_dashboard_panel(&app_state.paths, navigate_workspace.clone());
     dashboard.set_hexpand(true);
     dashboard.set_vexpand(true);
-    let main_stack_handle: Rc<RefCell<Option<Stack>>> = Rc::new(RefCell::new(None));
     tracing::info!(
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: dashboard built"
@@ -706,26 +727,6 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: building projects page"
     );
-    let refresh_view_preferences_handle = Rc::new(RefCell::new(None::<Rc<dyn Fn()>>));
-    let navigate_created_workspace: Rc<dyn Fn(String)> = {
-        let app_state = app_state.clone();
-        let main_stack_handle = main_stack_handle.clone();
-        let refresh_view_preferences_handle = refresh_view_preferences_handle.clone();
-        Rc::new(move |workspace_name| {
-            app_state.navigate_to_workspace_with_default_tab(
-                Some(workspace_name),
-                Some(WorkspaceTab::Chats),
-            );
-            if let Some(refresh_view_preferences) =
-                refresh_view_preferences_handle.borrow().as_ref()
-            {
-                refresh_view_preferences();
-            }
-            if let Some(stack) = main_stack_handle.borrow().as_ref() {
-                stack.set_visible_child_name("workspace");
-            }
-        })
-    };
     let (projects_page, refresh_projects) = projects::build_projects_page(
         &app_state.paths,
         refresh_dashboard.clone(),
@@ -737,7 +738,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
                 refresh_hub.refresh(RefreshScope::Sidebar);
             }
         },
-        navigate_created_workspace,
+        navigate_workspace,
         toast_manager.clone(),
     );
     tracing::info!(
