@@ -38,6 +38,10 @@ coding agent:
   session-scoped settings, but must not rewrite user settings files.
 - Keep provider-specific mechanics behind provider-neutral Archcar requests,
   events, and persisted records.
+- Every managed chat harness must implement the required Archcar baseline
+  contract. Provider-specific features remain explicit optional capabilities.
+- Keep Codex and Claude adapters isolated: neither adapter may import native
+  protocol types, codecs, or runtime state from the other.
 - Keep CLI and GTK behavior in line.
 - Build on the provider-neutral queue and immediate-delivery work already in
   progress. Do not overwrite concurrent Codex changes.
@@ -83,6 +87,11 @@ Use a persistent, headless Claude Code child process with bidirectional
 `stream-json`, supervised by Archcar. Add a small local hook bridge so Claude's
 documented permission and interactive-tool hooks can round-trip through
 Archcar and GTK.
+
+Introduce a narrow managed-harness contract beside the existing launch-focused
+`HarnessController`. The contract standardizes the behavior Archcar consumes;
+it does not standardize provider-native transports. Codex keeps its app-server
+adapter and Claude keeps its stream-json adapter.
 
 This follows Anthropic's recommended persistent streaming model for interactive
 applications:
@@ -140,6 +149,146 @@ or Claude stream-json, signals, resume launches, and hook results.
 
 Archcar must not require GTK or the CLI to understand native Claude message
 shapes. Native records are still stored losslessly for diagnostics.
+
+## Managed Harness Contract
+
+The existing `HarnessController` remains responsible for selecting a provider
+and building a launch. `ManagedHarness` extends that existing boundary with a
+descriptor and adapter factory. A new `ManagedHarnessAdapter` defines the pure
+runtime boundary used after launch. Process ownership, durable queueing,
+persistence, and event publication remain in the shared Archcar supervisor.
+
+Codex and Claude implement `ManagedHarness`; Shell remains a terminal
+`HarnessController`. Changing a required `ManagedHarness` or
+`ManagedHarnessAdapter` method therefore produces a compile-time obligation for
+both managed providers.
+
+The contract lives in `crates/core/src/archcar/harness_contract.rs`. It exposes
+provider-neutral types only:
+
+```rust
+pub const MANAGED_HARNESS_CONTRACT_VERSION: u16 = 1;
+
+pub trait ManagedHarness: HarnessController {
+    fn descriptor(&self) -> &'static HarnessDescriptor;
+    fn create_adapter(&self, context: HarnessAdapterContext)
+        -> Result<Box<dyn ManagedHarnessAdapter>>;
+}
+
+pub trait ManagedHarnessAdapter: Send {
+    fn encode_input(&mut self, input: HarnessInput) -> Result<NativeWrite>;
+    fn observe_native(&mut self, record: NativeRecord) -> Result<Vec<HarnessEffect>>;
+    fn plan_control(&mut self, control: HarnessControl) -> HarnessControlPlan;
+    fn recovery_plan(&self, cause: HarnessRecoveryCause) -> HarnessRecoveryPlan;
+}
+```
+
+`HarnessDescriptor` includes the contract version, `SessionKind`, stable
+provider key, display name, executable and preflight metadata, the complete
+required feature set, and optional capability support. Registration rejects a
+managed harness with an old contract version, a missing required feature, or
+`Unsupported` support for a required feature.
+
+`NativeRecord` and `NativeWrite` are opaque byte or JSON-line envelopes tagged
+with the provider key. They do not expose Codex or Claude structs. Each adapter
+owns its native parser, request IDs, native session IDs, turn tracker, control
+translation, and resume arguments.
+
+`HarnessEffect` is the only way an adapter requests changes to shared runtime
+state. The supervisor itself records a successful process write before
+accepting an acknowledgement effect. Together, the contract and supervisor
+cover:
+
+- initialized and ready;
+- input accepted for writing and provider-acknowledged;
+- turn started, completed, failed, interrupted, or deferred;
+- canonical provider event plus lossless native payload;
+- provider interaction requested or resolved;
+- native session metadata and observed capability changes;
+- retry, rate-limit, warning, and fatal error;
+- child recycle or resume required.
+
+`HarnessControlPlan` makes provider mechanics explicit:
+
+- `NativeWrite` for a live protocol command;
+- `Signal` for a process or process-group action;
+- `RestartRequired` with the controls and resume identity to preserve;
+- `Emulated` for behavior owned safely by Archcar;
+- `Unsupported` with a stable reason.
+
+The shared supervisor consumes these plans. It does not branch on Codex or
+Claude wire formats.
+
+### Required Baseline
+
+A provider cannot register as an `ArchcarManaged` chat harness unless its
+descriptor declares and its conformance tests prove all baseline behavior:
+
+1. installation, version, and authentication preflight;
+2. workspace- and chat-thread-scoped session identity;
+3. launch, initialization, readiness, kill, and clean process ownership;
+4. normal and immediate input delivery with durable local sequencing;
+5. provider acknowledgement or an explicit safe acknowledgement fallback;
+6. streamed canonical messages and lossless native diagnostic records;
+7. exactly-once terminal turn lifecycle;
+8. normal queueing while busy;
+9. interrupt with a deterministic recovery fallback;
+10. restart and resume without silently changing conversations;
+11. crash recovery without duplicating acknowledged input;
+12. model, effort or thinking, and permission-mode controls;
+13. permission, user-question, and plan-approval interaction round trips;
+14. structured retry, rate-limit, unsupported, and fatal errors;
+15. capability discovery consumed consistently by CLI and GTK.
+
+The mechanism may differ. For example, Codex can send a native interrupt while
+Claude may signal and restart with `--resume`. Both satisfy the same observable
+contract.
+
+### Optional Provider Extensions
+
+Capabilities outside the baseline are explicit extensions. Initial examples
+include Codex goals, provider-native slash commands, and any future feature
+that has no useful equivalent in every managed harness.
+
+Each capability reports one support mode:
+
+- `Native`;
+- `RestartRequired`;
+- `Emulated`;
+- `Unsupported { reason }`.
+
+Optional capabilities never receive fake parity. Codex may report its goal
+extension as native while Claude reports it unsupported. CLI and GTK render an
+optional action only when the selected harness descriptor supports it.
+
+### Isolation Rules
+
+- `codex_app_server.rs` contains Codex JSON-RPC parsing and encoding only.
+- `claude_stream.rs` contains Claude stream-json parsing and encoding only.
+- Provider-specific trackers live beside their provider adapter.
+- Shared contract types contain no native provider enums or JSON field names.
+- Neither provider adapter imports the other provider adapter.
+- Adding a third harness requires implementing the contract and registering a
+  descriptor; baseline CLI and GTK paths require no provider-specific branch.
+
+### Contract Conformance
+
+One table-driven conformance suite runs against deterministic Codex and Claude
+fixtures. It proves the required baseline from the Archcar boundary:
+
+- readiness occurs only after native initialization;
+- first, queued, and immediate inputs retain identity and complete once;
+- canonical and native events are both persisted;
+- interrupt settles or resumes deterministically;
+- changed controls apply without losing thread affinity;
+- crash recovery never replays acknowledged input twice;
+- interactions survive refresh and resolve through the same protocol;
+- unsupported optional features return structured reasons;
+- kill and Archcar shutdown leave no provider descendants.
+
+Provider-specific suites still test native codecs and unusual native events.
+Changing the required baseline means changing the contract and its shared
+suite first; both Codex and Claude must then pass before the change lands.
 
 ## Session And Turn Lifecycle
 
@@ -325,11 +474,12 @@ deduplication, with local per-turn sequence as the fallback.
 
 ## Capability Discovery
 
-Replace the optimistic static Claude capability declaration with observed
-runtime state.
+Replace optimistic static provider declarations with the harness descriptor
+plus observed runtime state.
 
-- Baseline capabilities come from features Archductor has actually wired and
-  tested.
+- Required baseline capabilities come from the managed-harness contract and
+  conformance suite, not from provider marketing or parser coverage.
+- Optional provider extensions use the common support modes and stable reasons.
 - `system/init` model, tools, MCP, and plugin fields refine the session state.
 - Newer Claude versions may include a `capabilities` array. Archcar
   feature-detects known values and ignores unknown ones.
@@ -424,6 +574,9 @@ only.
 
 ### Unit Tests
 
+- common managed-harness descriptor and control-plan behavior;
+- the same required baseline conformance cases against Codex and Claude
+  adapters;
 - launch argument construction, including resume, settings, controls, and user
   replay;
 - input encoding and replay acknowledgement matching;
@@ -486,13 +639,15 @@ reported.
 
 ## Implementation Boundaries
 
-Prefer small changes to the existing provider adapter, Archcar session manager,
-protocol, persistence, CLI, and GTK surface. Add a focused module only where it
+Add the focused `harness_contract.rs` module and shared conformance test helper.
+Keep the existing provider adapters, Archcar session manager, protocol,
+persistence, CLI, and GTK surface. Add another focused module only where it
 keeps the hook bridge or interaction persistence out of the already-large
 session loop.
 
-Do not introduce a generic provider framework rewrite. Extract shared behavior
-only when both Codex and Claude already need the same operation.
+Do not introduce a generic process framework or merge the native session loops.
+The shared contract describes observable behavior and pure translation effects;
+Codex and Claude retain independent native implementations.
 
 ## Collision-Safe Delivery
 
@@ -519,8 +674,10 @@ Implementation must:
 - Managing the user's Claude login, subscription, auto-updater, or global
   settings.
 - Making Codex and Claude native protocols identical.
-- Adding speculative provider abstractions beyond the Archcar contract required
-  by the two working agents.
+- Requiring optional provider extensions such as Codex goals to exist on every
+  harness.
+- Adding abstractions beyond the required managed-harness contract and its
+  conformance suite.
 
 ## Completion Criteria
 
@@ -533,5 +690,8 @@ Claude is complete when:
 - two Claude threads resume their own native conversations;
 - Archcar restart does not lose acknowledged input or pending interaction;
 - CLI and GTK expose the same behavior;
+- Codex and Claude both pass the managed-harness baseline conformance suite;
+- optional provider features are capability-gated rather than hardcoded or
+  falsely advertised;
 - the written unit, integration, CLI, and GTK verification passes;
 - Codex and Shell regressions remain green.
