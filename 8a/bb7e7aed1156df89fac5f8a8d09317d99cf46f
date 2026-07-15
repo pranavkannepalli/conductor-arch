@@ -1,0 +1,19 @@
+docs/superpowers/specs/2026-07-14-immediate-steer-and-stable-queue-design.md
+  s_d1a7d1b65e90c0::t_98854fdd848e1c 1-109
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "8abb7e7aed1156df89fac5f8a8d09317d99cf46f",
+  "prompts": {},
+  "sessions": {
+    "s_d1a7d1b65e90c0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6480-13d5-7d72-8e26-3df627bb2e4f",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
