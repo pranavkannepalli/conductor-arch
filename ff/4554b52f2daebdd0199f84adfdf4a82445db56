@@ -1,0 +1,20 @@
+docs/superpowers/specs/2026-07-15-settings-dashboard-history-design.md
+  s_334155ca48da57::t_d50ac5ab08469c 82-87
+  s_334155ca48da57::t_8d446c82b6f72f 1-81,88-267
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "ff4554b52f2daebdd0199f84adfdf4a82445db56",
+  "prompts": {},
+  "sessions": {
+    "s_334155ca48da57": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f649a-658f-7b33-8c99-86fbdc632ce0",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
