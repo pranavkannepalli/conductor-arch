@@ -261,7 +261,7 @@ fn cli_archcar_messages_renders_projected_provider_events() {
             ProviderEventPhase::Completed,
             "agent_message",
             "Assistant",
-            "Tests passed",
+            "<arch\nTests passed",
         ))
         .unwrap();
     provider_store
@@ -293,6 +293,7 @@ fn cli_archcar_messages_renders_projected_provider_events() {
         .success()
         .stdout(contains("You\nRun tests\n\n"))
         .stdout(contains("Assistant\nTests passed\n\n"))
+        .stdout(predicates::str::contains("<arch").not())
         .stdout(contains("Reasoning\nChecking failure output\n\n"))
         .stdout(predicates::str::contains("turn_started").not())
         .stdout(predicates::str::contains("raw lifecycle").not());

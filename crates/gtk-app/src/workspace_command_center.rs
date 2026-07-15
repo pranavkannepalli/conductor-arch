@@ -587,11 +587,12 @@ fn ws_center_panel(
     panel.set_hexpand(true);
     panel.set_vexpand(true);
 
-    panel.append(&session_surface::session_header_row(
+    let (session_header, branch_label) = session_surface::session_header_row_with_branch_label(
         &workspace_repository_name(store, &ws.name),
         &ws.branch,
         collapse_sidebar.clone(),
-    ));
+    );
+    panel.append(&session_header);
 
     let tab_bar = GBox::new(Orientation::Horizontal, 8);
     tab_bar.add_css_class("ws-tab-bar");
@@ -638,6 +639,7 @@ fn ws_center_panel(
     let known_threads = Rc::new(RefCell::new(
         store.list_chat_threads(&ws.name).unwrap_or_default(),
     ));
+    let current_workspace_name = Rc::new(RefCell::new(ws.name.clone()));
     let selected_thread = Rc::new(RefCell::new(state.selected_chat_thread().or_else(|| {
         known_threads
             .borrow()
@@ -682,7 +684,7 @@ fn ws_center_panel(
         let add_tab_btn = add_tab_btn.clone();
         let setup_readiness = setup_readiness.clone();
         let db_path = db_path.to_path_buf();
-        let workspace_name = ws.name.clone();
+        let current_workspace_name = current_workspace_name.clone();
         let archcar_paths = state.paths.clone();
         let state = state.clone();
         let external_thread_selection = external_thread_selection.clone();
@@ -716,7 +718,7 @@ fn ws_center_panel(
             for thread in closed_threads {
                 let item = menu_text_button(&workspace_chat_tab_label(&thread));
                 let db_path = db_path.clone();
-                let workspace_name = workspace_name.clone();
+                let current_workspace_name = current_workspace_name.clone();
                 let known_threads = known_threads.clone();
                 let selected_thread = selected_thread.clone();
                 let closed_chat_tabs = closed_chat_tabs.clone();
@@ -732,6 +734,7 @@ fn ws_center_panel(
                     if store.reopen_chat_thread(thread_id).is_err() {
                         return;
                     }
+                    let workspace_name = current_workspace_name.borrow().clone();
                     let threads = store.list_chat_threads(&workspace_name).unwrap_or_default();
                     *known_threads.borrow_mut() = threads;
                     closed_chat_tabs.borrow_mut().remove(&thread_id);
@@ -781,7 +784,7 @@ fn ws_center_panel(
                 });
                 let close_tab: Rc<dyn Fn()> = Rc::new({
                     let db_path = db_path.clone();
-                    let workspace_name = workspace_name.clone();
+                    let current_workspace_name = current_workspace_name.clone();
                     let archcar_paths = archcar_paths.clone();
                     let chat_tabs = chat_tabs.clone();
                     let tab_shell = tab_shell.clone();
@@ -796,6 +799,7 @@ fn ws_center_panel(
                     let add_tab_btn = add_tab_btn.clone();
                     let setup_readiness = setup_readiness.clone();
                     move || {
+                        let workspace_name = current_workspace_name.borrow().clone();
                         close_workspace_chat_thread(
                             &db_path,
                             &workspace_name,
@@ -870,13 +874,20 @@ fn ws_center_panel(
         Some(session_surface::ExternalChatTabs {
             on_threads_changed: on_threads_changed.clone(),
             selection_controller: external_thread_selection.clone(),
+            on_workspace_metadata_changed: {
+                let current_workspace_name = current_workspace_name.clone();
+                Rc::new(move |update| {
+                    *current_workspace_name.borrow_mut() = update.workspace_name.clone();
+                    branch_label.set_text(&update.branch_name);
+                })
+            },
         }),
         toast_manager,
     );
     content.add_named(&chat_widget, Some("chat"));
     {
         let db_path = db_path.to_path_buf();
-        let workspace_name = ws.name.clone();
+        let current_workspace_name = current_workspace_name.clone();
         let known_threads = known_threads.clone();
         let selected_thread = selected_thread.clone();
         let state = state.clone();
@@ -886,6 +897,7 @@ fn ws_center_panel(
         let setup_readiness = setup_readiness.clone();
         let add_tab_btn_for_feedback = add_tab_btn.clone();
         add_tab_btn.connect_clicked(move |_| {
+            let workspace_name = current_workspace_name.borrow().clone();
             let existing = { known_threads.borrow().clone() };
             let visible_existing = existing
                 .iter()

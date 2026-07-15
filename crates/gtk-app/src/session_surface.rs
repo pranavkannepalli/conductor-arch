@@ -271,9 +271,24 @@ struct ChatRenderSignature {
 }
 
 #[derive(Clone)]
-pub struct ExternalChatTabs {
+pub(crate) struct ExternalChatTabs {
     pub on_threads_changed: Rc<dyn Fn(Vec<ChatThreadRecord>, Option<i64>)>,
     pub selection_controller: ExternalThreadSelectionController,
+    pub on_workspace_metadata_changed: Rc<dyn Fn(&AgentMetadataUiUpdate)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentMetadataUiUpdate {
+    pub workspace_name: String,
+    pub branch_name: String,
+    pub thread: ChatThreadRecord,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct AgentMetadataUiChanges {
+    workspace_changed: bool,
+    branch_changed: bool,
+    chat_title_changed: bool,
 }
 
 #[derive(Clone)]
@@ -325,6 +340,7 @@ pub fn agent_session_panel(
     root.set_vexpand(true);
     root.set_hexpand(true);
     let current_workspace_name = Rc::new(RefCell::new(_workspace_name.to_owned()));
+    let current_branch_name = Rc::new(RefCell::new(branch_name.to_owned()));
 
     if include_header {
         root.append(&session_header_row(
@@ -926,10 +942,12 @@ pub fn agent_session_panel(
     update_composer_state();
 
     let refresh_chat_surface_for_view = refresh_chat_surface.clone();
+    let refresh_for_metadata = refresh.clone();
 
     let refresh_view = {
         let database_path = database_path.clone();
         let current_workspace_name = current_workspace_name.clone();
+        let current_branch_name = current_branch_name.clone();
         let messages = messages.clone();
         let scroll = scroll.clone();
         let thread_row = thread_row.clone();
@@ -965,6 +983,7 @@ pub fn agent_session_panel(
         let restore_composer_draft = restore_composer_draft.clone();
         let sync_live_controls = sync_live_controls.clone();
         let send_text_after_ready_queue = send_text_after_ready_queue.clone();
+        let refresh_for_metadata = refresh_for_metadata.clone();
         Rc::new(move || {
             let workspace = current_workspace_name.borrow().clone();
             debug!(workspace = %workspace, "chat refresh_view start");
@@ -1493,20 +1512,39 @@ pub fn agent_session_panel(
                             {
                                 let provider_projection =
                                     provider_projection_from_records(&provider_events);
-                                if let Some(new_workspace) =
+                                if let Some(metadata_update) =
                                     apply_provider_projection_agent_metadata(
                                         &database_path,
                                         thread_id,
                                         &provider_projection.items,
                                     )
                                 {
-                                    if new_workspace != workspace {
-                                        app_state.rename_workspace_in_navigation(
-                                            &workspace,
-                                            &new_workspace,
-                                        );
-                                        *current_workspace_name.borrow_mut() =
-                                            new_workspace.clone();
+                                    let changes = apply_agent_metadata_ui_update(
+                                        &app_state,
+                                        current_workspace_name.as_ref(),
+                                        current_branch_name.as_ref(),
+                                        thread_state.as_ref(),
+                                        metadata_update.clone(),
+                                    );
+                                    if changes.workspace_changed || changes.branch_changed {
+                                        if let Some(external_chat_tabs) =
+                                            external_chat_tabs.as_ref()
+                                        {
+                                            (external_chat_tabs.on_workspace_metadata_changed)(
+                                                &metadata_update,
+                                            );
+                                        }
+                                        refresh_for_metadata();
+                                    }
+                                    if changes.chat_title_changed {
+                                        if let Some(external_chat_tabs) =
+                                            external_chat_tabs.as_ref()
+                                        {
+                                            (external_chat_tabs.on_threads_changed)(
+                                                thread_state.borrow().clone(),
+                                                *selected_thread.borrow(),
+                                            );
+                                        }
                                     }
                                 }
                                 let status_banner =
@@ -2599,6 +2637,14 @@ pub(crate) fn session_header_row(
     branch_name: &str,
     collapse_sidebar: Rc<dyn Fn()>,
 ) -> GBox {
+    session_header_row_with_branch_label(repository_name, branch_name, collapse_sidebar).0
+}
+
+pub(crate) fn session_header_row_with_branch_label(
+    repository_name: &str,
+    branch_name: &str,
+    collapse_sidebar: Rc<dyn Fn()>,
+) -> (GBox, Label) {
     let header = GBox::new(Orientation::Horizontal, 10);
     header.add_css_class("chat-header-row");
     header.set_hexpand(true);
@@ -2638,7 +2684,7 @@ pub(crate) fn session_header_row(
     header.append(&breadcrumb);
     header.append(&editor_picker);
     header.append(&sidebar_btn);
-    header
+    (header, branch_label)
 }
 
 fn chat_user_bubble(text: &str) -> GBox {
@@ -3418,11 +3464,12 @@ fn chat_agent_message_display_content(
     message: &ChatMessageRecord,
     render_raw_message_content: bool,
 ) -> String {
-    if render_raw_message_content {
+    let content = if render_raw_message_content {
         message.content.clone()
     } else {
         strip_codex_status_blocks(&message.content)
-    }
+    };
+    strip_archductor_metadata_block(&content)
 }
 
 fn strip_codex_status_blocks(content: &str) -> String {
@@ -3546,7 +3593,7 @@ fn apply_provider_projection_agent_metadata(
     database_path: &Path,
     thread_id: i64,
     items: &[ProviderProjectionItem],
-) -> Option<String> {
+) -> Option<AgentMetadataUiUpdate> {
     if !items.iter().any(|item| {
         item.render_class == ProjectionRenderClass::AssistantChat
             && item.body.contains("<archductor_metadata>")
@@ -3567,11 +3614,53 @@ fn apply_provider_projection_agent_metadata(
             );
         }
     }
-    store
-        .get_chat_thread_record(thread_id)
-        .and_then(|thread| store.get_workspace_record(thread.workspace_id))
-        .map(|workspace| workspace.name)
-        .ok()
+    let thread = store.get_chat_thread_record(thread_id).ok()?;
+    let workspace = store.get_workspace_record(thread.workspace_id).ok()?;
+    Some(AgentMetadataUiUpdate {
+        workspace_name: workspace.name,
+        branch_name: workspace.branch,
+        thread,
+    })
+}
+
+fn apply_agent_metadata_ui_update(
+    app_state: &AppState,
+    current_workspace_name: &RefCell<String>,
+    current_branch_name: &RefCell<String>,
+    thread_state: &RefCell<Vec<ChatThreadRecord>>,
+    update: AgentMetadataUiUpdate,
+) -> AgentMetadataUiChanges {
+    let old_workspace_name = current_workspace_name.borrow().clone();
+    let workspace_changed = old_workspace_name != update.workspace_name;
+    if workspace_changed {
+        app_state.rename_workspace_in_navigation(&old_workspace_name, &update.workspace_name);
+        *current_workspace_name.borrow_mut() = update.workspace_name.clone();
+    }
+
+    let branch_changed = *current_branch_name.borrow() != update.branch_name;
+    if branch_changed {
+        *current_branch_name.borrow_mut() = update.branch_name.clone();
+    }
+
+    let mut threads = thread_state.borrow_mut();
+    let chat_title_changed = threads
+        .iter()
+        .find(|thread| thread.id == update.thread.id)
+        .is_some_and(|thread| thread.title != update.thread.title);
+    if chat_title_changed {
+        if let Some(thread) = threads
+            .iter_mut()
+            .find(|thread| thread.id == update.thread.id)
+        {
+            *thread = update.thread;
+        }
+    }
+
+    AgentMetadataUiChanges {
+        workspace_changed,
+        branch_changed,
+        chat_title_changed,
+    }
 }
 
 fn provider_projection_item_widget(item: &ProviderProjectionItem) -> Widget {
@@ -11988,6 +12077,169 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
         assert_eq!(
             provider_projection_assistant_body_for_render(&item),
             "Continuing."
+        );
+    }
+
+    #[test]
+    fn provider_assistant_body_hides_incomplete_archductor_control_line() {
+        let item = ProviderProjectionItem {
+            id: "assistant".to_owned(),
+            sequence: 1,
+            category: ProviderProjectionCategory::AssistantMessage,
+            render_class: ProjectionRenderClass::AssistantChat,
+            title: "Assistant".to_owned(),
+            body: "<arch\nContinuing.".to_owned(),
+            status: ProviderProjectionStatus::Running,
+            stream_state: ProviderProjectionStreamState::Streaming,
+            parent_id: None,
+            nested_thread_id: None,
+            raw_payload: None,
+            inspectable: false,
+        };
+
+        assert_eq!(
+            provider_projection_assistant_body_for_render(&item),
+            "Continuing."
+        );
+    }
+
+    #[test]
+    fn persisted_agent_body_hides_incomplete_archductor_control_line() {
+        let message = ChatMessageRecord {
+            id: 8,
+            thread_id: 7,
+            role: "agent".to_owned(),
+            content: "<archductor_metadata>{\"workspace_name\":\"harness-file\"\nContinuing."
+                .to_owned(),
+            source: "provider_event".to_owned(),
+            timeline_seq: Some(2),
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+        };
+
+        assert_eq!(
+            chat_agent_message_display_content(&message, true),
+            "Continuing."
+        );
+    }
+
+    #[test]
+    fn metadata_ui_update_reports_chat_title_independently() {
+        let base = PathBuf::from("/tmp/archductor-metadata-ui-test");
+        let paths = AppPaths {
+            config_dir: base.join("config"),
+            data_dir: base.join("data"),
+            state_dir: base.join("state"),
+            cache_dir: base.join("cache"),
+            database_path: base.join("data/archductor.db"),
+            logs_dir: base.join("state/logs"),
+        };
+        let app_state = AppState::new(
+            paths,
+            Some("berlin".to_owned()),
+            WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+        let current_workspace = RefCell::new("berlin".to_owned());
+        let current_branch = RefCell::new("lc/berlin".to_owned());
+        let original = ChatThreadRecord {
+            id: 7,
+            workspace_id: 42,
+            provider: "codex".to_owned(),
+            title: "New Chat".to_owned(),
+            status: "active".to_owned(),
+            native_thread_id: None,
+            harness_metadata: None,
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+            archived_at: None,
+        };
+        let thread_state = RefCell::new(vec![original.clone()]);
+        let mut renamed = original;
+        renamed.title = "Fix Billing Webhook".to_owned();
+
+        let changes = apply_agent_metadata_ui_update(
+            &app_state,
+            &current_workspace,
+            &current_branch,
+            &thread_state,
+            AgentMetadataUiUpdate {
+                workspace_name: "berlin".to_owned(),
+                branch_name: "lc/berlin".to_owned(),
+                thread: renamed,
+            },
+        );
+
+        assert!(!changes.workspace_changed);
+        assert!(!changes.branch_changed);
+        assert!(changes.chat_title_changed);
+        assert_eq!(thread_state.borrow()[0].title, "Fix Billing Webhook");
+    }
+
+    #[test]
+    fn metadata_ui_update_reports_workspace_and_branch_independently() {
+        let base = PathBuf::from("/tmp/archductor-metadata-identity-test");
+        let app_state = AppState::new(
+            AppPaths {
+                config_dir: base.join("config"),
+                data_dir: base.join("data"),
+                state_dir: base.join("state"),
+                cache_dir: base.join("cache"),
+                database_path: base.join("data/archductor.db"),
+                logs_dir: base.join("state/logs"),
+            },
+            Some("berlin".to_owned()),
+            WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+        let current_workspace = RefCell::new("berlin".to_owned());
+        let current_branch = RefCell::new("lc/berlin".to_owned());
+        let thread = ChatThreadRecord {
+            id: 7,
+            workspace_id: 42,
+            provider: "codex".to_owned(),
+            title: "Fix Billing Webhook".to_owned(),
+            status: "active".to_owned(),
+            native_thread_id: None,
+            harness_metadata: None,
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+            archived_at: None,
+        };
+        let thread_state = RefCell::new(vec![thread.clone()]);
+
+        let workspace_change = apply_agent_metadata_ui_update(
+            &app_state,
+            &current_workspace,
+            &current_branch,
+            &thread_state,
+            AgentMetadataUiUpdate {
+                workspace_name: "billing-webhook".to_owned(),
+                branch_name: "lc/berlin".to_owned(),
+                thread: thread.clone(),
+            },
+        );
+        assert!(workspace_change.workspace_changed);
+        assert!(!workspace_change.branch_changed);
+        assert!(!workspace_change.chat_title_changed);
+
+        let branch_change = apply_agent_metadata_ui_update(
+            &app_state,
+            &current_workspace,
+            &current_branch,
+            &thread_state,
+            AgentMetadataUiUpdate {
+                workspace_name: "billing-webhook".to_owned(),
+                branch_name: "lc/billing-webhook".to_owned(),
+                thread,
+            },
+        );
+        assert!(!branch_change.workspace_changed);
+        assert!(branch_change.branch_changed);
+        assert!(!branch_change.chat_title_changed);
+        assert_eq!(
+            app_state.selected_workspace().as_deref(),
+            Some("billing-webhook")
         );
     }
 

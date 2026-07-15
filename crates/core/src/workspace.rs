@@ -8198,11 +8198,11 @@ fn extract_archductor_metadata_directive(
     content: &str,
 ) -> (String, Option<ArchductorMetadataDirective>) {
     let Some(start) = content.find(ARCHDUCTOR_METADATA_OPEN) else {
-        return (content.to_owned(), None);
+        return (strip_archductor_control_lines(content), None);
     };
     let json_start = start + ARCHDUCTOR_METADATA_OPEN.len();
     let Some(relative_end) = content[json_start..].find(ARCHDUCTOR_METADATA_CLOSE) else {
-        return (content.to_owned(), None);
+        return (strip_archductor_control_lines(content), None);
     };
     let end = json_start + relative_end;
     let json_text = content[json_start..end].trim();
@@ -8210,11 +8210,37 @@ fn extract_archductor_metadata_directive(
     let mut cleaned = String::new();
     cleaned.push_str(&content[..start]);
     cleaned.push_str(&content[end + ARCHDUCTOR_METADATA_CLOSE.len()..]);
-    (trim_metadata_blank_edges(&cleaned), directive)
+    (
+        trim_metadata_blank_edges(&strip_archductor_control_lines(&cleaned)),
+        directive,
+    )
 }
 
 pub fn strip_archductor_metadata_block(content: &str) -> String {
     extract_archductor_metadata_directive(content).0
+}
+
+fn strip_archductor_control_lines(content: &str) -> String {
+    let mut removed = false;
+    let mut cleaned = String::with_capacity(content.len());
+    for line in content.split_inclusive('\n') {
+        let visible_line = line.trim_end_matches(['\r', '\n']);
+        if is_archductor_control_line(visible_line) {
+            removed = true;
+        } else {
+            cleaned.push_str(line);
+        }
+    }
+    if removed {
+        trim_metadata_blank_edges(&cleaned)
+    } else {
+        content.to_owned()
+    }
+}
+
+fn is_archductor_control_line(line: &str) -> bool {
+    let line = line.trim_start();
+    !line.is_empty() && (line.starts_with("<archductor") || "<archductor".starts_with(line))
 }
 
 fn parse_archductor_metadata_directive(json_text: &str) -> Option<ArchductorMetadataDirective> {
@@ -19038,7 +19064,7 @@ spotlight_testing = true
     }
 
     #[test]
-    fn incomplete_agent_metadata_marker_preserves_original_content() {
+    fn incomplete_agent_metadata_marker_is_never_persisted_as_chat_content() {
         let (_temp, store) = test_workspace_store();
         let thread = store
             .create_chat_thread("berlin", "codex", "New Chat", None)
@@ -19057,9 +19083,14 @@ spotlight_testing = true
 
         assert!(store.get_by_name("billing-webhook-fix").is_err());
         let messages = store.list_chat_messages(thread.id).unwrap();
+        assert_eq!(messages[1].content, "I'll inspect the webhook.");
+    }
+
+    #[test]
+    fn streaming_prefix_of_agent_metadata_marker_is_hidden() {
         assert_eq!(
-            messages[1].content,
-            "<archductor_metadata>{\"workspace_name\":\"billing webhook fix\"}\nI'll inspect the webhook."
+            strip_archductor_metadata_block("<arch\nI'll inspect the webhook."),
+            "I'll inspect the webhook."
         );
     }
 
