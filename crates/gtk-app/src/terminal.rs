@@ -446,6 +446,7 @@ fn run_terminal_command(
             input: command.clone(),
             visible_input: None,
             kind: ArchcarInputKind::ControlCommand,
+            delivery: archductor_core::archcar::protocol::ArchcarInputDelivery::Auto,
         },
     );
     append_text(

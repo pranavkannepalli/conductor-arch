@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use archductor_core::archcar::client::ArchcarClient;
 use archductor_core::archcar::protocol::{
-    ArchcarEvent, ArchcarInputKind, ArchcarRequest, ArchcarResponse,
+    ArchcarEvent, ArchcarInputDelivery, ArchcarInputKind, ArchcarRequest, ArchcarResponse,
 };
 use archductor_core::paths::AppPaths;
 use archductor_core::workspace::SessionKind;
@@ -36,6 +36,7 @@ pub enum AsyncArchcarRequestKind {
         input: String,
         visible_input: Option<String>,
         kind: ArchcarInputKind,
+        delivery: ArchcarInputDelivery,
     },
     InterruptTurn {
         session_id: i64,
@@ -181,11 +182,45 @@ impl AsyncArchcarBridge {
         visible_input: Option<String>,
         kind: ArchcarInputKind,
     ) -> Option<u64> {
+        self.send_input_with_delivery(
+            session_id,
+            input,
+            visible_input,
+            kind,
+            ArchcarInputDelivery::Auto,
+        )
+    }
+
+    pub fn send_input_immediately(
+        &self,
+        session_id: i64,
+        input: String,
+        visible_input: Option<String>,
+        kind: ArchcarInputKind,
+    ) -> Option<u64> {
+        self.send_input_with_delivery(
+            session_id,
+            input,
+            visible_input,
+            kind,
+            ArchcarInputDelivery::Immediate,
+        )
+    }
+
+    fn send_input_with_delivery(
+        &self,
+        session_id: i64,
+        input: String,
+        visible_input: Option<String>,
+        kind: ArchcarInputKind,
+        delivery: ArchcarInputDelivery,
+    ) -> Option<u64> {
         self.submit(ArchcarRequest::SendInput {
             session_id,
             input,
             visible_input,
             kind,
+            delivery,
         })
     }
 
@@ -466,11 +501,13 @@ fn request_kind(request: &ArchcarRequest) -> AsyncArchcarRequestKind {
             input,
             visible_input,
             kind,
+            delivery,
         } => AsyncArchcarRequestKind::SendInput {
             session_id: *session_id,
             input: input.clone(),
             visible_input: visible_input.clone(),
             kind: kind.clone(),
+            delivery: *delivery,
         },
         ArchcarRequest::InterruptTurn { session_id } => AsyncArchcarRequestKind::InterruptTurn {
             session_id: *session_id,
@@ -559,6 +596,7 @@ mod tests {
             input: "hello".to_owned(),
             visible_input: Some("visible hello".to_owned()),
             kind: ArchcarInputKind::ReviewPrompt,
+            delivery: ArchcarInputDelivery::Auto,
         };
 
         assert_eq!(
@@ -568,6 +606,29 @@ mod tests {
                 input: "hello".to_owned(),
                 visible_input: Some("visible hello".to_owned()),
                 kind: ArchcarInputKind::ReviewPrompt,
+                delivery: ArchcarInputDelivery::Auto,
+            }
+        );
+    }
+
+    #[test]
+    fn request_kind_preserves_immediate_send_input_delivery() {
+        let request = ArchcarRequest::SendInput {
+            session_id: 9,
+            input: "steer now".to_owned(),
+            visible_input: None,
+            kind: ArchcarInputKind::User,
+            delivery: ArchcarInputDelivery::Immediate,
+        };
+
+        assert_eq!(
+            request_kind(&request),
+            AsyncArchcarRequestKind::SendInput {
+                session_id: 9,
+                input: "steer now".to_owned(),
+                visible_input: None,
+                kind: ArchcarInputKind::User,
+                delivery: ArchcarInputDelivery::Immediate,
             }
         );
     }

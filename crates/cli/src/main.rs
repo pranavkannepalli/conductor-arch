@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use archductor_core::archcar::client::ArchcarClient;
 use archductor_core::archcar::protocol::{
-    ArchcarInputKind, ArchcarMessage, ArchcarRequest, ArchcarResponse,
+    ArchcarInputDelivery, ArchcarInputKind, ArchcarMessage, ArchcarRequest, ArchcarResponse,
 };
 use archductor_core::archcar::server::{reconcile_managed_sessions_on_startup, ArchcarServer};
 use archductor_core::doctor;
@@ -172,6 +172,11 @@ enum ArchcarCommand {
         kind: CliArchcarInputKind,
         #[arg(long)]
         visible_input: Option<String>,
+        #[arg(
+            long,
+            help = "Deliver now: steer an active Codex turn or start a new turn"
+        )]
+        immediate: bool,
         input: Vec<String>,
     },
     Model {
@@ -411,6 +416,11 @@ enum SessionCommand {
         visible_input: Option<String>,
         #[arg(long, default_value_t = 10_000)]
         timeout_ms: u64,
+        #[arg(
+            long,
+            help = "Deliver now: steer an active Codex turn or start a new turn"
+        )]
+        immediate: bool,
         message: Vec<String>,
     },
     List {
@@ -596,6 +606,7 @@ fn main() -> Result<()> {
                     session_id,
                     kind,
                     visible_input,
+                    immediate,
                     input,
                 } => {
                     print_archcar_response(client.send(ArchcarRequest::SendInput {
@@ -603,6 +614,7 @@ fn main() -> Result<()> {
                         input: input.join(" "),
                         visible_input,
                         kind: kind.into(),
+                        delivery: cli_input_delivery(immediate),
                     })?);
                 }
                 ArchcarCommand::Model { session_id, model } => {
@@ -1182,6 +1194,7 @@ fn main() -> Result<()> {
                     input_kind,
                     visible_input,
                     timeout_ms,
+                    immediate,
                     message,
                 } => {
                     let kind: SessionKind = kind.into();
@@ -1204,11 +1217,13 @@ fn main() -> Result<()> {
                         input,
                         visible_input,
                         kind: input_kind.into(),
+                        delivery: cli_input_delivery(immediate),
                     })? {
                         ArchcarResponse::Ack => {
                             println!(
-                                "sent {} message to session {} thread {}",
+                                "sent {}{} message to session {} thread {}",
                                 session_kind_label(kind),
+                                if immediate { " immediate" } else { "" },
                                 session_id,
                                 resolved_thread_id
                             );
@@ -1710,6 +1725,14 @@ impl From<CliArchcarInputKind> for ArchcarInputKind {
             CliArchcarInputKind::ReviewPrompt => Self::ReviewPrompt,
             CliArchcarInputKind::ControlCommand => Self::ControlCommand,
         }
+    }
+}
+
+fn cli_input_delivery(immediate: bool) -> ArchcarInputDelivery {
+    if immediate {
+        ArchcarInputDelivery::Immediate
+    } else {
+        ArchcarInputDelivery::Auto
     }
 }
 
@@ -2529,6 +2552,7 @@ mod tests {
                     session_id,
                     kind,
                     visible_input,
+                    immediate,
                     input,
                 },
         } = control.command
@@ -2538,6 +2562,7 @@ mod tests {
         assert_eq!(session_id, 7);
         assert_eq!(kind, CliArchcarInputKind::ControlCommand);
         assert_eq!(visible_input, None);
+        assert!(!immediate);
         assert_eq!(input, vec!["/model".to_owned(), "gpt-5.6-sol".to_owned()]);
 
         let review = Cli::try_parse_from([
@@ -2549,6 +2574,7 @@ mod tests {
             "review-prompt",
             "--visible-input",
             "Review selected comments",
+            "--immediate",
             "address",
             "comments",
         ])
@@ -2559,6 +2585,7 @@ mod tests {
                     session_id,
                     kind,
                     visible_input,
+                    immediate,
                     input,
                 },
         } = review.command
@@ -2568,6 +2595,7 @@ mod tests {
         assert_eq!(session_id, 8);
         assert_eq!(kind, CliArchcarInputKind::ReviewPrompt);
         assert_eq!(visible_input.as_deref(), Some("Review selected comments"));
+        assert!(immediate);
         assert_eq!(input, vec!["address".to_owned(), "comments".to_owned()]);
     }
 
@@ -2617,6 +2645,7 @@ mod tests {
             "Review selected comments",
             "--timeout-ms",
             "2500",
+            "--immediate",
             "fix",
             "the",
             "bug",
@@ -2632,6 +2661,7 @@ mod tests {
                     input_kind,
                     visible_input,
                     timeout_ms,
+                    immediate,
                     message,
                 },
         } = cli.command
@@ -2645,6 +2675,7 @@ mod tests {
         assert_eq!(input_kind, CliArchcarInputKind::ReviewPrompt);
         assert_eq!(visible_input.as_deref(), Some("Review selected comments"));
         assert_eq!(timeout_ms, 2500);
+        assert!(immediate);
         assert_eq!(
             message,
             vec!["fix".to_owned(), "the".to_owned(), "bug".to_owned()]

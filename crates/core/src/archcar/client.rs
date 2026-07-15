@@ -257,7 +257,9 @@ mod tests {
         archcar_rpc_log_payload_for_flag, request_retry_safe_after_response_loss,
         response_decode_or_eof_error,
     };
-    use crate::archcar::protocol::{ArchcarInputKind, ArchcarRequest, RpcEnvelope};
+    use crate::archcar::protocol::{
+        ArchcarInputDelivery, ArchcarInputKind, ArchcarRequest, RpcEnvelope,
+    };
 
     #[test]
     fn client_rpc_log_payload_redacts_sensitive_values_when_payload_logging_is_enabled() {
@@ -268,6 +270,7 @@ mod tests {
                 input: "OPENAI_API_KEY=sk-secret bearer ghp_secret --password swordfish".to_owned(),
                 visible_input: None,
                 kind: ArchcarInputKind::User,
+                delivery: ArchcarInputDelivery::Auto,
             },
         };
         let line = serde_json::to_string(&envelope).unwrap();
@@ -304,6 +307,7 @@ mod tests {
                 input: "hello".to_owned(),
                 visible_input: None,
                 kind: ArchcarInputKind::User,
+                delivery: ArchcarInputDelivery::Auto,
             }
         ));
         assert!(!request_retry_safe_after_response_loss(

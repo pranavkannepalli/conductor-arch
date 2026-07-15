@@ -134,6 +134,13 @@ you want to test. Run `gh auth login` before GitHub checks. Set
   state is available only from the previous GTK process memory.
 - [ ] Send input while Codex is still starting; confirm the composer defers the
   queued input and flushes it only after the selected session reports ready.
+- [ ] During active Codex generation, press Enter and confirm the message
+  remains queued until turn completion.
+- [ ] During active Codex generation, press Ctrl+Enter and confirm the user
+  message appears immediately and steers the active turn; if the turn finishes
+  concurrently, confirm a new turn starts without an error.
+- [ ] Hover queued-message actions while provider output streams and confirm
+  the queue row is not rebuilt and its hover state does not reset.
 - [ ] Select a saved or running agent session and confirm the session surface
   shows kind, status, runtime state, attachment state, harness metadata,
   command, event counts, and labeled transcript events for user input, review

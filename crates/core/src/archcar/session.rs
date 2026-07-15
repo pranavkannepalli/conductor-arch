@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -15,7 +16,7 @@ use tracing::{info, warn};
 use crate::archcar::harness::{
     controller_for_kind, ensure_thread_for_kind, provider_name, HarnessController,
 };
-use crate::archcar::protocol::{ArchcarEvent, ArchcarInputKind};
+use crate::archcar::protocol::{ArchcarEvent, ArchcarInputDelivery, ArchcarInputKind};
 use crate::codex_tui::codex_screen_ready_for_input;
 use crate::provider_adapters::claude_stream::{build_claude_stream_args, ClaudeStreamLaunchConfig};
 use crate::provider_adapters::codex_app_server::{
@@ -44,6 +45,7 @@ pub enum SessionCommand {
         input: String,
         visible_input: Option<String>,
         kind: ArchcarInputKind,
+        delivery: ArchcarInputDelivery,
     },
     SetModel {
         model: Option<String>,
@@ -1231,6 +1233,7 @@ fn run_session_loop(
                     input,
                     visible_input,
                     kind,
+                    delivery: _,
                 } => {
                     let current = snapshot.lock().unwrap().clone();
                     let persisted_input = visible_input.as_deref().unwrap_or(&input);
@@ -1551,7 +1554,9 @@ fn run_codex_app_server_session_loop(
         .max_runtime_input_provider_sequence(started.session_id)
         .unwrap_or(0);
     let mut control_request_sequence = 0_u64;
+    let mut fallback_request_sequence = 0_u64;
     let mut active_turn_id: Option<String> = None;
+    let mut pending_input_requests = HashMap::<u64, PendingCodexInputRequest>::new();
 
     loop {
         while let Ok(line) = connection.stdout_rx.try_recv() {
@@ -1627,6 +1632,68 @@ fn run_codex_app_server_session_loop(
                             thread_id: started.thread_id,
                         });
                     }
+                    if let Some(request_id) = codex_response_id(&message) {
+                        if let Some(pending) = pending_input_requests.remove(&request_id) {
+                            let response_error = codex_response_error(&message);
+                            match codex_input_response_action(&pending, response_error.is_some()) {
+                                CodexInputResponseAction::Complete => {}
+                                CodexInputResponseAction::RetryStart => {
+                                    let Some(thread_id) = provider_thread_id.as_deref() else {
+                                        let _ = event_tx.send(ArchcarEvent::SessionError {
+                                            session_id: Some(started.session_id),
+                                            thread_id: Some(started.thread_id),
+                                            message:
+                                                "Codex app-server thread is not initialized yet"
+                                                    .to_owned(),
+                                        });
+                                        continue;
+                                    };
+                                    fallback_request_sequence =
+                                        fallback_request_sequence.saturating_add(1);
+                                    let fallback_request_id =
+                                        next_fallback_request_id(fallback_request_sequence);
+                                    let params = codex_turn_start_params(
+                                        &connection,
+                                        thread_id,
+                                        &pending.input,
+                                    );
+                                    if let Err(err) = write_turn_start_request_with_id(
+                                        &mut connection.stdin,
+                                        fallback_request_id,
+                                        &params,
+                                    ) {
+                                        let _ = connection.child.kill();
+                                        mark_provider_session_failed(
+                                            &runtime_store,
+                                            &snapshot,
+                                            &event_tx,
+                                            &started,
+                                            format!(
+                                                "Codex immediate turn fallback failed: {err:#}"
+                                            ),
+                                        );
+                                        return;
+                                    }
+                                    pending_input_requests.insert(
+                                        fallback_request_id,
+                                        PendingCodexInputRequest {
+                                            kind: CodexInputRequestKind::ImmediateFallbackStart,
+                                            input: pending.input,
+                                        },
+                                    );
+                                }
+                                CodexInputResponseAction::ReportError => {
+                                    let _ = event_tx.send(ArchcarEvent::SessionError {
+                                        session_id: Some(started.session_id),
+                                        thread_id: Some(started.thread_id),
+                                        message: response_error.unwrap_or_else(|| {
+                                            "Codex app-server input request failed".to_owned()
+                                        }),
+                                    });
+                                }
+                            }
+                        }
+                    }
                     if let Some(turn_id) = codex_turn_id_from_message(&message) {
                         active_turn_id = Some(turn_id);
                     }
@@ -1661,6 +1728,7 @@ fn run_codex_app_server_session_loop(
                     input,
                     visible_input,
                     kind,
+                    delivery,
                 } => {
                     let Some(thread_id) = provider_thread_id.as_deref() else {
                         let _ = event_tx.send(ArchcarEvent::SessionError {
@@ -1672,49 +1740,39 @@ fn run_codex_app_server_session_loop(
                     };
                     let next_input_sequence = user_input_sequence + 1;
                     let request_id = next_turn_request_id(next_input_sequence);
-                    let active_turn = snapshot.lock().map(|state| !state.ready).unwrap_or(false);
-                    let sandbox_policy =
-                        codex_sandbox_for_approval(connection.approval_policy.as_deref())
-                            .map(|_| json!({"type": "dangerFullAccess"}));
-                    let effort = codex_turn_effort(&connection);
-                    let write_result = if active_turn {
-                        let Some(turn_id) = active_turn_id.as_deref() else {
-                            let _ = event_tx.send(ArchcarEvent::SessionError {
-                                session_id: Some(started.session_id),
-                                thread_id: Some(started.thread_id),
-                                message: "No active Codex turn id is available to steer".to_owned(),
-                            });
-                            continue;
-                        };
-                        write_turn_steer_request_with_id(
-                            &mut connection.stdin,
-                            request_id,
-                            &CodexAppServerTurnSteerParams {
-                                thread_id: thread_id.to_owned(),
-                                input: vec![CodexAppServerUserInput::Text {
-                                    text: input.clone(),
-                                }],
-                                expected_turn_id: Some(turn_id.to_owned()),
-                            },
-                        )
-                    } else {
-                        write_turn_start_request_with_id(
-                            &mut connection.stdin,
-                            request_id,
-                            &CodexAppServerTurnStartParams {
-                                thread_id: thread_id.to_owned(),
-                                input: vec![CodexAppServerUserInput::Text {
-                                    text: input.clone(),
-                                }],
-                                cwd: Some(connection.cwd.clone()),
-                                approval_policy: connection.approval_policy.clone(),
-                                sandbox_policy,
-                                model: connection.model.clone(),
-                                effort,
-                                summary: None,
-                                personality: connection.personality.clone(),
-                            },
-                        )
+                    let auto_active = snapshot.lock().map(|state| !state.ready).unwrap_or(false);
+                    let route = codex_input_route(delivery, active_turn_id.as_deref(), auto_active);
+                    let request_kind = match (&route, delivery) {
+                        (CodexInputRoute::Start, _) => CodexInputRequestKind::Start,
+                        (CodexInputRoute::Steer { .. }, ArchcarInputDelivery::Immediate) => {
+                            CodexInputRequestKind::ImmediateSteer
+                        }
+                        (CodexInputRoute::Steer { .. }, ArchcarInputDelivery::Auto) => {
+                            CodexInputRequestKind::AutoSteer
+                        }
+                    };
+                    let write_result = match route {
+                        CodexInputRoute::Steer { expected_turn_id } => {
+                            write_turn_steer_request_with_id(
+                                &mut connection.stdin,
+                                request_id,
+                                &CodexAppServerTurnSteerParams {
+                                    thread_id: thread_id.to_owned(),
+                                    input: vec![CodexAppServerUserInput::Text {
+                                        text: input.clone(),
+                                    }],
+                                    expected_turn_id: Some(expected_turn_id),
+                                },
+                            )
+                        }
+                        CodexInputRoute::Start => {
+                            let params = codex_turn_start_params(&connection, thread_id, &input);
+                            write_turn_start_request_with_id(
+                                &mut connection.stdin,
+                                request_id,
+                                &params,
+                            )
+                        }
                     };
                     if let Err(err) = write_result {
                         let _ = connection.child.kill();
@@ -1726,6 +1784,13 @@ fn run_codex_app_server_session_loop(
                             format!("Codex turn input failed: {err:#}"),
                         );
                     } else {
+                        pending_input_requests.insert(
+                            request_id,
+                            PendingCodexInputRequest {
+                                kind: request_kind,
+                                input: input.clone(),
+                            },
+                        );
                         user_input_sequence = next_input_sequence;
                         persist_runtime_user_input(
                             &runtime_store,
@@ -1735,6 +1800,9 @@ fn run_codex_app_server_session_loop(
                             &kind,
                             user_input_sequence,
                         );
+                        let _ = event_tx.send(ArchcarEvent::SessionMessagesUpdated {
+                            thread_id: started.thread_id,
+                        });
                         if let Ok(mut state) = snapshot.lock() {
                             state.ready = false;
                             state.runtime_state = AgentSessionState::Running;
@@ -1893,6 +1961,7 @@ fn run_claude_stream_session_loop(
                     input,
                     visible_input,
                     kind,
+                    delivery: _,
                 } => {
                     let payload = json!({
                         "type": "user",
@@ -1980,6 +2049,62 @@ enum CodexStartupPhase {
     InitializePending,
     ThreadPending,
     Ready,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CodexInputRoute {
+    Start,
+    Steer { expected_turn_id: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodexInputRequestKind {
+    Start,
+    AutoSteer,
+    ImmediateSteer,
+    ImmediateFallbackStart,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingCodexInputRequest {
+    kind: CodexInputRequestKind,
+    input: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodexInputResponseAction {
+    Complete,
+    RetryStart,
+    ReportError,
+}
+
+fn codex_input_route(
+    delivery: ArchcarInputDelivery,
+    active_turn_id: Option<&str>,
+    auto_active: bool,
+) -> CodexInputRoute {
+    let should_steer = delivery == ArchcarInputDelivery::Immediate || auto_active;
+    if should_steer {
+        if let Some(turn_id) = active_turn_id {
+            return CodexInputRoute::Steer {
+                expected_turn_id: turn_id.to_owned(),
+            };
+        }
+    }
+    CodexInputRoute::Start
+}
+
+fn codex_input_response_action(
+    pending: &PendingCodexInputRequest,
+    failed: bool,
+) -> CodexInputResponseAction {
+    if !failed {
+        CodexInputResponseAction::Complete
+    } else if pending.kind == CodexInputRequestKind::ImmediateSteer {
+        CodexInputResponseAction::RetryStart
+    } else {
+        CodexInputResponseAction::ReportError
+    }
 }
 
 fn continue_codex_app_server_startup_after_initialize(
@@ -2131,6 +2256,27 @@ fn codex_turn_effort(connection: &ProviderProcessConnection) -> Option<String> {
         .or_else(|| connection.reasoning_mode.clone())
 }
 
+fn codex_turn_start_params(
+    connection: &ProviderProcessConnection,
+    thread_id: &str,
+    input: &str,
+) -> CodexAppServerTurnStartParams {
+    CodexAppServerTurnStartParams {
+        thread_id: thread_id.to_owned(),
+        input: vec![CodexAppServerUserInput::Text {
+            text: input.to_owned(),
+        }],
+        cwd: Some(connection.cwd.clone()),
+        approval_policy: connection.approval_policy.clone(),
+        sandbox_policy: codex_sandbox_for_approval(connection.approval_policy.as_deref())
+            .map(|_| json!({"type": "dangerFullAccess"})),
+        model: connection.model.clone(),
+        effort: codex_turn_effort(connection),
+        summary: None,
+        personality: connection.personality.clone(),
+    }
+}
+
 fn persist_runtime_user_input(
     runtime_store: &RuntimeSessionStore,
     started: &SessionSnapshot,
@@ -2238,6 +2384,10 @@ fn next_turn_request_id(sequence: u64) -> u64 {
 
 fn next_control_request_id(sequence: u64) -> u64 {
     sequence.saturating_add(1_000_000)
+}
+
+fn next_fallback_request_id(sequence: u64) -> u64 {
+    sequence.saturating_add(2_000_000)
 }
 
 fn write_provider_json_line<W: Write>(writer: &mut W, value: &serde_json::Value) -> Result<()> {
@@ -3446,5 +3596,44 @@ mod tests {
         let pid = child.id();
         child.wait().unwrap();
         pid
+    }
+
+    #[test]
+    fn codex_immediate_input_routes_to_active_turn_or_new_turn() {
+        assert_eq!(
+            codex_input_route(ArchcarInputDelivery::Immediate, Some("turn-7"), false),
+            CodexInputRoute::Steer {
+                expected_turn_id: "turn-7".to_owned(),
+            }
+        );
+        assert_eq!(
+            codex_input_route(ArchcarInputDelivery::Immediate, None, false),
+            CodexInputRoute::Start
+        );
+    }
+
+    #[test]
+    fn codex_immediate_steer_error_retries_once_as_start() {
+        let immediate = PendingCodexInputRequest {
+            kind: CodexInputRequestKind::ImmediateSteer,
+            input: "adjust course".to_owned(),
+        };
+        assert_eq!(
+            codex_input_response_action(&immediate, true),
+            CodexInputResponseAction::RetryStart
+        );
+
+        let fallback = PendingCodexInputRequest {
+            kind: CodexInputRequestKind::ImmediateFallbackStart,
+            input: "adjust course".to_owned(),
+        };
+        assert_eq!(
+            codex_input_response_action(&fallback, true),
+            CodexInputResponseAction::ReportError
+        );
+        assert_eq!(
+            codex_input_response_action(&fallback, false),
+            CodexInputResponseAction::Complete
+        );
     }
 }

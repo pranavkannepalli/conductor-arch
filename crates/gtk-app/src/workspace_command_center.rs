@@ -483,6 +483,7 @@ impl WorkspaceRunConsoleTerminalConnection {
                 input: input.to_owned(),
                 visible_input: None,
                 kind: ArchcarInputKind::ControlCommand,
+                delivery: archductor_core::archcar::protocol::ArchcarInputDelivery::Auto,
             },
         );
         Ok(())

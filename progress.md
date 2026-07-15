@@ -50,6 +50,8 @@ paths and known rough edges.
 - Shell, Codex, and Claude CLI session commands. Cursor is available from GTK
   launch paths where configured, not from the current CLI `session --kind`
   enum.
+- Immediate Codex delivery from GTK Ctrl+Enter and CLI `session send`/`archcar
+  send --immediate`, using active-turn steer with transparent new-turn fallback.
 - Git status/diff/log, todos, review comments, checkpoints, conflicts, checks,
   PR summary, PR checks, PR thread resolve/reopen, PR merge, and history
   commands.
@@ -79,6 +81,8 @@ paths and known rough edges.
   paths, transcript persistence, selected-session input, staged review prompts,
   provider/auth/MCP status, harness metadata, prompt preview, profile selector,
   and stop notifications.
+- Plain Enter follow-up queueing, Ctrl+Enter immediate Codex delivery, and
+  queue-row reconciliation isolated from streaming chat refreshes.
 - Terminal surfaces for one-shot commands, PTY shell tabs, transcript
   persistence/search/reload, basic ANSI/control redraw handling, alternate
   screen restoration, configured terminal font, configured scrollback, and

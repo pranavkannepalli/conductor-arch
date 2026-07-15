@@ -1,7 +1,9 @@
 use archductor_core::agent_tools::{
     launchable_agent_tools, launchable_provider_key, tool_by_provider,
 };
-use archductor_core::archcar::protocol::{ArchcarEvent, ArchcarInputKind, ArchcarResponse};
+use archductor_core::archcar::protocol::{
+    ArchcarEvent, ArchcarInputDelivery, ArchcarInputKind, ArchcarResponse,
+};
 use archductor_core::codex_tui::{
     parse_codex_context_usage, parse_codex_file_change_block, parse_codex_inline_event,
     CodexFileChangeAction as CoreCodexFileChangeAction,
@@ -139,6 +141,7 @@ enum ChatTimelineItem {
     Message(ChatMessageRecord),
     Event(ChatEventRecord),
     ProviderProjection(ProviderProjectionItem),
+    OptimisticUserInput(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -381,6 +384,8 @@ pub fn agent_session_panel(
     let switch_chat_harness: SwitchChatHarnessController = Rc::new(RefCell::new(None));
     let sync_live_controls: RefreshChatSurfaceController = Rc::new(RefCell::new(None));
     let send_text_after_ready_queue: SendChatTextController = Rc::new(RefCell::new(None));
+    let send_immediate_after_ready_queue: SendChatTextController = Rc::new(RefCell::new(None));
+    let refresh_queue_overlay: RefreshChatSurfaceController = Rc::new(RefCell::new(None));
 
     let thread_row = GBox::new(Orientation::Horizontal, 8);
     thread_row.add_css_class("chat-thread-row");
@@ -517,6 +522,7 @@ pub fn agent_session_panel(
             let inflight_archcar_actions = inflight_archcar_actions.clone();
             let toast_manager = toast_manager.clone();
             let restore_composer_draft = restore_composer_draft.clone();
+            let refresh_queue_overlay = refresh_queue_overlay.clone();
             Rc::new(move |index| {
                 let Some(choice) = provider_model_choices_for_menu.get(index).cloned() else {
                     return;
@@ -673,7 +679,14 @@ pub fn agent_session_panel(
                                     selected_thread.as_ref(),
                                     Some(thread.id),
                                     |thread_id| app_state.set_selected_chat_thread(thread_id),
-                                    || restore_composer_draft(),
+                                    || {
+                                        restore_composer_draft();
+                                        if let Some(refresh) =
+                                            refresh_queue_overlay.borrow().as_ref().cloned()
+                                        {
+                                            refresh();
+                                        }
+                                    },
                                 );
                                 if let Some(refresh_view) =
                                     clone_refresh_chat_surface_controller(&refresh_chat_surface)
@@ -771,6 +784,107 @@ pub fn agent_session_panel(
     chat_overlay.add_overlay(&composer_wrap);
     chat_overlay.set_measure_overlay(&composer_wrap, false);
 
+    let last_queue_overlay_signature = Rc::new(RefCell::new(None::<QueueOverlaySignature>));
+    let refresh_queue_overlay_fn: Rc<dyn Fn()> = Rc::new({
+        let queue_overlay = queue_overlay.clone();
+        let selected_thread = selected_thread.clone();
+        let queued_chat_inputs = queued_chat_inputs.clone();
+        let buffer = buffer.clone();
+        let send_immediate_after_ready_queue = send_immediate_after_ready_queue.clone();
+        let refresh_chat_surface = refresh_chat_surface.clone();
+        let refresh_queue_overlay = refresh_queue_overlay.clone();
+        let last_queue_overlay_signature = last_queue_overlay_signature.clone();
+        move || {
+            let thread_id = *selected_thread.borrow();
+            let queued_items =
+                queued_composer_overlay_items_for_thread(&queued_chat_inputs, thread_id);
+            let signature = QueueOverlaySignature {
+                thread_id,
+                items: queued_items.clone(),
+            };
+            if !queue_overlay_requires_rebuild(
+                last_queue_overlay_signature.borrow().as_ref(),
+                &signature,
+            ) {
+                return;
+            }
+            *last_queue_overlay_signature.borrow_mut() = Some(signature);
+
+            clear_box(&queue_overlay);
+            queue_overlay.set_visible(!queued_items.is_empty());
+            let Some(thread_id) = thread_id else {
+                return;
+            };
+            for item in queued_items {
+                let refresh_after_action: Rc<dyn Fn()> = Rc::new({
+                    let refresh_chat_surface = refresh_chat_surface.clone();
+                    let refresh_queue_overlay = refresh_queue_overlay.clone();
+                    move || {
+                        if let Some(refresh) = refresh_queue_overlay.borrow().as_ref().cloned() {
+                            refresh();
+                        }
+                        if let Some(refresh) =
+                            clone_refresh_chat_surface_controller(&refresh_chat_surface)
+                        {
+                            gtk::glib::idle_add_local_once(move || refresh());
+                        }
+                    }
+                });
+                let delete_item = Rc::new({
+                    let queued_chat_inputs = queued_chat_inputs.clone();
+                    let refresh_after_action = refresh_after_action.clone();
+                    let index = item.index;
+                    move || {
+                        let _ = remove_queued_chat_input_at(&queued_chat_inputs, thread_id, index);
+                        refresh_after_action();
+                    }
+                });
+                let edit_item = Rc::new({
+                    let queued_chat_inputs = queued_chat_inputs.clone();
+                    let buffer = buffer.clone();
+                    let refresh_after_action = refresh_after_action.clone();
+                    let index = item.index;
+                    move || {
+                        if let Some(input) =
+                            remove_queued_chat_input_at(&queued_chat_inputs, thread_id, index)
+                        {
+                            buffer.set_text(&queued_archcar_input_visible_text(&input));
+                        }
+                        refresh_after_action();
+                    }
+                });
+                let send_immediately = Rc::new({
+                    let queued_chat_inputs = queued_chat_inputs.clone();
+                    let send_immediate_after_ready_queue = send_immediate_after_ready_queue.clone();
+                    let refresh_after_action = refresh_after_action.clone();
+                    let index = item.index;
+                    move || {
+                        if let Some(input) =
+                            remove_queued_chat_input_at(&queued_chat_inputs, thread_id, index)
+                        {
+                            let staged_review =
+                                matches!(input.kind, ArchcarInputKind::ReviewPrompt);
+                            let sent = send_immediate_after_ready_queue
+                                .borrow()
+                                .as_ref()
+                                .cloned()
+                                .is_some_and(|send| send(input.input.clone(), staged_review));
+                            if !sent {
+                                requeue_pending_input_front(&queued_chat_inputs, thread_id, input);
+                            }
+                        }
+                        refresh_after_action();
+                    }
+                });
+                let row =
+                    queued_composer_overlay_row(&item, delete_item, edit_item, send_immediately);
+                queue_overlay.append(&row);
+            }
+        }
+    });
+    *refresh_queue_overlay.borrow_mut() = Some(refresh_queue_overlay_fn.clone());
+    refresh_queue_overlay_fn();
+
     let last_render_signature = Rc::new(RefCell::new(None::<ChatRenderSignature>));
     let buffer_for_update = buffer.clone();
     let update_composer_state = {
@@ -784,9 +898,6 @@ pub fn agent_session_panel(
         let codex_startup_states = codex_startup_states.clone();
         let queued_chat_inputs = queued_chat_inputs.clone();
         let working_threads = working_threads.clone();
-        let queue_overlay = queue_overlay.clone();
-        let send_text_after_ready_queue = send_text_after_ready_queue.clone();
-        let refresh_chat_surface = refresh_chat_surface.clone();
         Rc::new(move || {
             let start = buffer_for_update.start_iter();
             let end = buffer_for_update.end_iter();
@@ -811,83 +922,6 @@ pub fn agent_session_panel(
             let queued_count = thread_id
                 .map(|thread_id| queued_chat_inputs_count(&queued_chat_inputs, thread_id))
                 .unwrap_or_default();
-            clear_box(&queue_overlay);
-            let queued_items =
-                queued_composer_overlay_items_for_thread(&queued_chat_inputs, thread_id);
-            queue_overlay.set_visible(!queued_items.is_empty());
-            if let Some(thread_id) = thread_id {
-                for item in queued_items {
-                    let refresh_after_action: Rc<dyn Fn()> = Rc::new({
-                        let refresh_chat_surface = refresh_chat_surface.clone();
-                        move || {
-                            if let Some(refresh) =
-                                clone_refresh_chat_surface_controller(&refresh_chat_surface)
-                            {
-                                gtk::glib::idle_add_local_once(move || refresh());
-                            }
-                        }
-                    });
-                    let delete_item = Rc::new({
-                        let queued_chat_inputs = queued_chat_inputs.clone();
-                        let refresh_after_action = refresh_after_action.clone();
-                        let index = item.index;
-                        move || {
-                            let _ =
-                                remove_queued_chat_input_at(&queued_chat_inputs, thread_id, index);
-                            refresh_after_action();
-                        }
-                    });
-                    let edit_item = Rc::new({
-                        let queued_chat_inputs = queued_chat_inputs.clone();
-                        let buffer = buffer_for_update.clone();
-                        let refresh_after_action = refresh_after_action.clone();
-                        let index = item.index;
-                        move || {
-                            if let Some(input) =
-                                remove_queued_chat_input_at(&queued_chat_inputs, thread_id, index)
-                            {
-                                buffer.set_text(&queued_archcar_input_visible_text(&input));
-                            }
-                            refresh_after_action();
-                        }
-                    });
-                    let send_as_steer = Rc::new({
-                        let queued_chat_inputs = queued_chat_inputs.clone();
-                        let send_text_after_ready_queue = send_text_after_ready_queue.clone();
-                        let refresh_after_action = refresh_after_action.clone();
-                        let index = item.index;
-                        move || {
-                            if let Some(input) =
-                                remove_queued_chat_input_at(&queued_chat_inputs, thread_id, index)
-                            {
-                                if let Some(send_text) =
-                                    send_text_after_ready_queue.borrow().as_ref().cloned()
-                                {
-                                    let staged_review =
-                                        matches!(input.kind, ArchcarInputKind::ReviewPrompt);
-                                    if !send_text(input.input.clone(), staged_review) {
-                                        requeue_pending_input_front(
-                                            &queued_chat_inputs,
-                                            thread_id,
-                                            input,
-                                        );
-                                    }
-                                } else {
-                                    requeue_pending_input_front(
-                                        &queued_chat_inputs,
-                                        thread_id,
-                                        input,
-                                    );
-                                }
-                            }
-                            refresh_after_action();
-                        }
-                    });
-                    let row =
-                        queued_composer_overlay_row(&item, delete_item, edit_item, send_as_steer);
-                    queue_overlay.append(&row);
-                }
-            }
             let codex_thread_ready = if *selected_harness.borrow() == SessionKind::Codex {
                 thread_id.is_none_or(|thread_id| {
                     codex_thread_ready_for_ui(
@@ -983,6 +1017,7 @@ pub fn agent_session_panel(
         let restore_composer_draft = restore_composer_draft.clone();
         let sync_live_controls = sync_live_controls.clone();
         let send_text_after_ready_queue = send_text_after_ready_queue.clone();
+        let refresh_queue_overlay = refresh_queue_overlay.clone();
         let refresh_for_metadata = refresh_for_metadata.clone();
         Rc::new(move || {
             let workspace = current_workspace_name.borrow().clone();
@@ -1110,7 +1145,12 @@ pub fn agent_session_panel(
                 selected_thread.as_ref(),
                 active_thread,
                 |thread_id| app_state.set_selected_chat_thread(thread_id),
-                || restore_composer_draft(),
+                || {
+                    restore_composer_draft();
+                    if let Some(refresh) = refresh_queue_overlay.borrow().as_ref().cloned() {
+                        refresh();
+                    }
+                },
             );
             let selected_thread_record = {
                 let selected_thread_id = *selected_thread.borrow();
@@ -1249,8 +1289,15 @@ pub fn agent_session_panel(
                                     pop_next_queued_chat_input(&queued_chat_inputs, thread_id)
                                 {
                                     let queued_chat_inputs_for_idle = queued_chat_inputs.clone();
+                                    let refresh_queue_overlay_for_idle =
+                                        refresh_queue_overlay.clone();
                                     let staged_review =
                                         matches!(queued_input.kind, ArchcarInputKind::ReviewPrompt);
+                                    if let Some(refresh) =
+                                        refresh_queue_overlay.borrow().as_ref().cloned()
+                                    {
+                                        refresh();
+                                    }
                                     gtk::glib::idle_add_local_once(move || {
                                         if !send_text(queued_input.input.clone(), staged_review) {
                                             requeue_pending_input_front(
@@ -1258,6 +1305,13 @@ pub fn agent_session_panel(
                                                 thread_id,
                                                 queued_input,
                                             );
+                                            if let Some(refresh) = refresh_queue_overlay_for_idle
+                                                .borrow()
+                                                .as_ref()
+                                                .cloned()
+                                            {
+                                                refresh();
+                                            }
                                         }
                                     });
                                 }
@@ -1298,6 +1352,7 @@ pub fn agent_session_panel(
                             let app_state = app_state_for_thread_select.clone();
                             let update_composer_state = update_composer_for_view.clone();
                             let restore_composer_draft = restore_composer_draft.clone();
+                            let refresh_queue_overlay = refresh_queue_overlay.clone();
                             move |thread_id| {
                                 apply_thread_selection(
                                     selected_thread.as_ref(),
@@ -1306,6 +1361,11 @@ pub fn agent_session_panel(
                                     || {
                                         restore_composer_draft();
                                         update_composer_state();
+                                        if let Some(refresh) =
+                                            refresh_queue_overlay.borrow().as_ref().cloned()
+                                        {
+                                            refresh();
+                                        }
                                     },
                                 );
                                 if let Some(refresh_view) =
@@ -1493,6 +1553,12 @@ pub fn agent_session_panel(
                                 inflight_archcar_actions.as_ref(),
                                 &thread_messages,
                             );
+                            let pending_immediate_inputs =
+                                pending_immediate_user_input_texts_for_thread(
+                                    thread_id,
+                                    inflight_archcar_actions.as_ref(),
+                                    &thread_messages,
+                                );
                             let render_legacy_inline_events =
                                 render_legacy_inline_events_for_thread(
                                     &thread_events,
@@ -1590,6 +1656,7 @@ pub fn agent_session_panel(
                                     thread_events,
                                     provider_projection.items,
                                     pending_user_inputs.clone(),
+                                    pending_immediate_inputs,
                                 );
                                 for item in timeline {
                                     match item {
@@ -1614,6 +1681,12 @@ pub fn agent_session_panel(
                                                 &provider_projection_item_widget(&item),
                                             );
                                         }
+                                        ChatTimelineItem::OptimisticUserInput(input) => {
+                                            append_chat_refresh_row(
+                                                &messages,
+                                                &chat_user_bubble(&input),
+                                            );
+                                        }
                                     }
                                 }
                                 restore_chat_scroll_after_refresh(&scroll, chat_scroll);
@@ -1626,6 +1699,11 @@ pub fn agent_session_panel(
                         thread_id,
                         pending_archcar_inputs.as_ref(),
                         queued_chat_inputs.as_ref(),
+                        inflight_archcar_actions.as_ref(),
+                        &[],
+                    );
+                    let pending_immediate_inputs = pending_immediate_user_input_texts_for_thread(
+                        thread_id,
                         inflight_archcar_actions.as_ref(),
                         &[],
                     );
@@ -1661,12 +1739,18 @@ pub fn agent_session_panel(
                         &startup_state,
                         working_elapsed,
                     );
-                    let empty = Label::new(Some("No messages yet."));
-                    empty.add_css_class("chat-agent-text");
-                    empty.set_selectable(true);
-                    empty.set_wrap(true);
-                    empty.set_xalign(0.0);
-                    append_chat_refresh_row(&messages, &empty);
+                    if pending_immediate_inputs.is_empty() {
+                        let empty = Label::new(Some("No messages yet."));
+                        empty.add_css_class("chat-agent-text");
+                        empty.set_selectable(true);
+                        empty.set_wrap(true);
+                        empty.set_xalign(0.0);
+                        append_chat_refresh_row(&messages, &empty);
+                    } else {
+                        for input in pending_immediate_inputs {
+                            append_chat_refresh_row(&messages, &chat_user_bubble(&input));
+                        }
+                    }
                     restore_chat_scroll_after_refresh(&scroll, chat_scroll);
                 }
                 (None, _) => {
@@ -1975,6 +2059,7 @@ pub fn agent_session_panel(
                         send_input.clone(),
                         visible_input.clone(),
                         kind.clone(),
+                        ArchcarInputDelivery::Auto,
                         checkpoint_id,
                     ) {
                         if let Some(checkpoint_id) = checkpoint_id {
@@ -2164,6 +2249,7 @@ pub fn agent_session_panel(
             send_input.clone(),
             visible_input.clone(),
             input_kind,
+            ArchcarInputDelivery::Auto,
             checkpoint_id,
         ) {
             if let Some(checkpoint_id) = checkpoint_id {
@@ -2203,6 +2289,7 @@ pub fn agent_session_panel(
         let selected_thread_for_switch = selected_thread.clone();
         let update_composer_for_switch = update_composer_state.clone();
         let restore_composer_draft_for_switch = restore_composer_draft.clone();
+        let refresh_queue_overlay_for_switch = refresh_queue_overlay.clone();
         let toast_for_switch = toast_manager.clone();
         let switch_action = Rc::new(move |next_kind: SessionKind| {
             let workspace_for_switch = current_workspace_name_for_switch.borrow().clone();
@@ -2253,6 +2340,11 @@ pub fn agent_session_panel(
                 || {
                     restore_composer_draft_for_switch();
                     update_composer_for_switch();
+                    if let Some(refresh) =
+                        refresh_queue_overlay_for_switch.borrow().as_ref().cloned()
+                    {
+                        refresh();
+                    }
                 },
             );
             let next_process = next_thread.and_then(|thread_id| {
@@ -2290,6 +2382,7 @@ pub fn agent_session_panel(
         let app_state = app_state.clone();
         let update_composer_state = update_composer_state.clone();
         let restore_composer_draft = restore_composer_draft.clone();
+        let refresh_queue_overlay = refresh_queue_overlay.clone();
         *external_chat_tabs.selection_controller.borrow_mut() = Some(Rc::new(move |thread_id| {
             apply_thread_selection(
                 selected_thread.as_ref(),
@@ -2298,6 +2391,9 @@ pub fn agent_session_panel(
                 || {
                     restore_composer_draft();
                     update_composer_state();
+                    if let Some(refresh) = refresh_queue_overlay.borrow().as_ref().cloned() {
+                        refresh();
+                    }
                 },
             );
             if let Some(refresh_view) = clone_refresh_chat_surface_controller(&refresh_chat_surface)
@@ -2362,7 +2458,7 @@ pub fn agent_session_panel(
         }
     });
 
-    let send_active_turn_steer = Rc::new({
+    let send_immediate_input: Rc<dyn Fn(String, bool) -> bool> = Rc::new({
         let selected_thread = selected_thread.clone();
         let selected_harness = selected_harness.clone();
         let record_state = record_state.clone();
@@ -2372,7 +2468,7 @@ pub fn agent_session_panel(
         let working_threads = working_threads.clone();
         let refresh_view = refresh_view.clone();
         let toast_manager = toast_manager.clone();
-        move |command: String| -> bool {
+        move |command: String, staged_review: bool| -> bool {
             if command.trim().is_empty() || *selected_harness.borrow() != SessionKind::Codex {
                 return false;
             }
@@ -2393,7 +2489,12 @@ pub fn agent_session_panel(
                 session_id,
                 command,
                 None,
-                ArchcarInputKind::User,
+                if staged_review {
+                    ArchcarInputKind::ReviewPrompt
+                } else {
+                    ArchcarInputKind::User
+                },
+                ArchcarInputDelivery::Immediate,
                 None,
             ) {
                 note_archcar_ready(&mut archcar_ready_cache.borrow_mut(), session_id, false);
@@ -2401,14 +2502,13 @@ pub fn agent_session_panel(
                 refresh_view();
                 true
             } else {
-                toast_manager.error(
-                    "Could not steer the active Codex turn because archcar is unavailable."
-                        .to_owned(),
-                );
+                toast_manager
+                    .error("Could not send immediately because archcar is unavailable.".to_owned());
                 false
             }
         }
     });
+    *send_immediate_after_ready_queue.borrow_mut() = Some(send_immediate_input.clone());
 
     let submit_composer_action = Rc::new({
         let buffer = buffer.clone();
@@ -2423,7 +2523,8 @@ pub fn agent_session_panel(
         let send_text = send_text.clone();
         let update_composer_state = update_composer_state.clone();
         let interrupt_current_session = interrupt_current_session.clone();
-        let send_active_turn_steer = send_active_turn_steer.clone();
+        let send_immediate_input = send_immediate_input.clone();
+        let refresh_queue_overlay = refresh_queue_overlay.clone();
         move |intent: ComposerSubmitIntent| {
             let command = buffer
                 .text(&buffer.start_iter(), &buffer.end_iter(), true)
@@ -2470,7 +2571,7 @@ pub fn agent_session_panel(
                 queued_count,
                 codex_waiting_for_startup,
             );
-            match composer_action_for_submit_intent(action, intent) {
+            match composer_action_for_submit_intent(action, intent, has_text) {
                 ComposerAction::Queue => {
                     let Some(thread_id) = thread_id else {
                         buffer.set_text("");
@@ -2519,8 +2620,10 @@ pub fn agent_session_panel(
                 ComposerAction::Send => {
                     if has_text {
                         buffer.set_text("");
-                        if intent == ComposerSubmitIntent::Steer && has_active_generation {
-                            let _ = send_active_turn_steer(command);
+                        if intent == ComposerSubmitIntent::Immediate {
+                            if !send_immediate_input(command.clone(), false) {
+                                (send_text)(command, false);
+                            }
                         } else {
                             (send_text)(command, false);
                         }
@@ -2528,6 +2631,9 @@ pub fn agent_session_panel(
                     update_composer_state();
                 }
                 ComposerAction::Disabled => {}
+            }
+            if let Some(refresh) = refresh_queue_overlay.borrow().as_ref().cloned() {
+                refresh();
             }
         }
     });
@@ -2588,6 +2694,7 @@ pub fn agent_session_panel(
         let refresh_view = refresh_view.clone();
         let update_composer_state = update_composer_state.clone();
         let restore_composer_draft = restore_composer_draft.clone();
+        let refresh_queue_overlay = refresh_queue_overlay.clone();
         let setup_readiness = setup_readiness.clone();
         let toast_manager = toast_manager.clone();
         move |_| {
@@ -2618,6 +2725,11 @@ pub fn agent_session_panel(
                         || {
                             restore_composer_draft();
                             update_composer_state();
+                            if let Some(refresh) =
+                                refresh_queue_overlay.borrow().as_ref().cloned()
+                            {
+                                refresh();
+                            }
                         },
                     );
                     refresh_view();
@@ -2709,7 +2821,7 @@ fn queued_composer_overlay_row(
     item: &QueuedComposerItem,
     on_delete: Rc<dyn Fn()>,
     on_edit: Rc<dyn Fn()>,
-    on_send_as_steer: Rc<dyn Fn()>,
+    on_send_immediately: Rc<dyn Fn()>,
 ) -> GBox {
     let row = GBox::new(Orientation::Horizontal, 8);
     row.add_css_class("chat-queued-composer-row");
@@ -2739,10 +2851,10 @@ fn queued_composer_overlay_row(
     delete_btn.connect_clicked(move |_| on_delete());
     actions.append(&delete_btn);
 
-    let steer_btn = icon_button("send-symbolic", "Send as steer now");
-    steer_btn.add_css_class("chat-queued-action-btn");
-    steer_btn.connect_clicked(move |_| on_send_as_steer());
-    actions.append(&steer_btn);
+    let send_btn = icon_button("send-symbolic", "Send immediately");
+    send_btn.add_css_class("chat-queued-action-btn");
+    send_btn.connect_clicked(move |_| on_send_immediately());
+    actions.append(&send_btn);
 
     row.append(&actions);
     row
@@ -3245,6 +3357,7 @@ fn chat_timeline_item_sort_key(item: &ChatTimelineItem) -> (i64, u8, i64) {
             2,
             i64::try_from(item.sequence).unwrap_or(i64::MAX),
         ),
+        ChatTimelineItem::OptimisticUserInput(_) => (i64::MAX, 3, i64::MAX),
     }
 }
 
@@ -3253,6 +3366,7 @@ fn chat_structured_items_for_render(
     events: Vec<ChatEventRecord>,
     provider_projection_items: Vec<ProviderProjectionItem>,
     _pending_inputs: Vec<String>,
+    optimistic_immediate_inputs: Vec<String>,
 ) -> Vec<ChatTimelineItem> {
     let (mut items, mut unsequenced_messages): (Vec<_>, Vec<_>) =
         merge_chat_timeline_for_render(messages.clone(), events)
@@ -3282,6 +3396,11 @@ fn chat_structured_items_for_render(
         );
     }
     items.append(&mut unsequenced_messages);
+    items.extend(
+        optimistic_immediate_inputs
+            .into_iter()
+            .map(ChatTimelineItem::OptimisticUserInput),
+    );
     items
 }
 
@@ -6116,6 +6235,42 @@ fn pending_user_input_texts_for_thread(
         .collect()
 }
 
+fn pending_immediate_user_input_texts_for_thread(
+    thread_id: i64,
+    inflight_actions: &RefCell<HashMap<u64, PendingArchcarAction>>,
+    persisted_messages: &[ChatMessageRecord],
+) -> Vec<String> {
+    let persisted = persisted_messages
+        .iter()
+        .filter(|message| message.role == "user")
+        .map(|message| message.content.trim().to_owned())
+        .collect::<HashSet<_>>();
+    let mut seen = HashSet::new();
+    let mut inputs = Vec::new();
+    inflight_actions
+        .borrow_mut()
+        .retain(|_, action| match action {
+            PendingArchcarAction::UserSend {
+                thread_id: action_thread_id,
+                input,
+                visible_input,
+                delivery: ArchcarInputDelivery::Immediate,
+                ..
+            } if *action_thread_id == thread_id => {
+                let input = visible_input.as_deref().unwrap_or(input).trim().to_owned();
+                if input.is_empty() || persisted.contains(&input) {
+                    return false;
+                }
+                if seen.insert(input.clone()) {
+                    inputs.push(input);
+                }
+                true
+            }
+            _ => true,
+        });
+    inputs
+}
+
 fn queued_chat_inputs_count(
     pending: &RefCell<HashMap<i64, Vec<QueuedArchcarInput>>>,
     thread_id: i64,
@@ -6145,7 +6300,7 @@ fn queued_composer_overlay_items_for_thread(
             actions: vec![
                 QueuedComposerAction::Delete,
                 QueuedComposerAction::Edit,
-                QueuedComposerAction::SendAsSteer,
+                QueuedComposerAction::SendImmediately,
             ],
         })
         .collect()
@@ -6221,14 +6376,14 @@ enum ComposerAction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ComposerSubmitIntent {
     Default,
-    Steer,
+    Immediate,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum QueuedComposerAction {
     Delete,
     Edit,
-    SendAsSteer,
+    SendImmediately,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -6236,6 +6391,19 @@ struct QueuedComposerItem {
     index: usize,
     preview: String,
     actions: Vec<QueuedComposerAction>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct QueueOverlaySignature {
+    thread_id: Option<i64>,
+    items: Vec<QueuedComposerItem>,
+}
+
+fn queue_overlay_requires_rebuild(
+    previous: Option<&QueueOverlaySignature>,
+    current: &QueueOverlaySignature,
+) -> bool {
+    previous != Some(current)
 }
 
 fn composer_action_for_state(
@@ -6288,7 +6456,7 @@ fn composer_action_for_startup_state(
 
 fn composer_submit_intent_for_modifiers(modifiers: gtk::gdk::ModifierType) -> ComposerSubmitIntent {
     if modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK) {
-        ComposerSubmitIntent::Steer
+        ComposerSubmitIntent::Immediate
     } else {
         ComposerSubmitIntent::Default
     }
@@ -6297,8 +6465,12 @@ fn composer_submit_intent_for_modifiers(modifiers: gtk::gdk::ModifierType) -> Co
 fn composer_action_for_submit_intent(
     action: ComposerAction,
     intent: ComposerSubmitIntent,
+    has_text: bool,
 ) -> ComposerAction {
-    if action == ComposerAction::Queue && intent == ComposerSubmitIntent::Steer {
+    if has_text
+        && intent == ComposerSubmitIntent::Immediate
+        && matches!(action, ComposerAction::Queue | ComposerAction::SendQueued)
+    {
         ComposerAction::Send
     } else {
         action
@@ -8228,6 +8400,7 @@ enum PendingArchcarAction {
         input: String,
         visible_input: Option<String>,
         kind: ArchcarInputKind,
+        delivery: ArchcarInputDelivery,
         checkpoint_id: Option<i64>,
     },
 }
@@ -8326,6 +8499,7 @@ fn flush_pending_archcar_inputs(
             queued_input.input.clone(),
             queued_input.visible_input.clone(),
             queued_input.kind.clone(),
+            ArchcarInputDelivery::Auto,
             checkpoint_id,
         ) {
             if let Some(checkpoint_id) = checkpoint_id {
@@ -8446,14 +8620,23 @@ fn queue_archcar_user_send(
     input: String,
     visible_input: Option<String>,
     kind: ArchcarInputKind,
+    delivery: ArchcarInputDelivery,
     checkpoint_id: Option<i64>,
 ) -> bool {
-    let token = bridge.send_input(
-        session_id,
-        input.clone(),
-        visible_input.clone(),
-        kind.clone(),
-    );
+    let token = match delivery {
+        ArchcarInputDelivery::Auto => bridge.send_input(
+            session_id,
+            input.clone(),
+            visible_input.clone(),
+            kind.clone(),
+        ),
+        ArchcarInputDelivery::Immediate => bridge.send_input_immediately(
+            session_id,
+            input.clone(),
+            visible_input.clone(),
+            kind.clone(),
+        ),
+    };
     if let Some(token) = token {
         inflight_actions.borrow_mut().insert(
             token,
@@ -8463,6 +8646,7 @@ fn queue_archcar_user_send(
                 input,
                 visible_input,
                 kind,
+                delivery,
                 checkpoint_id,
             },
         );
@@ -8887,6 +9071,7 @@ fn handle_archcar_response(
             input,
             visible_input,
             kind,
+            delivery,
             checkpoint_id,
         } => match response.result {
             Ok(ArchcarResponse::Ack) => {
@@ -8894,12 +9079,27 @@ fn handle_archcar_response(
                     thread_id,
                     session_id,
                     kind = ?kind,
+                    delivery = ?delivery,
                     chars = input.len(),
                     "archcar input accepted"
                 );
+                if delivery == ArchcarInputDelivery::Immediate {
+                    inflight_actions.borrow_mut().insert(
+                        response.token,
+                        PendingArchcarAction::UserSend {
+                            thread_id,
+                            session_id,
+                            input,
+                            visible_input,
+                            kind,
+                            delivery,
+                            checkpoint_id,
+                        },
+                    );
+                }
             }
             Ok(other) => {
-                warn!(thread_id, session_id, kind = ?kind, ?other, "unexpected archcar input response");
+                warn!(thread_id, session_id, kind = ?kind, delivery = ?delivery, ?other, "unexpected archcar input response");
                 if let Some(checkpoint_id) = checkpoint_id {
                     discard_turn_checkpoint(database_path, workspace, checkpoint_id);
                 }
@@ -8922,7 +9122,7 @@ fn handle_archcar_response(
                 );
             }
             Err(err) => {
-                warn!(thread_id, session_id, kind = ?kind, error = %err, "archcar input send failed");
+                warn!(thread_id, session_id, kind = ?kind, delivery = ?delivery, error = %err, "archcar input send failed");
                 if let Some(checkpoint_id) = checkpoint_id {
                     discard_turn_checkpoint(database_path, workspace, checkpoint_id);
                 }
@@ -9636,23 +9836,71 @@ fix it
     }
 
     #[test]
-    fn composer_ctrl_enter_steers_active_turn_instead_of_queueing() {
+    fn composer_ctrl_enter_delivers_immediately_instead_of_queueing() {
         assert_eq!(
             composer_submit_intent_for_modifiers(gtk::gdk::ModifierType::empty()),
             ComposerSubmitIntent::Default
         );
         assert_eq!(
             composer_submit_intent_for_modifiers(gtk::gdk::ModifierType::CONTROL_MASK),
-            ComposerSubmitIntent::Steer
+            ComposerSubmitIntent::Immediate
         );
         assert_eq!(
-            composer_action_for_submit_intent(ComposerAction::Queue, ComposerSubmitIntent::Default),
+            composer_action_for_submit_intent(
+                ComposerAction::Queue,
+                ComposerSubmitIntent::Default,
+                true,
+            ),
             ComposerAction::Queue
         );
         assert_eq!(
-            composer_action_for_submit_intent(ComposerAction::Queue, ComposerSubmitIntent::Steer),
+            composer_action_for_submit_intent(
+                ComposerAction::Queue,
+                ComposerSubmitIntent::Immediate,
+                true,
+            ),
             ComposerAction::Send
         );
+        assert_eq!(
+            composer_action_for_submit_intent(
+                ComposerAction::SendQueued,
+                ComposerSubmitIntent::Immediate,
+                true,
+            ),
+            ComposerAction::Send
+        );
+        assert_eq!(
+            composer_action_for_submit_intent(
+                ComposerAction::SendQueued,
+                ComposerSubmitIntent::Immediate,
+                false,
+            ),
+            ComposerAction::SendQueued
+        );
+    }
+
+    #[test]
+    fn unchanged_queue_overlay_does_not_rebuild_during_chat_refresh() {
+        let signature = QueueOverlaySignature {
+            thread_id: Some(7),
+            items: vec![QueuedComposerItem {
+                index: 0,
+                preview: "queued message".to_owned(),
+                actions: vec![QueuedComposerAction::SendImmediately],
+            }],
+        };
+
+        assert!(queue_overlay_requires_rebuild(None, &signature));
+        assert!(!queue_overlay_requires_rebuild(
+            Some(&signature),
+            &signature
+        ));
+
+        let changed = QueueOverlaySignature {
+            thread_id: Some(7),
+            items: Vec::new(),
+        };
+        assert!(queue_overlay_requires_rebuild(Some(&signature), &changed));
     }
 
     #[test]
@@ -9781,7 +10029,7 @@ fix it
         assert!(items[0].actions.contains(&QueuedComposerAction::Edit));
         assert!(items[0]
             .actions
-            .contains(&QueuedComposerAction::SendAsSteer));
+            .contains(&QueuedComposerAction::SendImmediately));
     }
 
     #[test]
@@ -10497,6 +10745,7 @@ fix it
                 input: "[metadata]\nreal inflight".to_owned(),
                 visible_input: Some("real inflight".to_owned()),
                 kind: ArchcarInputKind::User,
+                delivery: ArchcarInputDelivery::Auto,
                 checkpoint_id: None,
             },
         )]));
@@ -10556,6 +10805,47 @@ fix it
         );
 
         assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn immediate_inflight_input_renders_as_optimistic_user_boundary() {
+        let inflight = RefCell::new(HashMap::from([(
+            12,
+            PendingArchcarAction::UserSend {
+                thread_id: 7,
+                session_id: 9,
+                input: "change course now".to_owned(),
+                visible_input: None,
+                kind: ArchcarInputKind::User,
+                delivery: ArchcarInputDelivery::Immediate,
+                checkpoint_id: None,
+            },
+        )]));
+        let immediate = pending_immediate_user_input_texts_for_thread(7, &inflight, &[]);
+        assert_eq!(immediate, vec!["change course now".to_owned()]);
+
+        let timeline = chat_structured_items_for_render(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            immediate,
+        );
+        assert_eq!(
+            timeline,
+            vec![ChatTimelineItem::OptimisticUserInput(
+                "change course now".to_owned()
+            )]
+        );
+
+        let persisted = vec![chat_message_record(
+            1,
+            "user",
+            "change course now",
+            "user_send",
+        )];
+        assert!(pending_immediate_user_input_texts_for_thread(7, &inflight, &persisted).is_empty());
+        assert!(inflight.borrow().is_empty());
     }
 
     #[test]
@@ -11179,8 +11469,13 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
             updated_at: "now".to_owned(),
         }];
 
-        let timeline =
-            chat_structured_items_for_render(messages, Vec::new(), Vec::new(), Vec::new());
+        let timeline = chat_structured_items_for_render(
+            messages,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
 
         assert!(timeline.is_empty());
     }
@@ -11217,6 +11512,7 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
             Vec::new(),
             vec![provider_item],
             vec!["new user message".to_owned()],
+            Vec::new(),
         );
 
         assert!(matches!(timeline[0], ChatTimelineItem::Message(_)));
@@ -11263,8 +11559,13 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
             inspectable: false,
         };
 
-        let timeline =
-            chat_structured_items_for_render(messages, Vec::new(), vec![provider_item], Vec::new());
+        let timeline = chat_structured_items_for_render(
+            messages,
+            Vec::new(),
+            vec![provider_item],
+            Vec::new(),
+            Vec::new(),
+        );
 
         assert!(matches!(
             timeline[0],
@@ -11300,8 +11601,13 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
             inspectable: false,
         };
 
-        let timeline =
-            chat_structured_items_for_render(messages, Vec::new(), vec![provider_item], Vec::new());
+        let timeline = chat_structured_items_for_render(
+            messages,
+            Vec::new(),
+            vec![provider_item],
+            Vec::new(),
+            Vec::new(),
+        );
 
         assert!(matches!(timeline[0], ChatTimelineItem::Message(_)));
         assert!(matches!(
@@ -11393,8 +11699,13 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
             },
         ];
 
-        let timeline =
-            chat_structured_items_for_render(messages, Vec::new(), provider_items, Vec::new());
+        let timeline = chat_structured_items_for_render(
+            messages,
+            Vec::new(),
+            provider_items,
+            Vec::new(),
+            Vec::new(),
+        );
 
         assert!(matches!(timeline[0], ChatTimelineItem::Message(_)));
         assert!(matches!(

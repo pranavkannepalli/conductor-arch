@@ -23,7 +23,7 @@ reset their hover state even when the queue did not change.
 - Plain Enter during active generation adds a local queued input. It is sent
   after the current turn completes.
 - Ctrl+Enter delivers immediately.
-- The queued-row "Send as steer now" action uses the same immediate-delivery
+- The queued-row "Send immediately" action uses the same immediate-delivery
   path as Ctrl+Enter.
 - Immediate delivery uses Codex app-server `turn/steer` with `threadId`, input,
   and the required `expectedTurnId` when a matching active turn exists.

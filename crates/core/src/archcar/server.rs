@@ -245,6 +245,7 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             input,
             visible_input,
             kind,
+            delivery,
         } => match load_or_restore_session_handle(state, session_id) {
             Ok(Some(handle)) => {
                 match handle
@@ -253,6 +254,7 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                         input,
                         visible_input,
                         kind,
+                        delivery,
                     }) {
                     Ok(_) => ArchcarResponse::Ack,
                     Err(err) => ArchcarResponse::Error {
@@ -1207,7 +1209,7 @@ fn shutdown_managed_sessions(state: &Arc<Mutex<ServerState>>, reason: &str) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::archcar::protocol::ArchcarInputKind;
+    use crate::archcar::protocol::{ArchcarInputDelivery, ArchcarInputKind};
     use crate::provider_events::{ProviderEventDraft, ProviderEventKind, ProviderEventPhase};
     use std::fs;
     #[cfg(unix)]
@@ -1333,6 +1335,7 @@ mod tests {
                 input: "paste OPENAI_API_KEY=sk-secret into session".to_owned(),
                 visible_input: None,
                 kind: ArchcarInputKind::User,
+                delivery: ArchcarInputDelivery::Auto,
             },
         };
         let line = serde_json::to_string(&envelope).unwrap();
@@ -1340,7 +1343,7 @@ mod tests {
         assert_eq!(archcar_rpc_log_payload(&line), None);
         assert_eq!(
             archcar_request_summary(&envelope.payload),
-            "send_input session_id=42 kind=user chars=43"
+            "send_input session_id=42 kind=user delivery=auto chars=43"
         );
     }
 
@@ -1354,6 +1357,7 @@ mod tests {
                     .to_owned(),
                 visible_input: None,
                 kind: ArchcarInputKind::User,
+                delivery: ArchcarInputDelivery::Auto,
             },
         };
         let line = serde_json::to_string(&envelope).unwrap();
