@@ -1,0 +1,44 @@
+crates/core/src/workspace.rs
+  s_253c7caaac4043::t_90d1f84afd8887 8201,8205,8223
+  s_253c7caaac4043::t_5be1fa5edfdbb0 8213-8216,8224-8226,8228-8238,19087
+  s_253c7caaac4043::t_dfa0891ad52118 8243
+  s_253c7caaac4043::t_e2366f53eea6d5 19067,19086
+  s_253c7caaac4043::t_1162e28ebbd3b1 19090,19092-19093
+  s_253c7caaac4043::t_5465d5857bd0f0 8227
+  s_253c7caaac4043::t_870f13e0d2e7f5 8239-8242,8244
+  s_d1a7d1b65e90c0::t_38dc9789eb1ab9 8245,19088-19089
+crates/gtk-app/src/session_surface.rs
+  s_d1a7d1b65e90c0::t_d2825c94c95283 1532-1533
+  s_253c7caaac4043::t_1341e7f6e01651 3643,12083-12112,12114-12115,12117,12119,12124,12126,12134,12136,12149,12151,12153,12159,12161,12170,12172,12189,12191,12199,12201,12225,12227,12232,12237,12241
+  s_d1a7d1b65e90c0::t_c10ad1da912add 1546-1547
+  s_d1a7d1b65e90c0::t_b5f37c5fe48f77 274,277-291,343,945,950,986,1515,1522-1531,1534-1545,2640-2647,2687,3467,3471-3472,3596,3617-3642,3644-3663,12113,12116,12118,12120-12123,12125,12127-12133,12135,12137-12148,12150,12152,12154-12158,12160,12162-12169,12171,12173-12188,12190,12192-12198,12200,12202-12224,12226,12228-12231,12233-12236,12238-12240,12242-12245
+crates/gtk-app/src/workspace_command_center.rs
+  s_253c7caaac4043::t_c6dd2bdea2f518 590,594-595
+  s_253c7caaac4043::t_7addc0991c6468 642,687,721,737,787,802,877-883,890,900
+crates/cli/tests/cli_sessions.rs
+  s_253c7caaac4043::t_82df4ebf5159a4 264,296
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "06782ae1ad9f31e26d41df48b0ae200466c6d320",
+  "prompts": {},
+  "sessions": {
+    "s_253c7caaac4043": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f648f-4a92-7263-8ed4-be74fbdaeb80",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    },
+    "s_d1a7d1b65e90c0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6480-13d5-7d72-8e26-3df627bb2e4f",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
