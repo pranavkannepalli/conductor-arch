@@ -1,0 +1,21 @@
+progress.md
+  s_334155ca48da57::t_243a50fd58b413 3,10-11,32-34,48-51,79-80,82-88,110-114,128-130
+docs/manual-testing-checklist.md
+  s_334155ca48da57::t_243a50fd58b413 25-39,52-68,310-325
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "3e01bd774981dec828691181cf862ec50273c837",
+  "prompts": {},
+  "sessions": {
+    "s_334155ca48da57": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f649a-658f-7b33-8c99-86fbdc632ce0",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
