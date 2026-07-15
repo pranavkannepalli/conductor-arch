@@ -973,8 +973,8 @@ struct RawNamingSettings {
     commit_style: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pr_title_template: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pr_body_sections: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pr_body_sections: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     default_merge_method: Option<String>,
 }
@@ -985,8 +985,8 @@ struct RawAutomationSettings {
     auto_setup: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     auto_start_agent: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    required_local_files: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    required_local_files: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     test_command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1033,8 +1033,8 @@ struct RawAgentProfileSettings {
     reasoning_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     personality: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    mcp_servers: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mcp_servers: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -1077,8 +1077,8 @@ struct RawViewSettings {
     theme: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     accent_color: Option<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    colors: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    colors: Option<BTreeMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     density: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1091,14 +1091,14 @@ struct RawViewSettings {
     terminal_scrollback: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     transcript_display: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    dashboard_columns: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    notification_rules: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dashboard_columns: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    notification_rules: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     keybindings: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    command_palette_presets: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    command_palette_presets: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     settings_import_export: Option<String>,
 }
@@ -1117,10 +1117,10 @@ impl RawRepositorySettings {
                     .unwrap_or_default()
                     .merge(local.scripts.unwrap_or_default()),
             ),
-            environment_variables: Some(merge_maps(
-                self.environment_variables.unwrap_or_default(),
-                local.environment_variables.unwrap_or_default(),
-            )),
+            environment_variables: merge_optional_maps(
+                self.environment_variables,
+                local.environment_variables,
+            ),
             prompt_pack: Some(
                 self.prompt_pack
                     .unwrap_or_default()
@@ -1407,10 +1407,7 @@ impl RawCustomizationSettings {
                     .unwrap_or_default()
                     .merge(local.automation.unwrap_or_default()),
             ),
-            agent_profiles: Some(merge_profile_maps(
-                self.agent_profiles.unwrap_or_default(),
-                local.agent_profiles.unwrap_or_default(),
-            )),
+            agent_profiles: merge_optional_profile_maps(self.agent_profiles, local.agent_profiles),
             merge_rules: Some(
                 self.merge_rules
                     .unwrap_or_default()
@@ -1477,11 +1474,7 @@ impl RawNamingSettings {
             workspace_name_style: local.workspace_name_style.or(self.workspace_name_style),
             commit_style: local.commit_style.or(self.commit_style),
             pr_title_template: local.pr_title_template.or(self.pr_title_template),
-            pr_body_sections: if local.pr_body_sections.is_empty() {
-                self.pr_body_sections
-            } else {
-                local.pr_body_sections
-            },
+            pr_body_sections: local.pr_body_sections.or(self.pr_body_sections),
             default_merge_method: local.default_merge_method.or(self.default_merge_method),
         }
     }
@@ -1492,7 +1485,7 @@ impl RawNamingSettings {
             workspace_name_style: self.workspace_name_style,
             commit_style: self.commit_style,
             pr_title_template: self.pr_title_template,
-            pr_body_sections: self.pr_body_sections,
+            pr_body_sections: self.pr_body_sections.unwrap_or_default(),
             default_merge_method: self.default_merge_method,
         }
     }
@@ -1503,7 +1496,8 @@ impl RawNamingSettings {
             workspace_name_style: settings.workspace_name_style.clone(),
             commit_style: settings.commit_style.clone(),
             pr_title_template: settings.pr_title_template.clone(),
-            pr_body_sections: settings.pr_body_sections.clone(),
+            pr_body_sections: (!settings.pr_body_sections.is_empty())
+                .then(|| settings.pr_body_sections.clone()),
             default_merge_method: settings.default_merge_method.clone(),
         }
     }
@@ -1514,11 +1508,7 @@ impl RawAutomationSettings {
         Self {
             auto_setup: local.auto_setup.or(self.auto_setup),
             auto_start_agent: local.auto_start_agent.or(self.auto_start_agent),
-            required_local_files: if local.required_local_files.is_empty() {
-                self.required_local_files
-            } else {
-                local.required_local_files
-            },
+            required_local_files: local.required_local_files.or(self.required_local_files),
             test_command: local.test_command.or(self.test_command),
             lint_command: local.lint_command.or(self.lint_command),
             typecheck_command: local.typecheck_command.or(self.typecheck_command),
@@ -1542,7 +1532,7 @@ impl RawAutomationSettings {
         AutomationSettings {
             auto_setup: self.auto_setup,
             auto_start_agent: self.auto_start_agent,
-            required_local_files: self.required_local_files,
+            required_local_files: self.required_local_files.unwrap_or_default(),
             test_command: self.test_command,
             lint_command: self.lint_command,
             typecheck_command: self.typecheck_command,
@@ -1566,7 +1556,8 @@ impl RawAutomationSettings {
         Self {
             auto_setup: settings.auto_setup,
             auto_start_agent: settings.auto_start_agent.clone(),
-            required_local_files: settings.required_local_files.clone(),
+            required_local_files: (!settings.required_local_files.is_empty())
+                .then(|| settings.required_local_files.clone()),
             test_command: settings.test_command.clone(),
             lint_command: settings.lint_command.clone(),
             typecheck_command: settings.typecheck_command.clone(),
@@ -1595,11 +1586,7 @@ impl RawAgentProfileSettings {
             approval_mode: local.approval_mode.or(self.approval_mode),
             reasoning_mode: local.reasoning_mode.or(self.reasoning_mode),
             personality: local.personality.or(self.personality),
-            mcp_servers: if local.mcp_servers.is_empty() {
-                self.mcp_servers
-            } else {
-                local.mcp_servers
-            },
+            mcp_servers: local.mcp_servers.or(self.mcp_servers),
         }
     }
 
@@ -1610,7 +1597,7 @@ impl RawAgentProfileSettings {
             approval_mode: self.approval_mode,
             reasoning_mode: self.reasoning_mode,
             personality: self.personality,
-            mcp_servers: self.mcp_servers,
+            mcp_servers: self.mcp_servers.unwrap_or_default(),
         }
     }
 
@@ -1621,7 +1608,7 @@ impl RawAgentProfileSettings {
             approval_mode: settings.approval_mode.clone(),
             reasoning_mode: settings.reasoning_mode.clone(),
             personality: settings.personality.clone(),
-            mcp_servers: settings.mcp_servers.clone(),
+            mcp_servers: (!settings.mcp_servers.is_empty()).then(|| settings.mcp_servers.clone()),
         }
     }
 }
@@ -1706,29 +1693,19 @@ impl RawViewSettings {
         Self {
             theme: local.theme.or(self.theme),
             accent_color: local.accent_color.or(self.accent_color),
-            colors: merge_maps(self.colors, local.colors),
+            colors: merge_optional_maps(self.colors, local.colors),
             density: local.density.or(self.density),
             sidebar_layout: local.sidebar_layout.or(self.sidebar_layout),
             diff_preference: local.diff_preference.or(self.diff_preference),
             terminal_font: local.terminal_font.or(self.terminal_font),
             terminal_scrollback: local.terminal_scrollback.or(self.terminal_scrollback),
             transcript_display: local.transcript_display.or(self.transcript_display),
-            dashboard_columns: if local.dashboard_columns.is_empty() {
-                self.dashboard_columns
-            } else {
-                local.dashboard_columns
-            },
-            notification_rules: if local.notification_rules.is_empty() {
-                self.notification_rules
-            } else {
-                local.notification_rules
-            },
+            dashboard_columns: local.dashboard_columns.or(self.dashboard_columns),
+            notification_rules: local.notification_rules.or(self.notification_rules),
             keybindings: local.keybindings.or(self.keybindings),
-            command_palette_presets: if local.command_palette_presets.is_empty() {
-                self.command_palette_presets
-            } else {
-                local.command_palette_presets
-            },
+            command_palette_presets: local
+                .command_palette_presets
+                .or(self.command_palette_presets),
             settings_import_export: local.settings_import_export.or(self.settings_import_export),
         }
     }
@@ -1737,17 +1714,17 @@ impl RawViewSettings {
         ViewSettings {
             theme: self.theme,
             accent_color: self.accent_color,
-            colors: self.colors,
+            colors: self.colors.unwrap_or_default(),
             density: self.density,
             sidebar_layout: self.sidebar_layout,
             diff_preference: self.diff_preference,
             terminal_font: self.terminal_font,
             terminal_scrollback: self.terminal_scrollback,
             transcript_display: self.transcript_display,
-            dashboard_columns: self.dashboard_columns,
-            notification_rules: self.notification_rules,
+            dashboard_columns: self.dashboard_columns.unwrap_or_default(),
+            notification_rules: self.notification_rules.unwrap_or_default(),
             keybindings: self.keybindings,
-            command_palette_presets: self.command_palette_presets,
+            command_palette_presets: self.command_palette_presets.unwrap_or_default(),
             settings_import_export: self.settings_import_export,
         }
     }
@@ -1756,17 +1733,20 @@ impl RawViewSettings {
         Self {
             theme: settings.theme.clone(),
             accent_color: settings.accent_color.clone(),
-            colors: settings.colors.clone(),
+            colors: (!settings.colors.is_empty()).then(|| settings.colors.clone()),
             density: settings.density.clone(),
             sidebar_layout: settings.sidebar_layout.clone(),
             diff_preference: settings.diff_preference.clone(),
             terminal_font: settings.terminal_font.clone(),
             terminal_scrollback: settings.terminal_scrollback,
             transcript_display: settings.transcript_display.clone(),
-            dashboard_columns: settings.dashboard_columns.clone(),
-            notification_rules: settings.notification_rules.clone(),
+            dashboard_columns: (!settings.dashboard_columns.is_empty())
+                .then(|| settings.dashboard_columns.clone()),
+            notification_rules: (!settings.notification_rules.is_empty())
+                .then(|| settings.notification_rules.clone()),
             keybindings: settings.keybindings.clone(),
-            command_palette_presets: settings.command_palette_presets.clone(),
+            command_palette_presets: (!settings.command_palette_presets.is_empty())
+                .then(|| settings.command_palette_presets.clone()),
             settings_import_export: settings.settings_import_export.clone(),
         }
     }
@@ -1784,6 +1764,17 @@ fn merge_profile_maps(
         shared.insert(name, profile);
     }
     shared
+}
+
+fn merge_optional_profile_maps(
+    shared: Option<BTreeMap<String, RawAgentProfileSettings>>,
+    local: Option<BTreeMap<String, RawAgentProfileSettings>>,
+) -> Option<BTreeMap<String, RawAgentProfileSettings>> {
+    match local {
+        None => shared,
+        Some(local) if local.is_empty() => Some(local),
+        Some(local) => Some(merge_profile_maps(shared.unwrap_or_default(), local)),
+    }
 }
 
 fn load_optional_settings(path: &Path) -> Result<RawRepositorySettings> {
@@ -1822,6 +1813,17 @@ fn merge_maps(
 ) -> BTreeMap<String, String> {
     shared.extend(local);
     shared
+}
+
+fn merge_optional_maps(
+    shared: Option<BTreeMap<String, String>>,
+    local: Option<BTreeMap<String, String>>,
+) -> Option<BTreeMap<String, String>> {
+    match local {
+        None => shared,
+        Some(local) if local.is_empty() => Some(local),
+        Some(local) => Some(merge_maps(shared.unwrap_or_default(), local)),
+    }
 }
 
 pub(crate) fn is_valid_environment_key(key: &str) -> bool {
@@ -2370,6 +2372,325 @@ mod tests {
         let settings = load_effective_repository_settings(&repo, &app).unwrap();
 
         assert!(settings.file_include_globs.is_empty());
+    }
+
+    #[test]
+    fn raw_shared_empty_collections_clear_builtin_collections() {
+        let built_in: RawRepositorySettings = toml::from_str(
+            r##"
+[environment_variables]
+BUILT_IN = "1"
+
+[customization]
+
+[customization.naming]
+pr_body_sections = ["Summary"]
+
+[customization.automation]
+required_local_files = [".env"]
+
+[customization.agent_profiles.default]
+mcp_servers = ["github"]
+
+[customization.view]
+dashboard_columns = ["ready"]
+notification_rules = ["checks_failed"]
+command_palette_presets = ["test"]
+
+[customization.view.colors]
+accent = "#5b9dff"
+"##,
+        )
+        .unwrap();
+        let shared: RawRepositorySettings = toml::from_str(
+            r#"
+[environment_variables]
+
+[customization]
+agent_profiles = {}
+
+[customization.naming]
+pr_body_sections = []
+
+[customization.automation]
+required_local_files = []
+
+[customization.view]
+colors = {}
+dashboard_columns = []
+notification_rules = []
+command_palette_presets = []
+"#,
+        )
+        .unwrap();
+
+        let settings = built_in.merge(shared).into_settings();
+
+        assert!(settings.environment_variables.is_empty());
+        assert!(settings.customization.naming.pr_body_sections.is_empty());
+        assert!(settings
+            .customization
+            .automation
+            .required_local_files
+            .is_empty());
+        assert!(settings.customization.agent_profiles.is_empty());
+        assert!(settings.customization.view.colors.is_empty());
+        assert!(settings.customization.view.dashboard_columns.is_empty());
+        assert!(settings.customization.view.notification_rules.is_empty());
+        assert!(settings
+            .customization
+            .view
+            .command_palette_presets
+            .is_empty());
+
+        let built_in: RawRepositorySettings =
+            toml::from_str("[customization.agent_profiles.default]\nmcp_servers = [\"github\"]\n")
+                .unwrap();
+        let shared: RawRepositorySettings =
+            toml::from_str("[customization.agent_profiles.default]\nmcp_servers = []\n").unwrap();
+        let settings = built_in.merge(shared).into_settings();
+        assert!(settings.customization.agent_profiles["default"]
+            .mcp_servers
+            .is_empty());
+    }
+
+    #[test]
+    fn effective_settings_repository_empty_collections_clear_shared_collections() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        let app = temp.path().join("config/settings.toml");
+        fs::create_dir_all(repo.join(".archductor")).unwrap();
+        fs::create_dir_all(app.parent().unwrap()).unwrap();
+        fs::write(
+            &app,
+            r##"
+[environment_variables]
+SHARED = "1"
+
+[customization.naming]
+pr_body_sections = ["Summary"]
+
+[customization.automation]
+required_local_files = [".env"]
+
+[customization.agent_profiles.default]
+mcp_servers = ["github"]
+
+[customization.view]
+dashboard_columns = ["ready"]
+notification_rules = ["checks_failed"]
+command_palette_presets = ["test"]
+
+[customization.view.colors]
+accent = "#5b9dff"
+"##,
+        )
+        .unwrap();
+        fs::write(
+            repo.join(".archductor/settings.toml"),
+            r#"
+[environment_variables]
+
+[customization.naming]
+pr_body_sections = []
+
+[customization.automation]
+required_local_files = []
+
+[customization.agent_profiles.default]
+mcp_servers = []
+
+[customization.view]
+colors = {}
+dashboard_columns = []
+notification_rules = []
+command_palette_presets = []
+"#,
+        )
+        .unwrap();
+
+        let settings = load_effective_repository_settings(&repo, &app).unwrap();
+
+        assert!(settings.environment_variables.is_empty());
+        assert!(settings.customization.naming.pr_body_sections.is_empty());
+        assert!(settings
+            .customization
+            .automation
+            .required_local_files
+            .is_empty());
+        assert!(settings.customization.agent_profiles["default"]
+            .mcp_servers
+            .is_empty());
+        assert!(settings.customization.view.colors.is_empty());
+        assert!(settings.customization.view.dashboard_columns.is_empty());
+        assert!(settings.customization.view.notification_rules.is_empty());
+        assert!(settings
+            .customization
+            .view
+            .command_palette_presets
+            .is_empty());
+    }
+
+    #[test]
+    fn effective_settings_local_empty_collections_clear_repository_collections() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        let app = temp.path().join("config/settings.toml");
+        fs::create_dir_all(repo.join(".archductor")).unwrap();
+        fs::create_dir_all(app.parent().unwrap()).unwrap();
+        fs::write(&app, "[scripts]\nrun = \"shared\"\n").unwrap();
+        fs::write(
+            repo.join(".archductor/settings.toml"),
+            r##"
+[environment_variables]
+REPOSITORY = "1"
+
+[customization.naming]
+pr_body_sections = ["Summary"]
+
+[customization.automation]
+required_local_files = [".env"]
+
+[customization.agent_profiles.default]
+mcp_servers = ["github"]
+
+[customization.view]
+dashboard_columns = ["ready"]
+notification_rules = ["checks_failed"]
+command_palette_presets = ["test"]
+
+[customization.view.colors]
+accent = "#5b9dff"
+"##,
+        )
+        .unwrap();
+        fs::write(
+            repo.join(".archductor/settings.local.toml"),
+            r#"
+[environment_variables]
+
+[customization]
+agent_profiles = {}
+
+[customization.naming]
+pr_body_sections = []
+
+[customization.automation]
+required_local_files = []
+
+[customization.view]
+colors = {}
+dashboard_columns = []
+notification_rules = []
+command_palette_presets = []
+"#,
+        )
+        .unwrap();
+
+        let settings = load_effective_repository_settings(&repo, &app).unwrap();
+
+        assert!(settings.environment_variables.is_empty());
+        assert!(settings.customization.naming.pr_body_sections.is_empty());
+        assert!(settings
+            .customization
+            .automation
+            .required_local_files
+            .is_empty());
+        assert!(settings.customization.agent_profiles.is_empty());
+        assert!(settings.customization.view.colors.is_empty());
+        assert!(settings.customization.view.dashboard_columns.is_empty());
+        assert!(settings.customization.view.notification_rules.is_empty());
+        assert!(settings
+            .customization
+            .view
+            .command_palette_presets
+            .is_empty());
+    }
+
+    #[test]
+    fn effective_settings_absent_collections_inherit_and_empty_strings_override() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        let app = temp.path().join("config/settings.toml");
+        fs::create_dir_all(repo.join(".archductor")).unwrap();
+        fs::create_dir_all(app.parent().unwrap()).unwrap();
+        fs::write(
+            &app,
+            r##"
+[scripts]
+run = "shared"
+
+[environment_variables]
+SHARED = "1"
+
+[prompts]
+general = "shared"
+
+[customization.naming]
+pr_body_sections = ["Summary"]
+
+[customization.automation]
+required_local_files = [".env"]
+
+[customization.agent_profiles.default]
+mcp_servers = ["github"]
+
+[customization.view]
+dashboard_columns = ["ready"]
+notification_rules = ["checks_failed"]
+command_palette_presets = ["test"]
+
+[customization.view.colors]
+accent = "#5b9dff"
+"##,
+        )
+        .unwrap();
+        fs::write(
+            repo.join(".archductor/settings.toml"),
+            "[scripts]\nrun = \"\"\n",
+        )
+        .unwrap();
+        fs::write(
+            repo.join(".archductor/settings.local.toml"),
+            "[prompts]\ngeneral = \"\"\n",
+        )
+        .unwrap();
+
+        let settings = load_effective_repository_settings(&repo, &app).unwrap();
+
+        assert_eq!(settings.scripts.run.as_deref(), Some(""));
+        assert_eq!(settings.prompts.unwrap().general.as_deref(), Some(""));
+        assert_eq!(
+            settings.environment_variables,
+            [("SHARED".into(), "1".into())]
+        );
+        assert_eq!(settings.customization.naming.pr_body_sections, ["Summary"]);
+        assert_eq!(
+            settings.customization.automation.required_local_files,
+            [".env"]
+        );
+        assert_eq!(
+            settings.customization.agent_profiles["default"].mcp_servers,
+            ["github"]
+        );
+        assert_eq!(
+            settings
+                .customization
+                .view
+                .colors
+                .get("accent")
+                .map(String::as_str),
+            Some("#5b9dff")
+        );
+        assert_eq!(settings.customization.view.dashboard_columns, ["ready"]);
+        assert_eq!(
+            settings.customization.view.notification_rules,
+            ["checks_failed"]
+        );
+        assert_eq!(
+            settings.customization.view.command_palette_presets,
+            ["test"]
+        );
     }
 
     #[test]
