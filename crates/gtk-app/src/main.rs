@@ -601,6 +601,42 @@ fn with_upgraded_navigation_target<T>(
     true
 }
 
+fn weak_navigation_callback<C: 'static>(
+    coordinator: &Rc<C>,
+    navigate: fn(&C, String),
+) -> Rc<dyn Fn(String)> {
+    let coordinator = Rc::downgrade(coordinator);
+    Rc::new(move |workspace_name| {
+        if let Some(coordinator) = coordinator.upgrade() {
+            navigate(&coordinator, workspace_name);
+        }
+    })
+}
+
+struct WorkspaceNavigationCoordinator {
+    app_state: AppState,
+    main_stack: gtk::glib::WeakRef<Stack>,
+    refresh_view_preferences: Rc<dyn Fn()>,
+    refresh_workspace_detail: Rc<dyn Fn()>,
+}
+
+impl WorkspaceNavigationCoordinator {
+    fn navigate(&self, workspace_name: String) {
+        with_upgraded_navigation_target(
+            || self.main_stack.upgrade(),
+            |main_stack| {
+                navigate_workspace_from_dashboard(
+                    &self.app_state,
+                    workspace_name,
+                    self.refresh_view_preferences.as_ref(),
+                    self.refresh_workspace_detail.as_ref(),
+                    &|| main_stack.set_visible_child_name("workspace"),
+                );
+            },
+        );
+    }
+}
+
 fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     let startup = Instant::now();
     let paths = AppPaths::from_env();
@@ -737,26 +773,17 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
                 resolve_keybindings(db_path_for_view.clone(), workspace.as_deref());
         })
     };
-    let navigate_workspace: Rc<dyn Fn(String)> = {
-        let app_state = app_state.clone();
-        let main_stack_weak = main_stack_weak.clone();
-        let refresh_view_preferences = refresh_view_preferences.clone();
-        let refresh_workspace_detail = refresh_workspace_detail.clone();
-        Rc::new(move |workspace_name| {
-            navigate_workspace_from_dashboard(
-                &app_state,
-                workspace_name,
-                refresh_view_preferences.as_ref(),
-                &refresh_workspace_detail,
-                &|| {
-                    with_upgraded_navigation_target(
-                        || main_stack_weak.upgrade(),
-                        |stack| stack.set_visible_child_name("workspace"),
-                    );
-                },
-            );
-        })
-    };
+    let navigation_coordinator = Rc::new(WorkspaceNavigationCoordinator {
+        app_state: app_state.clone(),
+        main_stack: main_stack_weak,
+        refresh_view_preferences: refresh_view_preferences.clone(),
+        refresh_workspace_detail: Rc::new(refresh_workspace_detail.clone()),
+    });
+    let navigate_workspace = weak_navigation_callback(
+        &navigation_coordinator,
+        WorkspaceNavigationCoordinator::navigate,
+    );
+    let navigation_coordinator_handle = Rc::new(RefCell::new(Some(navigation_coordinator)));
     tracing::info!(
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: workspace center built"
@@ -1008,7 +1035,9 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         let spotlight_watcher_on_close = spotlight_watcher.clone();
         let runtime_reporter_on_close = runtime_error_reporter.clone();
         let toast_on_close = toast_manager.clone();
+        let navigation_coordinator_on_close = navigation_coordinator_handle.clone();
         window.connect_destroy(move |_| {
+            navigation_coordinator_on_close.borrow_mut().take();
             *spotlight_watcher_on_close.borrow_mut() = None;
             if reconcile_runtime_state_for_ui(
                 &db_path_on_close,
@@ -1785,6 +1814,62 @@ mod tests {
         assert_eq!(*target.borrow(), 1);
         drop(target);
         assert!(!navigate());
+    }
+
+    #[test]
+    fn descendant_navigation_callback_stops_before_state_and_refresh_after_root_drop() {
+        struct TestNavigationCoordinator {
+            root: std::rc::Weak<()>,
+            selected: Rc<RefCell<Option<String>>>,
+            events: Rc<RefCell<Vec<&'static str>>>,
+        }
+
+        impl TestNavigationCoordinator {
+            fn navigate(&self, workspace: String) {
+                with_upgraded_navigation_target(
+                    || self.root.upgrade(),
+                    |_| {
+                        *self.selected.borrow_mut() = Some(workspace);
+                        self.events.borrow_mut().extend([
+                            "preferences",
+                            "workspace-detail",
+                            "workspace-stack",
+                        ]);
+                    },
+                );
+            }
+        }
+
+        let root = Rc::new(());
+        let selected = Rc::new(RefCell::new(None));
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let coordinator = Rc::new(TestNavigationCoordinator {
+            root: Rc::downgrade(&root),
+            selected: selected.clone(),
+            events: events.clone(),
+        });
+        let weak_coordinator = Rc::downgrade(&coordinator);
+        let navigate = weak_navigation_callback(&coordinator, TestNavigationCoordinator::navigate);
+
+        assert_eq!(Rc::strong_count(&coordinator), 1);
+        navigate("berlin".to_owned());
+        assert_eq!(selected.borrow().as_deref(), Some("berlin"));
+        assert_eq!(
+            events.borrow().as_slice(),
+            ["preferences", "workspace-detail", "workspace-stack"]
+        );
+
+        events.borrow_mut().clear();
+        drop(root);
+        navigate("london".to_owned());
+        assert_eq!(selected.borrow().as_deref(), Some("berlin"));
+        assert!(events.borrow().is_empty());
+
+        drop(coordinator);
+        assert!(weak_coordinator.upgrade().is_none());
+        navigate("paris".to_owned());
+        assert_eq!(selected.borrow().as_deref(), Some("berlin"));
+        assert!(events.borrow().is_empty());
     }
 
     #[test]
