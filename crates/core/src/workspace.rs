@@ -8677,9 +8677,7 @@ impl ManagedPromptContext {
 }
 
 #[cfg(not(unix))]
-struct ManagedPromptContext {
-    directory: PathBuf,
-}
+struct ManagedPromptContext;
 
 #[cfg(not(unix))]
 impl ManagedPromptContext {
@@ -8687,68 +8685,24 @@ impl ManagedPromptContext {
         if !managed_prompt_context_is_real(workspace_path)? {
             return Ok(None);
         }
-        Ok(Some(Self {
-            directory: workspace_path.join(".context"),
-        }))
+        Ok(Some(Self))
     }
 
-    fn target_permissions(&self) -> Result<Option<fs::Permissions>> {
-        let path = self.directory.join("PROMPTS.md");
-        match fs::symlink_metadata(&path) {
-            Ok(metadata) => {
-                anyhow::ensure!(
-                    metadata.file_type().is_file(),
-                    "{} must be a real file",
-                    path.display()
-                );
-                Ok(Some(metadata.permissions()))
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(err) => Err(err).with_context(|| format!("inspect {}", path.display())),
-        }
-    }
-
-    fn replace(&self, contents: &[u8]) -> Result<()> {
-        let path = self.directory.join("PROMPTS.md");
-        let permissions = self.target_permissions()?;
-        let tmp_path = self
-            .directory
-            .join(format!(".PROMPTS.md.{}.tmp", Uuid::new_v4()));
-        let write_result = (|| -> Result<()> {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&tmp_path)
-                .with_context(|| format!("create {}", tmp_path.display()))?;
-            file.write_all(contents)
-                .with_context(|| format!("write {}", tmp_path.display()))?;
-            file.sync_all()
-                .with_context(|| format!("sync {}", tmp_path.display()))?;
-            if let Some(permissions) = permissions {
-                fs::set_permissions(&tmp_path, permissions)
-                    .with_context(|| format!("set permissions {}", tmp_path.display()))?;
-            }
-            self.target_permissions()?;
-            fs::rename(&tmp_path, &path).with_context(|| format!("replace {}", path.display()))?;
-            Ok(())
-        })();
-        if write_result.is_err() {
-            let _ = fs::remove_file(&tmp_path);
-        }
-        write_result
+    fn replace(&self, _contents: &[u8]) -> Result<()> {
+        unsupported_managed_prompt_mutation()
     }
 
     fn remove(&self) -> Result<()> {
-        if self.target_permissions()?.is_none() {
-            return Ok(());
-        }
-        let path = self.directory.join("PROMPTS.md");
-        match fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(err) => Err(err).with_context(|| format!("remove {}", path.display())),
-        }
+        unsupported_managed_prompt_mutation()
     }
+}
+
+#[cfg(any(test, not(unix)))]
+fn unsupported_managed_prompt_mutation() -> Result<()> {
+    anyhow::bail!(
+        "managed prompt snapshot mutation requires handle-relative no-follow operations; \
+         refusing to modify .context/PROMPTS.md on this platform"
+    )
 }
 
 #[cfg(not(unix))]
@@ -10175,6 +10129,14 @@ mod tests {
                 mode
             );
         }
+    }
+
+    #[test]
+    fn unsupported_managed_prompt_mutation_explains_fail_closed_safety() {
+        let err = unsupported_managed_prompt_mutation().unwrap_err();
+
+        assert!(format!("{err:#}").contains("handle-relative no-follow operations"));
+        assert!(format!("{err:#}").contains("refusing to modify"));
     }
 
     #[test]
