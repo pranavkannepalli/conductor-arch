@@ -1,0 +1,97 @@
+crates/core/src/archcar/server.rs
+  s_d1a7d1b65e90c0::t_be0a0f612cf0aa 248,257
+  s_d1a7d1b65e90c0::t_4a9a288749232e 1212,1338,1346,1360
+crates/cli/src/main.rs
+  s_d1a7d1b65e90c0::t_15c638b5e2b834 4,179,423,609,617,1197,1220,1224,1226,1731-1735
+  s_d1a7d1b65e90c0::t_db580bb6f1db37 2555,2565,2577,2588,2598,2648,2664,2678
+  s_d1a7d1b65e90c0::t_8837e91e5626dd 175-178,419-422
+  s_d1a7d1b65e90c0::t_62a91dcd163226 1736-1738
+crates/gtk-app/src/terminal.rs
+  s_d1a7d1b65e90c0::t_4a9a288749232e 449
+crates/core/src/archcar/protocol.rs
+  s_d1a7d1b65e90c0::t_db580bb6f1db37 396,401-425
+  s_d1a7d1b65e90c0::t_be0a0f612cf0aa 21-41,67-68,178,180,182
+docs/superpowers/specs/2026-07-14-immediate-steer-and-stable-queue-design.md
+  s_d1a7d1b65e90c0::t_7588272827770d 26
+crates/gtk-app/src/workspace_command_center.rs
+  s_d1a7d1b65e90c0::t_4a9a288749232e 486
+crates/gtk-app/src/archcar_async.rs
+  s_d1a7d1b65e90c0::t_c6f7e400f58a7e 39,609-631
+  s_d1a7d1b65e90c0::t_0457fac76eb110 184-216,223,504,510
+  s_d1a7d1b65e90c0::t_4a9a288749232e 12,599
+progress.md
+  s_d1a7d1b65e90c0::t_7588272827770d 53-54,84-85
+crates/core/src/archcar/session.rs
+  s_d1a7d1b65e90c0::t_a5c88c3f079b06 3600-3638
+  s_d1a7d1b65e90c0::t_9fc9f8965b81d5 1557,1559
+  s_d1a7d1b65e90c0::t_0124346496eaea 1964
+  s_d1a7d1b65e90c0::t_5b54b1b2c27be7 2054-2108,2391
+  s_d1a7d1b65e90c0::t_c45f397a1820cf 2259-2279,2389-2390
+  s_d1a7d1b65e90c0::t_8771de5b2f1b76 1236,1731
+  s_d1a7d1b65e90c0::t_8c2a5c03a749a3 1743-1775,1787-1793,1803-1805
+  s_d1a7d1b65e90c0::t_4ffe067788a7f1 1635-1696
+  s_d1a7d1b65e90c0::t_be0a0f612cf0aa 19,48
+  s_d1a7d1b65e90c0::t_5d5a53217ef7f4 1,2109,2392
+crates/core/src/archcar/client.rs
+  s_d1a7d1b65e90c0::t_0124346496eaea 260-262,273,310
+crates/gtk-app/src/session_surface.rs
+  s_d1a7d1b65e90c0::t_d2825c94c95283 1556-1561,1659,1684-1687,1742-1753
+  s_d1a7d1b65e90c0::t_c19238e44f9d55 6238-6248,6253-6259,6268
+  s_d1a7d1b65e90c0::t_7ea66bcbbf02db 3360,3369,3399-3403
+  s_d1a7d1b65e90c0::t_c1c3c4931e3dd3 9839,9880-9888,9890-9903
+  s_d1a7d1b65e90c0::t_0d9a8c8c268481 6303,6386,9889,10032
+  s_d1a7d1b65e90c0::t_8532c1bdd206af 2824,2854-2857
+  s_d1a7d1b65e90c0::t_e5665ca9986b08 787-804,809-886,1709,2626
+  s_d1a7d1b65e90c0::t_c10ad1da912add 1705-1706,11472-11478,11562-11568,11604-11610,11702-11708
+  s_d1a7d1b65e90c0::t_bb9054243c0e13 6250-6252
+  s_d1a7d1b65e90c0::t_0457fac76eb110 9846,9857-9858,9867,9869
+  s_253c7caaac4043::t_c71d633585b09b 2505-2506
+  s_d1a7d1b65e90c0::t_0d77477ed75e4a 387-388,6396-6399
+  s_d1a7d1b65e90c0::t_61e4d691a17a40 11515
+  s_d1a7d1b65e90c0::t_e5e8477f7b7e08 1020,1292-1293,1296-1300,1308-1314
+  s_d1a7d1b65e90c0::t_c6f7e400f58a7e 6379,6459
+  s_d1a7d1b65e90c0::t_0a19e876cc6260 2574,2623-2625,6468,6470-6473
+  s_d1a7d1b65e90c0::t_3ddcdb5976e3fb 2697,2728-2732
+  s_d1a7d1b65e90c0::t_f0433b63f325c2 4-6,2062,2252,2497,8502,8623,8626-8639
+  s_d1a7d1b65e90c0::t_ee2bcd489fceca 805-808,6402-6406
+  s_d1a7d1b65e90c0::t_c6866359197cc7 9849-9853,9859-9861,9864-9866,9868,9871-9878
+  s_d1a7d1b65e90c0::t_31076bf2de2028 9086-9099
+  s_d1a7d1b65e90c0::t_c5530c11875464 6272,9082,9102,9125
+  s_d1a7d1b65e90c0::t_32129ee7af7c2f 525,682-689
+  s_d1a7d1b65e90c0::t_8837e91e5626dd 2343-2344
+  s_d1a7d1b65e90c0::t_8a8073413a2925 9879,10810,10840-10848
+  s_d1a7d1b65e90c0::t_f16d28c2b0ea42 1148-1153,1355,1364-1368
+  s_d1a7d1b65e90c0::t_f293984ae14ac8 6249,6260-6267,6269-6271
+  s_d1a7d1b65e90c0::t_edb4bef54773c9 2292,2345-2347,2385,2394-2396
+  s_d1a7d1b65e90c0::t_076bc89736f60f 2461,2471,2492-2496,2511,2526
+  s_d1a7d1b65e90c0::t_44ed62630f576c 6400,10811-10839
+  s_d1a7d1b65e90c0::t_ce46d2acae34e0 2527,2635-2636
+  s_d1a7d1b65e90c0::t_3da81755edfddb 144,8403,8649,9074,10748
+  s_d1a7d1b65e90c0::t_fc51565de264dc 887,1688-1689,1707-1708,2637,6273,6401,6407-6408,9870,10849-10850
+docs/manual-testing-checklist.md
+  s_d1a7d1b65e90c0::t_7588272827770d 137-143
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "98cf9b5ffdbf052cd86b62bfb691364ed140fd47",
+  "prompts": {},
+  "sessions": {
+    "s_253c7caaac4043": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f648f-4a92-7263-8ed4-be74fbdaeb80",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    },
+    "s_d1a7d1b65e90c0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6480-13d5-7d72-8e26-3df627bb2e4f",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
