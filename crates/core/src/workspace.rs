@@ -10951,6 +10951,71 @@ notes.local
     }
 
     #[test]
+    fn app_store_create_repository_empty_file_globs_clear_shared_patterns() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        fs::write(repo_path.join(".gitignore"), "shared.cache\n").unwrap();
+        fs::write(repo_path.join("shared.cache"), "must not copy\n").unwrap();
+        fs::create_dir(repo_path.join(".archductor")).unwrap();
+        fs::write(
+            repo_path.join(".archductor/settings.toml"),
+            "file_include_globs = \"\"\n",
+        )
+        .unwrap();
+        git(&repo_path, ["add", ".gitignore"]).unwrap();
+        git(
+            &repo_path,
+            [
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "ignore shared cache",
+            ],
+        )
+        .unwrap();
+
+        let db_path = temp.path().join("state.db");
+        let app_settings_path = temp.path().join("config/settings.toml");
+        fs::create_dir_all(app_settings_path.parent().unwrap()).unwrap();
+        fs::write(
+            &app_settings_path,
+            "file_include_globs = \"shared.cache\"\n",
+        )
+        .unwrap();
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let workspace = WorkspaceStore::open_with_logs_and_app_settings(
+            &db_path,
+            temp.path().join("logs"),
+            Some(app_settings_path),
+        )
+        .unwrap()
+        .create(CreateWorkspace {
+            repository_name: "demo".to_owned(),
+            name: "berlin".to_owned(),
+            branch: "lc/berlin".to_owned(),
+            base_ref: Some("main".to_owned()),
+        })
+        .unwrap();
+
+        assert!(!workspace.path.join("shared.cache").exists());
+    }
+
+    #[test]
     fn app_store_mcp_status_uses_shared_provider_settings() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));

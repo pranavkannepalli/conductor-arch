@@ -221,12 +221,14 @@ pub fn load_effective_repository_settings(
     app_settings_path: &Path,
 ) -> Result<RepositorySettings> {
     let app_base = RawRepositorySettings::from_settings(&default_app_shared_settings())
-        .merge(load_optional_settings(app_settings_path)?)
-        .into_settings();
-    let repository = load_repository_settings_strict(repo_path)?;
-    let effective = RawRepositorySettings::from_settings(&app_base)
-        .merge(RawRepositorySettings::from_settings(&repository))
-        .into_settings();
+        .merge(load_optional_settings(app_settings_path)?);
+    let mut repository = load_raw_repository_settings(repo_path)?;
+    let repository_settings = repository_settings_from_raw(repo_path, repository.clone())?;
+    repository.prompts = repository_settings
+        .prompts
+        .as_ref()
+        .map(RawPromptSettings::from_settings);
+    let effective = app_base.merge(repository).into_settings();
     validate_repository_settings(&effective)?;
     Ok(effective)
 }
@@ -239,9 +241,20 @@ fn default_app_shared_settings() -> RepositorySettings {
 }
 
 fn load_repository_settings_strict(repo_path: &Path) -> Result<RepositorySettings> {
+    repository_settings_from_raw(repo_path, load_raw_repository_settings(repo_path)?)
+}
+
+fn load_raw_repository_settings(repo_path: &Path) -> Result<RawRepositorySettings> {
     let shared = load_optional_settings(&repo_path.join(".archductor/settings.toml"))?;
     let local = load_optional_settings(&repo_path.join(".archductor/settings.local.toml"))?;
-    let mut settings = shared.merge(local).into_settings();
+    Ok(shared.merge(local))
+}
+
+fn repository_settings_from_raw(
+    repo_path: &Path,
+    raw: RawRepositorySettings,
+) -> Result<RepositorySettings> {
+    let mut settings = raw.into_settings();
     validate_repository_settings(&settings)?;
     apply_prompt_pack_prompts(repo_path, &mut settings)?;
     Ok(settings)
@@ -2251,6 +2264,30 @@ mod tests {
         assert_eq!(prompts.code_review.as_deref(), Some("pack review"));
         assert_eq!(prompts.general.as_deref(), Some("repository general"));
         assert_eq!(prompts.handoff.as_deref(), Some("local handoff"));
+    }
+
+    #[test]
+    fn effective_settings_local_empty_file_globs_clear_app_shared_patterns() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        let app = temp.path().join("config/settings.toml");
+        fs::create_dir_all(repo.join(".archductor")).unwrap();
+        fs::create_dir_all(app.parent().unwrap()).unwrap();
+        fs::write(&app, "file_include_globs = \"shared.cache\"\n").unwrap();
+        fs::write(
+            repo.join(".archductor/settings.toml"),
+            "[scripts]\nrun_mode = \"concurrent\"\n",
+        )
+        .unwrap();
+        fs::write(
+            repo.join(".archductor/settings.local.toml"),
+            "file_include_globs = \"\"\n",
+        )
+        .unwrap();
+
+        let settings = load_effective_repository_settings(&repo, &app).unwrap();
+
+        assert!(settings.file_include_globs.is_empty());
     }
 
     #[test]
