@@ -575,6 +575,20 @@ window.lc-custom-colors,
 }
 "#;
 
+fn navigate_workspace_from_dashboard(
+    app_state: &AppState,
+    workspace_name: String,
+    refresh_view_preferences: &dyn Fn(),
+    refresh_workspace_detail: &dyn Fn(),
+    show_workspace_stack: &dyn Fn(),
+) {
+    app_state
+        .navigate_to_workspace_with_default_tab(Some(workspace_name), Some(WorkspaceTab::Chats));
+    refresh_view_preferences();
+    refresh_workspace_detail();
+    show_workspace_stack();
+}
+
 fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     let startup = Instant::now();
     let paths = AppPaths::from_env();
@@ -666,23 +680,32 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     let runtime_error_reporter = Rc::new(RefCell::new(RuntimeErrorReporter::default()));
     let main_stack_handle: Rc<RefCell<Option<Stack>>> = Rc::new(RefCell::new(None));
     let refresh_view_preferences_handle = Rc::new(RefCell::new(None::<Rc<dyn Fn()>>));
+    let refresh_workspace_detail_handle = Rc::new(RefCell::new(None::<Rc<dyn Fn()>>));
     let navigate_workspace: Rc<dyn Fn(String)> = {
         let app_state = app_state.clone();
         let main_stack_handle = main_stack_handle.clone();
         let refresh_view_preferences_handle = refresh_view_preferences_handle.clone();
+        let refresh_workspace_detail_handle = refresh_workspace_detail_handle.clone();
         Rc::new(move |workspace_name| {
-            app_state.navigate_to_workspace_with_default_tab(
-                Some(workspace_name),
-                Some(WorkspaceTab::Chats),
+            navigate_workspace_from_dashboard(
+                &app_state,
+                workspace_name,
+                &|| {
+                    if let Some(refresh) = refresh_view_preferences_handle.borrow().as_ref() {
+                        refresh();
+                    }
+                },
+                &|| {
+                    if let Some(refresh) = refresh_workspace_detail_handle.borrow().as_ref() {
+                        refresh();
+                    }
+                },
+                &|| {
+                    if let Some(stack) = main_stack_handle.borrow().as_ref() {
+                        stack.set_visible_child_name("workspace");
+                    }
+                },
             );
-            if let Some(refresh_view_preferences) =
-                refresh_view_preferences_handle.borrow().as_ref()
-            {
-                refresh_view_preferences();
-            }
-            if let Some(stack) = main_stack_handle.borrow().as_ref() {
-                stack.set_visible_child_name("workspace");
-            }
         })
     };
     tracing::info!(
@@ -709,6 +732,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
             toast_overlay.clone(),
             collapse_sidebar.clone(),
         );
+    *refresh_workspace_detail_handle.borrow_mut() = Some(Rc::new(refresh_workspace_detail.clone()));
     let workspace_preference_scope = GBox::new(Orientation::Vertical, 0);
     workspace_preference_scope.set_hexpand(true);
     workspace_preference_scope.set_vexpand(true);
@@ -1696,6 +1720,51 @@ mod tests {
         assert_eq!(target.workspace.as_deref(), Some("berlin"));
         assert_eq!(target.workspace_tab, WorkspaceTab::Checks);
         assert_eq!(target.page, AppPage::Workspace);
+    }
+
+    #[test]
+    fn dashboard_navigation_refreshes_selected_workspace_before_showing_it() {
+        let state = AppState::new(
+            AppPaths::from_env(),
+            None,
+            WorkspaceTab::Checks,
+            AppPage::Dashboard,
+        );
+        let events = Rc::new(RefCell::new(Vec::new()));
+
+        navigate_workspace_from_dashboard(
+            &state,
+            "berlin".to_owned(),
+            &{
+                let state = state.clone();
+                let events = events.clone();
+                move || {
+                    assert_eq!(state.selected_workspace().as_deref(), Some("berlin"));
+                    events.borrow_mut().push("preferences");
+                }
+            },
+            &{
+                let state = state.clone();
+                let events = events.clone();
+                move || {
+                    assert_eq!(state.selected_workspace().as_deref(), Some("berlin"));
+                    events.borrow_mut().push("workspace-detail");
+                }
+            },
+            &{
+                let events = events.clone();
+                move || events.borrow_mut().push("workspace-stack")
+            },
+        );
+
+        let snapshot = state.snapshot();
+        assert_eq!(snapshot.selected_workspace.as_deref(), Some("berlin"));
+        assert_eq!(snapshot.active_page, AppPage::Workspace);
+        assert_eq!(snapshot.active_workspace_tab, WorkspaceTab::Chats);
+        assert_eq!(
+            events.borrow().as_slice(),
+            ["preferences", "workspace-detail", "workspace-stack"]
+        );
     }
 
     #[test]

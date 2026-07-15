@@ -1,4 +1,5 @@
 use archductor_core::paths::AppPaths;
+use archductor_core::repository::RepositoryStore;
 use archductor_core::workspace::WorkspaceStatusLine;
 use archductor_core::workspace::WorkspaceStore;
 use gtk::prelude::*;
@@ -107,13 +108,10 @@ fn render_dashboard(
         return;
     };
 
-    let mut repo_names = statuses
-        .iter()
-        .map(|line| line.repository_name.clone())
-        .filter(|name| !name.is_empty())
-        .collect::<Vec<_>>();
-    repo_names.sort();
-    repo_names.dedup();
+    let Ok(repo_names) = dashboard_repository_names(db_path) else {
+        append_empty_dashboard(project_tabs, board, "Could not read project state.");
+        return;
+    };
 
     let selected = dashboard_selected_project(selected_project.borrow().as_deref(), &repo_names);
     *selected_project.borrow_mut() = selected.clone();
@@ -228,6 +226,18 @@ fn dashboard_project_tab(label: &str, active: bool, on_click: impl Fn() + 'stati
 
 fn dashboard_project_matches(repository_name: &str, selected_project: Option<&str>) -> bool {
     selected_project.is_none_or(|project| repository_name == project)
+}
+
+fn dashboard_repository_names(db_path: &Path) -> anyhow::Result<Vec<String>> {
+    let mut repository_names = RepositoryStore::open(db_path)?
+        .list()?
+        .into_iter()
+        .map(|repository| repository.name)
+        .filter(|name| !name.is_empty())
+        .collect::<Vec<_>>();
+    repository_names.sort();
+    repository_names.dedup();
+    Ok(repository_names)
 }
 
 fn dashboard_selected_project(
@@ -406,11 +416,14 @@ fn build_dashboard_card(
 #[cfg(test)]
 mod tests {
     use super::{
-        dashboard_bucket, dashboard_pr_meta, dashboard_project_matches, dashboard_selected_project,
-        open_dashboard_workspace, DashboardBucket,
+        dashboard_bucket, dashboard_pr_meta, dashboard_project_matches, dashboard_repository_names,
+        dashboard_selected_project, open_dashboard_workspace, DashboardBucket,
     };
+    use archductor_core::repository::{AddRepository, RepositoryStore};
     use archductor_core::workspace::{PullRequest, Workspace, WorkspaceStatusLine};
+    use std::fs;
     use std::path::PathBuf;
+    use std::process::Command;
     use std::{cell::RefCell, rc::Rc};
 
     fn line(
@@ -509,6 +522,38 @@ mod tests {
         assert_eq!(
             dashboard_selected_project(Some("missing"), &repositories),
             None
+        );
+    }
+
+    #[test]
+    fn dashboard_includes_and_preserves_a_project_without_workspaces() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository_path = temp.path().join("empty-project");
+        fs::create_dir(&repository_path).unwrap();
+        assert!(Command::new("git")
+            .args(["init", "--initial-branch", "main"])
+            .arg(&repository_path)
+            .status()
+            .unwrap()
+            .success());
+        let database_path = temp.path().join("state.db");
+        RepositoryStore::open(&database_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("empty-project".to_owned()),
+                root_path: repository_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/empty-project")),
+            })
+            .unwrap();
+
+        let repository_names = dashboard_repository_names(&database_path).unwrap();
+
+        assert_eq!(repository_names, vec!["empty-project"]);
+        assert_eq!(
+            dashboard_selected_project(Some("empty-project"), &repository_names),
+            Some("empty-project".to_owned())
         );
     }
 
