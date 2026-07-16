@@ -2818,6 +2818,7 @@ fn atomic_write_no_symlink(path: &Path, contents: &[u8]) -> Result<()> {
             .with_context(|| format!("sync {}", tmp_path.display()))?;
         reject_symlink_file(path)?;
         fs::rename(&tmp_path, path).with_context(|| format!("replace {}", path.display()))?;
+        #[cfg(unix)]
         fs::File::open(parent)
             .with_context(|| format!("open {}", parent.display()))?
             .sync_all()
