@@ -583,7 +583,7 @@ jobs:
 
       - name: Install openSUSE dependencies
         if: matrix.family == 'opensuse'
-        run: zypper --non-interactive install ca-certificates curl git gcc gtk4-devel libadwaita-devel pkg-config
+        run: zypper --non-interactive install bash ca-certificates curl git gcc gtk4-devel libadwaita-devel pkg-config
 
       - name: Install Alpine dependencies
         if: matrix.family == 'alpine'
