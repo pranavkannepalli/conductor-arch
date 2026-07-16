@@ -1,0 +1,23 @@
+crates/core/src/archcar/harness_conformance.rs
+  s_6e395f0089c433::t_3dbf0faa647c5e 100-136,193-206
+  s_6e395f0089c433::t_3e8a4058da1c44 137-173
+crates/core/src/provider_adapters/codex_app_server.rs
+  s_6e395f0089c433::t_238e00aa342ccc 166-169
+  s_6e395f0089c433::t_4a42431826334d 107,139-141
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "7b1dfd4954a45f2a91a675f3f0c9b0f91e9635b1",
+  "prompts": {},
+  "sessions": {
+    "s_6e395f0089c433": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6497-4ab3-7392-9dba-ed216eb78dd7",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
