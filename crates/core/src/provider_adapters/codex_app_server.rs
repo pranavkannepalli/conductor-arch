@@ -163,8 +163,13 @@ impl ManagedHarnessAdapter for CodexManagedAdapter {
         {
             let message = parse_jsonl_message(line, index + 1)?;
             if let Some(request_id) = message.id.as_ref().and_then(Value::as_u64) {
-                if message.value.get("error").is_none() {
-                    if let Some(local_input_id) = self.pending_inputs.remove(&request_id) {
+                if let Some(local_input_id) = self.pending_inputs.remove(&request_id) {
+                    if message.value.get("error").is_some() {
+                        effects.push(HarnessEffect::TurnCompleted {
+                            local_input_id,
+                            status: HarnessTurnStatus::Failed,
+                        });
+                    } else {
                         effects.push(HarnessEffect::InputAcknowledged { local_input_id });
                     }
                 }
@@ -1718,6 +1723,74 @@ mod tests {
     use serde_json::json;
     use std::io::Cursor;
     use std::path::Path;
+
+    #[test]
+    fn codex_error_response_fails_and_settles_steer_input() {
+        let mut adapter = CodexManagedAdapter::new(HarnessAdapterContext {
+            session_id: 7,
+            thread_id: 11,
+            workspace: "berlin".to_owned(),
+            native_session_id: Some("codex-thread-1".to_owned()),
+            controls: Default::default(),
+        });
+        adapter
+            .encode_input(managed_input("turn-input", "run tests", false))
+            .unwrap();
+        adapter
+            .observe_native(managed_record(
+                r#"{"method":"turn/started","params":{"threadId":"codex-thread-1","turn":{"id":"turn-1"}}}"#,
+            ))
+            .unwrap();
+        adapter
+            .encode_input(managed_input("steer-input", "also run clippy", true))
+            .unwrap();
+        assert_eq!(adapter.active_input_id.as_deref(), Some("turn-input"));
+        assert_eq!(
+            adapter.pending_inputs.get(&2).map(String::as_str),
+            Some("steer-input")
+        );
+
+        let effects = adapter
+            .observe_native(managed_record(
+                r#"{"id":2,"error":{"code":-32000,"message":"turn already completed"}}"#,
+            ))
+            .unwrap();
+
+        assert!(!effects.iter().any(|effect| matches!(
+            effect,
+            HarnessEffect::InputAcknowledged { local_input_id } if local_input_id == "steer-input"
+        )));
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            HarnessEffect::TurnCompleted {
+                local_input_id,
+                status: HarnessTurnStatus::Failed,
+            } if local_input_id == "steer-input"
+        )));
+        assert!(!adapter.pending_inputs.contains_key(&2));
+        assert_eq!(adapter.active_input_id.as_deref(), Some("turn-input"));
+    }
+
+    fn managed_input(local_input_id: &str, content: &str, immediate: bool) -> HarnessInput {
+        HarnessInput {
+            local_input_id: local_input_id.to_owned(),
+            content: content.to_owned(),
+            visible_content: None,
+            kind: crate::archcar::protocol::ArchcarInputKind::User,
+            delivery: if immediate {
+                crate::archcar::protocol::ArchcarInputDelivery::Immediate
+            } else {
+                crate::archcar::protocol::ArchcarInputDelivery::Auto
+            },
+        }
+    }
+
+    fn managed_record(payload: &str) -> NativeRecord {
+        NativeRecord {
+            provider_key: CODEX_APP_SERVER_PROVIDER,
+            payload: format!("{payload}\n").into_bytes(),
+        }
+    }
 
     #[test]
     fn capability_coverage_names_all_required_codex_categories() {

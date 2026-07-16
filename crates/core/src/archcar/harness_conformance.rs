@@ -98,43 +98,6 @@ fn claude_does_not_fake_native_input_acknowledgement() {
 }
 
 #[test]
-fn codex_error_response_does_not_acknowledge_or_drop_steer_input() {
-    let codex = managed_harness_for_kind(SessionKind::Codex).unwrap();
-    let mut adapter = codex
-        .create_adapter(adapter_context(Some("codex-thread-1")))
-        .unwrap();
-    adapter
-        .encode_input(input("turn-input", "run tests"))
-        .unwrap();
-    adapter
-        .observe_native(codex_record(
-            r#"{"method":"turn/started","params":{"threadId":"codex-thread-1","turn":{"id":"turn-1"}}}"#,
-        ))
-        .unwrap();
-    adapter
-        .encode_input(immediate_input("steer-input", "also run clippy"))
-        .unwrap();
-
-    let error_effects = adapter
-        .observe_native(codex_record(
-            r#"{"id":2,"error":{"code":-32000,"message":"turn already completed"}}"#,
-        ))
-        .unwrap();
-    assert!(!error_effects.iter().any(|effect| matches!(
-        effect,
-        HarnessEffect::InputAcknowledged { local_input_id } if local_input_id == "steer-input"
-    )));
-
-    let retry_effects = adapter
-        .observe_native(codex_record(r#"{"id":2,"result":{}}"#))
-        .unwrap();
-    assert!(retry_effects.iter().any(|effect| matches!(
-        effect,
-        HarnessEffect::InputAcknowledged { local_input_id } if local_input_id == "steer-input"
-    )));
-}
-
-#[test]
 fn codex_steer_preserves_turn_start_input_for_exactly_once_completion() {
     let codex = managed_harness_for_kind(SessionKind::Codex).unwrap();
     let mut adapter = codex
