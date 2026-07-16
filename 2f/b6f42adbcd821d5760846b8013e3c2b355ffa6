@@ -1,0 +1,29 @@
+.github/workflows/ci.yml
+  s_28d28baeac6b8d::t_8d8a0277a2ab8a 488-490
+crates/core/src/workspace.rs
+  s_28d28baeac6b8d::t_aa172819e2dc9e 9556-9558
+  s_28d28baeac6b8d::t_1b97c3da885019 8559-8567,9524,9531-9538,9541,9554-9555,9559-9562,9564
+  s_28d28baeac6b8d::t_ddb815c89b5a1e 9542
+  s_28d28baeac6b8d::t_d72a3c47c6bb9b 10214-10231
+  s_28d28baeac6b8d::t_bd7265624a9b8a 9539-9540
+  s_28d28baeac6b8d::t_c89512ecb06e41 9543
+  s_28d28baeac6b8d::t_eb7164303fb1da 9563
+  s_28d28baeac6b8d::t_7dbd2bd88cd87f 9565
+  s_28d28baeac6b8d::t_c31805d4099733 8549
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "2fb6f42adbcd821d5760846b8013e3c2b355ffa6",
+  "prompts": {},
+  "sessions": {
+    "s_28d28baeac6b8d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6980-2aaf-7762-9fa9-c21a1a12ddb4",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
