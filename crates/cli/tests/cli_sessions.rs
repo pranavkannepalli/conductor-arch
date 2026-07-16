@@ -551,6 +551,19 @@ fn claude_hook_hidden_command_prints_single_json_object() {
     assert_eq!(stdout.trim_end_matches('\n').lines().count(), 1);
 }
 
+#[test]
+fn provider_interactions_help_lists_cli_actions() {
+    let temp = tempfile::tempdir().unwrap();
+    app(temp.path())
+        .args(["archcar", "interactions", "--help"])
+        .assert()
+        .success()
+        .stdout(contains("list"))
+        .stdout(contains("allow"))
+        .stdout(contains("deny"))
+        .stdout(contains("answer"));
+}
+
 fn app(root: &Path) -> AssertCommand {
     let mut command = AssertCommand::cargo_bin("archductor").unwrap();
     command

@@ -251,6 +251,18 @@ pub fn provider_projection_item_is_relevant_chat_event(item: &ProviderProjection
     }
 }
 
+pub fn provider_projection_item_is_pending_interaction_event(
+    item: &ProviderProjectionItem,
+) -> bool {
+    matches!(
+        item.category,
+        ProviderProjectionCategory::Approval | ProviderProjectionCategory::Question
+    ) && matches!(
+        item.status,
+        ProviderProjectionStatus::Pending | ProviderProjectionStatus::Running
+    )
+}
+
 pub fn provider_projection_item_text(item: &ProviderProjectionItem) -> String {
     match item.render_class {
         ProjectionRenderClass::UserChat | ProjectionRenderClass::AssistantChat => item.body.clone(),
@@ -712,6 +724,41 @@ mod tests {
             projection.items[0].status,
             ProviderProjectionStatus::Complete
         );
+    }
+
+    #[test]
+    fn pending_interaction_events_are_detectable_for_dedicated_cards() {
+        let pending = record(
+            ProviderEventKind::ApprovalPermission,
+            ProviderEventPhase::Started,
+            "permission_request",
+        );
+        let mut completed = record(
+            ProviderEventKind::ApprovalPermission,
+            ProviderEventPhase::Completed,
+            "permission_result",
+        );
+        completed.identity_key = "codex:thread-1:item-2".to_owned();
+        completed.provider_item_id = Some("item-2".to_owned());
+
+        let projection = provider_projection_from_records(&[pending, completed]);
+        let pending_item = projection
+            .items
+            .iter()
+            .find(|item| item.status == ProviderProjectionStatus::Running)
+            .unwrap();
+        let completed_item = projection
+            .items
+            .iter()
+            .find(|item| item.status == ProviderProjectionStatus::Complete)
+            .unwrap();
+
+        assert!(provider_projection_item_is_pending_interaction_event(
+            pending_item
+        ));
+        assert!(!provider_projection_item_is_pending_interaction_event(
+            completed_item
+        ));
     }
 
     #[test]

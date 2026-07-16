@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use archductor_core::archcar::client::ArchcarClient;
+use archductor_core::archcar::harness_contract::ProviderInteractionResolution;
 use archductor_core::archcar::protocol::{
     ArchcarInputDelivery, ArchcarInputKind, ArchcarMessage, ArchcarRequest, ArchcarResponse,
 };
@@ -8,6 +9,7 @@ use archductor_core::doctor;
 use archductor_core::import::{default_conductor_app_database, import_conductor_app_database};
 use archductor_core::paths::AppPaths;
 use archductor_core::provider_adapters::claude_hooks::handle_claude_hook_json;
+use archductor_core::provider_interactions::ProviderInteractionRecord;
 use archductor_core::repository::{AddRepository, RepositoryStore};
 use archductor_core::settings::{
     load_app_shared_settings, repository_settings_from_toml, repository_settings_to_toml,
@@ -183,6 +185,10 @@ enum ArchcarCommand {
     Messages {
         thread_id: i64,
     },
+    Interactions {
+        #[command(subcommand)]
+        command: ArchcarInteractionsCommand,
+    },
     Send {
         session_id: i64,
         #[arg(long, value_enum, default_value_t = CliArchcarInputKind::User)]
@@ -218,6 +224,36 @@ enum ArchcarCommand {
     },
     Kill {
         session_id: i64,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ArchcarInteractionsCommand {
+    List {
+        #[arg(long)]
+        thread_id: Option<i64>,
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        detail: bool,
+    },
+    Show {
+        interaction_id: String,
+    },
+    Allow {
+        interaction_id: String,
+        #[arg(long)]
+        always: bool,
+    },
+    Deny {
+        interaction_id: String,
+        #[arg(long)]
+        message: Option<String>,
+    },
+    Answer {
+        interaction_id: String,
+        #[arg(long)]
+        answers_json: String,
     },
 }
 
@@ -649,6 +685,66 @@ fn main() -> Result<()> {
                         response => print_archcar_response(response),
                     }
                 }
+                ArchcarCommand::Interactions { command } => match command {
+                    ArchcarInteractionsCommand::List {
+                        thread_id,
+                        all,
+                        detail,
+                    } => match client.send(ArchcarRequest::ListProviderInteractions {
+                        thread_id,
+                        pending_only: !all,
+                    })? {
+                        ArchcarResponse::Error { message } => anyhow::bail!(message),
+                        ArchcarResponse::ProviderInteractions { interactions } => {
+                            print!("{}", render_provider_interactions(&interactions, detail));
+                        }
+                        response => print_archcar_response(response),
+                    },
+                    ArchcarInteractionsCommand::Show { interaction_id } => {
+                        match client
+                            .send(ArchcarRequest::GetProviderInteraction { interaction_id })?
+                        {
+                            ArchcarResponse::Error { message } => anyhow::bail!(message),
+                            ArchcarResponse::ProviderInteraction { interaction } => {
+                                print!("{}", render_provider_interaction_detail(&interaction));
+                            }
+                            response => print_archcar_response(response),
+                        }
+                    }
+                    ArchcarInteractionsCommand::Allow {
+                        interaction_id,
+                        always: _,
+                    } => match client.send(ArchcarRequest::ResolveProviderInteraction {
+                        interaction_id,
+                        resolution: ProviderInteractionResolution::Approve,
+                    })? {
+                        ArchcarResponse::Error { message } => anyhow::bail!(message),
+                        response => print_archcar_response(response),
+                    },
+                    ArchcarInteractionsCommand::Deny {
+                        interaction_id,
+                        message,
+                    } => match client.send(ArchcarRequest::ResolveProviderInteraction {
+                        interaction_id,
+                        resolution: ProviderInteractionResolution::Deny { reason: message },
+                    })? {
+                        ArchcarResponse::Error { message } => anyhow::bail!(message),
+                        response => print_archcar_response(response),
+                    },
+                    ArchcarInteractionsCommand::Answer {
+                        interaction_id,
+                        answers_json,
+                    } => {
+                        let answers = parse_answers_json(&answers_json)?;
+                        match client.send(ArchcarRequest::ResolveProviderInteraction {
+                            interaction_id,
+                            resolution: ProviderInteractionResolution::Answer { answers },
+                        })? {
+                            ArchcarResponse::Error { message } => anyhow::bail!(message),
+                            response => print_archcar_response(response),
+                        }
+                    }
+                },
                 ArchcarCommand::Send {
                     session_id,
                     kind,
@@ -1538,24 +1634,109 @@ fn print_archcar_response(response: ArchcarResponse) {
             print!("{}", render_archcar_protocol_messages(&messages));
         }
         ArchcarResponse::ProviderInteraction { interaction } => {
-            println!(
-                "provider interaction {} kind={:?} status={:?}",
-                interaction.id, interaction.kind, interaction.status
-            );
+            print!("{}", render_provider_interactions(&[interaction], false));
         }
         ArchcarResponse::ProviderInteractions { interactions } => {
-            println!("provider interactions {}", interactions.len());
-            for interaction in interactions {
-                println!(
-                    "- {} kind={:?} status={:?}",
-                    interaction.id, interaction.kind, interaction.status
-                );
-            }
+            print!("{}", render_provider_interactions(&interactions, false));
         }
         ArchcarResponse::Error { message } => {
             eprintln!("{message}");
         }
     }
+}
+
+fn render_provider_interactions(
+    interactions: &[ProviderInteractionRecord],
+    detail: bool,
+) -> String {
+    let mut output = String::new();
+    if interactions.is_empty() {
+        output.push_str("provider interactions 0\n");
+        return output;
+    }
+    for interaction in interactions {
+        output.push_str(&render_provider_interaction_line(interaction));
+        output.push('\n');
+        if detail {
+            output.push_str(&render_provider_interaction_detail(interaction));
+        }
+    }
+    output
+}
+
+fn render_provider_interaction_line(interaction: &ProviderInteractionRecord) -> String {
+    let summary = interaction_summary(interaction);
+    format!(
+        "{} provider={} kind={} status={} thread={} {}",
+        interaction.id,
+        interaction.provider_key,
+        provider_interaction_kind_label(interaction),
+        provider_interaction_status_label(interaction),
+        interaction.thread_id,
+        summary
+    )
+}
+
+fn render_provider_interaction_detail(interaction: &ProviderInteractionRecord) -> String {
+    format!(
+        "{}\nrequest={}\n",
+        render_provider_interaction_line(interaction),
+        serde_json::to_string_pretty(&interaction.native_request)
+            .unwrap_or_else(|_| "{}".to_owned())
+    )
+}
+
+fn interaction_summary(interaction: &ProviderInteractionRecord) -> String {
+    let title = interaction.title.trim();
+    let detail = interaction.detail.trim();
+    match (title.is_empty(), detail.is_empty()) {
+        (true, true) => interaction.native_id.clone(),
+        (false, true) => title.to_owned(),
+        (true, false) => detail.to_owned(),
+        (false, false) => format!("{title}: {detail}"),
+    }
+}
+
+fn provider_interaction_kind_label(interaction: &ProviderInteractionRecord) -> &'static str {
+    match interaction.kind {
+        archductor_core::archcar::harness_contract::ProviderInteractionKind::Permission => {
+            "permission"
+        }
+        archductor_core::archcar::harness_contract::ProviderInteractionKind::UserQuestion => {
+            "question"
+        }
+        archductor_core::archcar::harness_contract::ProviderInteractionKind::PlanApproval => "plan",
+    }
+}
+
+fn provider_interaction_status_label(interaction: &ProviderInteractionRecord) -> &'static str {
+    match interaction.status {
+        archductor_core::provider_interactions::ProviderInteractionStatus::Pending => "pending",
+        archductor_core::provider_interactions::ProviderInteractionStatus::Allowed => "allowed",
+        archductor_core::provider_interactions::ProviderInteractionStatus::Denied => "denied",
+        archductor_core::provider_interactions::ProviderInteractionStatus::Answered => "answered",
+        archductor_core::provider_interactions::ProviderInteractionStatus::Expired => "expired",
+        archductor_core::provider_interactions::ProviderInteractionStatus::Failed => "failed",
+    }
+}
+
+fn parse_answers_json(value: &str) -> Result<Vec<(String, String)>> {
+    let json = serde_json::from_str::<serde_json::Value>(value).context("parse --answers-json")?;
+    let object = json
+        .as_object()
+        .context("--answers-json must be a JSON object")?;
+    Ok(object
+        .iter()
+        .map(|(key, value)| {
+            (
+                key.clone(),
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| value.to_string()),
+            )
+        })
+        .collect())
 }
 
 fn cli_session_start_uses_archcar(kind: CliSessionKind) -> bool {
@@ -2795,6 +2976,73 @@ mod tests {
     }
 
     #[test]
+    fn cli_archcar_provider_interactions_parse_commands() {
+        let list = Cli::try_parse_from([
+            "archductor",
+            "archcar",
+            "interactions",
+            "list",
+            "--thread-id",
+            "42",
+            "--all",
+        ])
+        .unwrap();
+        let Command::Archcar {
+            command:
+                ArchcarCommand::Interactions {
+                    command: ArchcarInteractionsCommand::List { thread_id, all, .. },
+                },
+        } = list.command
+        else {
+            panic!("expected archcar interactions list");
+        };
+        assert_eq!(thread_id, Some(42));
+        assert!(all);
+
+        let answer = Cli::try_parse_from([
+            "archductor",
+            "archcar",
+            "interactions",
+            "answer",
+            "interaction-1",
+            "--answers-json",
+            r#"{"scope":"yes"}"#,
+        ])
+        .unwrap();
+        let Command::Archcar {
+            command:
+                ArchcarCommand::Interactions {
+                    command:
+                        ArchcarInteractionsCommand::Answer {
+                            interaction_id,
+                            answers_json,
+                        },
+                },
+        } = answer.command
+        else {
+            panic!("expected archcar interactions answer");
+        };
+        assert_eq!(interaction_id, "interaction-1");
+        assert_eq!(
+            parse_answers_json(&answers_json).unwrap(),
+            vec![("scope".to_owned(), "yes".to_owned())]
+        );
+    }
+
+    #[test]
+    fn provider_interactions_render_concise_lines_without_raw_payload() {
+        let interaction = provider_interaction_fixture();
+        let concise = render_provider_interactions(std::slice::from_ref(&interaction), false);
+        let detail = render_provider_interactions(&[interaction], true);
+
+        assert!(concise.contains("interaction-1 provider=claude kind=question status=pending"));
+        assert!(concise.contains("Need input: Pick a scope"));
+        assert!(!concise.contains("\"secret\""));
+        assert!(detail.contains("request="));
+        assert!(detail.contains("\"secret\""));
+    }
+
+    #[test]
     fn cli_session_send_accepts_provider_thread_and_message() {
         let cli = Cli::try_parse_from([
             "archductor",
@@ -3151,5 +3399,30 @@ mod tests {
             text,
             "#7\t2026-07-09T12:00:00Z\tbranch.renamed\tRenamed branch lc/a to lc/b\n"
         );
+    }
+
+    fn provider_interaction_fixture() -> ProviderInteractionRecord {
+        ProviderInteractionRecord {
+            id: "interaction-1".to_owned(),
+            provider_key: "claude".to_owned(),
+            workspace: "berlin".to_owned(),
+            thread_id: 42,
+            session_id: 7,
+            native_session_id: Some("claude-session-1".to_owned()),
+            native_id: "toolu-1".to_owned(),
+            kind: archductor_core::archcar::harness_contract::ProviderInteractionKind::UserQuestion,
+            title: "Need input".to_owned(),
+            detail: "Pick a scope".to_owned(),
+            choices: vec!["yes".to_owned(), "no".to_owned()],
+            native_request: serde_json::json!({"secret": "raw"}),
+            request_fingerprint: "fingerprint".to_owned(),
+            status: archductor_core::provider_interactions::ProviderInteractionStatus::Pending,
+            resolution: None,
+            native_response: None,
+            error: None,
+            created_at: "1".to_owned(),
+            resolved_at: None,
+            consumed_at: None,
+        }
     }
 }

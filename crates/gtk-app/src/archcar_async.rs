@@ -8,6 +8,7 @@ use std::thread;
 use std::time::Duration;
 
 use archductor_core::archcar::client::ArchcarClient;
+use archductor_core::archcar::harness_contract::ProviderInteractionResolution;
 use archductor_core::archcar::protocol::{
     ArchcarEvent, ArchcarInputDelivery, ArchcarInputKind, ArchcarRequest, ArchcarResponse,
 };
@@ -275,6 +276,32 @@ impl AsyncArchcarBridge {
             session_id,
             rows,
             cols,
+        })
+    }
+
+    pub fn list_provider_interactions(
+        &self,
+        thread_id: Option<i64>,
+        pending_only: bool,
+    ) -> Option<u64> {
+        self.submit(ArchcarRequest::ListProviderInteractions {
+            thread_id,
+            pending_only,
+        })
+    }
+
+    pub fn get_provider_interaction(&self, interaction_id: String) -> Option<u64> {
+        self.submit(ArchcarRequest::GetProviderInteraction { interaction_id })
+    }
+
+    pub fn resolve_provider_interaction(
+        &self,
+        interaction_id: String,
+        resolution: ProviderInteractionResolution,
+    ) -> Option<u64> {
+        self.submit(ArchcarRequest::ResolveProviderInteraction {
+            interaction_id,
+            resolution,
         })
     }
 
@@ -747,6 +774,32 @@ mod tests {
             AsyncArchcarRequestKind::SetSessionPermissionMode {
                 session_id: 9,
                 mode: "default".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn request_kind_preserves_provider_interaction_metadata() {
+        let list = ArchcarRequest::ListProviderInteractions {
+            thread_id: Some(42),
+            pending_only: true,
+        };
+        assert_eq!(
+            request_kind(&list),
+            AsyncArchcarRequestKind::ListProviderInteractions {
+                thread_id: Some(42),
+                pending_only: true,
+            }
+        );
+
+        let resolve = ArchcarRequest::ResolveProviderInteraction {
+            interaction_id: "interaction-1".to_owned(),
+            resolution: ProviderInteractionResolution::Approve,
+        };
+        assert_eq!(
+            request_kind(&resolve),
+            AsyncArchcarRequestKind::ResolveProviderInteraction {
+                interaction_id: "interaction-1".to_owned(),
             }
         );
     }

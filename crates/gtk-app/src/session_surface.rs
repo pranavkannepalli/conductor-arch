@@ -2,7 +2,9 @@ use archductor_core::agent_tools::{
     launchable_agent_tools, launchable_provider_key, tool_by_provider,
 };
 use archductor_core::archcar::harness::managed_harness_for_kind;
-use archductor_core::archcar::harness_contract::{HarnessDescriptor, RequiredHarnessFeature};
+use archductor_core::archcar::harness_contract::{
+    HarnessDescriptor, ProviderInteractionKind, RequiredHarnessFeature,
+};
 use archductor_core::archcar::protocol::{
     ArchcarEvent, ArchcarInputDelivery, ArchcarInputKind, ArchcarResponse,
 };
@@ -17,6 +19,7 @@ use archductor_core::model_registry::{model_choices_for_provider, CODEX_DEFAULT_
 use archductor_core::provider_events::{
     ProviderEventKind, ProviderEventPhase, ProviderEventRecord, ProviderEventStore,
 };
+use archductor_core::provider_interactions::ProviderInteractionRecord;
 #[cfg(test)]
 use archductor_core::provider_projection::ProviderProjectionCategory;
 use archductor_core::provider_projection::{
@@ -6513,6 +6516,62 @@ fn composer_send_button_presentation(action: ComposerAction) -> (&'static str, &
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InteractionUiKind {
+    Permission,
+    Question,
+    Plan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InteractionPresentation {
+    kind: InteractionUiKind,
+    provider_label: String,
+    title: String,
+    detail: String,
+    actions: Vec<&'static str>,
+}
+
+fn interaction_presentation(interaction: &ProviderInteractionRecord) -> InteractionPresentation {
+    let kind = match interaction.kind {
+        ProviderInteractionKind::Permission => InteractionUiKind::Permission,
+        ProviderInteractionKind::UserQuestion => InteractionUiKind::Question,
+        ProviderInteractionKind::PlanApproval => InteractionUiKind::Plan,
+    };
+    let actions = match interaction.kind {
+        ProviderInteractionKind::Permission => vec!["Allow", "Deny", "Always allow"],
+        ProviderInteractionKind::UserQuestion => vec!["Answer", "Deny"],
+        ProviderInteractionKind::PlanApproval => vec!["Approve plan", "Keep planning"],
+    };
+    InteractionPresentation {
+        kind,
+        provider_label: provider_interaction_label(&interaction.provider_key),
+        title: interaction.title.clone(),
+        detail: interaction.detail.clone(),
+        actions,
+    }
+}
+
+fn provider_interaction_label(provider_key: &str) -> String {
+    for kind in [SessionKind::Codex, SessionKind::Claude] {
+        if let Some(harness) = managed_harness_for_kind(kind) {
+            if harness.descriptor().provider_key == provider_key {
+                return harness.descriptor().display_name.to_owned();
+            }
+        }
+    }
+    provider_key.to_owned()
+}
+
+fn question_answers_complete(questions: &[String], answers: &HashMap<String, String>) -> bool {
+    !questions.is_empty()
+        && questions.iter().all(|question| {
+            answers
+                .get(question)
+                .is_some_and(|answer| !answer.trim().is_empty())
+        })
+}
+
 fn set_composer_send_button_action(button: &Button, action: ComposerAction) {
     let (icon, tooltip, sensitive) = composer_send_button_presentation(action);
     let image = Image::from_icon_name(resolve_icon_name(icon));
@@ -9473,6 +9532,31 @@ mod tests {
     use archductor_core::workspace::ProcessKind;
     use std::collections::HashMap;
     use std::path::PathBuf;
+
+    fn provider_interaction_fixture(kind: ProviderInteractionKind) -> ProviderInteractionRecord {
+        ProviderInteractionRecord {
+            id: "interaction-1".to_owned(),
+            provider_key: "claude".to_owned(),
+            workspace: "berlin".to_owned(),
+            thread_id: 42,
+            session_id: 7,
+            native_session_id: Some("claude-session-1".to_owned()),
+            native_id: "toolu-1".to_owned(),
+            kind,
+            title: "Need input".to_owned(),
+            detail: "Pick a scope".to_owned(),
+            choices: vec!["yes".to_owned(), "no".to_owned()],
+            native_request: serde_json::json!({"tool": "AskUserQuestion"}),
+            request_fingerprint: "fingerprint".to_owned(),
+            status: archductor_core::provider_interactions::ProviderInteractionStatus::Pending,
+            resolution: None,
+            native_response: None,
+            error: None,
+            created_at: "1".to_owned(),
+            resolved_at: None,
+            consumed_at: None,
+        }
+    }
 
     fn session_record(
         id: i64,
@@ -13037,7 +13121,7 @@ Schema confirms the app moved CRM around businesses.";
         assert_eq!(
             state,
             CodexStartupState::Loading {
-                message: "Starting Codex...".to_owned(),
+                message: "Starting agent...".to_owned(),
             }
         );
     }
@@ -13184,7 +13268,7 @@ Schema confirms the app moved CRM around businesses.";
         assert_eq!(
             startup_states.get(&11),
             Some(&CodexStartupState::Loading {
-                message: "Starting Codex...".to_owned(),
+                message: "Starting agent...".to_owned(),
             })
         );
     }
@@ -13231,6 +13315,53 @@ Schema confirms the app moved CRM around businesses.";
             },
         ));
         assert_eq!(turn_completed_scope, (true, true));
+    }
+
+    #[test]
+    fn provider_interaction_presentation_maps_kind_actions() {
+        let permission = interaction_presentation(&provider_interaction_fixture(
+            ProviderInteractionKind::Permission,
+        ));
+        assert_eq!(permission.kind, InteractionUiKind::Permission);
+        assert_eq!(permission.actions, ["Allow", "Deny", "Always allow"]);
+        assert_eq!(permission.provider_label, "Claude Code");
+
+        let question = interaction_presentation(&provider_interaction_fixture(
+            ProviderInteractionKind::UserQuestion,
+        ));
+        assert_eq!(question.kind, InteractionUiKind::Question);
+
+        let plan = interaction_presentation(&provider_interaction_fixture(
+            ProviderInteractionKind::PlanApproval,
+        ));
+        assert_eq!(plan.actions, ["Approve plan", "Keep planning"]);
+    }
+
+    #[test]
+    fn provider_interaction_question_answers_require_all_questions() {
+        let questions = vec!["scope".to_owned(), "risk".to_owned()];
+        let mut answers = HashMap::new();
+        answers.insert("scope".to_owned(), "yes".to_owned());
+        assert!(!question_answers_complete(&questions, &answers));
+
+        answers.insert("risk".to_owned(), "low".to_owned());
+        assert!(question_answers_complete(&questions, &answers));
+    }
+
+    #[test]
+    fn provider_interaction_events_refresh_thread_only() {
+        let interaction = provider_interaction_fixture(ProviderInteractionKind::Permission);
+        let requested_scope = archcar_message_refresh_scope(&AsyncArchcarMessage::Event(
+            ArchcarEvent::ProviderInteractionRequested {
+                interaction: interaction.clone(),
+            },
+        ));
+        let resolved_scope = archcar_message_refresh_scope(&AsyncArchcarMessage::Event(
+            ArchcarEvent::ProviderInteractionResolved { interaction },
+        ));
+
+        assert_eq!(requested_scope, (true, false));
+        assert_eq!(resolved_scope, (true, false));
     }
 
     #[test]
