@@ -6,6 +6,7 @@ use crate::chat_store::ChatStore;
 use crate::provider_events::{
     ProviderEventDraft, ProviderEventKind, ProviderEventRecord, ProviderEventStore,
 };
+use crate::provider_inputs::{ProviderInputInput, ProviderInputRecord, ProviderInputStore};
 use crate::session_pipeline::PtyChunkInput;
 use crate::workspace::{SessionKind, WorkspaceStore};
 
@@ -14,6 +15,7 @@ pub struct RuntimeSessionStore {
     db_path: PathBuf,
     chat_store: ChatStore,
     provider_event_store: ProviderEventStore,
+    provider_input_store: ProviderInputStore,
 }
 
 impl RuntimeSessionStore {
@@ -21,6 +23,7 @@ impl RuntimeSessionStore {
         Self {
             chat_store: ChatStore::new(db_path.clone()),
             provider_event_store: ProviderEventStore::new(db_path.clone()),
+            provider_input_store: ProviderInputStore::new(db_path.clone()),
             db_path,
         }
     }
@@ -88,6 +91,31 @@ impl RuntimeSessionStore {
 
     pub fn append_provider_event(&self, draft: &ProviderEventDraft) -> Result<ProviderEventRecord> {
         self.provider_event_store.upsert_event(draft)
+    }
+
+    pub fn enqueue_provider_input(&self, input: ProviderInputInput) -> Result<ProviderInputRecord> {
+        self.provider_input_store.enqueue(input)
+    }
+
+    pub fn mark_provider_input_written(&self, id: &str) -> Result<()> {
+        self.provider_input_store.mark_written(id)
+    }
+
+    pub fn mark_provider_input_acknowledged(
+        &self,
+        id: &str,
+        acknowledgement: Option<&str>,
+    ) -> Result<()> {
+        self.provider_input_store
+            .mark_acknowledged(id, acknowledgement)
+    }
+
+    pub fn mark_provider_input_terminal(&self, id: &str) -> Result<()> {
+        self.provider_input_store.mark_terminal(id)
+    }
+
+    pub fn mark_provider_input_failed(&self, id: &str, error: &str) -> Result<()> {
+        self.provider_input_store.mark_failed(id, error)
     }
 
     pub fn max_runtime_input_provider_sequence(&self, process_id: i64) -> Result<u64> {

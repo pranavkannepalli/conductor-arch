@@ -214,6 +214,29 @@ pub(crate) fn migrate_workspace_db(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_provider_events_process
           ON provider_events(process_id, received_sequence, id);
 
+        CREATE TABLE IF NOT EXISTS provider_inputs (
+          id TEXT PRIMARY KEY,
+          provider TEXT NOT NULL,
+          thread_id INTEGER NOT NULL REFERENCES chat_threads(id) ON DELETE CASCADE,
+          process_id INTEGER NOT NULL REFERENCES processes(id) ON DELETE CASCADE,
+          native_session_id TEXT,
+          input_kind TEXT NOT NULL,
+          delivery TEXT NOT NULL,
+          provider_input TEXT NOT NULL,
+          visible_input TEXT,
+          state TEXT NOT NULL,
+          acknowledgement TEXT,
+          error TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_provider_inputs_process
+          ON provider_inputs(process_id, state, updated_at);
+
+        CREATE INDEX IF NOT EXISTS idx_provider_inputs_thread
+          ON provider_inputs(thread_id, state, updated_at);
+
         CREATE TABLE IF NOT EXISTS provider_event_raw_payloads (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           identity_key TEXT NOT NULL,

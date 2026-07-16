@@ -32,7 +32,7 @@ impl ArchcarInputDelivery {
         *self == Self::Auto
     }
 
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Auto => "auto",
             Self::Immediate => "immediate",

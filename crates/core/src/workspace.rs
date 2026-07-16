@@ -5703,6 +5703,31 @@ mutation($threadId: ID!) {{
         self.get_chat_message(self.conn.last_insert_rowid())
     }
 
+    pub fn append_chat_message_once_for_source(
+        &self,
+        thread_id: i64,
+        role: &str,
+        content: &str,
+        source: &str,
+    ) -> Result<ChatMessageRecord> {
+        if let Some(existing) = self
+            .conn
+            .query_row(
+                "SELECT id, thread_id, role, content, source, timeline_seq, created_at, updated_at
+                 FROM chat_messages
+                 WHERE thread_id = ?1 AND source = ?2
+                 ORDER BY id ASC
+                 LIMIT 1",
+                params![thread_id, source],
+                row_to_chat_message,
+            )
+            .optional()?
+        {
+            return Ok(existing);
+        }
+        self.append_chat_message(thread_id, role, content, source)
+    }
+
     pub fn apply_agent_chat_metadata_directive(
         &self,
         thread_id: i64,

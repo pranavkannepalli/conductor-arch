@@ -25,6 +25,18 @@ impl ChatStore {
             .append_chat_message(thread_id, role, content, source)
     }
 
+    pub fn append_message_once_for_provider_input(
+        &self,
+        provider_input_id: &str,
+        thread_id: i64,
+        role: &str,
+        content: &str,
+    ) -> Result<ChatMessageRecord> {
+        let source = format!("provider_input:{provider_input_id}");
+        self.open()?
+            .append_chat_message_once_for_source(thread_id, role, content, &source)
+    }
+
     pub fn resolve_codex_native_thread_id_for_process(
         &self,
         process_id: i64,

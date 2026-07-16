@@ -40,6 +40,7 @@ use crate::provider_adapters::codex_app_server::{
 use crate::provider_events::{
     ProviderEventContext, ProviderEventDraft, ProviderEventKind, ProviderEventPhase,
 };
+use crate::provider_inputs::ProviderInputInput;
 use crate::pty::PtySession;
 use crate::runtime_session_store::RuntimeSessionStore;
 use crate::session_state::{AgentSessionState, SessionStateMachine};
@@ -538,7 +539,14 @@ fn apply_harness_effect(
                 thread_id: started.thread_id,
             });
         }
-        HarnessEffect::TurnCompleted { status, .. } => {
+        HarnessEffect::InputAcknowledged { local_input_id } => {
+            let _ = runtime_store.mark_provider_input_acknowledged(&local_input_id, None);
+        }
+        HarnessEffect::TurnCompleted {
+            local_input_id,
+            status,
+        } => {
+            let _ = runtime_store.mark_provider_input_terminal(&local_input_id);
             let _ = event_tx.send(ArchcarEvent::TurnCompleted {
                 session_id: started.session_id,
                 thread_id: started.thread_id,
@@ -571,8 +579,7 @@ fn apply_harness_effect(
                 });
             }
         }
-        HarnessEffect::InputAcknowledged { .. }
-        | HarnessEffect::TurnStarted { .. }
+        HarnessEffect::TurnStarted { .. }
         | HarnessEffect::InteractionRequested(_)
         | HarnessEffect::InteractionResolved { .. }
         | HarnessEffect::Retry { .. }
@@ -1939,6 +1946,7 @@ fn run_codex_app_server_session_loop(
                         continue;
                     };
                     let next_input_sequence = user_input_sequence + 1;
+                    let local_input_id = user_input_identity_suffix(next_input_sequence);
                     let request_id = next_turn_request_id(next_input_sequence);
                     let auto_active = snapshot.lock().map(|state| !state.ready).unwrap_or(false);
                     let route = codex_input_route(delivery, active_turn_id.as_deref(), auto_active);
@@ -1974,7 +1982,19 @@ fn run_codex_app_server_session_loop(
                             )
                         }
                     };
+                    enqueue_provider_input(
+                        &runtime_store,
+                        &started,
+                        &local_input_id,
+                        &input,
+                        visible_input.as_deref(),
+                        &kind,
+                        delivery,
+                        connection.native_thread_id.clone(),
+                    );
                     if let Err(err) = write_result {
+                        let _ = runtime_store
+                            .mark_provider_input_failed(&local_input_id, &err.to_string());
                         let _ = connection.child.kill();
                         mark_provider_session_failed(
                             &runtime_store,
@@ -1984,6 +2004,7 @@ fn run_codex_app_server_session_loop(
                             format!("Codex turn input failed: {err:#}"),
                         );
                     } else {
+                        let _ = runtime_store.mark_provider_input_written(&local_input_id);
                         pending_input_requests.insert(
                             request_id,
                             PendingCodexInputRequest {
@@ -2121,6 +2142,16 @@ fn run_claude_stream_session_loop(
                 } => {
                     let next_input_sequence = user_input_sequence + 1;
                     let local_input_id = user_input_identity_suffix(next_input_sequence);
+                    enqueue_provider_input(
+                        &runtime_store,
+                        &started,
+                        &local_input_id,
+                        &input,
+                        visible_input.as_deref(),
+                        &kind,
+                        delivery,
+                        connection.native_thread_id.clone(),
+                    );
                     let native_write = adapter.encode_input(HarnessInput {
                         local_input_id: local_input_id.clone(),
                         content: input.clone(),
@@ -2139,6 +2170,8 @@ fn run_claude_stream_session_loop(
                         Ok(())
                     });
                     if let Err(err) = write_result {
+                        let _ = runtime_store
+                            .mark_provider_input_failed(&local_input_id, &err.to_string());
                         adapter.settle_failed_input_write(&local_input_id);
                         let _ = connection.child.kill();
                         mark_provider_session_failed(
@@ -2149,6 +2182,7 @@ fn run_claude_stream_session_loop(
                             format!("Claude stream input failed: {err:#}"),
                         );
                     } else {
+                        let _ = runtime_store.mark_provider_input_written(&local_input_id);
                         user_input_sequence = next_input_sequence;
                         persist_runtime_user_input(
                             &runtime_store,
@@ -2574,6 +2608,45 @@ fn mark_snapshot_ready(snapshot: &Arc<Mutex<SessionSnapshot>>) {
     if let Ok(mut state) = snapshot.lock() {
         state.ready = true;
         state.runtime_state = AgentSessionState::WaitingForInput;
+    }
+}
+
+fn enqueue_provider_input(
+    runtime_store: &RuntimeSessionStore,
+    started: &SessionSnapshot,
+    local_input_id: &str,
+    input: &str,
+    visible_input: Option<&str>,
+    kind: &ArchcarInputKind,
+    delivery: ArchcarInputDelivery,
+    native_session_id: Option<String>,
+) {
+    let _ = runtime_store.enqueue_provider_input(ProviderInputInput {
+        id: local_input_id.to_owned(),
+        provider: session_kind_provider_key(started.kind).to_owned(),
+        thread_id: started.thread_id,
+        process_id: started.session_id,
+        native_session_id,
+        input_kind: input_kind_storage_label(kind).to_owned(),
+        delivery: delivery.as_str().to_owned(),
+        provider_input: input.to_owned(),
+        visible_input: visible_input.map(str::to_owned),
+    });
+}
+
+fn session_kind_provider_key(kind: SessionKind) -> &'static str {
+    match kind {
+        SessionKind::Codex => "codex",
+        SessionKind::Claude => "claude",
+        SessionKind::Shell => "shell",
+    }
+}
+
+fn input_kind_storage_label(kind: &ArchcarInputKind) -> &'static str {
+    match kind {
+        ArchcarInputKind::User => "user",
+        ArchcarInputKind::ReviewPrompt => "review_prompt",
+        ArchcarInputKind::ControlCommand => "control_command",
     }
 }
 
