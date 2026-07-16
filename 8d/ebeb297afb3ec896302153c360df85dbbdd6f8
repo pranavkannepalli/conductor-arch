@@ -1,0 +1,19 @@
+.github/workflows/ci.yml
+  s_28d28baeac6b8d::t_5c26c4a3f49ac0 445,477,479-480,483,486,489,492
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "8debeb297afb3ec896302153c360df85dbbdd6f8",
+  "prompts": {},
+  "sessions": {
+    "s_28d28baeac6b8d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6980-2aaf-7762-9fa9-c21a1a12ddb4",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
