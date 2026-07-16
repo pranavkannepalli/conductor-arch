@@ -7,6 +7,7 @@ use archductor_core::archcar::server::{reconcile_managed_sessions_on_startup, Ar
 use archductor_core::doctor;
 use archductor_core::import::{default_conductor_app_database, import_conductor_app_database};
 use archductor_core::paths::AppPaths;
+use archductor_core::provider_adapters::claude_hooks::handle_claude_hook_json;
 use archductor_core::repository::{AddRepository, RepositoryStore};
 use archductor_core::settings::{
     load_app_shared_settings, repository_settings_from_toml, repository_settings_to_toml,
@@ -543,6 +544,9 @@ enum CliArchcarInputKind {
 }
 
 fn main() -> Result<()> {
+    if handle_archcar_claude_hook()? {
+        return Ok(());
+    }
     if std::env::args().any(|arg| arg == "--archcar-serve") {
         let paths = AppPaths::from_env();
         reconcile_managed_sessions_on_startup(&paths)?;
@@ -1466,6 +1470,25 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn handle_archcar_claude_hook() -> Result<bool> {
+    let args = std::env::args().collect::<Vec<_>>();
+    let Some(index) = args.iter().position(|arg| arg == "--archcar-claude-hook") else {
+        return Ok(false);
+    };
+    let thread_id = args
+        .get(index + 1)
+        .context("--archcar-claude-hook requires a thread id")?
+        .parse::<i64>()
+        .context("parse Claude hook thread id")?;
+    let mut stdin = String::new();
+    io::stdin()
+        .read_to_string(&mut stdin)
+        .context("read Claude hook stdin")?;
+    let output = handle_claude_hook_json(thread_id, &stdin);
+    println!("{output}");
+    Ok(true)
 }
 
 fn print_archcar_response(response: ArchcarResponse) {

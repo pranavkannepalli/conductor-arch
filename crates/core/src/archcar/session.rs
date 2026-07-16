@@ -27,6 +27,7 @@ use crate::archcar::protocol::{
     ArchcarInputKind, SessionHarnessCapabilities,
 };
 use crate::codex_tui::codex_screen_ready_for_input;
+use crate::provider_adapters::claude_hooks::build_claude_hook_settings;
 use crate::provider_adapters::claude_stream::{
     build_claude_stream_args, ClaudeManagedAdapter, ClaudeStreamLaunchConfig,
 };
@@ -770,6 +771,9 @@ fn claude_stream_session_launch(
         SessionKind::Claude,
         SessionHarnessOptions::default(),
     )?;
+    let hook_settings = std::env::current_exe().ok().and_then(|executable| {
+        serde_json::to_string(&build_claude_hook_settings(&executable, thread_record.id)).ok()
+    });
     launch.args = build_claude_stream_args(&ClaudeStreamLaunchConfig {
         persistent_input: true,
         replay_user_messages: true,
@@ -778,7 +782,7 @@ fn claude_stream_session_launch(
         model: sanitize_harness_text(harness.model.as_deref()),
         effort: claude_stream_effort_mode(&harness),
         append_system_prompt: None,
-        settings_json: None,
+        settings_json: hook_settings,
     });
     launch.harness_metadata = non_interactive_harness_metadata("claude-stream-json", &harness);
     launch.session_resume_id = thread_record.native_thread_id.clone();
@@ -3548,26 +3552,31 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
         .unwrap();
 
         assert_eq!(launch.program, PathBuf::from("claude"));
+        assert!(launch
+            .args
+            .windows(2)
+            .any(|args| args == ["--resume", "claude-session-1"]));
+        assert!(launch
+            .args
+            .windows(2)
+            .any(|args| args == ["--permission-mode", "bypassPermissions"]));
+        assert!(launch
+            .args
+            .windows(2)
+            .any(|args| args == ["--model", "claude-sonnet-5"]));
+        assert!(launch
+            .args
+            .windows(2)
+            .any(|args| args == ["--effort", "low"]));
+        let settings = launch
+            .args
+            .windows(2)
+            .find_map(|args| (args[0] == "--settings").then_some(args[1].as_str()))
+            .unwrap();
         assert_eq!(
-            launch.args,
-            vec![
-                "-p",
-                "--output-format",
-                "stream-json",
-                "--verbose",
-                "--include-partial-messages",
-                "--input-format",
-                "stream-json",
-                "--replay-user-messages",
-                "--resume",
-                "claude-session-1",
-                "--permission-mode",
-                "bypassPermissions",
-                "--model",
-                "claude-sonnet-5",
-                "--effort",
-                "low",
-            ]
+            serde_json::from_str::<serde_json::Value>(settings).unwrap()["hooks"]
+                ["PermissionRequest"][0]["matcher"],
+            ".*"
         );
         assert!(!launch.args.iter().any(|arg| arg == "--bare"));
         assert_eq!(launch.env_value("ARCHDUCTOR_PORT"), Some("42000"));

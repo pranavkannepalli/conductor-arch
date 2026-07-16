@@ -1,3 +1,4 @@
+pub mod claude_hooks;
 pub mod claude_stream;
 pub mod codex_app_server;
 

@@ -384,9 +384,9 @@ impl ManagedHarnessAdapter for ClaudeManagedAdapter {
                 self.context.controls.permission_mode = permission_mode;
                 HarnessControlPlan::RestartRequired(self.context.controls.clone())
             }
-            HarnessControl::ResolveInteraction(_) => HarnessControlPlan::Unsupported {
-                reason: "Claude interaction resolution is not implemented".to_owned(),
-            },
+            HarnessControl::ResolveInteraction(_) => {
+                HarnessControlPlan::RestartRequired(self.context.controls.clone())
+            }
         }
     }
 

@@ -518,6 +518,39 @@ fn claude_thread_session_send_help_exposes_thread_targeting() {
         .stdout(contains("claude"));
 }
 
+#[test]
+fn claude_hook_hidden_command_prints_single_json_object() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = app(temp.path())
+        .args(["--archcar-claude-hook", "42"])
+        .write_stdin(
+            json!({
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_input": {"command": "cargo test"}
+            })
+            .to_string(),
+        )
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+
+    assert_eq!(
+        parsed,
+        json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "defer"
+            }
+        })
+    );
+    assert_eq!(stdout.trim_end_matches('\n').lines().count(), 1);
+}
+
 fn app(root: &Path) -> AssertCommand {
     let mut command = AssertCommand::cargo_bin("archductor").unwrap();
     command

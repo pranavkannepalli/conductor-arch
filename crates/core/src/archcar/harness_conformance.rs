@@ -2,7 +2,8 @@ use super::harness::{managed_harness_for_kind, validate_managed_harness};
 use super::harness_contract::{
     DesiredHarnessControls, HarnessAdapterContext, HarnessCapability, HarnessControl,
     HarnessControlPlan, HarnessEffect, HarnessInput, HarnessRecoveryCause, HarnessRecoveryPlan,
-    HarnessSignal, NativeRecord, SupportMode, REQUIRED_HARNESS_FEATURES,
+    HarnessSignal, NativeRecord, ProviderInteractionResolution, SupportMode,
+    REQUIRED_HARNESS_FEATURES,
 };
 use super::protocol::{
     session_harness_capabilities_for_descriptor, ArchcarInputDelivery, ArchcarInputKind,
@@ -73,6 +74,25 @@ fn claude_reconfigure_controls_require_resume_with_desired_controls() {
             effort: Some(ref effort),
             ..
         }) if effort == "high"
+    ));
+}
+
+#[test]
+fn claude_interaction_resolution_requires_restart_with_desired_controls() {
+    let claude = managed_harness_for_kind(SessionKind::Claude).unwrap();
+    let mut adapter = claude
+        .create_adapter(adapter_context(Some("claude-session-1")))
+        .unwrap();
+    adapter.plan_control(HarnessControl::SetModel(Some("claude-sonnet-5".to_owned())));
+
+    assert!(matches!(
+        adapter.plan_control(HarnessControl::ResolveInteraction(
+            ProviderInteractionResolution::Approve
+        )),
+        HarnessControlPlan::RestartRequired(DesiredHarnessControls {
+            model: Some(ref model),
+            ..
+        }) if model == "claude-sonnet-5"
     ));
 }
 
