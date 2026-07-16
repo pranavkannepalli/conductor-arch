@@ -1,0 +1,40 @@
+crates/core/src/provider_inputs.rs
+  s_7e20ed6ba888b4::t_67a962cbdc9ee3 100-102,199,223,304-327
+  s_7e20ed6ba888b4::t_d0dabbd4cb5d08 1-99,103-198,200-222,224-235,282-293,328-329
+  s_7e20ed6ba888b4::t_611aabbc0b60c2 236-281,294-303
+  s_7e20ed6ba888b4::t_739e1460c3391d 330-332
+crates/core/src/runtime_session_store.rs
+  s_7e20ed6ba888b4::t_2d14c61e3e071c 9,18,26,96-120
+crates/core/src/chat_store.rs
+  s_7e20ed6ba888b4::t_2fab730a3e5cd1 28-35
+  s_7e20ed6ba888b4::t_5d23b3d8680039 36-37
+  s_7e20ed6ba888b4::t_29618c8c0b4bf1 38-39
+crates/core/src/lib.rs
+  s_7e20ed6ba888b4::t_ebf6cd80d49bf8 19
+crates/core/src/archcar/session.rs
+  s_7e20ed6ba888b4::t_f05ffb1b9fcdb3 43,542-549,582
+  s_7e20ed6ba888b4::t_e99b919fc56871 1949,1985-1994,1996-1997,2007,2145-2154,2173-2174,2185
+  s_7e20ed6ba888b4::t_6f64b23126aba9 2614-2652
+crates/core/src/workspace.rs
+  s_7e20ed6ba888b4::t_e623f9ba753ce9 5706-5730
+crates/core/src/storage.rs
+  s_7e20ed6ba888b4::t_6f0b1393e16b91 217-239
+crates/core/src/archcar/protocol.rs
+  s_7e20ed6ba888b4::t_eb7b188a15cefb 35
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "6722be1a9a7185c92e5ac2296d04f901abb35e72",
+  "prompts": {},
+  "sessions": {
+    "s_7e20ed6ba888b4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6989-46fd-74c2-b2dd-ae33d67c261e",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
