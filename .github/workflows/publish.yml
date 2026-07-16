@@ -188,9 +188,11 @@ jobs:
       CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: C:\msys64\ucrt64\bin\gcc.exe
       CC_x86_64_pc_windows_gnu: C:\msys64\ucrt64\bin\gcc.exe
       AR_x86_64_pc_windows_gnu: C:\msys64\ucrt64\bin\ar.exe
-      PKG_CONFIG: C:\msys64\ucrt64\bin\pkg-config.exe
+      PKG_CONFIG: C:\msys64\ucrt64\bin\pkgconf.exe
       PKG_CONFIG_ALLOW_CROSS: "1"
       PKG_CONFIG_PATH: C:\msys64\ucrt64\lib\pkgconfig
+      PKG_CONFIG_PATH_x86_64_pc_windows_gnu: C:\msys64\ucrt64\lib\pkgconfig
+      PKG_CONFIG_x86_64_pc_windows_gnu: C:\msys64\ucrt64\bin\pkgconf.exe
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
