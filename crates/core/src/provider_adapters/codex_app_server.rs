@@ -104,6 +104,7 @@ impl ManagedHarnessAdapter for CodexManagedAdapter {
         let native_input = vec![CodexAppServerUserInput::Text {
             text: input.content,
         }];
+        let steering_active_turn = self.active_turn_id.is_some();
 
         if let Some(active_turn_id) = self.active_turn_id.clone() {
             write_turn_steer_request_with_id(
@@ -135,7 +136,9 @@ impl ManagedHarnessAdapter for CodexManagedAdapter {
 
         self.pending_inputs
             .insert(request_id, input.local_input_id.clone());
-        self.active_input_id = Some(input.local_input_id.clone());
+        if !steering_active_turn {
+            self.active_input_id = Some(input.local_input_id.clone());
+        }
         Ok(NativeWrite {
             provider_key: CODEX_APP_SERVER_PROVIDER,
             local_input_id: Some(input.local_input_id),
@@ -160,8 +163,10 @@ impl ManagedHarnessAdapter for CodexManagedAdapter {
         {
             let message = parse_jsonl_message(line, index + 1)?;
             if let Some(request_id) = message.id.as_ref().and_then(Value::as_u64) {
-                if let Some(local_input_id) = self.pending_inputs.remove(&request_id) {
-                    effects.push(HarnessEffect::InputAcknowledged { local_input_id });
+                if message.value.get("error").is_none() {
+                    if let Some(local_input_id) = self.pending_inputs.remove(&request_id) {
+                        effects.push(HarnessEffect::InputAcknowledged { local_input_id });
+                    }
                 }
             }
 

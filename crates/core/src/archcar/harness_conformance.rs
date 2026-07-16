@@ -97,6 +97,80 @@ fn claude_does_not_fake_native_input_acknowledgement() {
         .any(|effect| matches!(effect, HarnessEffect::InputAcknowledged { .. })));
 }
 
+#[test]
+fn codex_error_response_does_not_acknowledge_or_drop_steer_input() {
+    let codex = managed_harness_for_kind(SessionKind::Codex).unwrap();
+    let mut adapter = codex
+        .create_adapter(adapter_context(Some("codex-thread-1")))
+        .unwrap();
+    adapter
+        .encode_input(input("turn-input", "run tests"))
+        .unwrap();
+    adapter
+        .observe_native(codex_record(
+            r#"{"method":"turn/started","params":{"threadId":"codex-thread-1","turn":{"id":"turn-1"}}}"#,
+        ))
+        .unwrap();
+    adapter
+        .encode_input(immediate_input("steer-input", "also run clippy"))
+        .unwrap();
+
+    let error_effects = adapter
+        .observe_native(codex_record(
+            r#"{"id":2,"error":{"code":-32000,"message":"turn already completed"}}"#,
+        ))
+        .unwrap();
+    assert!(!error_effects.iter().any(|effect| matches!(
+        effect,
+        HarnessEffect::InputAcknowledged { local_input_id } if local_input_id == "steer-input"
+    )));
+
+    let retry_effects = adapter
+        .observe_native(codex_record(r#"{"id":2,"result":{}}"#))
+        .unwrap();
+    assert!(retry_effects.iter().any(|effect| matches!(
+        effect,
+        HarnessEffect::InputAcknowledged { local_input_id } if local_input_id == "steer-input"
+    )));
+}
+
+#[test]
+fn codex_steer_preserves_turn_start_input_for_exactly_once_completion() {
+    let codex = managed_harness_for_kind(SessionKind::Codex).unwrap();
+    let mut adapter = codex
+        .create_adapter(adapter_context(Some("codex-thread-1")))
+        .unwrap();
+    adapter
+        .encode_input(input("turn-input", "run tests"))
+        .unwrap();
+    adapter
+        .observe_native(codex_record(
+            r#"{"method":"turn/started","params":{"threadId":"codex-thread-1","turn":{"id":"turn-1"}}}"#,
+        ))
+        .unwrap();
+    adapter
+        .encode_input(immediate_input("steer-input", "also run clippy"))
+        .unwrap();
+
+    let completion = codex_record(
+        r#"{"method":"turn/completed","params":{"threadId":"codex-thread-1","turn":{"id":"turn-1","status":"completed"}}}"#,
+    );
+    let effects = adapter.observe_native(completion.clone()).unwrap();
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        HarnessEffect::TurnCompleted { local_input_id, .. } if local_input_id == "turn-input"
+    )));
+    assert!(!effects.iter().any(|effect| matches!(
+        effect,
+        HarnessEffect::TurnCompleted { local_input_id, .. } if local_input_id == "steer-input"
+    )));
+
+    let duplicate_effects = adapter.observe_native(completion).unwrap();
+    assert!(!duplicate_effects
+        .iter()
+        .any(|effect| matches!(effect, HarnessEffect::TurnCompleted { .. })));
+}
+
 fn adapter_context(native_session_id: Option<&str>) -> HarnessAdapterContext {
     HarnessAdapterContext {
         session_id: 7,
@@ -114,5 +188,19 @@ fn input(local_input_id: &str, content: &str) -> HarnessInput {
         visible_content: None,
         kind: ArchcarInputKind::User,
         delivery: ArchcarInputDelivery::Auto,
+    }
+}
+
+fn immediate_input(local_input_id: &str, content: &str) -> HarnessInput {
+    HarnessInput {
+        delivery: ArchcarInputDelivery::Immediate,
+        ..input(local_input_id, content)
+    }
+}
+
+fn codex_record(payload: &str) -> NativeRecord {
+    NativeRecord {
+        provider_key: "codex",
+        payload: format!("{payload}\n").into_bytes(),
     }
 }
