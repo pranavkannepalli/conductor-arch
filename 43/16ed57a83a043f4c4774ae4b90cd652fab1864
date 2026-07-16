@@ -1,0 +1,37 @@
+crates/core/src/provider_adapters/claude_hooks.rs
+  s_7e20ed6ba888b4::t_fc6dd181af094c 1-332
+crates/core/src/archcar/session.rs
+  s_7e20ed6ba888b4::t_08683bf1f0caa0 3555-3575
+  s_7e20ed6ba888b4::t_36b12484422911 774-775
+  s_7e20ed6ba888b4::t_dfc26b9ea12271 30,776,785,3577-3579
+crates/cli/tests/cli_sessions.rs
+  s_7e20ed6ba888b4::t_16c6d682795fcc 521-553
+crates/core/src/archcar/harness_conformance.rs
+  s_7e20ed6ba888b4::t_54a8e8ea6a867f 5-6,80-95
+  s_7e20ed6ba888b4::t_081d828ea5ff8b 96-98
+crates/core/src/provider_adapters/mod.rs
+  s_7e20ed6ba888b4::t_3054bb7d8c4ff4 1
+crates/core/src/provider_adapters/claude_stream.rs
+  s_7e20ed6ba888b4::t_57c21b12e16683 387-389
+crates/cli/src/main.rs
+  s_7e20ed6ba888b4::t_7e021bdf10ce6e 547-549
+  s_7e20ed6ba888b4::t_6f516272af0b19 1490
+  s_7e20ed6ba888b4::t_6f0610228b729e 10
+  s_7e20ed6ba888b4::t_11fb762f2130b3 1475-1489,1491-1493
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "4316ed57a83a043f4c4774ae4b90cd652fab1864",
+  "prompts": {},
+  "sessions": {
+    "s_7e20ed6ba888b4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6989-46fd-74c2-b2dd-ae33d67c261e",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
