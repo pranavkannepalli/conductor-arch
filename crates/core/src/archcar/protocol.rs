@@ -128,6 +128,7 @@ pub enum ArchcarRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum ArchcarResponse {
     Ack,
     SessionSpawnQueued {

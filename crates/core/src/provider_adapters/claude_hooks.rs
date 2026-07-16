@@ -160,7 +160,7 @@ pub fn encode_claude_hook_resolution(
 }
 
 pub fn handle_claude_hook_json(_thread_id: i64, stdin: &str) -> Value {
-    let request = serde_json::from_str::<Value>(stdin).unwrap_or_else(|_| Value::Null);
+    let request = serde_json::from_str::<Value>(stdin).unwrap_or(Value::Null);
     encode_claude_hook_defer(&classify_claude_hook_request(&request))
 }
 

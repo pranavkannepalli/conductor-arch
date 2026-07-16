@@ -118,7 +118,7 @@ impl ClaudeTurnTracker {
     }
 
     fn note_replayed_user(&mut self, text: &str, effects: &mut Vec<HarnessEffect>) {
-        if self.active_turn.is_none() {
+        if self.active_turn.is_none() && self.initialized {
             let Some(front) = self.written_inputs.front() else {
                 return;
             };
@@ -354,9 +354,7 @@ impl ManagedHarnessAdapter for ClaudeManagedAdapter {
                         ClaudeResultStatus::Failed,
                         &mut effects,
                     );
-                    if self.tracker.ready() {
-                        effects.push(HarnessEffect::Ready);
-                    }
+                    effects.push(HarnessEffect::Ready);
                 }
             }
         }

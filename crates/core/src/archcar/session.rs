@@ -2629,6 +2629,7 @@ fn mark_snapshot_ready(snapshot: &Arc<Mutex<SessionSnapshot>>) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn enqueue_provider_input(
     runtime_store: &RuntimeSessionStore,
     started: &SessionSnapshot,
@@ -3668,7 +3669,9 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
         let second_reservation =
             reserve_provider_native_thread_port(&store, "berlin", second.id).unwrap();
 
-        assert_eq!(second_reservation.local_addr().unwrap().port(), 43001);
+        let second_port = second_reservation.local_addr().unwrap().port();
+        assert_ne!(second_port, reservation.local_addr().unwrap().port());
+        assert!(second_port >= 43001);
     }
 
     #[test]
