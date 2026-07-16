@@ -1,6 +1,6 @@
 # Progress
 
-Current as of 2026-07-14.
+Current as of 2026-07-16.
 
 ## Current State
 
@@ -52,6 +52,13 @@ paths and known rough edges.
   enum.
 - Immediate Codex delivery from GTK Ctrl+Enter and CLI `session send`/`archcar
   send --immediate`, using active-turn steer with transparent new-turn fallback.
+- Archcar-managed Claude Code stream-json sessions with local auth readiness,
+  persistent input delivery, resumable controls, process-group interrupt,
+  native hook settings, provider interaction records, and common CLI commands
+  for listing/resolving provider interactions.
+- Managed Codex and Claude descriptors report contract version 1 with the full
+  required baseline in written conformance tests. Codex goals are native;
+  Claude goals return a structured unsupported reason.
 - Git status/diff/log, todos, review comments, checkpoints, conflicts, checks,
   PR summary, PR checks, PR thread resolve/reopen, PR merge, and history
   commands.
@@ -81,6 +88,9 @@ paths and known rough edges.
   paths, transcript persistence, selected-session input, staged review prompts,
   provider/auth/MCP status, harness metadata, prompt preview, profile selector,
   and stop notifications.
+- GTK uses managed harness descriptors for Codex and Claude live controls:
+  provider/model/thinking are baseline controls, Codex-only goals remain
+  visible, and Claude hides unsupported goals.
 - Plain Enter follow-up queueing, Ctrl+Enter immediate Codex delivery, and
   queue-row reconciliation isolated from streaming chat refreshes.
 - Terminal surfaces for one-shot commands, PTY shell tabs, transcript
@@ -108,7 +118,10 @@ paths and known rough edges.
 - Prompt pack switching/import/export, naming templates, hooks, local check
   runner UI, richer notifications, and deeper layout/theme controls are not
   fully surfaced in the GUI.
-- Runtime ownership is still converging around the archcar/local daemon APIs.
+- Runtime ownership is now Archcar-managed for Codex and Claude Code in written
+  tests. Live Claude Code auth/session/interaction smokes still need to be run
+  on a machine with an authenticated Claude CLI before calling the parity slice
+  manually validated.
 - Codex unsafe approval/sandbox bypass needs explicit product policy before a
   broad public launch.
 - Live GitHub validation requires authenticated `gh`; live Linear validation
@@ -151,3 +164,29 @@ Before calling behavior done, name:
 - GTK smoke
 
 If one layer is skipped, say exactly why.
+
+## Recent Verification
+
+Claude Code Archcar parity written verification on 2026-07-16:
+
+- Passed `cargo fmt --all -- --check`.
+- Passed `cargo clippy -p archductor-core -p archductor -p archductor-gtk --all-targets -- -D warnings`.
+- Passed `cargo test -p archductor-core archcar::harness_conformance --lib`.
+- Passed `cargo test -p archductor-core`.
+- Passed `cargo test -p archductor`.
+- Passed `cargo test -p archductor-gtk`.
+- Passed `cargo build -p archductor-gtk`.
+- `claude auth status` succeeded with local first-party `claude.ai` auth; no API
+  key prompt was required.
+- GTK Xvfb launch reached startup under `timeout 8 xvfb-run -a
+  target/debug/archductor-gtk`, but emitted existing runtime warnings for DRI3,
+  unsupported libadwaita dark-theme setting, CSS `text-align`, and missing
+  accessibility bus. Treat GTK runtime smoke as started-with-warnings, not clean.
+
+Not yet manually smoke-verified in this branch:
+
+- Live Claude first-send/follow-up through Archcar.
+- Two simultaneous Claude native thread IDs.
+- Live queue/immediate/interrupt/model/effort/permission-mode behavior.
+- Live permission/question/plan interaction cards in GTK.
+- Archcar restart with a pending Claude interaction.

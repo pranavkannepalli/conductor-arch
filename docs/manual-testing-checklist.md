@@ -139,6 +139,33 @@ you want to test. Run `gh auth login` before GitHub checks. Set
 - [ ] During active Codex generation, press Ctrl+Enter and confirm the user
   message appears immediately and steers the active turn; if the turn finishes
   concurrently, confirm a new turn starts without an error.
+- [ ] Confirm contract version 1 capability snapshots list the full required
+  baseline for both Codex and Claude Code through
+  `archductor archcar status <session-id>`.
+- [ ] Confirm Codex exposes native goal support and the GTK goal action, while
+  Claude Code reports a structured unsupported-goals reason and does not show
+  the goal action.
+- [ ] Run `claude auth status` with the user's local Claude Code login and
+  confirm Archductor does not require an API key.
+- [ ] Send a first Claude Code message through Archcar and confirm stream-json
+  output appears in transcript/projection without opening the interactive TUI.
+- [ ] Send a Claude follow-up and confirm it resumes the same native Claude
+  session ID.
+- [ ] Start two Claude Code threads and confirm their native session IDs,
+  transcripts, readiness, queued input, and provider events remain separate.
+- [ ] Exercise Claude queueing and immediate delivery from CLI/GTK and confirm
+  messages are not duplicated.
+- [ ] Interrupt a harmless long Claude turn and confirm either clean survival or
+  restart-and-resume, with exactly one interrupted completion boundary.
+- [ ] Change Claude model, effort, and permission mode; confirm conversation
+  context survives the restart/resume path.
+- [ ] Resolve Claude permission flows through CLI and GTK: allow, deny, always
+  allow, `AskUserQuestion`, and plan approval.
+- [ ] Restart Archcar with an acknowledged Claude input and a pending provider
+  interaction; confirm acknowledged input is not resent and the pending
+  interaction survives.
+- [ ] Confirm native Claude raw JSON and canonical provider events remain
+  queryable and that transcript content is not duplicated.
 - [ ] Hover queued-message actions while provider output streams and confirm
   the queue row is not rebuilt and its hover state does not reset.
 - [ ] Select a saved or running agent session and confirm the session surface
