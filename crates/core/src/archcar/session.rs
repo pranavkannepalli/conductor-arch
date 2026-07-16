@@ -17,7 +17,8 @@ use crate::archcar::harness::{
     controller_for_kind, ensure_thread_for_kind, provider_name, HarnessController,
 };
 use crate::archcar::harness_contract::{
-    DesiredHarnessControls, HarnessAdapterContext, HarnessInput, ManagedHarnessAdapter,
+    DesiredHarnessControls, HarnessAdapterContext, HarnessEffect, HarnessInput,
+    ManagedHarnessAdapter, NativeRecord,
 };
 use crate::archcar::protocol::{ArchcarEvent, ArchcarInputDelivery, ArchcarInputKind};
 use crate::codex_tui::codex_screen_ready_for_input;
@@ -1924,7 +1925,6 @@ fn run_claude_stream_session_loop(
     let mut user_input_sequence = runtime_store
         .max_runtime_input_provider_sequence(started.session_id)
         .unwrap_or(0);
-    let mut parser = crate::provider_adapters::claude_stream::ClaudeStreamParser::default();
     let mut adapter = ClaudeManagedAdapter::new(HarnessAdapterContext {
         session_id: started.session_id,
         thread_id: started.thread_id,
@@ -1944,34 +1944,43 @@ fn run_claude_stream_session_loop(
                 "claude-stream-json",
                 &line,
             );
-            match parser.parse_line(&line) {
-                Ok(Some(event)) => {
-                    if let Some(session_id) = event.session_id.as_deref() {
-                        connection.native_thread_id = Some(session_id.to_owned());
-                        let _ = runtime_store
-                            .update_chat_thread_native_id(started.thread_id, session_id);
-                    }
-                    let draft = event.into_provider_event_draft(ProviderEventContext::runtime(
-                        None,
-                        Some(started.thread_id),
-                        Some(started.session_id),
-                        "claude-stream-json",
-                    ));
-                    let _ = runtime_store.append_provider_event(&draft);
-                    let _ = event_tx.send(ArchcarEvent::SessionMessagesUpdated {
-                        thread_id: started.thread_id,
-                    });
-                    if draft.phase == ProviderEventPhase::Completed
-                        && draft.kind == ProviderEventKind::Turn
-                    {
-                        mark_snapshot_ready(&snapshot);
-                        let _ = event_tx.send(ArchcarEvent::SessionReady {
-                            session_id: started.session_id,
-                            thread_id: started.thread_id,
-                        });
+            match adapter.observe_native(NativeRecord {
+                provider_key: "claude",
+                payload: line.into_bytes(),
+            }) {
+                Ok(effects) => {
+                    for effect in effects {
+                        match effect {
+                            HarnessEffect::Initialized {
+                                native_session_id, ..
+                            } => {
+                                connection.native_thread_id = Some(native_session_id.clone());
+                                let _ = runtime_store.update_chat_thread_native_id(
+                                    started.thread_id,
+                                    &native_session_id,
+                                );
+                            }
+                            HarnessEffect::ProviderEvent(draft) => {
+                                let _ = runtime_store.append_provider_event(&draft);
+                                let _ = event_tx.send(ArchcarEvent::SessionMessagesUpdated {
+                                    thread_id: started.thread_id,
+                                });
+                            }
+                            HarnessEffect::Ready => {
+                                let was_ready =
+                                    snapshot.lock().map(|state| state.ready).unwrap_or(false);
+                                mark_snapshot_ready(&snapshot);
+                                if !was_ready {
+                                    let _ = event_tx.send(ArchcarEvent::SessionReady {
+                                        session_id: started.session_id,
+                                        thread_id: started.thread_id,
+                                    });
+                                }
+                            }
+                            _ => {}
+                        }
                     }
                 }
-                Ok(None) => {}
                 Err(err) => warn!(
                     session_id = started.session_id,
                     error = %format!("{err:#}"),
@@ -1989,8 +1998,9 @@ fn run_claude_stream_session_loop(
                     delivery,
                 } => {
                     let next_input_sequence = user_input_sequence + 1;
+                    let local_input_id = user_input_identity_suffix(next_input_sequence);
                     let native_write = adapter.encode_input(HarnessInput {
-                        local_input_id: user_input_identity_suffix(next_input_sequence),
+                        local_input_id: local_input_id.clone(),
                         content: input.clone(),
                         visible_content: visible_input.clone(),
                         kind: kind.clone(),
@@ -2007,6 +2017,7 @@ fn run_claude_stream_session_loop(
                         Ok(())
                     });
                     if let Err(err) = write_result {
+                        adapter.settle_failed_input_write(&local_input_id);
                         let _ = connection.child.kill();
                         mark_provider_session_failed(
                             &runtime_store,
@@ -2675,6 +2686,23 @@ mod tests {
             source.contains("append_provider_event"),
             "archcar runtime loop should write canonical provider events instead"
         );
+    }
+
+    #[test]
+    fn managed_claude_runtime_uses_one_adapter_for_input_and_output_state() {
+        let source = include_str!("session.rs");
+        let loop_source = source
+            .split_once("fn run_claude_stream_session_loop")
+            .unwrap()
+            .1
+            .split_once("fn start_codex_app_server_lifecycle")
+            .unwrap()
+            .0;
+
+        assert!(loop_source.contains("adapter.encode_input(HarnessInput"));
+        assert!(loop_source.contains("adapter.observe_native(NativeRecord"));
+        assert!(loop_source.contains("adapter.settle_failed_input_write"));
+        assert!(!loop_source.contains("ClaudeStreamParser"));
     }
 
     #[test]

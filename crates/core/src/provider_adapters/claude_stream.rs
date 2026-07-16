@@ -88,6 +88,14 @@ impl ClaudeManagedAdapter {
             "claude-stream-json",
         )
     }
+
+    pub(crate) fn settle_failed_input_write(&mut self, local_input_id: &str) {
+        self.pending_inputs
+            .retain(|pending_input_id| pending_input_id != local_input_id);
+        if self.active_input_id.as_deref() == Some(local_input_id) {
+            self.active_input_id = None;
+        }
+    }
 }
 
 impl ManagedHarnessAdapter for ClaudeManagedAdapter {
@@ -776,6 +784,182 @@ mod tests {
     const DEFERRED_AND_FAILED_RESULTS_FIXTURE: &str =
         include_str!("../../tests/fixtures/claude_stream/deferred_and_failed_results.jsonl");
 
+    fn fixture_values(name: &str, input: &str) -> Result<Vec<Value>> {
+        input
+            .lines()
+            .enumerate()
+            .map(|(index, line)| {
+                serde_json::from_str(line)
+                    .with_context(|| format!("parse {name} fixture line {}", index + 1))
+            })
+            .collect()
+    }
+
+    fn validate_fixture_contract(
+        basic: &[Value],
+        tools: &[Value],
+        results: &[Value],
+    ) -> Result<()> {
+        let init_index = basic
+            .iter()
+            .position(|record| record["type"] == "system" && record["subtype"] == "init")
+            .context("basic fixture missing system/init")?;
+        anyhow::ensure!(
+            init_index > 0,
+            "basic fixture needs startup records before init"
+        );
+        anyhow::ensure!(
+            basic[..init_index]
+                .iter()
+                .all(|record| record["type"].is_string() && record["subtype"].is_string()),
+            "startup records need string type and subtype"
+        );
+        let init = &basic[init_index];
+        anyhow::ensure!(
+            init["session_id"].is_string(),
+            "init session_id must be string"
+        );
+        anyhow::ensure!(init["model"].is_string(), "init model must be string");
+        anyhow::ensure!(
+            init["tools"]
+                .as_array()
+                .is_some_and(|values| values.iter().all(Value::is_string)),
+            "init tools must be an array of strings"
+        );
+        anyhow::ensure!(
+            init["mcp_servers"].as_array().is_some_and(|servers| {
+                servers
+                    .iter()
+                    .all(|server| server["name"].is_string() && server["status"].is_string())
+            }),
+            "init mcp_servers must contain string name/status fields"
+        );
+        anyhow::ensure!(
+            init["plugins"].as_array().is_some_and(|plugins| {
+                plugins
+                    .iter()
+                    .all(|plugin| plugin["name"].is_string() && plugin["path"].is_string())
+            }),
+            "init plugins must contain string name/path fields"
+        );
+        if let Some(capabilities) = init.get("capabilities") {
+            anyhow::ensure!(
+                capabilities
+                    .as_array()
+                    .is_some_and(|values| values.iter().all(Value::is_string)),
+                "optional init capabilities must be an array of strings"
+            );
+        }
+
+        let replay = basic
+            .iter()
+            .find(|record| record["type"] == "user" && record["isReplay"] == true)
+            .context("basic fixture missing replayed user input")?;
+        anyhow::ensure!(
+            replay["session_id"].is_string(),
+            "replay session_id must be string"
+        );
+        anyhow::ensure!(replay["parent_tool_use_id"].is_null());
+        anyhow::ensure!(replay["message"]["role"] == "user");
+        anyhow::ensure!(
+            replay["message"]["content"]
+                .as_array()
+                .is_some_and(|content| content
+                    .iter()
+                    .any(|block| { block["type"] == "text" && block["text"].is_string() })),
+            "replayed user content needs a text block"
+        );
+        anyhow::ensure!(basic.iter().any(|record| {
+            record["type"] == "stream_event"
+                && record["event"]["type"] == "content_block_delta"
+                && record["event"]["delta"]["type"] == "text_delta"
+                && record["event"]["delta"]["text"].is_string()
+        }));
+        anyhow::ensure!(basic.iter().any(|record| {
+            record["type"] == "assistant"
+                && record["message"]["role"] == "assistant"
+                && record["message"]["content"].is_array()
+        }));
+        anyhow::ensure!(basic.iter().any(|record| {
+            record["type"] == "result"
+                && record["subtype"] == "success"
+                && record["is_error"].is_boolean()
+                && record["result"].is_string()
+                && record["duration_ms"].is_u64()
+                && record["usage"]["input_tokens"].is_u64()
+                && record["usage"]["output_tokens"].is_u64()
+        }));
+        anyhow::ensure!(basic.iter().any(|record| {
+            record["type"].is_string() && record["type"] == "future_fixture_record"
+        }));
+
+        anyhow::ensure!(tools.iter().any(|record| {
+            record["event"]["delta"]["type"] == "input_json_delta"
+                && record["event"]["delta"]["partial_json"]
+                    .as_str()
+                    .is_some_and(|partial| serde_json::from_str::<Value>(partial).is_ok())
+        }));
+        anyhow::ensure!(tools.iter().any(|record| {
+            record["type"] == "user"
+                && record["message"]["content"]
+                    .as_array()
+                    .is_some_and(|content| {
+                        content.iter().any(|block| {
+                            block["type"] == "tool_result"
+                                && block["tool_use_id"].is_string()
+                                && block["is_error"].is_boolean()
+                        })
+                    })
+        }));
+        for subtype in ["hook_started", "hook_response"] {
+            let hook = tools
+                .iter()
+                .find(|record| record["type"] == "system" && record["subtype"] == subtype)
+                .with_context(|| format!("tools fixture missing {subtype}"))?;
+            anyhow::ensure!(hook["hook_id"].is_string());
+            anyhow::ensure!(hook["hook_name"].is_string());
+            anyhow::ensure!(hook["hook_event"].is_string());
+        }
+        let retry = tools
+            .iter()
+            .find(|record| record["type"] == "system" && record["subtype"] == "api_retry")
+            .context("tools fixture missing api_retry")?;
+        anyhow::ensure!(retry["attempt"].is_u64());
+        anyhow::ensure!(retry["max_retries"].is_u64());
+        anyhow::ensure!(retry["retry_delay_ms"].is_u64());
+        anyhow::ensure!(retry["error"].is_string());
+        let rate_limit = tools
+            .iter()
+            .find(|record| record["type"] == "rate_limit_event")
+            .context("tools fixture missing rate_limit_event")?;
+        anyhow::ensure!(rate_limit["rate_limit_info"]["status"].is_string());
+        anyhow::ensure!(rate_limit["rate_limit_info"]["resetsAt"].is_u64());
+        anyhow::ensure!(rate_limit["rate_limit_info"]["rateLimitType"].is_string());
+        anyhow::ensure!(rate_limit["rate_limit_info"]["isUsingOverage"].is_boolean());
+
+        anyhow::ensure!(results.iter().any(|record| {
+            record["type"] == "user"
+                && record["tool_use_result"]["type"] == "tool_deferred"
+                && record["message"]["content"]
+                    .as_array()
+                    .is_some_and(|content| {
+                        content.iter().any(|block| {
+                            block["type"] == "tool_result" && block["tool_use_id"].is_string()
+                        })
+                    })
+        }));
+        for subtype in ["error_during_execution", "interrupted"] {
+            let result = results
+                .iter()
+                .find(|record| record["type"] == "result" && record["subtype"] == subtype)
+                .with_context(|| format!("results fixture missing {subtype}"))?;
+            anyhow::ensure!(result["is_error"].is_boolean());
+            anyhow::ensure!(result["result"].is_string());
+            anyhow::ensure!(result["duration_ms"].is_u64());
+        }
+        Ok(())
+    }
+
     #[test]
     fn claude_stream_contract_launches_persistent_native_stream_with_settings() {
         let args = build_claude_stream_args(&ClaudeStreamLaunchConfig {
@@ -838,6 +1022,61 @@ mod tests {
     }
 
     #[test]
+    fn claude_failed_input_write_settles_pending_and_active_correlation() {
+        let mut pending_adapter = ClaudeManagedAdapter::new(HarnessAdapterContext {
+            session_id: 7,
+            thread_id: 11,
+            workspace: "fixture-workspace".to_owned(),
+            native_session_id: None,
+            controls: Default::default(),
+        });
+        pending_adapter
+            .encode_input(HarnessInput {
+                local_input_id: "pending-input".to_owned(),
+                content: "pending".to_owned(),
+                visible_content: None,
+                kind: crate::archcar::protocol::ArchcarInputKind::User,
+                delivery: crate::archcar::protocol::ArchcarInputDelivery::Auto,
+            })
+            .unwrap();
+
+        pending_adapter.settle_failed_input_write("pending-input");
+
+        assert!(pending_adapter.pending_inputs.is_empty());
+        assert!(pending_adapter.active_input_id.is_none());
+
+        let mut active_adapter = ClaudeManagedAdapter::new(HarnessAdapterContext {
+            session_id: 7,
+            thread_id: 11,
+            workspace: "fixture-workspace".to_owned(),
+            native_session_id: None,
+            controls: Default::default(),
+        });
+        active_adapter
+            .encode_input(HarnessInput {
+                local_input_id: "active-input".to_owned(),
+                content: "active".to_owned(),
+                visible_content: None,
+                kind: crate::archcar::protocol::ArchcarInputKind::User,
+                delivery: crate::archcar::protocol::ArchcarInputDelivery::Auto,
+            })
+            .unwrap();
+        active_adapter
+            .observe_native(NativeRecord {
+                provider_key: "claude",
+                payload: br#"{"type":"stream_event","session_id":"fixture-session","event":{"type":"message_start","message":{"id":"fixture-message"}}}
+"#
+                .to_vec(),
+            })
+            .unwrap();
+
+        active_adapter.settle_failed_input_write("active-input");
+
+        assert!(active_adapter.pending_inputs.is_empty());
+        assert!(active_adapter.active_input_id.is_none());
+    }
+
+    #[test]
     fn claude_stream_contract_fixtures_cover_native_record_families_losslessly() {
         let basic = parse_claude_stream_json_lines(BASIC_TURN_FIXTURE).unwrap();
         let tools = parse_claude_stream_json_lines(TOOLS_HOOKS_LIMITS_FIXTURE).unwrap();
@@ -849,10 +1088,10 @@ mod tests {
             results.len(),
             DEFERRED_AND_FAILED_RESULTS_FIXTURE.lines().count()
         );
-        assert_eq!(basic[0].raw_json["subtype"], "status");
+        assert_eq!(basic[0].raw_json["subtype"], "hook_started");
         assert_eq!(basic[1].raw_json["subtype"], "init");
         assert_eq!(basic[1].raw_json["mcp_servers"][0]["name"], "fixture-mcp");
-        assert_eq!(basic[2].raw_json["isReplay"], true);
+        assert!(basic.iter().any(|event| event.raw_json["isReplay"] == true));
         assert!(basic.iter().any(|event| {
             event.raw_json["type"] == "assistant"
                 && event.raw_json["message"]["content"][0]["text"] == "Fixture complete."
@@ -881,6 +1120,96 @@ mod tests {
         assert!(results
             .iter()
             .any(|event| event.raw_json["subtype"] == "interrupted"));
+    }
+
+    #[test]
+    fn claude_stream_contract_fixtures_have_required_native_field_shapes() {
+        let basic = fixture_values("basic", BASIC_TURN_FIXTURE).unwrap();
+        let tools = fixture_values("tools", TOOLS_HOOKS_LIMITS_FIXTURE).unwrap();
+        let results = fixture_values("results", DEFERRED_AND_FAILED_RESULTS_FIXTURE).unwrap();
+
+        validate_fixture_contract(&basic, &tools, &results).unwrap();
+
+        let mut malformed_basic = basic.clone();
+        let init = malformed_basic
+            .iter_mut()
+            .find(|record| record["subtype"] == "init")
+            .unwrap();
+        init["tools"] = Value::String("not-an-array".to_owned());
+        assert!(validate_fixture_contract(&malformed_basic, &tools, &results).is_err());
+    }
+
+    #[test]
+    fn claude_stream_contract_fixtures_drive_common_adapter_effects() {
+        let mut adapter = ClaudeManagedAdapter::new(HarnessAdapterContext {
+            session_id: 7,
+            thread_id: 11,
+            workspace: "fixture-workspace".to_owned(),
+            native_session_id: None,
+            controls: Default::default(),
+        });
+        adapter
+            .encode_input(HarnessInput {
+                local_input_id: "fixture-input".to_owned(),
+                content: "fixture".to_owned(),
+                visible_content: None,
+                kind: crate::archcar::protocol::ArchcarInputKind::User,
+                delivery: crate::archcar::protocol::ArchcarInputDelivery::Auto,
+            })
+            .unwrap();
+
+        let effects = adapter
+            .observe_native(NativeRecord {
+                provider_key: "claude",
+                payload: BASIC_TURN_FIXTURE.as_bytes().to_vec(),
+            })
+            .unwrap();
+
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            HarnessEffect::Initialized { native_session_id, .. }
+                if native_session_id == "session_fixture_basic"
+        )));
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            HarnessEffect::TurnStarted { local_input_id } if local_input_id == "fixture-input"
+        )));
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            HarnessEffect::TurnCompleted { local_input_id, status: HarnessTurnStatus::Success }
+                if local_input_id == "fixture-input"
+        )));
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            HarnessEffect::ProviderEvent(event)
+                if event.kind == ProviderEventKind::Unknown
+                    && event.raw_json["type"] == "future_fixture_record"
+        )));
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect, HarnessEffect::Ready)));
+
+        let edge_effects = adapter
+            .observe_native(NativeRecord {
+                provider_key: "claude",
+                payload: TOOLS_HOOKS_LIMITS_FIXTURE.as_bytes().to_vec(),
+            })
+            .unwrap();
+        assert!(edge_effects.iter().any(|effect| matches!(
+            effect,
+            HarnessEffect::ProviderEvent(event)
+                if event.raw_json["subtype"] == "hook_response"
+        )));
+        assert!(edge_effects.iter().any(|effect| matches!(
+            effect,
+            HarnessEffect::ProviderEvent(event)
+                if event.raw_json["subtype"] == "api_retry"
+        )));
+        assert!(edge_effects.iter().any(|effect| matches!(
+            effect,
+            HarnessEffect::ProviderEvent(event)
+                if event.raw_json["type"] == "rate_limit_event"
+        )));
     }
 
     #[test]
