@@ -1,7 +1,8 @@
 use super::harness::{managed_harness_for_kind, validate_managed_harness};
 use super::harness_contract::{
-    DesiredHarnessControls, HarnessAdapterContext, HarnessCapability, HarnessEffect, HarnessInput,
-    NativeRecord, SupportMode, REQUIRED_HARNESS_FEATURES,
+    DesiredHarnessControls, HarnessAdapterContext, HarnessCapability, HarnessControl,
+    HarnessControlPlan, HarnessEffect, HarnessInput, NativeRecord, SupportMode,
+    REQUIRED_HARNESS_FEATURES,
 };
 use super::protocol::{
     session_harness_capabilities_for_descriptor, ArchcarInputDelivery, ArchcarInputKind,
@@ -57,6 +58,22 @@ fn capability_snapshots_include_required_baseline_for_managed_providers() {
             harness.descriptor().optional_capabilities.len()
         );
     }
+}
+
+#[test]
+fn claude_reconfigure_controls_require_resume_with_desired_controls() {
+    let claude = managed_harness_for_kind(SessionKind::Claude).unwrap();
+    let mut adapter = claude
+        .create_adapter(adapter_context(Some("claude-session-1")))
+        .unwrap();
+
+    assert!(matches!(
+        adapter.plan_control(HarnessControl::SetEffort(Some("high".to_owned()))),
+        HarnessControlPlan::RestartRequired(DesiredHarnessControls {
+            effort: Some(ref effort),
+            ..
+        }) if effort == "high"
+    ));
 }
 
 #[test]

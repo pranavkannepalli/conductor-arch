@@ -207,6 +207,8 @@ fn request_retry_safe_after_response_loss(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::GetSessionMessages { .. }
             | ArchcarRequest::ResizeSession { .. }
             | ArchcarRequest::SetSessionModel { .. }
+            | ArchcarRequest::SetSessionEffort { .. }
+            | ArchcarRequest::SetSessionPermissionMode { .. }
     )
 }
 
@@ -299,6 +301,18 @@ mod tests {
             &ArchcarRequest::SetSessionModel {
                 session_id: 42,
                 model: Some("gpt-5".to_owned()),
+            }
+        ));
+        assert!(request_retry_safe_after_response_loss(
+            &ArchcarRequest::SetSessionEffort {
+                session_id: 42,
+                effort: Some("high".to_owned()),
+            }
+        ));
+        assert!(request_retry_safe_after_response_loss(
+            &ArchcarRequest::SetSessionPermissionMode {
+                session_id: 42,
+                mode: "default".to_owned(),
             }
         ));
         assert!(!request_retry_safe_after_response_loss(

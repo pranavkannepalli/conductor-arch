@@ -45,6 +45,14 @@ pub enum AsyncArchcarRequestKind {
         session_id: i64,
         model: Option<String>,
     },
+    SetSessionEffort {
+        session_id: i64,
+        effort: Option<String>,
+    },
+    SetSessionPermissionMode {
+        session_id: i64,
+        mode: String,
+    },
     ResizeSession {
         session_id: i64,
         rows: u16,
@@ -226,6 +234,14 @@ impl AsyncArchcarBridge {
 
     pub fn set_session_model(&self, session_id: i64, model: Option<String>) -> Option<u64> {
         self.submit(ArchcarRequest::SetSessionModel { session_id, model })
+    }
+
+    pub fn set_session_effort(&self, session_id: i64, effort: Option<String>) -> Option<u64> {
+        self.submit(ArchcarRequest::SetSessionEffort { session_id, effort })
+    }
+
+    pub fn set_session_permission_mode(&self, session_id: i64, mode: String) -> Option<u64> {
+        self.submit(ArchcarRequest::SetSessionPermissionMode { session_id, mode })
     }
 
     pub fn interrupt_turn(&self, session_id: i64) -> Option<u64> {
@@ -518,6 +534,18 @@ fn request_kind(request: &ArchcarRequest) -> AsyncArchcarRequestKind {
                 model: model.clone(),
             }
         }
+        ArchcarRequest::SetSessionEffort { session_id, effort } => {
+            AsyncArchcarRequestKind::SetSessionEffort {
+                session_id: *session_id,
+                effort: effort.clone(),
+            }
+        }
+        ArchcarRequest::SetSessionPermissionMode { session_id, mode } => {
+            AsyncArchcarRequestKind::SetSessionPermissionMode {
+                session_id: *session_id,
+                mode: mode.clone(),
+            }
+        }
         ArchcarRequest::ResizeSession {
             session_id,
             rows,
@@ -645,6 +673,33 @@ mod tests {
             AsyncArchcarRequestKind::SetSessionModel {
                 session_id: 9,
                 model: Some("gpt-5.6-terra".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn request_kind_preserves_live_control_metadata() {
+        let effort = ArchcarRequest::SetSessionEffort {
+            session_id: 9,
+            effort: Some("high".to_owned()),
+        };
+        assert_eq!(
+            request_kind(&effort),
+            AsyncArchcarRequestKind::SetSessionEffort {
+                session_id: 9,
+                effort: Some("high".to_owned()),
+            }
+        );
+
+        let permission = ArchcarRequest::SetSessionPermissionMode {
+            session_id: 9,
+            mode: "default".to_owned(),
+        };
+        assert_eq!(
+            request_kind(&permission),
+            AsyncArchcarRequestKind::SetSessionPermissionMode {
+                session_id: 9,
+                mode: "default".to_owned(),
             }
         );
     }

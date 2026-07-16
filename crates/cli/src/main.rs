@@ -199,6 +199,14 @@ enum ArchcarCommand {
         session_id: i64,
         model: String,
     },
+    Effort {
+        session_id: i64,
+        level: String,
+    },
+    PermissionMode {
+        session_id: i64,
+        mode: String,
+    },
     Resize {
         session_id: i64,
         rows: u16,
@@ -654,6 +662,23 @@ fn main() -> Result<()> {
                         session_id,
                         model: Some(model),
                     })? {
+                        ArchcarResponse::Error { message } => anyhow::bail!(message),
+                        response => print_archcar_response(response),
+                    }
+                }
+                ArchcarCommand::Effort { session_id, level } => {
+                    match client.send(ArchcarRequest::SetSessionEffort {
+                        session_id,
+                        effort: Some(level),
+                    })? {
+                        ArchcarResponse::Error { message } => anyhow::bail!(message),
+                        response => print_archcar_response(response),
+                    }
+                }
+                ArchcarCommand::PermissionMode { session_id, mode } => {
+                    match client
+                        .send(ArchcarRequest::SetSessionPermissionMode { session_id, mode })?
+                    {
                         ArchcarResponse::Error { message } => anyhow::bail!(message),
                         response => print_archcar_response(response),
                     }
@@ -2667,6 +2692,31 @@ mod tests {
         };
         assert_eq!(session_id, 7);
         assert_eq!(model, "gpt-5.6-terra");
+    }
+
+    #[test]
+    fn cli_archcar_control_parses_effort_and_permission_mode() {
+        let effort = Cli::try_parse_from(["archductor", "archcar", "effort", "7", "high"]).unwrap();
+        let Command::Archcar {
+            command: ArchcarCommand::Effort { session_id, level },
+        } = effort.command
+        else {
+            panic!("expected archcar effort");
+        };
+        assert_eq!(session_id, 7);
+        assert_eq!(level, "high");
+
+        let permission =
+            Cli::try_parse_from(["archductor", "archcar", "permission-mode", "7", "default"])
+                .unwrap();
+        let Command::Archcar {
+            command: ArchcarCommand::PermissionMode { session_id, mode },
+        } = permission.command
+        else {
+            panic!("expected archcar permission-mode");
+        };
+        assert_eq!(session_id, 7);
+        assert_eq!(mode, "default");
     }
 
     #[test]

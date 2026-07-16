@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
+use crate::archcar::harness_contract::HarnessControl;
 use crate::archcar::protocol::{
     archcar_event_summary, archcar_request_summary, archcar_response_summary, ArchcarEvent,
     ArchcarMessage, ArchcarRequest, ArchcarResponse, RpcEnvelope,
@@ -299,34 +300,16 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             }
         }
         ArchcarRequest::SetSessionModel { session_id, model } => {
-            match load_or_restore_session_handle(state, session_id) {
-                Ok(Some(handle)) => {
-                    let kind = handle.snapshot.lock().ok().map(|snapshot| snapshot.kind);
-                    if kind != Some(crate::workspace::SessionKind::Codex) {
-                        return ArchcarResponse::Error {
-                            message: format!(
-                                "set_session_model is only supported for codex sessions; got {kind:?}"
-                            ),
-                        };
-                    }
-                    match handle
-                        .command_tx
-                        .send(crate::archcar::session::SessionCommand::SetModel { model })
-                    {
-                        Ok(_) => ArchcarResponse::Ack,
-                        Err(err) => ArchcarResponse::Error {
-                            message: err.to_string(),
-                        },
-                    }
-                }
-                Ok(None) => ArchcarResponse::Error {
-                    message: format!("unknown session {session_id}"),
-                },
-                Err(err) => ArchcarResponse::Error {
-                    message: err.to_string(),
-                },
-            }
+            send_session_control(state, session_id, HarnessControl::SetModel(model))
         }
+        ArchcarRequest::SetSessionEffort { session_id, effort } => {
+            send_session_control(state, session_id, HarnessControl::SetEffort(effort))
+        }
+        ArchcarRequest::SetSessionPermissionMode { session_id, mode } => send_session_control(
+            state,
+            session_id,
+            HarnessControl::SetPermissionMode(Some(mode)),
+        ),
         ArchcarRequest::ResizeSession {
             session_id,
             rows,
@@ -422,6 +405,33 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
         }
         ArchcarRequest::Subscribe => ArchcarResponse::Error {
             message: "subscribe must use a persistent connection".to_owned(),
+        },
+    }
+}
+
+fn send_session_control(
+    state: &Arc<Mutex<ServerState>>,
+    session_id: i64,
+    control: HarnessControl,
+) -> ArchcarResponse {
+    match load_or_restore_session_handle(state, session_id) {
+        Ok(Some(handle)) => {
+            match handle
+                .command_tx
+                .send(crate::archcar::session::SessionCommand::ApplyControl(
+                    control,
+                )) {
+                Ok(_) => ArchcarResponse::Ack,
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        Ok(None) => ArchcarResponse::Error {
+            message: format!("unknown session {session_id}"),
+        },
+        Err(err) => ArchcarResponse::Error {
+            message: err.to_string(),
         },
     }
 }

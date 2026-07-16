@@ -2,7 +2,7 @@ use archductor_core::agent_tools::{
     launchable_agent_tools, launchable_provider_key, tool_by_provider,
 };
 use archductor_core::archcar::harness::managed_harness_for_kind;
-use archductor_core::archcar::harness_contract::HarnessDescriptor;
+use archductor_core::archcar::harness_contract::{HarnessDescriptor, RequiredHarnessFeature};
 use archductor_core::archcar::protocol::{
     ArchcarEvent, ArchcarInputDelivery, ArchcarInputKind, ArchcarResponse,
 };
@@ -6522,6 +6522,9 @@ fn set_composer_send_button_action(button: &Button, action: ComposerAction) {
 }
 
 fn visible_live_controls_for_provider(provider: &str) -> Vec<String> {
+    if let Some(harness) = managed_harness_for_kind(session_kind_from_provider(provider)) {
+        return visible_live_controls_for_harness(harness.descriptor());
+    }
     let controls = gtk_live_controls_for_provider(provider)
         .map(|control| control.control.to_owned())
         .collect::<Vec<_>>();
@@ -6530,6 +6533,18 @@ fn visible_live_controls_for_provider(provider: &str) -> Vec<String> {
     } else {
         controls
     }
+}
+
+fn visible_live_controls_for_harness(descriptor: &HarnessDescriptor) -> Vec<String> {
+    let mut controls = vec!["provider".to_owned()];
+    if descriptor
+        .required_features
+        .contains(&RequiredHarnessFeature::SessionControls)
+    {
+        controls.push("model".to_owned());
+        controls.push("thinking".to_owned());
+    }
+    controls
 }
 
 fn retry_agent_prompt() -> &'static str {
@@ -9916,6 +9931,16 @@ fix it
         assert!(!controls.contains(&"goal".to_owned()));
         assert!(!controls.contains(&"attach".to_owned()));
         assert!(!visible_live_controls_for_provider("claude").contains(&"interrupt".to_owned()));
+    }
+
+    #[test]
+    fn claude_live_controls_come_from_managed_harness_descriptor() {
+        let claude = managed_harness_for_kind(SessionKind::Claude).unwrap();
+        let controls = visible_live_controls_for_harness(claude.descriptor());
+
+        assert!(controls.contains(&"model".to_owned()));
+        assert!(controls.contains(&"thinking".to_owned()));
+        assert!(!controls.contains(&"interrupt".to_owned()));
     }
 
     #[test]

@@ -76,6 +76,15 @@ pub enum ArchcarRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
     },
+    SetSessionEffort {
+        session_id: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effort: Option<String>,
+    },
+    SetSessionPermissionMode {
+        session_id: i64,
+        mode: String,
+    },
     ResizeSession {
         session_id: i64,
         rows: u16,
@@ -239,6 +248,13 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
                 "default"
             }
         ),
+        ArchcarRequest::SetSessionEffort { session_id, effort } => format!(
+            "set_session_effort session_id={session_id} effort={}",
+            effort.as_deref().unwrap_or("default")
+        ),
+        ArchcarRequest::SetSessionPermissionMode { session_id, mode } => {
+            format!("set_session_permission_mode session_id={session_id} mode={mode}")
+        }
         ArchcarRequest::ResizeSession {
             session_id,
             rows,
@@ -513,6 +529,39 @@ mod tests {
         assert!(!json.contains("\"model\""));
         let decoded: ArchcarRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, reset);
+    }
+
+    #[test]
+    fn set_session_effort_and_permission_mode_requests_round_trip() {
+        let effort = ArchcarRequest::SetSessionEffort {
+            session_id: 7,
+            effort: Some("high".to_owned()),
+        };
+        assert_eq!(
+            archcar_request_summary(&effort),
+            "set_session_effort session_id=7 effort=high"
+        );
+        let json = serde_json::to_string(&effort).unwrap();
+        assert!(json.contains("\"type\":\"set_session_effort\""));
+        assert_eq!(
+            serde_json::from_str::<ArchcarRequest>(&json).unwrap(),
+            effort
+        );
+
+        let permission = ArchcarRequest::SetSessionPermissionMode {
+            session_id: 7,
+            mode: "default".to_owned(),
+        };
+        assert_eq!(
+            archcar_request_summary(&permission),
+            "set_session_permission_mode session_id=7 mode=default"
+        );
+        let json = serde_json::to_string(&permission).unwrap();
+        assert!(json.contains("\"type\":\"set_session_permission_mode\""));
+        assert_eq!(
+            serde_json::from_str::<ArchcarRequest>(&json).unwrap(),
+            permission
+        );
     }
 
     #[test]

@@ -18,8 +18,9 @@ use crate::archcar::harness::{
     HarnessController,
 };
 use crate::archcar::harness_contract::{
-    DesiredHarnessControls, HarnessAdapterContext, HarnessEffect, HarnessInput, HarnessTurnStatus,
-    ManagedHarnessAdapter, NativeRecord,
+    DesiredHarnessControls, HarnessAdapterContext, HarnessControl, HarnessControlPlan,
+    HarnessEffect, HarnessInput, HarnessSignal, HarnessTurnStatus, ManagedHarnessAdapter,
+    NativeRecord,
 };
 use crate::archcar::protocol::{
     session_harness_capabilities_for_descriptor, ArchcarEvent, ArchcarInputDelivery,
@@ -35,7 +36,8 @@ use crate::provider_adapters::codex_app_server::{
     write_turn_start_request_with_id, write_turn_steer_request_with_id,
     CodexAppServerInitializeParams, CodexAppServerMessage, CodexAppServerThreadStartParams,
     CodexAppServerTurnInterruptParams, CodexAppServerTurnStartParams,
-    CodexAppServerTurnSteerParams, CodexAppServerUserInput, CODEX_APP_SERVER_DEFAULT_ARGS,
+    CodexAppServerTurnSteerParams, CodexAppServerUserInput, CodexManagedAdapter,
+    CODEX_APP_SERVER_DEFAULT_ARGS,
 };
 use crate::provider_events::{
     ProviderEventContext, ProviderEventDraft, ProviderEventKind, ProviderEventPhase,
@@ -57,9 +59,7 @@ pub enum SessionCommand {
         kind: ArchcarInputKind,
         delivery: ArchcarInputDelivery,
     },
-    SetModel {
-        model: Option<String>,
-    },
+    ApplyControl(HarnessControl),
     Resize {
         rows: u16,
         cols: u16,
@@ -948,6 +948,93 @@ fn set_provider_connection_model(
     connection.model = sanitize_harness_text(model.as_deref());
 }
 
+fn set_provider_connection_effort(
+    connection: &mut ProviderProcessConnection,
+    effort: Option<String>,
+) {
+    connection.effort_mode = sanitize_harness_text(effort.as_deref());
+}
+
+fn set_provider_connection_permission_mode(
+    connection: &mut ProviderProcessConnection,
+    permission_mode: Option<String>,
+) {
+    connection.approval_policy = sanitize_harness_text(permission_mode.as_deref());
+}
+
+fn apply_provider_connection_controls(
+    connection: &mut ProviderProcessConnection,
+    controls: DesiredHarnessControls,
+) {
+    set_provider_connection_model(connection, controls.model);
+    set_provider_connection_effort(connection, controls.effort);
+    set_provider_connection_permission_mode(connection, controls.permission_mode);
+}
+
+fn apply_provider_control_plan(
+    runtime_store: &RuntimeSessionStore,
+    snapshot: &Arc<Mutex<SessionSnapshot>>,
+    event_tx: &Sender<ArchcarEvent>,
+    started: &SessionSnapshot,
+    connection: &mut ProviderProcessConnection,
+    plan: HarnessControlPlan,
+) {
+    match plan {
+        HarnessControlPlan::NativeWrite(native_write) => {
+            if let Err(err) = connection
+                .stdin
+                .write_all(&native_write.payload)
+                .and_then(|_| connection.stdin.flush())
+            {
+                let _ = connection.child.kill();
+                mark_provider_session_failed(
+                    runtime_store,
+                    snapshot,
+                    event_tx,
+                    started,
+                    format!("Provider control write failed: {err:#}"),
+                );
+            }
+        }
+        HarnessControlPlan::Signal(HarnessSignal::TerminateProcessGroup) => {
+            let _ = connection.child.kill();
+        }
+        HarnessControlPlan::Signal(HarnessSignal::InterruptProcessGroup) => {
+            let _ = connection.child.kill();
+        }
+        HarnessControlPlan::RestartRequired(controls) => {
+            if started.kind == SessionKind::Claude && connection.native_thread_id.is_none() {
+                let _ = event_tx.send(ArchcarEvent::SessionError {
+                    session_id: Some(started.session_id),
+                    thread_id: Some(started.thread_id),
+                    message: "Claude session has no native session id to resume".to_owned(),
+                });
+                return;
+            }
+            apply_provider_connection_controls(connection, controls);
+        }
+        HarnessControlPlan::Emulated(effect) => {
+            let mut native_thread_id = connection.native_thread_id.clone();
+            apply_harness_effect(
+                runtime_store,
+                snapshot,
+                event_tx,
+                started,
+                &mut native_thread_id,
+                effect,
+            );
+            connection.native_thread_id = native_thread_id;
+        }
+        HarnessControlPlan::Unsupported { reason } => {
+            let _ = event_tx.send(ArchcarEvent::SessionError {
+                session_id: Some(started.session_id),
+                thread_id: Some(started.thread_id),
+                message: reason,
+            });
+        }
+    }
+}
+
 fn sanitize_metadata_value(value: &str) -> String {
     value.replace(';', ",").replace('\n', " ")
 }
@@ -1466,7 +1553,7 @@ fn run_session_loop(
                         );
                     }
                 }
-                SessionCommand::SetModel { .. } => {}
+                SessionCommand::ApplyControl(_) => {}
             }
         }
 
@@ -1653,6 +1740,17 @@ fn run_codex_app_server_session_loop(
     let mut fallback_request_sequence = 0_u64;
     let mut active_turn_id: Option<String> = None;
     let mut pending_input_requests = HashMap::<u64, PendingCodexInputRequest>::new();
+    let mut control_adapter = CodexManagedAdapter::new(HarnessAdapterContext {
+        session_id: started.session_id,
+        thread_id: started.thread_id,
+        workspace: started.workspace.clone(),
+        native_session_id: connection.native_thread_id.clone(),
+        controls: DesiredHarnessControls {
+            model: connection.model.clone(),
+            effort: connection.effort_mode.clone(),
+            permission_mode: connection.approval_policy.clone(),
+        },
+    });
 
     loop {
         while let Ok(line) = connection.stdout_rx.try_recv() {
@@ -1954,8 +2052,16 @@ fn run_codex_app_server_session_loop(
                         state.runtime_state = AgentSessionState::Running;
                     }
                 }
-                SessionCommand::SetModel { model } => {
-                    set_provider_connection_model(&mut connection, model);
+                SessionCommand::ApplyControl(control) => {
+                    let plan = control_adapter.plan_control(control);
+                    apply_provider_control_plan(
+                        &runtime_store,
+                        &snapshot,
+                        &event_tx,
+                        &started,
+                        &mut connection,
+                        plan,
+                    );
                 }
                 SessionCommand::Resize { .. } => {}
             }
@@ -2086,8 +2192,16 @@ fn run_claude_stream_session_loop(
                     let _ = connection.child.kill();
                 }
                 SessionCommand::InterruptTurn => {}
-                SessionCommand::SetModel { model } => {
-                    set_provider_connection_model(&mut connection, model);
+                SessionCommand::ApplyControl(control) => {
+                    let plan = adapter.plan_control(control);
+                    apply_provider_control_plan(
+                        &runtime_store,
+                        &snapshot,
+                        &event_tx,
+                        &started,
+                        &mut connection,
+                        plan,
+                    );
                 }
                 SessionCommand::Resize { .. } => {}
             }
@@ -3287,7 +3401,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
     }
 
     #[test]
-    fn codex_app_server_model_update_changes_future_turn_model() {
+    fn codex_model_update_changes_future_turn_model() {
         let mut child = ProcessCommand::new("bash")
             .args(["-lc", "cat"])
             .stdin(Stdio::piped())
@@ -3311,11 +3425,23 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             personality: None,
         };
 
-        set_provider_connection_model(&mut connection, Some(" gpt-5.6-terra ".to_owned()));
+        apply_provider_connection_controls(
+            &mut connection,
+            DesiredHarnessControls {
+                model: Some(" gpt-5.6-terra ".to_owned()),
+                ..DesiredHarnessControls::default()
+            },
+        );
 
         assert_eq!(connection.model.as_deref(), Some("gpt-5.6-terra"));
 
-        set_provider_connection_model(&mut connection, Some("   ".to_owned()));
+        apply_provider_connection_controls(
+            &mut connection,
+            DesiredHarnessControls {
+                model: Some("   ".to_owned()),
+                ..DesiredHarnessControls::default()
+            },
+        );
 
         assert_eq!(connection.model, None);
 

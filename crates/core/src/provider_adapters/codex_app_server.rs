@@ -65,7 +65,7 @@ pub(crate) struct CodexManagedAdapter {
 }
 
 impl CodexManagedAdapter {
-    fn new(context: HarnessAdapterContext) -> Self {
+    pub(crate) fn new(context: HarnessAdapterContext) -> Self {
         Self {
             context,
             next_request_id: 1,
