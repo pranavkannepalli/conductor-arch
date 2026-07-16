@@ -1,6 +1,6 @@
 use std::io;
 #[cfg(windows)]
-use std::io::{BufRead, Write};
+use std::io::{Read, Write};
 use std::path::Path;
 #[cfg(windows)]
 use std::time::Duration;
@@ -55,12 +55,17 @@ pub fn bind(endpoint: &Path) -> io::Result<LocalListener> {
 pub fn accept(listener: &LocalListener, endpoint: &Path) -> io::Result<(LocalStream, ())> {
     let expected = endpoint_token(endpoint)?;
     loop {
-        let (stream, _) = listener.accept()?;
+        let (mut stream, _) = listener.accept()?;
         stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-        let mut reader = io::BufReader::new(stream);
-        let mut token = String::new();
-        if reader.read_line(&mut token).is_ok() && token.trim_end() == expected {
-            let stream = reader.into_inner();
+        let mut token = Vec::new();
+        let mut byte = [0_u8; 1];
+        while stream.read_exact(&mut byte).is_ok() {
+            if byte[0] == b'\n' {
+                break;
+            }
+            token.push(byte[0]);
+        }
+        if String::from_utf8_lossy(&token).trim_end_matches('\r') == expected {
             stream.set_read_timeout(None)?;
             return Ok((stream, ()));
         }
