@@ -453,16 +453,8 @@ fn cli_session_send_hides_general_prompt_while_provider_receives_first_turn_pref
         vec!["Keep changes focused.\n\nFix auth", "Run tests"]
     );
 
-    let store = WorkspaceStore::open(app_database_path(temp.path())).unwrap();
-    let visible_messages = store.list_chat_messages(thread.id).unwrap();
-    assert_eq!(
-        visible_messages
-            .iter()
-            .filter(|message| message.role == "user")
-            .map(|message| message.content.as_str())
-            .collect::<Vec<_>>(),
-        vec!["Fix auth", "Run tests"]
-    );
+    let visible_messages =
+        wait_for_visible_user_messages(temp.path(), thread.id, &["Fix auth", "Run tests"]);
     assert!(visible_messages
         .iter()
         .all(|message| !message.content.contains("Keep changes focused.")));
@@ -988,6 +980,28 @@ fn wait_for_file_lines(path: &Path, expected: usize) {
         "timed out waiting for {expected} line(s) in {}",
         path.display()
     );
+}
+
+fn wait_for_visible_user_messages(
+    root: &Path,
+    thread_id: i64,
+    expected: &[&str],
+) -> Vec<archductor_core::workspace::ChatMessageRecord> {
+    for _ in 0..100 {
+        let visible_messages = WorkspaceStore::open(app_database_path(root))
+            .and_then(|store| store.list_chat_messages(thread_id))
+            .unwrap_or_default();
+        let visible_user_messages = visible_messages
+            .iter()
+            .filter(|message| message.role == "user")
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>();
+        if visible_user_messages == expected {
+            return visible_messages;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!("timed out waiting for visible user messages {expected:?}");
 }
 
 fn wait_for_session_exit(root: &Path, session_id: i64) {
