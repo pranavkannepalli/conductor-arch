@@ -1824,14 +1824,12 @@ button.ws-tab-shell {
     min-height: 32px;
     padding: 5px 8px;
     border-radius: 6px;
+    border: none;
+    box-shadow: none;
+    background: transparent;
 }
 .ws-file-summary-row:hover {
     background-color: #1f1f1f;
-}
-.ws-file-summary-path {
-    color: #dddddd;
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
-    font-size: 13px;
 }
 .ws-file-summary-state {
     color: #9a9a9a;

@@ -33,6 +33,7 @@ const DIFF_RENDER_LIMIT_BYTES: usize = 200_000;
 const WORKSPACE_COMMIT_CHANGE_LIMIT: usize = 25;
 type WorkspaceTabSelector = Rc<dyn Fn(&str)>;
 type ContextMenuItem = (&'static str, Rc<dyn Fn()>);
+type OpenWorkspaceFile = Rc<dyn Fn(&str)>;
 
 fn clone_external_thread_selection_controller(
     controller: &session_surface::ExternalThreadSelectionController,
@@ -1372,7 +1373,7 @@ fn ws_right_panel(
     run_console_terminals: RunConsoleTerminalStore,
     refresh_hub: RefreshHub,
     toast_overlay: ToastOverlay,
-    open_file: Rc<dyn Fn(&str)>,
+    open_file: OpenWorkspaceFile,
     collapse_sidebar: Rc<dyn Fn()>,
 ) -> GBox {
     let panel = GBox::new(Orientation::Vertical, 0);
@@ -1410,6 +1411,7 @@ fn ws_right_panel(
         store,
         &ws.name,
         state.selected_chat_thread(),
+        Some(open_file.clone()),
         refresh_hub.clone(),
         toast_overlay.clone(),
     );
@@ -3601,6 +3603,7 @@ fn changes_checks_review_tabs(
             store,
             name,
             app_state.selected_chat_thread(),
+            None,
             refresh_hub.clone(),
             toast_overlay.clone(),
         ),
@@ -4029,6 +4032,7 @@ fn workspace_changes_panel(
     store: &WorkspaceStore,
     name: &str,
     selected_chat_thread: Option<i64>,
+    open_file: Option<OpenWorkspaceFile>,
     refresh_hub: RefreshHub,
     toast_overlay: ToastOverlay,
 ) -> GBox {
@@ -4049,18 +4053,31 @@ fn workspace_changes_panel(
     body_stack.set_vexpand(true);
     body_stack.set_hexpand(true);
 
-    let uncommitted_summaries = store.diff_file_summaries(name).unwrap_or_default();
+    let all_summaries = store.all_file_change_summaries(name).unwrap_or_default();
     body_stack.add_named(
-        &workspace_file_summary_scope_view(&uncommitted_summaries, true),
-        Some("uncommitted"),
+        &workspace_file_summary_scope_view(&all_summaries, true, open_file.clone()),
+        Some("all_changes"),
     );
 
     let mut scope_items = vec![WorkspaceChangesScopeItem {
+        label: "All changes".to_owned(),
+        stack_key: "all_changes".to_owned(),
+        menu_label: "All changes".to_owned(),
+        persisted_scope: "all".to_owned(),
+    }];
+
+    let uncommitted_summaries = store.diff_file_summaries(name).unwrap_or_default();
+    body_stack.add_named(
+        &workspace_file_summary_scope_view(&uncommitted_summaries, true, open_file.clone()),
+        Some("uncommitted"),
+    );
+
+    scope_items.push(WorkspaceChangesScopeItem {
         label: "Uncommitted changes".to_owned(),
         stack_key: "uncommitted".to_owned(),
         menu_label: "Uncommitted".to_owned(),
         persisted_scope: "uncommitted".to_owned(),
-    }];
+    });
 
     match store.commit_file_change_summaries(name, WORKSPACE_COMMIT_CHANGE_LIMIT) {
         Ok(commits) => {
@@ -4068,7 +4085,7 @@ fn workspace_changes_panel(
                 let key = format!("commit_{index}");
                 let label = commit_scope_label(&commit.commit, &commit.subject);
                 body_stack.add_named(
-                    &workspace_file_summary_scope_view(&commit.files, false),
+                    &workspace_file_summary_scope_view(&commit.files, false, open_file.clone()),
                     Some(&key),
                 );
                 scope_items.push(WorkspaceChangesScopeItem {
@@ -4110,7 +4127,9 @@ fn workspace_changes_panel(
     let last_turn_key = "last_turn";
     let last_turn_view = match selected_chat_thread {
         Some(thread_id) => match store.last_turn_file_change_summary(name, thread_id) {
-            Ok(Some(turn)) => workspace_file_summary_scope_view(&turn.files, false),
+            Ok(Some(turn)) => {
+                workspace_file_summary_scope_view(&turn.files, false, open_file.clone())
+            }
             Ok(None) => workspace_empty_changes_scope_view(
                 "No file changes recorded for the focused chat's last turn.",
             ),
@@ -4186,6 +4205,7 @@ fn workspace_changes_panel(
 fn workspace_file_summary_scope_view(
     summaries: &[DiffFileSummary],
     show_state: bool,
+    open_file: Option<OpenWorkspaceFile>,
 ) -> ScrolledWindow {
     let panel = GBox::new(Orientation::Vertical, 6);
     panel.add_css_class("ws-file-summary-panel");
@@ -4199,7 +4219,11 @@ fn workspace_file_summary_scope_view(
         panel.append(&empty);
     } else {
         for summary in summaries {
-            panel.append(&workspace_file_summary_row(summary, show_state));
+            panel.append(&workspace_file_summary_row(
+                summary,
+                show_state,
+                open_file.clone(),
+            ));
         }
     }
 
@@ -4227,28 +4251,68 @@ fn workspace_empty_changes_scope_view(message: &str) -> ScrolledWindow {
     scroll
 }
 
-fn workspace_file_summary_row(summary: &DiffFileSummary, show_state: bool) -> GBox {
-    let row = GBox::new(Orientation::Horizontal, 8);
-    row.add_css_class("ws-file-summary-row");
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceChangeFileRowModel {
+    icon_name: &'static str,
+    path: String,
+    counts: String,
+    state: Option<&'static str>,
+}
 
-    let path = Label::new(Some(&summary.path));
-    path.add_css_class("ws-file-summary-path");
+fn workspace_change_file_row_model(
+    summary: &DiffFileSummary,
+    show_state: bool,
+) -> WorkspaceChangeFileRowModel {
+    WorkspaceChangeFileRowModel {
+        icon_name: file_tree_icon_name(false, &summary.path),
+        path: summary.path.clone(),
+        counts: diff_counts_text(summary),
+        state: show_state.then_some(diff_state_label(summary)),
+    }
+}
+
+fn workspace_file_summary_row(
+    summary: &DiffFileSummary,
+    show_state: bool,
+    open_file: Option<OpenWorkspaceFile>,
+) -> Button {
+    let model = workspace_change_file_row_model(summary, show_state);
+    let button = Button::new();
+    button.add_css_class("ws-file-summary-row");
+    button.set_halign(Align::Fill);
+    button.set_hexpand(true);
+    if let Some(open_file) = open_file {
+        let path = model.path.clone();
+        button.connect_clicked(move |_| open_file(path.as_str()));
+    }
+
+    let row = GBox::new(Orientation::Horizontal, file_tree_row_spacing());
+    row.add_css_class("ws-file-summary-row-content");
+    row.set_hexpand(true);
+
+    let icon = Image::from_icon_name(model.icon_name);
+    icon.add_css_class("ws-file-icon");
+    row.append(&icon);
+
+    let path = Label::new(Some(&model.path));
+    path.add_css_class("ws-file-name");
     path.set_xalign(0.0);
     path.set_hexpand(true);
     path.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
     row.append(&path);
 
-    if show_state {
-        let state = Label::new(Some(diff_state_label(summary)));
+    if let Some(state_label) = model.state {
+        let state = Label::new(Some(state_label));
         state.add_css_class("ws-file-summary-state");
         row.append(&state);
     }
 
-    let counts = Label::new(Some(&diff_counts_text(summary)));
+    let counts = Label::new(Some(&model.counts));
     counts.add_css_class("ws-file-summary-counts");
     row.append(&counts);
 
-    row
+    button.set_child(Some(&row));
+    button
 }
 
 fn diff_counts_text(summary: &DiffFileSummary) -> String {
@@ -7811,6 +7875,48 @@ mod tests {
             "Commit abcdef1: fix parser"
         );
         assert_eq!(commit_scope_label("abcdef1234567890", ""), "Commit abcdef1");
+    }
+
+    #[test]
+    fn workspace_changes_scope_defaults_to_all_changes() {
+        let items = vec![
+            WorkspaceChangesScopeItem {
+                label: "All changes".to_owned(),
+                stack_key: "all_changes".to_owned(),
+                menu_label: "All changes".to_owned(),
+                persisted_scope: "all".to_owned(),
+            },
+            WorkspaceChangesScopeItem {
+                label: "Uncommitted changes".to_owned(),
+                stack_key: "uncommitted".to_owned(),
+                menu_label: "Uncommitted".to_owned(),
+                persisted_scope: "uncommitted".to_owned(),
+            },
+        ];
+
+        let selected = workspace_changes_selected_scope(&items, None);
+
+        assert_eq!(selected.stack_key, "all_changes");
+        assert_eq!(selected.menu_label, "All changes");
+    }
+
+    #[test]
+    fn changed_file_rows_use_file_style_metadata_with_counts() {
+        let summary = archductor_core::workspace::DiffFileSummary {
+            path: "src/ui/panel.rs".to_owned(),
+            additions: Some(12),
+            deletions: Some(3),
+            staged: true,
+            unstaged: false,
+            untracked: false,
+        };
+
+        let row = workspace_change_file_row_model(&summary, true);
+
+        assert_eq!(row.icon_name, "text-x-generic-symbolic");
+        assert_eq!(row.path, "src/ui/panel.rs");
+        assert_eq!(row.counts, "+12 -3");
+        assert_eq!(row.state, Some("[staged]"));
     }
 
     #[test]

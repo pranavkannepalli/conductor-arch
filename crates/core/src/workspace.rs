@@ -3125,6 +3125,39 @@ impl WorkspaceStore {
         Ok(summaries)
     }
 
+    pub fn all_file_change_summaries(&self, name: &str) -> Result<Vec<DiffFileSummary>> {
+        let workspace = self.get_by_name(name)?;
+        let base_ref = workspace_base_ref(&workspace);
+        let diff = git_output_dynamic(&workspace.path, &["diff", "--numstat", base_ref, "--"])?;
+        let mut summaries = merge_diff_summaries(parse_diff_numstat(&diff));
+        let mut known_paths = summaries
+            .iter()
+            .map(|summary| summary.path.clone())
+            .collect::<BTreeSet<_>>();
+        let status = git_output(
+            &workspace.path,
+            ["status", "--porcelain", "--untracked-files=all"],
+        )?;
+        apply_diff_file_status(&mut summaries, &status);
+        for path in parse_untracked_status_paths(&status) {
+            if known_paths.contains(&path) || is_conductor_context_path(&path) {
+                continue;
+            }
+            let counts = untracked_file_counts(&workspace.path.join(&path))?;
+            known_paths.insert(path.clone());
+            summaries.push(DiffFileSummary {
+                path,
+                additions: Some(counts.0),
+                deletions: Some(0),
+                staged: false,
+                unstaged: false,
+                untracked: true,
+            });
+        }
+        summaries.sort_by(|left, right| left.path.cmp(&right.path));
+        Ok(summaries)
+    }
+
     pub fn turn_file_change_summaries(
         &self,
         name: &str,
@@ -20727,6 +20760,50 @@ spotlight_testing = true
         let changed = store.changed_files("berlin").unwrap();
         assert!(changed.iter().any(|path| path == "README.md"));
         assert!(changed.iter().any(|path| path == "new.txt"));
+    }
+
+    #[test]
+    fn all_file_change_summaries_include_committed_worktree_and_untracked_changes() {
+        let (_temp, store) = test_workspace_store();
+        let workspace = store.get_by_name("berlin").unwrap();
+
+        fs::write(workspace.path.join("README.md"), "demo\ncommitted\n").unwrap();
+        git_output(&workspace.path, ["add", "README.md"]);
+        git_output(
+            &workspace.path,
+            [
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "update readme",
+            ],
+        );
+        fs::write(workspace.path.join("src.rs"), "working\n").unwrap();
+        fs::write(workspace.path.join("draft.md"), "draft\n").unwrap();
+        git_output(&workspace.path, ["add", "src.rs"]);
+
+        let summaries = store.all_file_change_summaries("berlin").unwrap();
+
+        assert!(summaries.iter().any(|summary| {
+            summary.path == "README.md"
+                && summary.additions == Some(1)
+                && !summary.staged
+                && !summary.untracked
+        }));
+        assert!(summaries.iter().any(|summary| {
+            summary.path == "src.rs"
+                && summary.additions == Some(1)
+                && summary.staged
+                && !summary.untracked
+        }));
+        assert!(summaries.iter().any(|summary| {
+            summary.path == "draft.md" && summary.additions == Some(1) && summary.untracked
+        }));
     }
 
     #[test]
