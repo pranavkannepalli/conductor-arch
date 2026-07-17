@@ -178,10 +178,26 @@ mod tests {
             while std::time::Instant::now() < deadline && !marker.exists() {
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
-            let _ = terminate_process_group(child.id(), true);
-            let _ = child.wait();
+            let terminated = terminate_process_group(child.id(), true).unwrap_or(false);
+            let exited = wait_for_child_exit(&mut child, std::time::Duration::from_secs(2));
 
+            assert!(
+                exited,
+                "test process did not exit after force termination; terminate_process_group={terminated}"
+            );
             assert!(marker.exists());
         }
+    }
+
+    #[cfg(unix)]
+    fn wait_for_child_exit(child: &mut std::process::Child, timeout: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        while std::time::Instant::now() < deadline {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        false
     }
 }
