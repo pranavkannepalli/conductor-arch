@@ -1,14 +1,16 @@
 VERSION ?= 0.1.0
+DEV_ENV := scripts/dev-instance-env.sh
 
-.PHONY: help dev archcar gtk cli run build build-release check release tag publish-tag
+.PHONY: help dev dev-env archcar gtk cli run build build-release check release tag publish-tag
 
 help:
 	@printf '%s\n' \
-		'make gtk                      Run GTK app in dev mode' \
-		'make archcar                  Run archcar sidecar in dev mode' \
-		'make cli                      Run CLI in dev mode' \
+		'make gtk                      Run GTK app in branch-scoped dev mode' \
+		'make archcar                  Run archcar sidecar in branch-scoped dev mode' \
+		'make cli                      Run CLI in branch-scoped dev mode' \
 		'make run                      Alias for make gtk' \
-		'make dev                      Build workspace, then run stable archcar + watched GTK app' \
+		'make dev                      Build workspace, then run watched GTK app for this branch' \
+		'make dev-env                  Print branch-scoped dev environment' \
 		'make build                    Build workspace in dev mode' \
 		'make build-release            Build workspace in release mode' \
 		'make check                    Run fmt, clippy, and tests' \
@@ -17,22 +19,23 @@ help:
 		'make publish-tag VERSION=x.y.z Push git tag vVERSION'
 
 dev:
-	@pkill -f '^target/debug/archductor-gtk$$' 2>/dev/null || true
-	@pkill -f '^target/debug/archcar$$' 2>/dev/null || true
 	@cargo build --workspace
 	@trap 'kill 0' INT TERM EXIT; \
-	cargo run --bin archcar & \
-	cargo watch -x "run --bin archductor-gtk" & \
+	$(DEV_ENV) cargo run --bin archcar & \
+	$(DEV_ENV) cargo watch -x "run --bin archductor-gtk" & \
 	wait
 
+dev-env:
+	@$(DEV_ENV) --print
+
 archcar:
-	cargo run --bin archcar
+	$(DEV_ENV) cargo run --bin archcar
 
 gtk:
-	cargo run --bin archductor-gtk
+	$(DEV_ENV) cargo run --bin archductor-gtk
 
 cli:
-	cargo run --bin archductor --
+	$(DEV_ENV) cargo run --bin archductor --
 
 run: gtk
 

@@ -4,4 +4,5 @@
 .worktrees/
 .context/
 docs/superpowers/plans/*.md
+.archductor/dev-instances/
 .archductor/settings.local.toml*

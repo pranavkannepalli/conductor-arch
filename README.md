@@ -152,6 +152,11 @@ make tag VERSION=0.1.0
 make publish-tag VERSION=0.1.0
 ```
 
+Development `make` launch targets are branch-scoped. `make dev`, `make gtk`,
+`make cli`, and `make archcar` set separate XDG config/data/state/cache
+directories from the current branch, so multiple Archductor checkouts can run
+side by side while dogfooding. Run `make dev-env` to print the active paths.
+
 Optional install:
 
 ```bash

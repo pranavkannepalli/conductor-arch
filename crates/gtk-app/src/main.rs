@@ -205,9 +205,44 @@ fn main() {
     let launch_target =
         parse_launch_target_with_debug_mode(std::env::args(), debug_mode).unwrap_or_default();
 
-    let app = Application::builder().application_id(APP_ID).build();
+    let app_id = application_id();
+    let app = Application::builder().application_id(&app_id).build();
     app.connect_activate(move |app| build_ui(app, launch_target.clone(), debug_mode));
     app.run_with_args(&["archductor-gtk"]);
+}
+
+fn application_id() -> String {
+    dev_application_id_from_suffix(std::env::var("ARCHDUCTOR_DEV_INSTANCE").ok().as_deref())
+}
+
+fn dev_application_id_from_suffix(suffix: Option<&str>) -> String {
+    let Some(suffix) = suffix else {
+        return APP_ID.to_owned();
+    };
+    let sanitized = sanitize_dev_application_id_suffix(suffix);
+    if sanitized.is_empty() {
+        APP_ID.to_owned()
+    } else {
+        format!("{APP_ID}.dev.instance-{sanitized}")
+    }
+}
+
+fn sanitize_dev_application_id_suffix(value: &str) -> String {
+    let mut out = String::new();
+    let mut last_was_separator = false;
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            last_was_separator = false;
+        } else if !last_was_separator && !out.is_empty() {
+            out.push('-');
+            last_was_separator = true;
+        }
+        if out.len() >= 80 {
+            break;
+        }
+    }
+    out.trim_matches('-').to_owned()
 }
 
 fn parse_launch_target<I, S>(args: I) -> Result<LaunchTarget, String>
@@ -1800,6 +1835,16 @@ mod tests {
         assert_eq!(target.workspace.as_deref(), Some("berlin"));
         assert_eq!(target.workspace_tab, WorkspaceTab::Checks);
         assert_eq!(target.page, AppPage::Workspace);
+    }
+
+    #[test]
+    fn dev_application_id_uses_sanitized_instance_suffix() {
+        assert_eq!(
+            dev_application_id_from_suffix(Some("feature/Dogfood Archductor!!")),
+            "io.github.pranavkannepalli.archductor.dev.instance-feature-dogfood-archductor"
+        );
+        assert_eq!(dev_application_id_from_suffix(Some("...")), APP_ID);
+        assert_eq!(dev_application_id_from_suffix(None), APP_ID);
     }
 
     #[test]
