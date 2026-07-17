@@ -314,6 +314,9 @@ impl ManagedHarnessAdapter for ClaudeManagedAdapter {
                     stop_reason,
                 }) => {
                     let _ = stop_reason;
+                    if let Some(message) = claude_terminal_failure_message(&event) {
+                        effects.push(HarnessEffect::Fatal(message));
+                    }
                     self.tracker.note_terminal_result(
                         terminal_result_id
                             .unwrap_or_else(|| claude_fallback_event_id(&event.raw_json)),
@@ -1048,7 +1051,14 @@ fn string_at(value: &Value, path: &[&str]) -> Option<String> {
 fn number_at(value: &Value, path: &[&str]) -> Option<u64> {
     path.iter()
         .try_fold(value, |current, key| current.get(*key))
-        .and_then(Value::as_u64)
+        .and_then(|value| {
+            value.as_u64().or_else(|| {
+                value.as_f64().and_then(|number| {
+                    (number.is_finite() && number >= 0.0 && number <= u64::MAX as f64)
+                        .then_some(number as u64)
+                })
+            })
+        })
 }
 
 fn claude_fallback_event_id(value: &Value) -> String {
@@ -1173,6 +1183,19 @@ fn claude_result_status_from_json(value: &Value) -> ClaudeResultStatus {
     } else {
         ClaudeResultStatus::Success
     }
+}
+
+fn claude_terminal_failure_message(event: &ClaudeProviderEventDraft) -> Option<String> {
+    if event.kind != ClaudeProviderEventKind::Result {
+        return None;
+    }
+    if event.result_status()? != ClaudeResultStatus::Failed {
+        return None;
+    }
+    let message = string_at(&event.raw_json, &["result"])
+        .or_else(|| string_at(&event.raw_json, &["error"]))
+        .unwrap_or_else(|| "Claude Code returned a failed result.".to_owned());
+    Some(message)
 }
 
 fn claude_system_hook_event(value: &Value) -> bool {
@@ -1705,6 +1728,78 @@ mod tests {
             .iter()
             .any(|effect| matches!(effect, HarnessEffect::Ready)));
         assert_eq!(adapter.tracker.written_inputs.len(), 1);
+    }
+
+    #[test]
+    fn claude_auth_failure_result_emits_fatal_session_error() {
+        let mut adapter = ClaudeManagedAdapter::new(HarnessAdapterContext {
+            session_id: 7,
+            thread_id: 11,
+            workspace: "fixture-workspace".to_owned(),
+            native_session_id: Some("fixture-session".to_owned()),
+            controls: Default::default(),
+        });
+        adapter.tracker.initialized = true;
+        adapter
+            .encode_input(HarnessInput {
+                local_input_id: "auth-input".to_owned(),
+                content: "hello".to_owned(),
+                visible_content: None,
+                kind: crate::archcar::protocol::ArchcarInputKind::User,
+                delivery: crate::archcar::protocol::ArchcarInputDelivery::Auto,
+            })
+            .unwrap();
+
+        let effects = adapter
+            .observe_native(NativeRecord {
+                provider_key: "claude",
+                payload: br#"{"type":"result","subtype":"success","is_error":true,"api_error_status":401,"error":"authentication_failed","result":"Failed to authenticate. API Error: 401 OAuth access token has expired. Re-authenticate to continue.","session_id":"fixture-session","uuid":"auth-result"}
+"#
+                .to_vec(),
+            })
+            .unwrap();
+
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            HarnessEffect::Fatal(message)
+                if message.contains("Failed to authenticate")
+                    && message.contains("Re-authenticate")
+        )));
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            HarnessEffect::TurnCompleted {
+                local_input_id,
+                status: HarnessTurnStatus::Failed,
+            } if local_input_id == "auth-input"
+        )));
+    }
+
+    #[test]
+    fn claude_api_retry_accepts_fractional_retry_delay_ms() {
+        let mut adapter = ClaudeManagedAdapter::new(HarnessAdapterContext {
+            session_id: 7,
+            thread_id: 11,
+            workspace: "fixture-workspace".to_owned(),
+            native_session_id: Some("fixture-session".to_owned()),
+            controls: Default::default(),
+        });
+
+        let effects = adapter
+            .observe_native(NativeRecord {
+                provider_key: "claude",
+                payload: br#"{"type":"system","subtype":"api_retry","attempt":1,"max_retries":10,"retry_delay_ms":562.276368885656,"error_status":401,"error":"authentication_failed","session_id":"fixture-session","uuid":"retry-1"}
+"#
+                .to_vec(),
+            })
+            .unwrap();
+
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            HarnessEffect::Retry {
+                message,
+                delay_ms: Some(562),
+            } if message == "authentication_failed"
+        )));
     }
 
     #[test]
