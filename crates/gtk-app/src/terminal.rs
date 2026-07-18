@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use crate::buttons::text_button;
-use crate::refresh::{RefreshHub, RefreshScope};
+use crate::refresh::{RefreshEvent, RefreshHub};
 use crate::toast::ToastManager;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -65,6 +65,14 @@ pub(crate) struct TerminalCommandPreset {
     pub label: String,
     pub command: String,
 }
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct TerminalRefreshOutcome {
+    pub process_changed: bool,
+    pub transcript_changed: bool,
+}
+
+type RefreshTerminalSurface = Rc<dyn Fn() -> TerminalRefreshOutcome>;
 
 impl Default for TerminalPreferences {
     fn default() -> Self {
@@ -155,7 +163,7 @@ pub fn embedded_terminal_panel(
     workspace_name: &str,
     workspace_path: &Path,
     full_mode: bool,
-    _refresh_hub: RefreshHub,
+    refresh_hub: RefreshHub,
     preferences: TerminalPreferences,
     command_presets: Vec<TerminalCommandPreset>,
     toast_manager: ToastManager,
@@ -211,6 +219,7 @@ pub fn embedded_terminal_panel(
     let workspace_for_start = workspace_name.to_owned();
     let buffer_for_start = transcript.buffer();
     let toast_for_start = toast_manager.clone();
+    let refresh_for_start = refresh_hub.clone();
     start_btn.connect_clicked(move |_| {
         let request = ArchcarRequest::SpawnSession {
             workspace: workspace_for_start.clone(),
@@ -234,6 +243,14 @@ pub fn embedded_terminal_panel(
             toast_for_start.error(message.trim().to_owned());
             append_text(&buffer_for_start, &message);
         }
+        notify_terminal_refresh(
+            &refresh_for_start,
+            &workspace_for_start,
+            TerminalRefreshOutcome {
+                process_changed: true,
+                transcript_changed: true,
+            },
+        );
     });
 
     let db_for_resize = database_path.clone();
@@ -273,6 +290,7 @@ pub fn embedded_terminal_panel(
     let db_for_stop = database_path.clone();
     let workspace_for_stop = workspace_name.to_owned();
     let buffer_for_stop = transcript.buffer();
+    let refresh_for_stop = refresh_hub.clone();
     stop_btn.connect_clicked(move |_| {
         let running_shell = latest_running_runtime_shell(&db_for_stop, &workspace_for_stop);
         let Some(record) = running_shell else {
@@ -295,6 +313,14 @@ pub fn embedded_terminal_panel(
                 "\n[terminal] shell stop requested through archcar for #{}\n",
                 record.id
             ),
+        );
+        notify_terminal_refresh(
+            &refresh_for_stop,
+            &workspace_for_stop,
+            TerminalRefreshOutcome {
+                process_changed: true,
+                transcript_changed: true,
+            },
         );
     });
 
@@ -1879,8 +1905,25 @@ fn terminal_exit_label(exit_code: Option<i32>) -> String {
         .unwrap_or_else(|| "-".to_owned())
 }
 
-fn terminal_process_refresh_scope() -> RefreshScope {
-    RefreshScope::Workspace
+pub(crate) fn terminal_refresh_event(
+    workspace: &str,
+    outcome: TerminalRefreshOutcome,
+) -> Option<RefreshEvent> {
+    outcome
+        .process_changed
+        .then(|| RefreshEvent::TerminalChanged {
+            workspace: workspace.to_owned(),
+        })
+}
+
+fn notify_terminal_refresh(
+    refresh_hub: &RefreshHub,
+    workspace: &str,
+    outcome: TerminalRefreshOutcome,
+) {
+    if let Some(event) = terminal_refresh_event(workspace, outcome) {
+        refresh_hub.refresh_event(event);
+    }
 }
 
 fn terminal_size_from_pixels(width: i32, height: i32) -> (u16, u16) {
@@ -3748,11 +3791,29 @@ mod tests {
     }
 
     #[test]
-    fn terminal_process_changes_refresh_workspace_scope() {
-        assert!(matches!(
-            terminal_process_refresh_scope(),
-            crate::refresh::RefreshScope::Workspace
-        ));
+    fn terminal_refresh_event_only_emits_for_process_changes() {
+        assert_eq!(
+            terminal_refresh_event(
+                "berlin",
+                TerminalRefreshOutcome {
+                    process_changed: true,
+                    transcript_changed: false,
+                },
+            ),
+            Some(RefreshEvent::TerminalChanged {
+                workspace: "berlin".to_owned(),
+            })
+        );
+        assert_eq!(
+            terminal_refresh_event(
+                "berlin",
+                TerminalRefreshOutcome {
+                    process_changed: false,
+                    transcript_changed: true,
+                },
+            ),
+            None
+        );
     }
 
     #[test]
