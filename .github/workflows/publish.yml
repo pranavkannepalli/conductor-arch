@@ -181,6 +181,7 @@ jobs:
   build-windows-release:
     name: Build Windows release
     runs-on: windows-2025
+    continue-on-error: true
     timeout-minutes: 45
     permissions:
       contents: write

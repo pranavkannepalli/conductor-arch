@@ -11,6 +11,10 @@ fn windows_publish_build_uses_path_resolved_msys_tools() {
         "Windows release should smoke-test pkgconf before cargo build"
     );
     assert!(
+        workflow.contains("build-windows-release:\n    name: Build Windows release\n    runs-on: windows-2025\n    continue-on-error: true"),
+        "Windows preview artifacts should not fail the publish workflow"
+    );
+    assert!(
         workflow.contains("PKG_CONFIG: pkgconf"),
         "Windows release should use the PATH-resolved pkgconf executable"
     );
