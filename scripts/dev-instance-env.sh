@@ -23,8 +23,11 @@ fi
 base="${ARCHDUCTOR_DEV_HOME:-$repo_root/.archductor/dev-instances/$slug}"
 mkdir -p "$base/config" "$base/data" "$base/state" "$base/cache"
 
+user_config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+
 export ARCHDUCTOR_DEV_INSTANCE="$slug"
 export ARCHDUCTOR_ARCHCAR_BIN="${ARCHDUCTOR_ARCHCAR_BIN:-$repo_root/target/debug/archcar}"
+export GH_CONFIG_DIR="${GH_CONFIG_DIR:-$user_config_home/gh}"
 export XDG_CONFIG_HOME="$base/config"
 export XDG_DATA_HOME="$base/data"
 export XDG_STATE_HOME="$base/state"
@@ -33,6 +36,7 @@ export XDG_CACHE_HOME="$base/cache"
 if [[ "${1:-}" == "--print" ]]; then
     printf 'ARCHDUCTOR_DEV_INSTANCE=%s\n' "$ARCHDUCTOR_DEV_INSTANCE"
     printf 'ARCHDUCTOR_ARCHCAR_BIN=%s\n' "$ARCHDUCTOR_ARCHCAR_BIN"
+    printf 'GH_CONFIG_DIR=%s\n' "$GH_CONFIG_DIR"
     printf 'XDG_CONFIG_HOME=%s\n' "$XDG_CONFIG_HOME"
     printf 'XDG_DATA_HOME=%s\n' "$XDG_DATA_HOME"
     printf 'XDG_STATE_HOME=%s\n' "$XDG_STATE_HOME"
