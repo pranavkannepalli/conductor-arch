@@ -99,13 +99,22 @@ required release gate. It needs:
 
 ## AUR Checksum Update
 
-After the release source tarball checksum is known, update the AUR package:
+The `Publish` workflow updates the AUR package on tag pushes after the Linux
+release package job passes. It expects the repository secret
+`AUR_SSH_PRIVATE_KEY` to contain an SSH private key whose public key is
+registered on the AUR account that owns `archductor`.
+
+For manual updates after the release source tarball checksum is known, update
+the AUR package:
 
 ```bash
 scripts/update-aur-checksum.sh 0.1.0 <64-character-sha256>
 ```
 
-Then run `makepkg -si` from `packaging/aur` on Arch before publishing.
+Then run `makepkg -si` from `packaging/aur` on Arch before publishing. AUR
+publishes from a Git repository at
+`ssh://aur@aur.archlinux.org/archductor.git`; commit `PKGBUILD` and `.SRCINFO`
+to its `master` branch.
 
 ## Known Launch Limits
 

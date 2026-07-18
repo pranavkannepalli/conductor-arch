@@ -4,12 +4,12 @@ pkgver=0.1.0
 pkgrel=1
 pkgdesc="Archductor parallel coding-agent workflow tool built around Git worktrees"
 arch=('x86_64')
-url="https://github.com/pranavkannepalli/conductor-arch"
+url="https://github.com/perceo-ai/conductor-arch"
 license=('Apache-2.0')
 depends=('git' 'github-cli' 'sqlite' 'openssh' 'gtk4' 'libadwaita')
 makedepends=('rust' 'cargo' 'pkgconf')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('3ce40f320f273a5038d818e071671c9c65c1c3c22662166c5dbfbee3b5795022')
 
 build() {
     cd "conductor-arch-$pkgver"
