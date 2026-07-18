@@ -83,6 +83,9 @@ impl ArchcarServer {
     pub fn bind(paths: AppPaths) -> Result<Self> {
         fs::create_dir_all(&paths.state_dir)?;
         let endpoint_path = paths.archcar_endpoint_path();
+        if let Some(parent) = endpoint_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
         let listener = transport::bind(&endpoint_path)
             .with_context(|| format!("bind archcar endpoint {}", endpoint_path.display()))?;
         let state = Arc::new(Mutex::new(ServerState {
