@@ -1284,7 +1284,9 @@ pub fn agent_session_panel(
             let current_kind = *selected_harness.borrow();
             let selected_thread_id = *selected_thread.borrow();
             let mut archcar_changed = false;
+            let mut archcar_intent = ArchcarRefreshIntent::default();
             while let Some(message) = archcar_bridge.try_recv() {
+                archcar_intent.merge(archcar_message_refresh_intent(&message));
                 match message {
                     AsyncArchcarMessage::Event(event) => {
                         let _ = update_working_indicator_for_archcar_event(
@@ -1421,6 +1423,9 @@ pub fn agent_session_panel(
                 }
                 update_composer_for_view();
             }
+            outcome.messages_changed |= archcar_intent.chat_surface;
+            outcome.session_lifecycle_changed |=
+                archcar_intent.workspace_nav || archcar_intent.global_summary;
             if outcome.requires_nav_refresh() {
                 if let Some(external_chat_tabs) = external_chat_tabs.as_ref() {
                     (external_chat_tabs.on_threads_changed)(
@@ -9580,23 +9585,51 @@ fn handle_archcar_response(
     changed
 }
 
-fn archcar_message_refresh_scope(message: &AsyncArchcarMessage) -> (bool, bool) {
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ArchcarRefreshIntent {
+    chat_surface: bool,
+    workspace_nav: bool,
+    global_summary: bool,
+}
+
+impl ArchcarRefreshIntent {
+    fn merge(&mut self, next: Self) {
+        self.chat_surface |= next.chat_surface;
+        self.workspace_nav |= next.workspace_nav;
+        self.global_summary |= next.global_summary;
+    }
+}
+
+fn archcar_message_refresh_intent(message: &AsyncArchcarMessage) -> ArchcarRefreshIntent {
     match message {
         AsyncArchcarMessage::Event(event) => match event {
             ArchcarEvent::SessionSpawnQueued { .. }
             | ArchcarEvent::SessionStarted { .. }
             | ArchcarEvent::TurnCompleted { .. }
             | ArchcarEvent::SessionExited { .. }
-            | ArchcarEvent::SessionError { .. } => (true, true),
+            | ArchcarEvent::SessionError { .. } => ArchcarRefreshIntent {
+                chat_surface: true,
+                workspace_nav: true,
+                global_summary: true,
+            },
             ArchcarEvent::SessionReady { .. }
             | ArchcarEvent::SessionCapabilitiesChanged { .. }
             | ArchcarEvent::SessionScreenUpdated { .. }
             | ArchcarEvent::SessionMessagesUpdated { .. }
             | ArchcarEvent::ProviderInteractionRequested { .. }
-            | ArchcarEvent::ProviderInteractionResolved { .. } => (true, false),
+            | ArchcarEvent::ProviderInteractionResolved { .. } => ArchcarRefreshIntent {
+                chat_surface: true,
+                workspace_nav: false,
+                global_summary: false,
+            },
         },
-        AsyncArchcarMessage::Response(_) => (false, false),
-        AsyncArchcarMessage::BridgeError { .. } => (true, false),
+        AsyncArchcarMessage::Response(_) | AsyncArchcarMessage::BridgeError { .. } => {
+            ArchcarRefreshIntent {
+                chat_surface: true,
+                workspace_nav: false,
+                global_summary: false,
+            }
+        }
     }
 }
 
@@ -13773,14 +13806,14 @@ Schema confirms the app moved CRM around businesses.";
 
     #[test]
     fn routine_archcar_updates_do_not_force_outer_refresh() {
-        let ready_scope = archcar_message_refresh_scope(&AsyncArchcarMessage::Event(
+        let ready_intent = archcar_message_refresh_intent(&AsyncArchcarMessage::Event(
             ArchcarEvent::SessionReady {
                 session_id: 61,
                 thread_id: 4,
             },
         ));
-        let status_scope =
-            archcar_message_refresh_scope(&AsyncArchcarMessage::Response(AsyncArchcarResponse {
+        let status_intent =
+            archcar_message_refresh_intent(&AsyncArchcarMessage::Response(AsyncArchcarResponse {
                 token: 7,
                 request: AsyncArchcarRequestKind::GetSessionStatus { session_id: 61 },
                 result: Ok(ArchcarResponse::SessionStatus {
@@ -13791,7 +13824,7 @@ Schema confirms the app moved CRM around businesses.";
                     capabilities: None,
                 }),
             }));
-        let started_scope = archcar_message_refresh_scope(&AsyncArchcarMessage::Event(
+        let started_intent = archcar_message_refresh_intent(&AsyncArchcarMessage::Event(
             ArchcarEvent::SessionStarted {
                 session_id: 61,
                 thread_id: 4,
@@ -13801,18 +13834,46 @@ Schema confirms the app moved CRM around businesses.";
             },
         ));
 
-        assert_eq!(ready_scope, (true, false));
-        assert_eq!(status_scope, (false, false));
-        assert_eq!(started_scope, (true, true));
+        assert_eq!(
+            ready_intent,
+            ArchcarRefreshIntent {
+                chat_surface: true,
+                workspace_nav: false,
+                global_summary: false,
+            }
+        );
+        assert_eq!(
+            status_intent,
+            ArchcarRefreshIntent {
+                chat_surface: true,
+                workspace_nav: false,
+                global_summary: false,
+            }
+        );
+        assert_eq!(
+            started_intent,
+            ArchcarRefreshIntent {
+                chat_surface: true,
+                workspace_nav: true,
+                global_summary: true,
+            }
+        );
 
-        let turn_completed_scope = archcar_message_refresh_scope(&AsyncArchcarMessage::Event(
+        let turn_completed_intent = archcar_message_refresh_intent(&AsyncArchcarMessage::Event(
             ArchcarEvent::TurnCompleted {
                 session_id: 61,
                 thread_id: 4,
                 status: Some("completed".to_owned()),
             },
         ));
-        assert_eq!(turn_completed_scope, (true, true));
+        assert_eq!(
+            turn_completed_intent,
+            ArchcarRefreshIntent {
+                chat_surface: true,
+                workspace_nav: true,
+                global_summary: true,
+            }
+        );
     }
 
     #[test]
@@ -13849,17 +13910,24 @@ Schema confirms the app moved CRM around businesses.";
     #[test]
     fn provider_interaction_events_refresh_thread_only() {
         let interaction = provider_interaction_fixture(ProviderInteractionKind::Permission);
-        let requested_scope = archcar_message_refresh_scope(&AsyncArchcarMessage::Event(
+        let requested_intent = archcar_message_refresh_intent(&AsyncArchcarMessage::Event(
             ArchcarEvent::ProviderInteractionRequested {
                 interaction: interaction.clone(),
             },
         ));
-        let resolved_scope = archcar_message_refresh_scope(&AsyncArchcarMessage::Event(
+        let resolved_intent = archcar_message_refresh_intent(&AsyncArchcarMessage::Event(
             ArchcarEvent::ProviderInteractionResolved { interaction },
         ));
 
-        assert_eq!(requested_scope, (true, false));
-        assert_eq!(resolved_scope, (true, false));
+        assert_eq!(
+            requested_intent,
+            ArchcarRefreshIntent {
+                chat_surface: true,
+                workspace_nav: false,
+                global_summary: false,
+            }
+        );
+        assert_eq!(resolved_intent, requested_intent);
     }
 
     #[test]
