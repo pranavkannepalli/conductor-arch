@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::Result;
-use archductor_core::workspace::WorkspaceStore;
+use std::collections::HashSet;
+
+use archductor_core::workspace::{ChatThreadRecord, ProcessStatus, WorkspaceStore};
 
 use crate::refresh::RefreshEvent;
 
@@ -24,6 +26,17 @@ pub struct BackgroundSyncSnapshot {
     pub running_threads: Vec<BackgroundThreadSnapshot>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkspaceChatNavItem {
+    pub thread_id: i64,
+    pub title: String,
+    pub provider: String,
+    pub status: String,
+    pub running: bool,
+    pub unread: bool,
+    pub updated_at: String,
+}
+
 pub fn load_background_sync_snapshot(db_path: &Path) -> Result<BackgroundSyncSnapshot> {
     let store = WorkspaceStore::open_app(db_path)?;
     let running_threads = store
@@ -42,6 +55,42 @@ pub fn load_background_sync_snapshot(db_path: &Path) -> Result<BackgroundSyncSna
         })
         .collect();
     Ok(BackgroundSyncSnapshot { running_threads })
+}
+
+pub(crate) fn load_workspace_chat_nav(
+    db_path: &Path,
+    workspace: &str,
+    selected_thread: Option<i64>,
+) -> Result<Vec<WorkspaceChatNavItem>> {
+    let store = WorkspaceStore::open_app(db_path)?;
+    let running_threads = store
+        .list_sessions(workspace)?
+        .into_iter()
+        .filter(|record| record.status == ProcessStatus::Running)
+        .filter_map(|record| record.chat_thread_id)
+        .collect::<HashSet<_>>();
+    Ok(store
+        .list_chat_threads(workspace)?
+        .into_iter()
+        .map(|thread| workspace_chat_nav_item(&thread, &running_threads, selected_thread))
+        .collect())
+}
+
+fn workspace_chat_nav_item(
+    thread: &ChatThreadRecord,
+    running_threads: &HashSet<i64>,
+    selected_thread: Option<i64>,
+) -> WorkspaceChatNavItem {
+    let running = running_threads.contains(&thread.id);
+    WorkspaceChatNavItem {
+        thread_id: thread.id,
+        title: thread.title.clone(),
+        provider: thread.provider.clone(),
+        status: thread.status.clone(),
+        running,
+        unread: running && selected_thread != Some(thread.id),
+        updated_at: thread.updated_at.clone(),
+    }
 }
 
 pub fn diff_background_sync(
@@ -177,5 +226,49 @@ mod tests {
                 workspace: "berlin".into(),
             }]
         );
+    }
+
+    #[test]
+    fn selected_running_thread_is_not_unread() {
+        let thread = ChatThreadRecord {
+            id: 7,
+            workspace_id: 1,
+            provider: "codex".to_owned(),
+            title: "Fix auth".to_owned(),
+            status: "active".to_owned(),
+            native_thread_id: None,
+            harness_metadata: None,
+            created_at: "then".to_owned(),
+            updated_at: "now".to_owned(),
+            archived_at: None,
+        };
+        let running_threads = HashSet::from([7]);
+
+        let item = workspace_chat_nav_item(&thread, &running_threads, Some(7));
+
+        assert!(item.running);
+        assert!(!item.unread);
+    }
+
+    #[test]
+    fn non_selected_running_thread_is_unread() {
+        let thread = ChatThreadRecord {
+            id: 7,
+            workspace_id: 1,
+            provider: "codex".to_owned(),
+            title: "Fix auth".to_owned(),
+            status: "active".to_owned(),
+            native_thread_id: None,
+            harness_metadata: None,
+            created_at: "then".to_owned(),
+            updated_at: "now".to_owned(),
+            archived_at: None,
+        };
+        let running_threads = HashSet::from([7]);
+
+        let item = workspace_chat_nav_item(&thread, &running_threads, Some(8));
+
+        assert!(item.running);
+        assert!(item.unread);
     }
 }

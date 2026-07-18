@@ -765,12 +765,37 @@ fn ws_center_panel(
                 .or_else(|| visible_threads.first().map(|thread| thread.id));
             *selected_thread.borrow_mut() = selected;
             state.set_selected_chat_thread(selected);
+            let workspace_name = current_workspace_name.borrow().clone();
+            let nav_items_by_thread = crate::background_sync::load_workspace_chat_nav(
+                &db_path,
+                &workspace_name,
+                selected,
+            )
+            .map(|items| {
+                items
+                    .into_iter()
+                    .map(|item| (item.thread_id, item))
+                    .collect::<HashMap<_, _>>()
+            })
+            .unwrap_or_default();
             while let Some(child) = chat_tabs.first_child() {
                 chat_tabs.remove(&child);
             }
             chat_tab_buttons.borrow_mut().clear();
             for thread in visible_threads {
-                let (tab_shell, close_button) = ws_tab_surface(&workspace_chat_tab_label(&thread));
+                let tab_label = nav_items_by_thread
+                    .get(&thread.id)
+                    .map(workspace_chat_nav_label)
+                    .unwrap_or_else(|| workspace_chat_tab_label(&thread));
+                let (tab_shell, close_button) = ws_tab_surface(&tab_label);
+                if let Some(nav_item) = nav_items_by_thread.get(&thread.id) {
+                    if nav_item.running {
+                        tab_shell.add_css_class("ws-tab-running");
+                    }
+                    if nav_item.unread {
+                        tab_shell.add_css_class("ws-tab-unread");
+                    }
+                }
                 let controller_for_click = external_thread_selection.clone();
                 let content_for_click = content.clone();
                 let selected_thread_for_click = selected_thread.clone();
@@ -1268,6 +1293,18 @@ fn workspace_chat_tab_label(thread: &ChatThreadRecord) -> String {
     let title = thread.title.trim();
     if title.is_empty() {
         "New Chat".to_owned()
+    } else {
+        title.to_owned()
+    }
+}
+
+fn workspace_chat_nav_label(item: &crate::background_sync::WorkspaceChatNavItem) -> String {
+    let title = item.title.trim();
+    let title = if title.is_empty() { "New Chat" } else { title };
+    if item.unread {
+        format!("{title} *")
+    } else if item.running {
+        format!("{title} ...")
     } else {
         title.to_owned()
     }
@@ -8488,6 +8525,28 @@ mod tests {
             }]),
             "New Chat 2"
         );
+    }
+
+    #[test]
+    fn workspace_chat_nav_label_marks_running_and_unread_threads() {
+        let base = crate::background_sync::WorkspaceChatNavItem {
+            thread_id: 7,
+            title: "Fix auth".to_owned(),
+            provider: "codex".to_owned(),
+            status: "active".to_owned(),
+            running: false,
+            unread: false,
+            updated_at: "now".to_owned(),
+        };
+        assert_eq!(workspace_chat_nav_label(&base), "Fix auth");
+
+        let mut running = base.clone();
+        running.running = true;
+        assert_eq!(workspace_chat_nav_label(&running), "Fix auth ...");
+
+        let mut unread = running;
+        unread.unread = true;
+        assert_eq!(workspace_chat_nav_label(&unread), "Fix auth *");
     }
 
     #[test]
