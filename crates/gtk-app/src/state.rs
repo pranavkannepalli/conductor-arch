@@ -68,7 +68,6 @@ fn normalize_tab_token(value: &str) -> String {
 #[derive(Debug, Clone)]
 pub struct AppStateSnapshot {
     pub selected_workspace: Option<String>,
-    pub selected_project: Option<String>,
     pub active_page: AppPage,
     pub active_workspace_tab: WorkspaceTab,
     pub active_workspace_right_panel_tab: WorkspaceRightPanelTab,
@@ -76,28 +75,8 @@ pub struct AppStateSnapshot {
     pub selected_agent_session: Option<i64>,
     pub staged_review_prompt: Option<String>,
     pub pending_chat_prompt: Option<String>,
-    pub running_processes: Vec<i64>,
-    pub attention_state: AttentionState,
-    pub settings_layer: SettingsLayer,
     navigation_back: Vec<NavigationEntry>,
     navigation_forward: Vec<NavigationEntry>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct AttentionState {
-    pub failed_checks: usize,
-    pub open_todos: usize,
-    pub open_comments: usize,
-    pub conflicts: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SettingsLayer {
-    BuiltInDefaults,
-    UserShared,
-    RepositoryShared,
-    LocalProjectOverride,
-    Managed,
 }
 
 #[derive(Debug, Clone)]
@@ -121,7 +100,6 @@ impl AppState {
         Self {
             inner: Rc::new(RefCell::new(AppStateSnapshot {
                 selected_workspace: initial_workspace,
-                selected_project: None,
                 active_page,
                 active_workspace_tab: initial_tab,
                 active_workspace_right_panel_tab: WorkspaceRightPanelTab::Browse,
@@ -129,9 +107,6 @@ impl AppState {
                 selected_agent_session: None,
                 staged_review_prompt: None,
                 pending_chat_prompt: None,
-                running_processes: Vec::new(),
-                attention_state: AttentionState::default(),
-                settings_layer: SettingsLayer::BuiltInDefaults,
                 navigation_back: Vec::new(),
                 navigation_forward: Vec::new(),
             })),
