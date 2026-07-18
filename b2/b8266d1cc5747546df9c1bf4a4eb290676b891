@@ -1,0 +1,21 @@
+docs/release-readiness.md
+  s_32109acf6d1f93::t_6e57bab2abceae 102-108,114-117
+.github/workflows/publish.yml
+  s_32109acf6d1f93::t_8292f3f2a12204 310-402
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "b2b8266d1cc5747546df9c1bf4a4eb290676b891",
+  "prompts": {},
+  "sessions": {
+    "s_32109acf6d1f93": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f74f6-6ae2-7ac2-ab69-bc30ca2325bc",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
