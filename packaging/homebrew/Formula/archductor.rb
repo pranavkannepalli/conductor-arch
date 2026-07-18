@@ -12,8 +12,10 @@ class Archductor < Formula
   depends_on "git"
   depends_on "gtk4"
   depends_on "libadwaita"
+  depends_on "sqlite"
 
   def install
+    ENV["LIBSQLITE3_SYS_USE_PKG_CONFIG"] = "1"
     system "cargo", "build", "--release", "--locked", "--workspace"
     bin.install "target/release/archductor"
     bin.install "target/release/archductor-gtk"

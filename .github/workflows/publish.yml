@@ -371,7 +371,11 @@ jobs:
               su builder -c "cd /pkg && makepkg --noconfirm"
               pacman -U --noconfirm /pkg/archductor-*.pkg.tar.*
               archductor doctor
-              xvfb-run -a timeout 15s archductor-gtk --page dashboard
+              gtk_status=0
+              xvfb-run -a timeout 15s archductor-gtk --page dashboard || gtk_status=$?
+              if [ "$gtk_status" -ne 0 ] && [ "$gtk_status" -ne 124 ]; then
+                exit "$gtk_status"
+              fi
             '
 
       - name: Publish to AUR
@@ -477,7 +481,11 @@ jobs:
           brew install --build-from-source packaging/homebrew/Formula/archductor.rb
           brew test archductor
           archductor doctor
-          xvfb-run -a timeout 15s archductor-gtk --page dashboard
+          gtk_status=0
+          xvfb-run -a timeout 15s archductor-gtk --page dashboard || gtk_status=$?
+          if [ "$gtk_status" -ne 0 ] && [ "$gtk_status" -ne 124 ]; then
+            exit "$gtk_status"
+          fi
 
       - name: Publish formula to tap
         env:

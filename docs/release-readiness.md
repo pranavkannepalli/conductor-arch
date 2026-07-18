@@ -121,7 +121,9 @@ Then install and smoke the AUR package on Arch before publishing:
 cd packaging/aur
 makepkg -si
 archductor doctor
-xvfb-run -a timeout 15s archductor-gtk --page dashboard
+gtk_status=0
+xvfb-run -a timeout 15s archductor-gtk --page dashboard || gtk_status=$?
+test "$gtk_status" -eq 0 -o "$gtk_status" -eq 124
 ```
 
 AUR publishes from a Git repository at
@@ -148,7 +150,9 @@ brew audit --strict --online --formula packaging/homebrew/Formula/archductor.rb
 brew install --build-from-source packaging/homebrew/Formula/archductor.rb
 brew test archductor
 archductor doctor
-xvfb-run -a timeout 15s archductor-gtk --page dashboard
+gtk_status=0
+xvfb-run -a timeout 15s archductor-gtk --page dashboard || gtk_status=$?
+test "$gtk_status" -eq 0 -o "$gtk_status" -eq 124
 ```
 
 After the checks pass, commit and push the tap repository.

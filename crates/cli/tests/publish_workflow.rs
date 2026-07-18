@@ -11,6 +11,7 @@ fn publish_build_uses_ci_verified_release_packaging() {
         fs::read_to_string(repo_root.join("packaging/appimage/archductor.AppDir/AppRun")).unwrap();
     let flatpak =
         fs::read_to_string(repo_root.join("packaging/flatpak/ai.perceo.Archductor.yml")).unwrap();
+    let aur = fs::read_to_string(repo_root.join("packaging/aur/PKGBUILD")).unwrap();
     let nix = fs::read_to_string(repo_root.join("flake.nix")).unwrap();
     let homebrew =
         fs::read_to_string(repo_root.join("packaging/homebrew/Formula/archductor.rb")).unwrap();
@@ -67,7 +68,8 @@ fn publish_build_uses_ci_verified_release_packaging() {
         publish.contains("Validate AUR package")
             && publish.contains("makepkg --noconfirm")
             && publish.contains("pacman -U --noconfirm /pkg/archductor-*.pkg.tar.*")
-            && publish.contains("xvfb-run -a timeout 15s archductor-gtk --page dashboard"),
+            && publish.contains("xvfb-run -a timeout 15s archductor-gtk --page dashboard")
+            && publish.contains("[ \"$gtk_status\" -ne 0 ] && [ \"$gtk_status\" -ne 124 ]"),
         "publish should build, install, and smoke-test the AUR package before publishing"
     );
     assert!(
@@ -75,8 +77,15 @@ fn publish_build_uses_ci_verified_release_packaging() {
             && publish.contains("brew audit --strict --online --formula")
             && publish.contains("brew install --build-from-source packaging/homebrew/Formula/archductor.rb")
             && publish.contains("brew test archductor")
-            && publish.contains("xvfb-run -a timeout 15s archductor-gtk --page dashboard"),
+            && publish.contains("xvfb-run -a timeout 15s archductor-gtk --page dashboard")
+            && publish.contains("[ \"$gtk_status\" -ne 0 ] && [ \"$gtk_status\" -ne 124 ]"),
         "publish should audit, install, test, and smoke-test the Homebrew formula before publishing"
+    );
+    assert!(
+        aur.contains("export LIBSQLITE3_SYS_USE_PKG_CONFIG=1")
+            && homebrew.contains("ENV[\"LIBSQLITE3_SYS_USE_PKG_CONFIG\"] = \"1\"")
+            && nix.contains("LIBSQLITE3_SYS_USE_PKG_CONFIG = \"1\";"),
+        "source-built package managers should use distro SQLite through pkg-config"
     );
     assert!(
         !publish.contains("PKG_CONFIG: C:\\msys64\\ucrt64\\bin\\pkgconf.exe")

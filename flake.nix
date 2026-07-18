@@ -32,8 +32,10 @@
             buildInputs = with pkgs; [
               gtk4
               libadwaita
+              sqlite
             ];
 
+            LIBSQLITE3_SYS_USE_PKG_CONFIG = "1";
             cargoBuildFlags = [ "--workspace" ];
             doCheck = false;
 
