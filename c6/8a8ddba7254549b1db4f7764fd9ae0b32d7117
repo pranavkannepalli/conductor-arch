@@ -1,0 +1,45 @@
+docs/release-readiness.md
+  s_32109acf6d1f93::t_450bba1e96a19a 53-54,86-88,123-162
+  s_32109acf6d1f93::t_0987bec779da64 163
+packaging/flatpak/ai.perceo.Archductor.yml
+  s_32109acf6d1f93::t_81009dd6be1109 1,11,13,15,35-38,40
+packaging/flatpak/ai.perceo.Archductor.metainfo.xml
+  s_32109acf6d1f93::t_eeb1691f4e8790 4
+  s_32109acf6d1f93::t_e8581044ec37bc 3,7-10,13-14,17-19,21,24,26-27,31-34,51,53
+packaging/flatpak/ai.perceo.Archductor.desktop
+  s_32109acf6d1f93::t_0663abb8f85df9 4,6
+scripts/update-homebrew-formula.sh
+  s_32109acf6d1f93::t_0e47306fab569a 1-47
+Cargo.toml
+  s_32109acf6d1f93::t_5515eedbbb2913 13
+crates/cli/tests/publish_workflow.rs
+  s_32109acf6d1f93::t_3751e2ffba9ad7 12-16,94-105
+.github/workflows/publish.yml
+  s_32109acf6d1f93::t_42bdeddbde1791 403-470
+packaging/README.md
+  s_32109acf6d1f93::t_3685aae290e18a 134,137,175-177
+  s_32109acf6d1f93::t_cfbecad7a66aff 101-121
+README.md
+  s_32109acf6d1f93::t_5e853bffd603ac 114-130
+  s_32109acf6d1f93::t_8fd055bfacb3db 100,153
+packaging/homebrew/Formula/archductor.rb
+  s_32109acf6d1f93::t_a178216cbe2bd1 1-29
+flake.nix
+  s_32109acf6d1f93::t_d6bd0a229e767e 1-109
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "c68a8ddba7254549b1db4f7764fd9ae0b32d7117",
+  "prompts": {},
+  "sessions": {
+    "s_32109acf6d1f93": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f74f6-6ae2-7ac2-ab69-bc30ca2325bc",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
