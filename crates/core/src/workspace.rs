@@ -724,6 +724,19 @@ pub struct ChatMessageRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunningChatThreadSummary {
+    pub workspace: String,
+    pub thread_id: i64,
+    pub title: String,
+    pub provider: String,
+    pub status: String,
+    pub latest_message_id: Option<i64>,
+    pub latest_provider_sequence: Option<i64>,
+    pub running_session_id: Option<i64>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatEventRecord {
     pub id: i64,
     pub thread_id: i64,
@@ -5157,6 +5170,57 @@ mutation($threadId: ID!) {{
             )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(records)
+    }
+
+    pub fn list_running_chat_thread_summaries(&self) -> Result<Vec<RunningChatThreadSummary>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT
+                w.name,
+                t.id,
+                t.title,
+                t.provider,
+                t.status,
+                (
+                    SELECT MAX(m.id)
+                    FROM chat_messages m
+                    WHERE m.thread_id = t.id
+                ) AS latest_message_id,
+                (
+                    SELECT MAX(COALESCE(pe.timeline_seq, pe.received_sequence))
+                    FROM provider_events pe
+                    WHERE pe.chat_thread_id = t.id
+                ) AS latest_provider_sequence,
+                MAX(p.id) AS running_session_id,
+                t.updated_at
+             FROM processes p
+             JOIN chat_threads t ON t.id = p.chat_thread_id
+             JOIN workspaces w ON w.id = t.workspace_id
+             WHERE p.kind = ?1 AND p.status = ?2
+             GROUP BY w.name, t.id, t.title, t.provider, t.status, t.updated_at
+             ORDER BY w.name ASC, t.updated_at DESC, t.id DESC",
+        )?;
+        let rows = stmt
+            .query_map(
+                [
+                    ProcessKind::Session.as_str(),
+                    ProcessStatus::Running.as_str(),
+                ],
+                |row| {
+                    Ok(RunningChatThreadSummary {
+                        workspace: row.get(0)?,
+                        thread_id: row.get(1)?,
+                        title: row.get(2)?,
+                        provider: row.get(3)?,
+                        status: row.get(4)?,
+                        latest_message_id: row.get(5)?,
+                        latest_provider_sequence: row.get(6)?,
+                        running_session_id: row.get(7)?,
+                        updated_at: row.get(8)?,
+                    })
+                },
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
     }
 
     pub fn get_process_record(&self, id: i64) -> Result<ProcessRecord> {
@@ -20766,6 +20830,54 @@ spotlight_testing = true
             reopened.list_chat_messages(paris_thread.id).unwrap()[0].content,
             "paris screen snapshot"
         );
+    }
+
+    #[test]
+    fn running_chat_thread_summaries_include_latest_ids_without_message_bodies() {
+        let (temp, store) = test_workspace_store();
+        let workspace = store.get_by_name("berlin").unwrap();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Bugfix", None)
+            .unwrap();
+        let process = process_record_for_thread(&store, thread.id);
+        let message = store
+            .append_chat_message(thread.id, "user", "fix auth", "user_send")
+            .unwrap();
+        crate::provider_events::ProviderEventStore::new(temp.path().join("state.db"))
+            .upsert_event(&crate::provider_events::ProviderEventDraft {
+                provider: "codex".to_owned(),
+                provider_event_id: Some("event-1".to_owned()),
+                provider_item_id: Some("item-1".to_owned()),
+                provider_thread_id: Some("thread-1".to_owned()),
+                provider_turn_id: Some("turn-1".to_owned()),
+                parent_provider_item_id: None,
+                parent_provider_thread_id: None,
+                workspace_id: Some(workspace.id),
+                chat_thread_id: Some(thread.id),
+                process_id: Some(process.id),
+                phase: crate::provider_events::ProviderEventPhase::Completed,
+                kind: crate::provider_events::ProviderEventKind::AssistantOutput,
+                provider_subtype: None,
+                provider_sequence: Some(7),
+                occurred_at_ms: 10,
+                normalized_payload: serde_json::json!({"body": "done"}),
+                raw_json: serde_json::json!({"body": "done"}),
+                schema_version: 1,
+                adapter_version: "test".to_owned(),
+            })
+            .unwrap();
+
+        let summaries = store.list_running_chat_thread_summaries().unwrap();
+
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].workspace, "berlin");
+        assert_eq!(summaries[0].thread_id, thread.id);
+        assert_eq!(summaries[0].title, "Bugfix");
+        assert_eq!(summaries[0].provider, "codex");
+        assert_eq!(summaries[0].status, "active");
+        assert_eq!(summaries[0].latest_message_id, Some(message.id));
+        assert_eq!(summaries[0].latest_provider_sequence, Some(2));
+        assert_eq!(summaries[0].running_session_id, Some(process.id));
     }
 
     #[test]

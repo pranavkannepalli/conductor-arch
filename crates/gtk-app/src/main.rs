@@ -2,6 +2,7 @@
 #![allow(clippy::ptr_arg, clippy::too_many_arguments)]
 
 mod archcar_async;
+mod background_sync;
 mod buttons;
 mod command_palette;
 mod dashboard;
@@ -1098,6 +1099,38 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
             ) {
                 hub_on_focus.refresh(RefreshScope::All);
             }
+        });
+    }
+
+    {
+        let db_path_background = app_state.workspace_database_path();
+        let hub_background = refresh_hub.clone();
+        let previous_background =
+            Rc::new(RefCell::new(background_sync::BackgroundSyncSnapshot::default()));
+        // PER-190: Background sync samples persisted running chat markers while
+        // off-focus event routing is still being split from active timelines.
+        // Remove when archcar/runtime producers emit typed RefreshEvents for
+        // every running workspace regardless of the selected GTK page.
+        // PER-190: running chats can update while their workspace is not
+        // focused; keep summaries current without loading hidden timelines.
+        glib::timeout_add_seconds_local(2, move || {
+            match background_sync::load_background_sync_snapshot(&db_path_background) {
+                Ok(next) => {
+                    let previous = previous_background.borrow().clone();
+                    if previous.running_threads.is_empty() && next.running_threads.is_empty() {
+                        return glib::ControlFlow::Continue;
+                    }
+                    let events = background_sync::diff_background_sync(&previous, &next);
+                    *previous_background.borrow_mut() = next;
+                    for event in events {
+                        hub_background.refresh_event(event);
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "gtk background sync snapshot failed");
+                }
+            }
+            glib::ControlFlow::Continue
         });
     }
 
