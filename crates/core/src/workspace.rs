@@ -1509,6 +1509,18 @@ impl WorkspaceStore {
         })
     }
 
+    pub fn workspace_exists_by_name(&self, name: &str) -> Result<bool> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM workspaces WHERE name = ?1",
+                [name],
+                |row| row.get(0),
+            )
+            .with_context(|| format!("check workspace {name}"))?;
+        Ok(count > 0)
+    }
+
     fn ids_for_workspace_kind(&self, workspace_id: i64, kind: ProcessKind) -> Result<Vec<i64>> {
         let mut stmt = self.conn.prepare(
             "SELECT id FROM processes WHERE workspace_id = ?1 AND kind = ?2 ORDER BY id",

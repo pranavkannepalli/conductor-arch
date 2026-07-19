@@ -1,9 +1,7 @@
 use adw::ApplicationWindow;
 use archductor_core::archcar::protocol::ArchcarRequest;
 use archductor_core::repository::RepositoryStore;
-use archductor_core::workspace::{
-    CreateWorkspace, SessionKind, WorkspaceStore, WorkspaceViewDefaults,
-};
+use archductor_core::workspace::{CreateWorkspace, SessionKind, WorkspaceStore};
 use gtk::prelude::*;
 use gtk::{
     Align, Box as GBox, Button, Entry, EventControllerKey, EventControllerMotion, GestureClick,
@@ -34,13 +32,9 @@ enum SidebarWorkspaceSelection {
     Unavailable { message: String },
 }
 
-fn sidebar_workspace_lookup_returned_no_rows(err: &anyhow::Error) -> bool {
-    err.chain().any(|cause| {
-        matches!(
-            cause.downcast_ref::<rusqlite::Error>(),
-            Some(rusqlite::Error::QueryReturnedNoRows)
-        )
-    })
+enum SidebarWorkspaceLookup {
+    Ready { default_visible_tab: Option<String> },
+    MissingWorkspace,
 }
 
 fn validate_sidebar_workspace_selection<F>(
@@ -49,15 +43,15 @@ fn validate_sidebar_workspace_selection<F>(
     load_defaults: F,
 ) -> SidebarWorkspaceSelection
 where
-    F: FnOnce(&str) -> anyhow::Result<WorkspaceViewDefaults>,
+    F: FnOnce(&str) -> anyhow::Result<SidebarWorkspaceLookup>,
 {
     match load_defaults(workspace) {
-        Ok(defaults) => SidebarWorkspaceSelection::Ready {
-            default_tab: defaults
-                .default_visible_tab
-                .and_then(|tab| WorkspaceTab::from_config(&tab)),
+        Ok(SidebarWorkspaceLookup::Ready {
+            default_visible_tab,
+        }) => SidebarWorkspaceSelection::Ready {
+            default_tab: default_visible_tab.and_then(|tab| WorkspaceTab::from_config(&tab)),
         },
-        Err(err) if sidebar_workspace_lookup_returned_no_rows(&err) => {
+        Ok(SidebarWorkspaceLookup::MissingWorkspace) => {
             state.remove_workspace_from_navigation(workspace, AppPage::Dashboard);
             SidebarWorkspaceSelection::Stale
         }
@@ -562,8 +556,16 @@ pub(crate) fn build_app_sidebar(
             };
             let default_tab =
                 match validate_sidebar_workspace_selection(&state_select, &name, |workspace| {
-                    WorkspaceStore::open_app(db_path_select.clone())
-                        .and_then(|store| store.workspace_view_defaults(workspace))
+                    WorkspaceStore::open_app(db_path_select.clone()).and_then(|store| {
+                        if !store.workspace_exists_by_name(workspace)? {
+                            return Ok(SidebarWorkspaceLookup::MissingWorkspace);
+                        }
+                        store.workspace_view_defaults(workspace).map(|defaults| {
+                            SidebarWorkspaceLookup::Ready {
+                                default_visible_tab: defaults.default_visible_tab,
+                            }
+                        })
+                    })
                 }) {
                     SidebarWorkspaceSelection::Ready { default_tab } => default_tab,
                     SidebarWorkspaceSelection::Stale => {
@@ -1651,7 +1653,7 @@ mod tests {
         primary_sidebar_nav_labels, sidebar_should_restore_workspace_selection,
         validate_sidebar_workspace_selection, workspace_context_actions,
         workspace_row_selection_should_open_workspace, workspace_status_allows_sidebar_actions,
-        SidebarWorkspaceSelection,
+        SidebarWorkspaceLookup, SidebarWorkspaceSelection,
     };
     use crate::state::{AppPage, AppState, WorkspaceTab};
 
@@ -1739,12 +1741,37 @@ mod tests {
         );
 
         let selection = validate_sidebar_workspace_selection(&state, "deleted", |_| {
-            Err(anyhow::Error::new(rusqlite::Error::QueryReturnedNoRows))
+            Ok(SidebarWorkspaceLookup::MissingWorkspace)
         });
 
         assert_eq!(selection, SidebarWorkspaceSelection::Stale);
         assert_eq!(state.snapshot().selected_workspace, None);
         assert_eq!(state.snapshot().active_page, AppPage::Dashboard);
+    }
+
+    #[test]
+    fn sidebar_workspace_selection_nested_defaults_query_no_rows_preserves_navigation() {
+        let state = AppState::new(
+            archductor_core::paths::AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+
+        let selection = validate_sidebar_workspace_selection(&state, "berlin", |_| {
+            Err(anyhow::Error::new(rusqlite::Error::QueryReturnedNoRows)
+                .context("load repository settings"))
+        });
+
+        assert!(matches!(
+            selection,
+            SidebarWorkspaceSelection::Unavailable { .. }
+        ));
+        assert_eq!(
+            state.snapshot().selected_workspace.as_deref(),
+            Some("berlin")
+        );
+        assert_eq!(state.snapshot().active_page, AppPage::Workspace);
     }
 
     #[test]
