@@ -1,0 +1,21 @@
+docs/perceo-suite-release-prd.md
+  s_2b6e703d096c08::t_87bf7ad60f572a 1-626
+docs/release-readiness.md
+  s_2b6e703d096c08::t_87bf7ad60f572a 94-95
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "13d7d48bdc742de9b9388b0fc3fc40f917f3f8d5",
+  "prompts": {},
+  "sessions": {
+    "s_2b6e703d096c08": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f7505-502d-7181-9eae-ce0df671e45e",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
