@@ -1216,7 +1216,9 @@ pub fn agent_session_panel(
             let text = buffer_for_update.text(&start, &end, true);
             let has_text = !text.as_str().trim().is_empty();
             let thread_id = *selected_thread.borrow();
-            let has_active_generation = thread_id.is_some_and(|thread_id| {
+            let chat_target = selected_chat_target_for_submit(&app_state, thread_id);
+            let action_thread_id = composer_thread_for_target(chat_target.as_ref(), thread_id);
+            let has_active_generation = action_thread_id.is_some_and(|thread_id| {
                 active_generation_for_thread(
                     &record_state.borrow(),
                     working_threads.as_ref(),
@@ -1224,20 +1226,20 @@ pub fn agent_session_panel(
                     *selected_harness.borrow(),
                 )
             });
-            let latest_status = thread_id.and_then(|thread_id| {
+            let latest_status = action_thread_id.and_then(|thread_id| {
                 latest_session_status_for_thread(
                     &record_state.borrow(),
                     thread_id,
                     *selected_harness.borrow(),
                 )
             });
-            let queued_count = thread_id
+            let queued_count = action_thread_id
                 .map(|thread_id| queued_chat_inputs_count(&app_state, thread_id))
                 .unwrap_or_default();
             let current_harness = *selected_harness.borrow();
             let managed_harness_waits = managed_harness_for_kind(current_harness).is_some();
             let managed_thread_ready = if managed_harness_waits {
-                thread_id.is_none_or(|thread_id| {
+                action_thread_id.is_none_or(|thread_id| {
                     managed_thread_ready_for_ui(
                         current_harness,
                         thread_id,
@@ -1256,7 +1258,7 @@ pub fn agent_session_panel(
             };
             placeholder.set_text("Ask to make changes, @mention files, or run /commands");
             placeholder.set_visible(!has_text);
-            let is_editing_queued_message = thread_id
+            let is_editing_queued_message = action_thread_id
                 .is_some_and(|thread_id| app_state.editing_queued_chat_input(thread_id).is_some());
             let action = if is_editing_queued_message {
                 if has_text {
@@ -3077,7 +3079,8 @@ pub fn agent_session_panel(
             let has_text = !command.trim().is_empty();
             let thread_id = *selected_thread.borrow();
             let chat_target = selected_chat_target_for_submit(&app_state, thread_id);
-            if let Some(thread_id) = thread_id {
+            let action_thread_id = composer_thread_for_target(chat_target.as_ref(), thread_id);
+            if let Some(thread_id) = action_thread_id {
                 if app_state.editing_queued_chat_input(thread_id).is_some() {
                     if has_text {
                         if let Some(previous) =
@@ -3102,14 +3105,14 @@ pub fn agent_session_panel(
                     *selected_harness.borrow(),
                 )
             });
-            let latest_status = thread_id.and_then(|thread_id| {
+            let latest_status = action_thread_id.and_then(|thread_id| {
                 latest_session_status_for_thread(
                     &record_state.borrow(),
                     thread_id,
                     *selected_harness.borrow(),
                 )
             });
-            let queued_count = thread_id
+            let queued_count = action_thread_id
                 .map(|thread_id| queued_chat_inputs_count(&app_state, thread_id))
                 .unwrap_or_default();
             let current_harness = *selected_harness.borrow();
@@ -3176,7 +3179,7 @@ pub fn agent_session_panel(
                     update_composer_state();
                 }
                 ComposerAction::SendQueued => {
-                    let Some(thread_id) = thread_id else {
+                    let Some(thread_id) = action_thread_id else {
                         return;
                     };
                     if let Some(queued_input) = pop_next_queued_chat_input(&app_state, thread_id) {
@@ -7101,13 +7104,15 @@ fn selected_chat_target_for_submit(
     }
 }
 
-fn queued_archcar_input_visible_text(input: &QueuedArchcarInput) -> String {
-    input
-        .visible_input
-        .as_deref()
-        .unwrap_or(&input.input)
-        .trim()
-        .to_owned()
+fn composer_thread_for_target(
+    chat_target: Option<&ChatUiTarget>,
+    selected_thread_id: Option<i64>,
+) -> Option<i64> {
+    match chat_target {
+        Some(ChatUiTarget::Pending { .. }) => None,
+        Some(ChatUiTarget::Thread(thread_id)) => Some(*thread_id),
+        None => selected_thread_id,
+    }
 }
 
 fn queued_chat_input_visible_text(input: &QueuedChatInputDraft) -> String {
@@ -7121,7 +7126,7 @@ fn queued_chat_input_visible_text(input: &QueuedChatInputDraft) -> String {
 
 fn submitted_user_input_texts_for_thread(
     thread_id: i64,
-    pending_archcar_inputs: &RefCell<HashMap<i64, Vec<QueuedArchcarInput>>>,
+    _pending_archcar_inputs: &RefCell<HashMap<i64, Vec<QueuedArchcarInput>>>,
     inflight_actions: &RefCell<HashMap<u64, PendingArchcarAction>>,
     persisted_messages: &[ChatMessageRecord],
 ) -> Vec<String> {
@@ -7132,14 +7137,6 @@ fn submitted_user_input_texts_for_thread(
         .collect::<HashSet<_>>();
     let mut inputs = Vec::new();
 
-    for input in pending_archcar_inputs
-        .borrow()
-        .get(&thread_id)
-        .into_iter()
-        .flat_map(|inputs| inputs.iter())
-    {
-        inputs.push(queued_archcar_input_visible_text(input));
-    }
     for action in inflight_actions.borrow().values() {
         if let PendingArchcarAction::UserSend {
             thread_id: action_thread_id,
@@ -11713,6 +11710,38 @@ fix it
     }
 
     #[test]
+    fn pending_chat_composer_state_ignores_previous_thread_queue() {
+        let state = AppState::new(
+            archductor_core::paths::AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            crate::state::WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+        state.set_selected_chat_thread(Some(7));
+        state.queue_chat_input(
+            7,
+            QueuedChatInputDraft {
+                input: "old queued input".to_owned(),
+                visible_input: None,
+                kind: ArchcarInputKind::User,
+                session_kind: SessionKind::Codex,
+            },
+        );
+        let pending = state.create_pending_chat_target("berlin".to_owned(), SessionKind::Codex);
+
+        assert_eq!(
+            composer_thread_for_target(Some(&pending), Some(7)),
+            None,
+            "pending chat should not inherit previous thread queue/action state"
+        );
+        assert_eq!(
+            state.queued_chat_inputs_count(7),
+            1,
+            "previous thread queue must remain untouched while pending chat is selected"
+        );
+    }
+
+    #[test]
     fn pending_chat_resolve_keeps_first_message_on_new_thread_queue() {
         let state = AppState::new(
             archductor_core::paths::AppPaths::from_env(),
@@ -12618,7 +12647,7 @@ fix it
     }
 
     #[test]
-    fn submitted_user_input_texts_include_starting_and_inflight_sends_only() {
+    fn submitted_user_input_texts_exclude_startup_queue_until_sent() {
         let app_state = AppState::new(
             archductor_core::paths::AppPaths::from_env(),
             Some("berlin".to_owned()),
@@ -12660,13 +12689,7 @@ fix it
 
         let submitted = submitted_user_input_texts_for_thread(7, &starting_queue, &inflight, &[]);
 
-        assert_eq!(
-            submitted,
-            vec![
-                "queued while starting".to_owned(),
-                "real inflight".to_owned(),
-            ]
-        );
+        assert_eq!(submitted, vec!["real inflight".to_owned()]);
         assert_eq!(app_state.queued_chat_inputs_count(7), 1);
     }
 
