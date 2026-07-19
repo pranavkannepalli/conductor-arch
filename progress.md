@@ -110,6 +110,11 @@ paths and known rough edges.
   visible, and Claude hides unsupported goals.
 - Plain Enter follow-up queueing, Ctrl+Enter immediate Codex delivery, and
   queue-row reconciliation isolated from streaming chat refreshes.
+- GTK keeps hot workspace/chat UI state in watched AppState slices for
+  selection, refresh requests, pending workspace phases, pending chat targets,
+  and queued composer input. Workspace and chat creation publish optimistic
+  status, keep the composer usable, and drain queued input after the real
+  workspace/chat thread and agent session are ready.
 - GTK refreshes use typed events for routine runtime, review, workspace
   inventory, terminal, and chat changes; `RefreshScope::All` is reserved for
   explicit manual refresh and startup reconciliation.

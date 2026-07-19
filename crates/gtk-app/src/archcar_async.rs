@@ -1,6 +1,7 @@
 use std::any::Any;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
@@ -109,7 +110,7 @@ type BridgeWake = Arc<dyn Fn() + Send + Sync + 'static>;
 type BridgeWakeSlot = Arc<Mutex<Option<BridgeWake>>>;
 type BridgeConnectLock = Arc<Mutex<()>>;
 type BackgroundJobCallback = Box<dyn FnOnce(Box<dyn Any>) + 'static>;
-type BackgroundProgressCallback = Box<dyn Fn() + 'static>;
+type BackgroundProgressCallback = Rc<dyn Fn() + 'static>;
 
 static NEXT_BACKGROUND_JOB_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -373,31 +374,42 @@ where
         );
     });
     BACKGROUND_JOB_PROGRESS_CALLBACKS.with(|callbacks| {
-        callbacks.borrow_mut().insert(id, Box::new(on_progress));
+        callbacks.borrow_mut().insert(id, Rc::new(on_progress));
     });
     let main_context = glib::MainContext::default();
     thread::spawn(move || {
         let progress_context = main_context.clone();
         let progress = Box::new(move || {
             progress_context.invoke(move || {
-                BACKGROUND_JOB_PROGRESS_CALLBACKS.with(|callbacks| {
-                    if let Some(callback) = callbacks.borrow().get(&id) {
-                        callback();
-                    }
-                });
+                invoke_background_job_progress_callback(id);
             });
         });
         let result = job(progress);
         main_context.invoke(move || {
-            BACKGROUND_JOB_PROGRESS_CALLBACKS.with(|callbacks| {
-                callbacks.borrow_mut().remove(&id);
-            });
-            BACKGROUND_JOB_CALLBACKS.with(|callbacks| {
-                if let Some(callback) = callbacks.borrow_mut().remove(&id) {
-                    callback(Box::new(result));
-                }
-            });
+            remove_background_job_progress_callback(id);
+            invoke_background_job_callback(id, Box::new(result));
         });
+    });
+}
+
+fn invoke_background_job_callback(id: u64, payload: Box<dyn Any>) {
+    let callback = BACKGROUND_JOB_CALLBACKS.with(|callbacks| callbacks.borrow_mut().remove(&id));
+    if let Some(callback) = callback {
+        callback(payload);
+    }
+}
+
+fn invoke_background_job_progress_callback(id: u64) {
+    let callback =
+        BACKGROUND_JOB_PROGRESS_CALLBACKS.with(|callbacks| callbacks.borrow().get(&id).cloned());
+    if let Some(callback) = callback {
+        callback();
+    }
+}
+
+fn remove_background_job_progress_callback(id: u64) {
+    BACKGROUND_JOB_PROGRESS_CALLBACKS.with(|callbacks| {
+        callbacks.borrow_mut().remove(&id);
     });
 }
 
@@ -689,6 +701,30 @@ mod tests {
         assert_eq!(before_restart.get(&7), Some(&true));
         assert!(!after_restart.contains_key(&7));
         assert_eq!(after_restart.get(&8), Some(&true));
+    }
+
+    #[test]
+    fn background_job_completion_callback_can_enqueue_another_job() {
+        let callback_id = NEXT_BACKGROUND_JOB_ID.fetch_add(1, Ordering::Relaxed);
+        let nested_id = NEXT_BACKGROUND_JOB_ID.fetch_add(1, Ordering::Relaxed);
+        BACKGROUND_JOB_CALLBACKS.with(|callbacks| {
+            callbacks.borrow_mut().insert(
+                callback_id,
+                Box::new(move |_| {
+                    BACKGROUND_JOB_CALLBACKS.with(|callbacks| {
+                        callbacks.borrow_mut().insert(nested_id, Box::new(|_| {}));
+                    });
+                }),
+            );
+        });
+
+        invoke_background_job_callback(callback_id, Box::new(()));
+
+        BACKGROUND_JOB_CALLBACKS.with(|callbacks| {
+            let mut callbacks = callbacks.borrow_mut();
+            assert!(!callbacks.contains_key(&callback_id));
+            assert!(callbacks.remove(&nested_id).is_some());
+        });
     }
 
     #[test]

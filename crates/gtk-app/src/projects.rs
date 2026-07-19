@@ -14,14 +14,16 @@ use std::process::Command;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-use crate::archcar_async::spawn_background_job_with_progress;
+use crate::archcar_async::{spawn_background_job, spawn_background_job_with_progress};
 use crate::buttons::{resolve_icon_name, text_button};
 use crate::motion::{append_revealed, append_revealed_row, clear_box, clear_list};
+use crate::state::{AppState, WorkspaceUiPhase};
 use crate::toast::{surface_label_error, ToastManager};
 use crate::{default_clone_parent, detail_row, repo_name_from_url};
 
 pub(crate) fn build_projects_page(
     paths: &AppPaths,
+    app_state: AppState,
     refresh_dashboard: impl Fn() + Clone + 'static,
     refresh_workspace: impl Fn() + Clone + 'static,
     navigate_created_workspace: Rc<dyn Fn(String)>,
@@ -394,6 +396,7 @@ pub(crate) fn build_projects_page(
     let result_inline = result.clone();
     let toast_create_inline = toast_manager.clone();
     let navigate_created_workspace_inline = navigate_created_workspace.clone();
+    let app_state_inline = app_state.clone();
     create_btn.connect_clicked(move |_| {
         let repo = repo_entry.text().trim().to_owned();
         let typed_name = name_entry.text().trim().to_owned();
@@ -438,6 +441,7 @@ pub(crate) fn build_projects_page(
         let navigate_created_workspace_inline = navigate_created_workspace_inline.clone();
         spawn_workspace_create_with_navigation(
             db_path_create.clone(),
+            app_state_inline.clone(),
             repo.clone(),
             request,
             navigate_created_workspace_inline,
@@ -469,9 +473,11 @@ pub(crate) fn build_projects_page(
     let refresh_workspace_modal_workspace = refresh_workspace.clone();
     let navigate_modal_workspace = navigate_created_workspace.clone();
     let toast_modal_workspace = toast_manager.clone();
+    let app_state_modal_workspace = app_state.clone();
     open_workspace_modal_btn.connect_clicked(move |_| {
         show_create_workspace_dialog(
             db_path_modal_workspace.clone(),
+            app_state_modal_workspace.clone(),
             Rc::new(refresh_after_modal_workspace.clone()),
             Rc::new(refresh_dashboard_modal_workspace.clone()),
             Rc::new(refresh_workspace_modal_workspace.clone()),
@@ -487,6 +493,7 @@ pub(crate) fn build_projects_page(
 
 pub(crate) fn show_create_workspace_dialog(
     database_path: PathBuf,
+    app_state: AppState,
     refresh: Rc<dyn Fn()>,
     refresh_dashboard: Rc<dyn Fn()>,
     _refresh_workspace: Rc<dyn Fn()>,
@@ -843,12 +850,25 @@ pub(crate) fn show_create_workspace_dialog(
         let repo_select = repo_select.clone();
         let branch_select = branch_select.clone();
         let loaded_source_choices = loaded_source_choices.clone();
+        let toast_manager = toast_manager.clone();
         move |_| {
             if let Some(repo_name) = repo_select.active_id().map(|id| id.to_string()) {
-                if let Ok(repo_root) = repository_root(&database_path, &repo_name) {
-                    *loaded_source_choices.borrow_mut() = None;
-                    load_branch_choices(&repo_root, &branch_select);
-                }
+                *loaded_source_choices.borrow_mut() = None;
+                let repo_root = repository_root(&database_path, &repo_name);
+                let branch_select = branch_select.clone();
+                let toast_manager = toast_manager.clone();
+                let loaded_source_choices = loaded_source_choices.clone();
+                let desired_key = (repo_name, "branch".to_owned());
+                spawn_background_job(
+                    move || repo_root.and_then(|root| load_branch_choice_rows(&root)),
+                    move |result| match result {
+                        Ok(rows) => {
+                            *loaded_source_choices.borrow_mut() = Some(desired_key);
+                            apply_combo_rows(&branch_select, rows);
+                        }
+                        Err(err) => toast_manager.error(format!("Load branches failed: {err:#}")),
+                    },
+                );
             }
         }
     });
@@ -857,12 +877,25 @@ pub(crate) fn show_create_workspace_dialog(
         let repo_select = repo_select.clone();
         let github_issue_select = github_issue_select.clone();
         let loaded_source_choices = loaded_source_choices.clone();
+        let toast_manager = toast_manager.clone();
         move |_| {
             if let Some(repo_name) = repo_select.active_id().map(|id| id.to_string()) {
-                if let Ok(repo_root) = repository_root(&database_path, &repo_name) {
-                    *loaded_source_choices.borrow_mut() = None;
-                    load_github_issue_choices(&repo_root, &github_issue_select);
-                }
+                *loaded_source_choices.borrow_mut() = None;
+                let repo_root = repository_root(&database_path, &repo_name);
+                let github_issue_select = github_issue_select.clone();
+                let toast_manager = toast_manager.clone();
+                let loaded_source_choices = loaded_source_choices.clone();
+                let desired_key = (repo_name, "github_issue".to_owned());
+                spawn_background_job(
+                    move || repo_root.and_then(|root| load_github_issue_choice_rows(&root)),
+                    move |result| match result {
+                        Ok(rows) => {
+                            *loaded_source_choices.borrow_mut() = Some(desired_key);
+                            apply_combo_rows(&github_issue_select, rows);
+                        }
+                        Err(err) => toast_manager.error(format!("Load issues failed: {err:#}")),
+                    },
+                );
             }
         }
     });
@@ -871,12 +904,25 @@ pub(crate) fn show_create_workspace_dialog(
         let repo_select = repo_select.clone();
         let github_pr_select = github_pr_select.clone();
         let loaded_source_choices = loaded_source_choices.clone();
+        let toast_manager = toast_manager.clone();
         move |_| {
             if let Some(repo_name) = repo_select.active_id().map(|id| id.to_string()) {
-                if let Ok(repo_root) = repository_root(&database_path, &repo_name) {
-                    *loaded_source_choices.borrow_mut() = None;
-                    load_github_pr_choices(&repo_root, &github_pr_select);
-                }
+                *loaded_source_choices.borrow_mut() = None;
+                let repo_root = repository_root(&database_path, &repo_name);
+                let github_pr_select = github_pr_select.clone();
+                let toast_manager = toast_manager.clone();
+                let loaded_source_choices = loaded_source_choices.clone();
+                let desired_key = (repo_name, "github_pr".to_owned());
+                spawn_background_job(
+                    move || repo_root.and_then(|root| load_github_pr_choice_rows(&root)),
+                    move |result| match result {
+                        Ok(rows) => {
+                            *loaded_source_choices.borrow_mut() = Some(desired_key);
+                            apply_combo_rows(&github_pr_select, rows);
+                        }
+                        Err(err) => toast_manager.error(format!("Load PRs failed: {err:#}")),
+                    },
+                );
             }
         }
     });
@@ -960,8 +1006,10 @@ pub(crate) fn show_create_workspace_dialog(
         let dialog_for_create = dialog_for_create.clone();
         let toast_create = toast_create.clone();
         let navigate_created_workspace = navigate_created_workspace.clone();
+        let app_state = app_state.clone();
         spawn_workspace_create_with_navigation(
             db_path_for_create.clone(),
+            app_state,
             repo.clone(),
             request,
             navigate_created_workspace,
@@ -1005,6 +1053,7 @@ fn repository_root(db_path: &PathBuf, name: &str) -> anyhow::Result<PathBuf> {
 
 fn spawn_workspace_create_with_navigation<P, C>(
     db_path: PathBuf,
+    app_state: AppState,
     repository_name: String,
     request: WorkspaceSourceRequest,
     navigate_created_workspace: Rc<dyn Fn(String)>,
@@ -1015,13 +1064,19 @@ fn spawn_workspace_create_with_navigation<P, C>(
     C: FnOnce(anyhow::Result<archductor_core::workspace::Workspace>) + 'static,
 {
     let inserted_workspace_name = Arc::new(Mutex::new(None::<String>));
+    let inserted_workspace_name_for_completion = Arc::new(Mutex::new(None::<String>));
     spawn_background_job_with_progress(
         {
             let inserted_workspace_name = inserted_workspace_name.clone();
+            let inserted_workspace_name_for_completion =
+                inserted_workspace_name_for_completion.clone();
             move |progress| {
                 WorkspaceStore::open_app(db_path).and_then(|store| {
                     request.create_workspace_with_progress(&store, &repository_name, |workspace| {
                         if let Ok(mut name) = inserted_workspace_name.lock() {
+                            *name = Some(workspace.name.clone());
+                        }
+                        if let Ok(mut name) = inserted_workspace_name_for_completion.lock() {
                             *name = Some(workspace.name.clone());
                         }
                         progress();
@@ -1031,16 +1086,53 @@ fn spawn_workspace_create_with_navigation<P, C>(
         },
         {
             let inserted_workspace_name = inserted_workspace_name.clone();
+            let app_state = app_state.clone();
             move || {
                 if let Ok(mut name) = inserted_workspace_name.lock() {
                     if let Some(name) = name.take() {
+                        app_state.mark_workspace_phase(
+                            name.clone(),
+                            WorkspaceUiPhase::Creating {
+                                detail: "Preparing workspace".to_owned(),
+                            },
+                        );
                         navigate_created_workspace(name);
                     }
                 }
                 on_inserted_progress();
             }
         },
-        on_complete,
+        {
+            let inserted_workspace_name_for_completion =
+                inserted_workspace_name_for_completion.clone();
+            move |result| {
+                match result.as_ref() {
+                    Ok(workspace) => {
+                        app_state.mark_workspace_phase(
+                            workspace.name.clone(),
+                            WorkspaceUiPhase::StartingAgent {
+                                detail:
+                                    "Workspace ready. Agent can start when a message is queued."
+                                        .to_owned(),
+                            },
+                        );
+                    }
+                    Err(err) => {
+                        if let Ok(mut name) = inserted_workspace_name_for_completion.lock() {
+                            if let Some(name) = name.take() {
+                                app_state.mark_workspace_phase(
+                                    name,
+                                    WorkspaceUiPhase::Failed {
+                                        message: format!("{err:#}"),
+                                    },
+                                );
+                            }
+                        }
+                    }
+                }
+                on_complete(result);
+            }
+        },
     );
 }
 
@@ -1921,8 +2013,16 @@ fn clear_combo_text(combo: &ComboBoxText) {
     combo.append(Some(""), "Select...");
 }
 
-fn load_branch_choices(repo_root: &Path, combo: &ComboBoxText) {
+fn apply_combo_rows(combo: &ComboBoxText, rows: Vec<(String, String)>) {
     clear_combo_text(combo);
+    let has_items = !rows.is_empty();
+    for (value, label) in rows {
+        combo.append(Some(&value), &label);
+    }
+    combo.set_active(Some(if has_items { 1 } else { 0 }));
+}
+
+fn load_branch_choice_rows(repo_root: &Path) -> anyhow::Result<Vec<(String, String)>> {
     let output = Command::new("git")
         .arg("-C")
         .arg(repo_root)
@@ -1932,13 +2032,13 @@ fn load_branch_choices(repo_root: &Path, combo: &ComboBoxText) {
             "refs/heads",
             "refs/remotes/origin",
         ])
-        .output();
-    let Ok(output) = output else {
-        return;
-    };
-    if !output.status.success() {
-        return;
-    }
+        .output()
+        .context("load git branches")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "git branch load exited with {}",
+        output.status
+    );
     let mut branches = String::from_utf8_lossy(&output.stdout)
         .lines()
         .map(str::trim)
@@ -1948,11 +2048,18 @@ fn load_branch_choices(repo_root: &Path, combo: &ComboBoxText) {
         .collect::<Vec<_>>();
     branches.sort();
     branches.dedup();
-    let has_items = !branches.is_empty();
-    for branch in branches {
-        combo.append(Some(&branch), &branch);
+    Ok(branches
+        .into_iter()
+        .map(|branch| (branch.clone(), branch))
+        .collect())
+}
+
+fn load_branch_choices(repo_root: &Path, combo: &ComboBoxText) {
+    if let Ok(rows) = load_branch_choice_rows(repo_root) {
+        apply_combo_rows(combo, rows);
+    } else {
+        clear_combo_text(combo);
     }
-    combo.set_active(Some(if has_items { 1 } else { 0 }));
 }
 
 fn parse_github_numbered_stateful_choices(raw: &str) -> Vec<GithubNumberedChoice> {
@@ -1996,11 +2103,9 @@ fn github_selection_preview_label(
     Some(selected_text.to_owned())
 }
 
-fn load_github_issue_choices(repo_root: &Path, combo: &ComboBoxText) {
-    clear_combo_text(combo);
+fn load_github_issue_choice_rows(repo_root: &Path) -> anyhow::Result<Vec<(String, String)>> {
     let output = Command::new("gh")
-        .arg("-C")
-        .arg(repo_root)
+        .current_dir(repo_root)
         .args([
             "issue",
             "list",
@@ -2013,26 +2118,31 @@ fn load_github_issue_choices(repo_root: &Path, combo: &ComboBoxText) {
             "--template",
             "{{range .}}{{.number}}{{\"\\t\"}}{{.state}}{{\"\\t\"}}{{.title}}{{\"\\n\"}}{{end}}",
         ])
-        .output();
-    let Ok(output) = output else {
-        return;
-    };
-    if !output.status.success() {
-        return;
-    }
+        .output()
+        .context("load GitHub issues")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "gh issue list exited with {}",
+        output.status
+    );
     let choices = parse_github_numbered_stateful_choices(&String::from_utf8_lossy(&output.stdout));
-    let has_items = !choices.is_empty();
-    for choice in choices {
-        combo.append(Some(&choice.value), &choice.label);
-    }
-    combo.set_active(Some(if has_items { 1 } else { 0 }));
+    Ok(choices
+        .into_iter()
+        .map(|choice| (choice.value, choice.label))
+        .collect())
 }
 
-fn load_github_pr_choices(repo_root: &Path, combo: &ComboBoxText) {
-    clear_combo_text(combo);
+fn load_github_issue_choices(repo_root: &Path, combo: &ComboBoxText) {
+    if let Ok(rows) = load_github_issue_choice_rows(repo_root) {
+        apply_combo_rows(combo, rows);
+    } else {
+        clear_combo_text(combo);
+    }
+}
+
+fn load_github_pr_choice_rows(repo_root: &Path) -> anyhow::Result<Vec<(String, String)>> {
     let output = Command::new("gh")
-        .arg("-C")
-        .arg(repo_root)
+        .current_dir(repo_root)
         .args([
             "pr",
             "list",
@@ -2045,19 +2155,26 @@ fn load_github_pr_choices(repo_root: &Path, combo: &ComboBoxText) {
             "--template",
             "{{range .}}{{.number}}{{\"\\t\"}}{{if .isDraft}}DRAFT{{else}}{{.state}}{{end}}{{\"\\t\"}}{{.title}}{{\"\\n\"}}{{end}}",
         ])
-        .output();
-    let Ok(output) = output else {
-        return;
-    };
-    if !output.status.success() {
-        return;
-    }
+        .output()
+        .context("load GitHub PRs")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "gh pr list exited with {}",
+        output.status
+    );
     let choices = parse_github_numbered_stateful_choices(&String::from_utf8_lossy(&output.stdout));
-    let has_items = !choices.is_empty();
-    for choice in choices {
-        combo.append(Some(&choice.value), &choice.label);
+    Ok(choices
+        .into_iter()
+        .map(|choice| (choice.value, choice.label))
+        .collect())
+}
+
+fn load_github_pr_choices(repo_root: &Path, combo: &ComboBoxText) {
+    if let Ok(rows) = load_github_pr_choice_rows(repo_root) {
+        apply_combo_rows(combo, rows);
+    } else {
+        clear_combo_text(combo);
     }
-    combo.set_active(Some(if has_items { 1 } else { 0 }));
 }
 
 fn new_project_templates() -> Vec<NewProjectTemplate> {
@@ -2250,6 +2367,98 @@ mod tests {
             !modal_create.contains("refresh_workspace_for_create();"),
             "modal workspace create should rely on navigation for selected-shell refresh"
         );
+    }
+
+    #[test]
+    fn workspace_create_progress_marks_workspace_phase() {
+        let source = include_str!("projects.rs");
+        let function = source
+            .split("fn spawn_workspace_create_with_navigation")
+            .nth(1)
+            .expect("spawn_workspace_create_with_navigation exists");
+
+        assert!(
+            function.contains("mark_workspace_phase"),
+            "workspace creation must publish a visible creating phase"
+        );
+        assert!(
+            function.contains("WorkspaceUiPhase::Failed"),
+            "workspace creation failures after insertion must clear the creating phase"
+        );
+        assert!(
+            function.contains("navigate_created_workspace(name);"),
+            "workspace should open as soon as the inserted workspace name is known"
+        );
+    }
+
+    #[test]
+    fn source_choice_refresh_buttons_spawn_background_loads() {
+        let source = include_str!("projects.rs");
+        let branch_handler = source
+            .split("branch_refresh_btn.connect_clicked")
+            .nth(1)
+            .and_then(|rest| {
+                rest.split("github_issue_refresh_btn.connect_clicked")
+                    .next()
+            })
+            .expect("branch refresh handler exists");
+
+        assert!(
+            branch_handler.contains("spawn_background_job"),
+            "branch choice loading can call git and must not block GTK"
+        );
+        assert!(
+            branch_handler.contains("Some(desired_key)"),
+            "branch async refresh must mark loaded choices before combo changes fire"
+        );
+
+        let issue_handler = source
+            .split("github_issue_refresh_btn.connect_clicked")
+            .nth(1)
+            .and_then(|rest| rest.split("github_pr_refresh_btn.connect_clicked").next())
+            .expect("github issue refresh handler exists");
+        assert!(
+            issue_handler.contains("spawn_background_job"),
+            "github issue choice loading can call gh and must not block GTK"
+        );
+        assert!(
+            issue_handler.contains("Some(desired_key)"),
+            "github issue async refresh must mark loaded choices before combo changes fire"
+        );
+
+        let pr_handler = source
+            .split("github_pr_refresh_btn.connect_clicked")
+            .nth(1)
+            .and_then(|rest| rest.split("confirm_for_create").next())
+            .expect("github pr refresh handler exists");
+        assert!(
+            pr_handler.contains("spawn_background_job"),
+            "github pr choice loading can call gh and must not block GTK"
+        );
+        assert!(
+            pr_handler.contains("Some(desired_key)"),
+            "github pr async refresh must mark loaded choices before combo changes fire"
+        );
+    }
+
+    #[test]
+    fn github_issue_and_pr_loaders_use_supported_gh_working_directory() {
+        let source = include_str!("projects.rs");
+        let issue_loader = source
+            .split("fn load_github_issue_choice_rows")
+            .nth(1)
+            .and_then(|rest| rest.split("fn load_github_issue_choices").next())
+            .expect("github issue loader exists");
+        let pr_loader = source
+            .split("fn load_github_pr_choice_rows")
+            .nth(1)
+            .and_then(|rest| rest.split("fn load_github_pr_choices").next())
+            .expect("github pr loader exists");
+
+        for loader in [issue_loader, pr_loader] {
+            assert!(loader.contains(".current_dir(repo_root)"));
+            assert!(!loader.contains(".arg(\"-C\")"));
+        }
     }
 
     #[test]

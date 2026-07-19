@@ -40,7 +40,7 @@ use gtk::{
 };
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use refresh::{RefreshEvent, RefreshHub, RefreshScope};
-use state::{AppPage, AppState, WorkspaceTab};
+use state::{AppPage, AppState, AppStateEvent, WorkspaceTab};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -713,6 +713,14 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         launch_target.page.clone(),
     );
     let refresh_hub = RefreshHub::default();
+    let app_state_refresh_subscription = {
+        let refresh_hub = refresh_hub.clone();
+        app_state.subscribe(move |event, _snapshot| {
+            if let AppStateEvent::RefreshRequested(refresh_event) = event {
+                refresh_hub.refresh_event(refresh_event.clone());
+            }
+        })
+    };
     let window = ApplicationWindow::builder()
         .application(app)
         .title("Archductor")
@@ -848,6 +856,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     );
     let (projects_page, refresh_projects) = projects::build_projects_page(
         &app_state.paths,
+        app_state.clone(),
         refresh_dashboard.clone(),
         {
             let refresh_workspace_detail = refresh_workspace_detail.clone();
@@ -1088,7 +1097,9 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         let runtime_reporter_on_close = runtime_error_reporter.clone();
         let toast_on_close = toast_manager.clone();
         let navigation_coordinator_on_close = navigation_coordinator_handle.clone();
+        let app_state_refresh_subscription = app_state_refresh_subscription;
         window.connect_destroy(move |_| {
+            let _keep_refresh_subscription_alive = &app_state_refresh_subscription;
             navigation_coordinator_on_close.borrow_mut().take();
             *spotlight_watcher_on_close.borrow_mut() = None;
             if reconcile_runtime_state_for_ui(
@@ -1139,7 +1150,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
 
     {
         let db_path_background = app_state.workspace_database_path();
-        let hub_background = refresh_hub.clone();
+        let state_background = app_state.clone();
         let previous_background = Rc::new(RefCell::new(
             background_sync::BackgroundSyncSnapshot::default(),
         ));
@@ -1156,7 +1167,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
             }
             background_sync_in_flight.set(true);
             let db_path = db_path_background.clone();
-            let hub = hub_background.clone();
+            let state = state_background.clone();
             let previous_background = Rc::clone(&previous_background);
             let in_flight = Rc::clone(&background_sync_in_flight);
             archcar_async::spawn_background_job(
@@ -1179,7 +1190,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
                     );
                     *previous_background.borrow_mut() = next;
                     for event in events {
-                        hub.refresh_event(event);
+                        state.request_refresh(event);
                     }
                 },
             );

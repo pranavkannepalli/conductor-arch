@@ -57,15 +57,17 @@ use std::{env, fs as stdfs};
 use tracing::{debug, error, info, trace, warn};
 
 use crate::archcar_async::{
-    clear_archcar_ready, note_archcar_ready, AsyncArchcarBridge, AsyncArchcarMessage,
-    AsyncArchcarResponse,
+    clear_archcar_ready, note_archcar_ready, spawn_background_job, AsyncArchcarBridge,
+    AsyncArchcarMessage, AsyncArchcarResponse,
 };
 use crate::buttons::{
     icon_button, resolve_icon_name, style_icon_button, style_text_button, text_button,
 };
 use crate::motion::{append_revealed, clear_box};
 use crate::refresh::RefreshEvent;
-use crate::state::{AppPage, AppState, AppStateSnapshot, QueuedChatInputDraft};
+use crate::state::{
+    AppPage, AppState, AppStateSnapshot, ChatUiPhase, ChatUiTarget, QueuedChatInputDraft,
+};
 use crate::terminal::terminal_display_text;
 use crate::toast::ToastManager;
 
@@ -82,7 +84,7 @@ const CONTEXT_DETAIL_CONTRIBUTOR_LIMIT: usize = 5;
 const CHAT_SCROLL_BOTTOM_EPSILON: f64 = 48.0;
 const CHAT_SCROLL_RESTORE_LAYOUT_PASSES: u8 = 4;
 const CHAT_SCROLL_RESTORE_LAYOUT_PASS_MS: u64 = 16;
-const CHAT_REFRESH_WAKE_DELAY_MS: u64 = 33;
+const CHAT_REFRESH_WAKE_DELAY_MS: u64 = 150;
 const INLINE_EVENT_BODY_MAX_HEIGHT: i32 = 220;
 static NEXT_CHAT_WAKE_ID: AtomicUsize = AtomicUsize::new(1);
 
@@ -219,13 +221,22 @@ enum ChatTimelineItemKey {
 struct ChatTimelineRenderState {
     thread_id: i64,
     transcript_display: String,
+    leading_rows: usize,
     keys: Vec<ChatTimelineItemKey>,
+}
+
+struct ChatTimelineSnapshot {
+    thread_messages: Vec<ChatMessageRecord>,
+    thread_events: Vec<ChatEventRecord>,
+    provider_events: Vec<ProviderEventRecord>,
+    transcript_display: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ChatTimelineRefreshPlan {
     Skip,
     Append { start: usize },
+    RebuildFrom { start: usize },
     RebuildMessages,
 }
 
@@ -295,6 +306,95 @@ fn clear_deleted_workspace_surface(
     clear_box(thread_row);
     clear_box(messages);
     apply_context_usage_state(context_usage, None);
+}
+
+fn load_chat_timeline_snapshot(
+    database_path: PathBuf,
+    workspace: String,
+    thread_id: i64,
+) -> Result<ChatTimelineSnapshot, String> {
+    WorkspaceStore::open_app(database_path.clone())
+        .and_then(|store| {
+            let thread_messages = store.list_chat_messages(thread_id)?;
+            let thread_events = store.list_chat_events(thread_id)?;
+            let provider_events =
+                ProviderEventStore::new(database_path.clone()).list_for_chat_thread(thread_id)?;
+            let transcript_display = transcript_display_for_workspace(&database_path, &workspace);
+            Ok(ChatTimelineSnapshot {
+                thread_messages,
+                thread_events,
+                provider_events,
+                transcript_display,
+            })
+        })
+        .map_err(|err| format!("{err:#}"))
+}
+
+struct SessionChatCreateUi {
+    app_state: AppState,
+    selected_thread: Rc<RefCell<Option<i64>>>,
+    thread_state: Rc<RefCell<Vec<ChatThreadRecord>>>,
+    refresh_view: Rc<dyn Fn()>,
+    send_text: Rc<dyn Fn(String, bool) -> bool>,
+    on_selected: Rc<dyn Fn()>,
+    toast_manager: ToastManager,
+}
+
+fn spawn_session_chat_thread_create(
+    database_path: PathBuf,
+    workspace_name: String,
+    kind: SessionKind,
+    title: String,
+    metadata: Option<String>,
+    pending_target: ChatUiTarget,
+    ui: SessionChatCreateUi,
+) {
+    let workspace_for_job = workspace_name.clone();
+    spawn_background_job(
+        move || {
+            WorkspaceStore::open_app(database_path)
+                .and_then(|store| {
+                    store.create_chat_thread(
+                        &workspace_for_job,
+                        session_kind_provider(kind),
+                        &title,
+                        metadata.as_deref(),
+                    )
+                })
+                .map_err(|err| format!("{err:#}"))
+        },
+        move |result| match result {
+            Ok(thread) => {
+                ui.thread_state.borrow_mut().insert(0, thread.clone());
+                ui.app_state
+                    .resolve_pending_chat_target(pending_target.clone(), thread.id);
+                ui.app_state.mark_chat_phase(
+                    ChatUiTarget::Thread(thread.id),
+                    ChatUiPhase::StartingAgent { provider: kind },
+                );
+                *ui.selected_thread.borrow_mut() = Some(thread.id);
+                (ui.on_selected)();
+                if let Some(queued_input) = pop_next_queued_chat_input(&ui.app_state, thread.id) {
+                    let staged_review = matches!(queued_input.kind, ArchcarInputKind::ReviewPrompt);
+                    if !(ui.send_text)(queued_input.input.clone(), staged_review) {
+                        requeue_pending_input_front(&ui.app_state, thread.id, queued_input);
+                    }
+                }
+                (ui.refresh_view)();
+            }
+            Err(message) => {
+                ui.app_state.mark_chat_phase(
+                    pending_target,
+                    ChatUiPhase::Failed {
+                        message: format!("Create chat thread failed: {message}"),
+                    },
+                );
+                ui.toast_manager
+                    .error(format!("Create chat thread failed: {message}"));
+                error!(workspace = %workspace_name, error = %message, "failed to create chat thread");
+            }
+        },
+    );
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1116,7 +1216,9 @@ pub fn agent_session_panel(
             let text = buffer_for_update.text(&start, &end, true);
             let has_text = !text.as_str().trim().is_empty();
             let thread_id = *selected_thread.borrow();
-            let has_active_generation = thread_id.is_some_and(|thread_id| {
+            let chat_target = selected_chat_target_for_submit(&app_state, thread_id);
+            let action_thread_id = composer_thread_for_target(chat_target.as_ref(), thread_id);
+            let has_active_generation = action_thread_id.is_some_and(|thread_id| {
                 active_generation_for_thread(
                     &record_state.borrow(),
                     working_threads.as_ref(),
@@ -1124,20 +1226,20 @@ pub fn agent_session_panel(
                     *selected_harness.borrow(),
                 )
             });
-            let latest_status = thread_id.and_then(|thread_id| {
+            let latest_status = action_thread_id.and_then(|thread_id| {
                 latest_session_status_for_thread(
                     &record_state.borrow(),
                     thread_id,
                     *selected_harness.borrow(),
                 )
             });
-            let queued_count = thread_id
+            let queued_count = action_thread_id
                 .map(|thread_id| queued_chat_inputs_count(&app_state, thread_id))
                 .unwrap_or_default();
             let current_harness = *selected_harness.borrow();
             let managed_harness_waits = managed_harness_for_kind(current_harness).is_some();
             let managed_thread_ready = if managed_harness_waits {
-                thread_id.is_none_or(|thread_id| {
+                action_thread_id.is_none_or(|thread_id| {
                     managed_thread_ready_for_ui(
                         current_harness,
                         thread_id,
@@ -1156,7 +1258,7 @@ pub fn agent_session_panel(
             };
             placeholder.set_text("Ask to make changes, @mention files, or run /commands");
             placeholder.set_visible(!has_text);
-            let is_editing_queued_message = thread_id
+            let is_editing_queued_message = action_thread_id
                 .is_some_and(|thread_id| app_state.editing_queued_chat_input(thread_id).is_some());
             let action = if is_editing_queued_message {
                 if has_text {
@@ -1440,6 +1542,7 @@ pub fn agent_session_panel(
                             archcar_ready_cache.as_ref(),
                             codex_startup_states.as_ref(),
                             archcar_session_threads.as_ref(),
+                            inflight_archcar_actions.as_ref(),
                             current_kind,
                             selected_thread_id,
                             codex_ready.as_ref(),
@@ -1511,23 +1614,16 @@ pub fn agent_session_panel(
                 );
                 if !flushed_pending {
                     if let Some(thread_id) = selected_thread_id {
-                        let can_send_next = managed_harness_for_kind(current_kind).is_some()
-                            && queued_auto_drain_allowed(
-                                queued_auto_drain_holds.as_ref(),
-                                thread_id,
-                            )
-                            && !pending_archcar_inputs.borrow().contains_key(&thread_id)
-                            && !has_inflight_user_send_for_thread(
-                                inflight_archcar_actions.as_ref(),
-                                thread_id,
-                            )
-                            && ready_running_session_for_thread(
-                                &record_state.borrow(),
-                                thread_id,
-                                current_kind,
-                                archcar_ready_cache.as_ref(),
-                            )
-                            .is_some();
+                        let can_send_next = queued_chat_auto_drain_ready(
+                            current_kind,
+                            &record_state.borrow(),
+                            thread_id,
+                            archcar_ready_cache.as_ref(),
+                            inflight_archcar_actions.as_ref(),
+                            pending_archcar_inputs.as_ref(),
+                            queued_auto_drain_holds.as_ref(),
+                            working_threads.as_ref(),
+                        );
                         if can_send_next {
                             if let Some(send_text) =
                                 send_text_after_ready_queue.borrow().as_ref().cloned()
@@ -1814,19 +1910,12 @@ pub fn agent_session_panel(
                                 };
                             let transcript_display =
                                 transcript_display_for_workspace(&database_path, &workspace);
-                            let pending_user_inputs = pending_user_input_texts_for_thread(
+                            let submitted_user_inputs = submitted_user_input_texts_for_thread(
                                 thread_id,
                                 pending_archcar_inputs.as_ref(),
-                                &app_state,
                                 inflight_archcar_actions.as_ref(),
                                 &thread_messages,
                             );
-                            let pending_immediate_inputs =
-                                pending_immediate_user_input_texts_for_thread(
-                                    thread_id,
-                                    inflight_archcar_actions.as_ref(),
-                                    &thread_messages,
-                                );
                             let render_legacy_inline_events =
                                 render_legacy_inline_events_for_thread(
                                     &thread_events,
@@ -1902,7 +1991,7 @@ pub fn agent_session_panel(
                                     &thread_messages,
                                     &thread_events,
                                     &provider_events,
-                                    &pending_user_inputs,
+                                    &submitted_user_inputs,
                                     &transcript_display,
                                     "timeline",
                                     runtime_summary.clone(),
@@ -1914,40 +2003,84 @@ pub fn agent_session_panel(
                                     debug!(?outcome, "chat refresh_view outcome");
                                     return;
                                 }
-                                outcome.messages_changed = true;
-                                clear_box(&messages);
-                                apply_context_usage_state(
-                                    &context_usage,
-                                    latest_context_usage_from_messages(&thread_messages),
-                                );
-                                append_chat_status_banner(
-                                    &messages,
-                                    status_banner,
-                                    &startup_state,
-                                    working_elapsed,
-                                );
                                 let timeline = chat_structured_items_for_render(
                                     thread_messages.clone(),
                                     thread_events,
                                     provider_projection.items,
-                                    pending_user_inputs.clone(),
-                                    pending_immediate_inputs,
+                                    Vec::new(),
+                                    submitted_user_inputs,
                                 );
-                                for item in &timeline {
-                                    if let Some(widget) = chat_timeline_item_widget(
-                                        item,
-                                        render_raw_message_content(&transcript_display),
-                                        render_legacy_inline_events,
-                                    ) {
-                                        append_chat_refresh_row(&messages, &widget);
-                                    }
-                                }
-                                *last_timeline_render_state.borrow_mut() =
-                                    Some(chat_timeline_render_state(
+                                let timeline_leading_rows =
+                                    usize::from(status_banner != ChatStatusBannerKind::None);
+                                let next_timeline_state =
+                                    chat_timeline_render_state_with_leading_rows(
                                         thread_id,
                                         &transcript_display,
                                         &timeline,
-                                    ));
+                                        timeline_leading_rows,
+                                    );
+                                let previous_timeline_state =
+                                    last_timeline_render_state.borrow().clone();
+                                let previous_timeline_leading_rows = previous_timeline_state
+                                    .as_ref()
+                                    .map_or(0, |state| state.leading_rows);
+                                let mut plan = chat_timeline_refresh_plan(
+                                    previous_timeline_state.as_ref(),
+                                    &next_timeline_state,
+                                );
+                                if status_banner != ChatStatusBannerKind::None {
+                                    plan = ChatTimelineRefreshPlan::RebuildMessages;
+                                }
+                                outcome.messages_changed =
+                                    !matches!(plan, ChatTimelineRefreshPlan::Skip);
+                                apply_context_usage_state(
+                                    &context_usage,
+                                    latest_context_usage_from_messages(&thread_messages),
+                                );
+                                match plan {
+                                    ChatTimelineRefreshPlan::Skip => {
+                                        debug!(?outcome, "chat refresh_view outcome");
+                                        restore_chat_scroll_after_refresh(&scroll, chat_scroll);
+                                        return;
+                                    }
+                                    ChatTimelineRefreshPlan::Append { start } => {
+                                        append_chat_timeline_items(
+                                            &messages,
+                                            &timeline[start..],
+                                            &transcript_display,
+                                            render_legacy_inline_events,
+                                        );
+                                    }
+                                    ChatTimelineRefreshPlan::RebuildFrom { start } => {
+                                        remove_box_children_from(
+                                            &messages,
+                                            previous_timeline_leading_rows + start,
+                                        );
+                                        append_chat_timeline_items(
+                                            &messages,
+                                            &timeline[start..],
+                                            &transcript_display,
+                                            render_legacy_inline_events,
+                                        );
+                                    }
+                                    ChatTimelineRefreshPlan::RebuildMessages => {
+                                        clear_box(&messages);
+                                        append_chat_status_banner(
+                                            &messages,
+                                            status_banner,
+                                            &startup_state,
+                                            working_elapsed,
+                                        );
+                                        append_chat_timeline_items(
+                                            &messages,
+                                            &timeline,
+                                            &transcript_display,
+                                            render_legacy_inline_events,
+                                        );
+                                    }
+                                }
+                                *last_timeline_render_state.borrow_mut() =
+                                    Some(next_timeline_state);
                                 debug!(?outcome, "chat refresh_view outcome");
                                 restore_chat_scroll_after_refresh(&scroll, chat_scroll);
                                 return;
@@ -1955,22 +2088,16 @@ pub fn agent_session_panel(
                         }
                     }
 
-                    let pending_user_inputs = pending_user_input_texts_for_thread(
+                    let submitted_user_inputs = submitted_user_input_texts_for_thread(
                         thread_id,
                         pending_archcar_inputs.as_ref(),
-                        &app_state,
-                        inflight_archcar_actions.as_ref(),
-                        &[],
-                    );
-                    let pending_immediate_inputs = pending_immediate_user_input_texts_for_thread(
-                        thread_id,
                         inflight_archcar_actions.as_ref(),
                         &[],
                     );
                     let status_banner = chat_status_banner_kind(
                         &startup_state,
                         working_elapsed,
-                        !pending_user_inputs.is_empty(),
+                        !submitted_user_inputs.is_empty(),
                     );
                     let signature = chat_render_signature(
                         current_kind,
@@ -1983,7 +2110,7 @@ pub fn agent_session_panel(
                         &[],
                         &[],
                         &[],
-                        &pending_user_inputs,
+                        &submitted_user_inputs,
                         "structured",
                         "empty",
                         runtime_summary.clone(),
@@ -2002,7 +2129,7 @@ pub fn agent_session_panel(
                         &startup_state,
                         working_elapsed,
                     );
-                    if pending_immediate_inputs.is_empty() {
+                    if submitted_user_inputs.is_empty() {
                         let empty = Label::new(Some("No messages yet."));
                         empty.add_css_class("chat-agent-text");
                         empty.set_selectable(true);
@@ -2010,7 +2137,7 @@ pub fn agent_session_panel(
                         empty.set_xalign(0.0);
                         append_chat_refresh_row(&messages, &empty);
                     } else {
-                        for input in pending_immediate_inputs {
+                        for input in submitted_user_inputs {
                             append_chat_refresh_row(&messages, &chat_user_bubble(&input));
                         }
                     }
@@ -2063,108 +2190,147 @@ pub fn agent_session_panel(
                 let context_usage = context_usage.clone();
                 let pending_archcar_inputs = pending_archcar_inputs.clone();
                 let inflight_archcar_actions = inflight_archcar_actions.clone();
-                let app_state = app_state.clone();
                 let last_timeline_render_state = last_timeline_render_state.clone();
                 let toast_manager = toast_manager.clone();
+                let message_refresh_generation = Rc::new(Cell::new(0_u64));
                 Rc::new(move |thread_id| {
                     if *selected_thread.borrow() != Some(thread_id) {
                         return;
                     }
                     let workspace = current_workspace_name.borrow().clone();
                     let chat_scroll = capture_chat_scroll(&scroll);
-                    let (thread_messages, thread_events, provider_events) =
-                        match WorkspaceStore::open_app(database_path.clone()).and_then(|store| {
-                            let messages = store.list_chat_messages(thread_id)?;
-                            let events = store.list_chat_events(thread_id)?;
-                            let provider_events = ProviderEventStore::new(database_path.clone())
-                                .list_for_chat_thread(thread_id)?;
-                            Ok((messages, events, provider_events))
-                        }) {
-                            Ok(timeline) => timeline,
-                            Err(err) => {
-                                error!(workspace = %workspace, thread_id, error = %err, "chat message refresh failed to load thread timeline");
-                                let message =
-                                    session_refresh_error_text("load chat timeline", &err);
-                                toast_manager.error(message.clone());
-                                let label = Label::new(Some(&message));
-                                label.add_css_class("chat-agent-text");
-                                label.set_selectable(true);
-                                label.set_wrap(true);
-                                label.set_xalign(0.0);
-                                clear_box(&messages);
-                                *last_timeline_render_state.borrow_mut() = None;
-                                apply_context_usage_state(&context_usage, None);
-                                append_chat_refresh_row(&messages, &label);
-                                restore_chat_scroll_after_refresh(&scroll, chat_scroll);
+                    let generation = message_refresh_generation.get() + 1;
+                    message_refresh_generation.set(generation);
+                    let database_path_for_job = database_path.clone();
+                    let workspace_for_job = workspace.clone();
+                    let selected_thread = selected_thread.clone();
+                    let messages = messages.clone();
+                    let scroll = scroll.clone();
+                    let context_usage = context_usage.clone();
+                    let pending_archcar_inputs = pending_archcar_inputs.clone();
+                    let inflight_archcar_actions = inflight_archcar_actions.clone();
+                    let last_timeline_render_state = last_timeline_render_state.clone();
+                    let toast_manager = toast_manager.clone();
+                    let message_refresh_generation = message_refresh_generation.clone();
+                    spawn_background_job(
+                        move || {
+                            load_chat_timeline_snapshot(
+                                database_path_for_job,
+                                workspace_for_job,
+                                thread_id,
+                            )
+                        },
+                        move |result| {
+                            if message_refresh_generation.get() != generation
+                                || *selected_thread.borrow() != Some(thread_id)
+                            {
                                 return;
                             }
-                        };
-                    let transcript_display =
-                        transcript_display_for_workspace(&database_path, &workspace);
-                    let pending_user_inputs = pending_user_input_texts_for_thread(
-                        thread_id,
-                        pending_archcar_inputs.as_ref(),
-                        &app_state,
-                        inflight_archcar_actions.as_ref(),
-                        &thread_messages,
-                    );
-                    let pending_immediate_inputs = pending_immediate_user_input_texts_for_thread(
-                        thread_id,
-                        inflight_archcar_actions.as_ref(),
-                        &thread_messages,
-                    );
-                    let render_legacy_inline_events =
-                        render_legacy_inline_events_for_thread(&thread_events, &transcript_display);
-                    let provider_projection = provider_projection_from_records(&provider_events);
-                    let timeline = chat_structured_items_for_render(
-                        thread_messages.clone(),
-                        thread_events,
-                        provider_projection.items,
-                        pending_user_inputs,
-                        pending_immediate_inputs,
-                    );
-                    let next_state =
-                        chat_timeline_render_state(thread_id, &transcript_display, &timeline);
-                    let plan = chat_timeline_refresh_plan(
-                        last_timeline_render_state.borrow().as_ref(),
-                        &next_state,
-                    );
-                    match plan {
-                        ChatTimelineRefreshPlan::Skip => return,
-                        ChatTimelineRefreshPlan::Append { start } => {
-                            apply_context_usage_state(
-                                &context_usage,
-                                latest_context_usage_from_messages(&thread_messages),
+                            let snapshot = match result {
+                                Ok(snapshot) => snapshot,
+                                Err(message) => {
+                                    error!(workspace = %workspace, thread_id, error = %message, "chat message refresh failed to load thread timeline");
+                                    let message = format!("Load chat timeline failed: {message}");
+                                    toast_manager.error(message.clone());
+                                    let label = Label::new(Some(&message));
+                                    label.add_css_class("chat-agent-text");
+                                    label.set_selectable(true);
+                                    label.set_wrap(true);
+                                    label.set_xalign(0.0);
+                                    clear_box(&messages);
+                                    *last_timeline_render_state.borrow_mut() = None;
+                                    apply_context_usage_state(&context_usage, None);
+                                    append_chat_refresh_row(&messages, &label);
+                                    restore_chat_scroll_after_refresh(&scroll, chat_scroll);
+                                    return;
+                                }
+                            };
+                            let thread_messages = snapshot.thread_messages;
+                            let thread_events = snapshot.thread_events;
+                            let provider_events = snapshot.provider_events;
+                            let transcript_display = snapshot.transcript_display;
+                            let submitted_user_inputs = submitted_user_input_texts_for_thread(
+                                thread_id,
+                                pending_archcar_inputs.as_ref(),
+                                inflight_archcar_actions.as_ref(),
+                                &thread_messages,
                             );
-                            for item in &timeline[start..] {
-                                if let Some(widget) = chat_timeline_item_widget(
-                                    item,
-                                    render_raw_message_content(&transcript_display),
-                                    render_legacy_inline_events,
-                                ) {
-                                    append_chat_refresh_row(&messages, &widget);
+                            let render_legacy_inline_events =
+                                render_legacy_inline_events_for_thread(
+                                    &thread_events,
+                                    &transcript_display,
+                                );
+                            let provider_projection =
+                                provider_projection_from_records(&provider_events);
+                            let timeline = chat_structured_items_for_render(
+                                thread_messages.clone(),
+                                thread_events,
+                                provider_projection.items,
+                                Vec::new(),
+                                submitted_user_inputs,
+                            );
+                            let next_state = chat_timeline_render_state(
+                                thread_id,
+                                &transcript_display,
+                                &timeline,
+                            );
+                            let previous_timeline_state =
+                                last_timeline_render_state.borrow().clone();
+                            let previous_timeline_leading_rows = previous_timeline_state
+                                .as_ref()
+                                .map_or(0, |state| state.leading_rows);
+                            let plan = chat_timeline_refresh_plan(
+                                previous_timeline_state.as_ref(),
+                                &next_state,
+                            );
+                            match plan {
+                                ChatTimelineRefreshPlan::Skip => return,
+                                ChatTimelineRefreshPlan::Append { start } => {
+                                    apply_context_usage_state(
+                                        &context_usage,
+                                        latest_context_usage_from_messages(&thread_messages),
+                                    );
+                                    append_chat_timeline_items(
+                                        &messages,
+                                        &timeline[start..],
+                                        &transcript_display,
+                                        render_legacy_inline_events,
+                                    );
+                                }
+                                ChatTimelineRefreshPlan::RebuildFrom { start } => {
+                                    remove_box_children_from(
+                                        &messages,
+                                        previous_timeline_leading_rows + start,
+                                    );
+                                    apply_context_usage_state(
+                                        &context_usage,
+                                        latest_context_usage_from_messages(&thread_messages),
+                                    );
+                                    append_chat_timeline_items(
+                                        &messages,
+                                        &timeline[start..],
+                                        &transcript_display,
+                                        render_legacy_inline_events,
+                                    );
+                                }
+                                ChatTimelineRefreshPlan::RebuildMessages => {
+                                    clear_box(&messages);
+                                    apply_context_usage_state(
+                                        &context_usage,
+                                        latest_context_usage_from_messages(&thread_messages),
+                                    );
+                                    append_chat_timeline_items(
+                                        &messages,
+                                        &timeline,
+                                        &transcript_display,
+                                        render_legacy_inline_events,
+                                    );
                                 }
                             }
-                        }
-                        ChatTimelineRefreshPlan::RebuildMessages => {
-                            clear_box(&messages);
-                            apply_context_usage_state(
-                                &context_usage,
-                                latest_context_usage_from_messages(&thread_messages),
-                            );
-                            for item in &timeline {
-                                if let Some(widget) = chat_timeline_item_widget(
-                                    item,
-                                    render_raw_message_content(&transcript_display),
-                                    render_legacy_inline_events,
-                                ) {
-                                    append_chat_refresh_row(&messages, &widget);
-                                }
-                            }
-                        }
-                    }
-                    *last_timeline_render_state.borrow_mut() = Some(next_state);
-                    restore_chat_scroll_after_refresh(&scroll, chat_scroll);
+                            *last_timeline_render_state.borrow_mut() = Some(next_state);
+                            restore_chat_scroll_after_refresh(&scroll, chat_scroll);
+                        },
+                    );
                 })
             };
             let refresh_thread_nav_for_external = refresh_view.clone();
@@ -2335,9 +2501,20 @@ pub fn agent_session_panel(
                     return false;
                 }
             };
+            let branch_prefix = WorkspaceStore::open_app(db_for_send.clone())
+                .and_then(|store| store.workspace_branch_prefix(&workspace_for_send))
+                .unwrap_or_else(|err| {
+                    warn!(
+                        workspace = %workspace_for_send,
+                        error = %err,
+                        "failed to load workspace branch prefix for metadata prompt"
+                    );
+                    "lc".to_owned()
+                });
             let prepared_input = prepare_session_send_input(
                 &command,
                 &workspace_for_send,
+                &branch_prefix,
                 staged_review,
                 selected_kind,
                 &thread,
@@ -2901,7 +3078,9 @@ pub fn agent_session_panel(
                 .to_string();
             let has_text = !command.trim().is_empty();
             let thread_id = *selected_thread.borrow();
-            if let Some(thread_id) = thread_id {
+            let chat_target = selected_chat_target_for_submit(&app_state, thread_id);
+            let action_thread_id = composer_thread_for_target(chat_target.as_ref(), thread_id);
+            if let Some(thread_id) = action_thread_id {
                 if app_state.editing_queued_chat_input(thread_id).is_some() {
                     if has_text {
                         if let Some(previous) =
@@ -2926,14 +3105,14 @@ pub fn agent_session_panel(
                     *selected_harness.borrow(),
                 )
             });
-            let latest_status = thread_id.and_then(|thread_id| {
+            let latest_status = action_thread_id.and_then(|thread_id| {
                 latest_session_status_for_thread(
                     &record_state.borrow(),
                     thread_id,
                     *selected_harness.borrow(),
                 )
             });
-            let queued_count = thread_id
+            let queued_count = action_thread_id
                 .map(|thread_id| queued_chat_inputs_count(&app_state, thread_id))
                 .unwrap_or_default();
             let current_harness = *selected_harness.borrow();
@@ -2963,6 +3142,20 @@ pub fn agent_session_panel(
             let selected_kind = *selected_harness.borrow();
             match composer_action_for_submit_intent(action, intent, has_text, selected_kind) {
                 ComposerAction::Queue => {
+                    if let Some(target @ ChatUiTarget::Pending { .. }) = chat_target.clone() {
+                        queue_archcar_input_for_target(
+                            &app_state,
+                            target,
+                            command.clone(),
+                            None,
+                            ArchcarInputKind::User,
+                            *selected_harness.borrow(),
+                        );
+                        buffer.set_text("");
+                        refresh_view();
+                        update_composer_state();
+                        return;
+                    }
                     let Some(thread_id) = thread_id else {
                         buffer.set_text("");
                         (send_text)(command, false);
@@ -2986,7 +3179,7 @@ pub fn agent_session_panel(
                     update_composer_state();
                 }
                 ComposerAction::SendQueued => {
-                    let Some(thread_id) = thread_id else {
+                    let Some(thread_id) = action_thread_id else {
                         return;
                     };
                     if let Some(queued_input) = pop_next_queued_chat_input(&app_state, thread_id) {
@@ -3011,6 +3204,19 @@ pub fn agent_session_panel(
                 ComposerAction::Send => {
                     if has_text {
                         buffer.set_text("");
+                        if let Some(target @ ChatUiTarget::Pending { .. }) = chat_target.clone() {
+                            queue_archcar_input_for_target(
+                                &app_state,
+                                target,
+                                command.clone(),
+                                None,
+                                ArchcarInputKind::User,
+                                *selected_harness.borrow(),
+                            );
+                            refresh_view();
+                            update_composer_state();
+                            return;
+                        }
                         if intent == ComposerSubmitIntent::Immediate
                             && managed_harness_for_kind(selected_kind).is_some()
                         {
@@ -3086,6 +3292,7 @@ pub fn agent_session_panel(
         let selected_thread = selected_thread.clone();
         let app_state = app_state.clone();
         let refresh_view = refresh_view.clone();
+        let send_text = send_text.clone();
         let update_composer_state = update_composer_state.clone();
         let restore_composer_draft = restore_composer_draft.clone();
         let refresh_queue_overlay = refresh_queue_overlay.clone();
@@ -3102,37 +3309,44 @@ pub fn agent_session_panel(
             let title = default_chat_thread_title(kind, &thread_state.borrow());
             let metadata =
                 provider_model_harness_metadata(None, selected_model.borrow().as_deref());
-            match WorkspaceStore::open_app(database_path.clone()).and_then(|store| {
-                store.create_chat_thread(
-                    &workspace_name,
-                    session_kind_provider(kind),
-                    &title,
-                    metadata.as_deref(),
-                )
-            }) {
-                Ok(thread) => {
-                    thread_state.borrow_mut().insert(0, thread.clone());
-                    apply_thread_selection(
-                        selected_thread.as_ref(),
-                        Some(thread.id),
-                        |thread_id| app_state.set_selected_chat_thread(thread_id),
-                        || {
-                            restore_composer_draft();
-                            update_composer_state();
-                            if let Some(refresh) =
-                                refresh_queue_overlay.borrow().as_ref().cloned()
-                            {
-                                refresh();
-                            }
-                        },
-                    );
-                    refresh_view();
+            let pending_target = app_state.create_pending_chat_target(workspace_name.clone(), kind);
+            app_state.mark_chat_phase(
+                pending_target.clone(),
+                ChatUiPhase::Creating { provider: kind },
+            );
+            let on_selected: Rc<dyn Fn()> = Rc::new({
+                let restore_composer_draft = restore_composer_draft.clone();
+                let update_composer_state = update_composer_state.clone();
+                let refresh_queue_overlay = refresh_queue_overlay.clone();
+                move || {
+                    restore_composer_draft();
+                    update_composer_state();
+                    if let Some(refresh) = refresh_queue_overlay.borrow().as_ref().cloned() {
+                        refresh();
+                    }
                 }
-                Err(err) => {
-                    toast_manager.error(format!("Create chat thread failed: {err:#}"));
-                    error!(workspace = %workspace_name, error = %err, "failed to create chat thread");
-                }
+            });
+            update_composer_state();
+            if let Some(refresh) = refresh_queue_overlay.borrow().as_ref().cloned() {
+                refresh();
             }
+            spawn_session_chat_thread_create(
+                database_path.clone(),
+                workspace_name,
+                kind,
+                title,
+                metadata,
+                pending_target,
+                SessionChatCreateUi {
+                    app_state: app_state.clone(),
+                    selected_thread: selected_thread.clone(),
+                    thread_state: thread_state.clone(),
+                    refresh_view: refresh_view.clone(),
+                    send_text: send_text.clone(),
+                    on_selected,
+                    toast_manager: toast_manager.clone(),
+                },
+            );
         }
     });
     root
@@ -3293,6 +3507,35 @@ fn append_chat_refresh_row<W: IsA<Widget>>(container: &GBox, child: &W) {
         append_revealed(container, child);
     } else {
         container.append(child);
+    }
+}
+
+fn append_chat_timeline_items(
+    container: &GBox,
+    items: &[ChatTimelineItem],
+    transcript_display: &str,
+    render_legacy_inline_events: bool,
+) {
+    for item in items {
+        if let Some(widget) = chat_timeline_item_widget(
+            item,
+            render_raw_message_content(transcript_display),
+            render_legacy_inline_events,
+        ) {
+            append_chat_refresh_row(container, &widget);
+        }
+    }
+}
+
+fn remove_box_children_from(container: &GBox, start: usize) {
+    let mut index = 0;
+    let mut child = container.first_child();
+    while let Some(widget) = child {
+        child = widget.next_sibling();
+        if index >= start {
+            container.remove(&widget);
+        }
+        index += 1;
     }
 }
 
@@ -3940,9 +4183,19 @@ fn chat_timeline_render_state(
     transcript_display: &str,
     items: &[ChatTimelineItem],
 ) -> ChatTimelineRenderState {
+    chat_timeline_render_state_with_leading_rows(thread_id, transcript_display, items, 0)
+}
+
+fn chat_timeline_render_state_with_leading_rows(
+    thread_id: i64,
+    transcript_display: &str,
+    items: &[ChatTimelineItem],
+    leading_rows: usize,
+) -> ChatTimelineRenderState {
     ChatTimelineRenderState {
         thread_id,
         transcript_display: transcript_display.to_owned(),
+        leading_rows,
         keys: items.iter().map(chat_timeline_item_key).collect(),
     }
 }
@@ -3956,21 +4209,40 @@ fn chat_timeline_refresh_plan(
     };
     if previous.thread_id != next.thread_id
         || previous.transcript_display != next.transcript_display
-        || previous.keys.len() > next.keys.len()
+        || previous.leading_rows != next.leading_rows
     {
         return ChatTimelineRefreshPlan::RebuildMessages;
     }
-    if !next.keys.starts_with(&previous.keys) {
-        return ChatTimelineRefreshPlan::RebuildMessages;
-    }
-    if previous.keys.len() == next.keys.len() {
+    let first_changed = previous
+        .keys
+        .iter()
+        .zip(next.keys.iter())
+        .position(|(left, right)| left != right);
+    if first_changed.is_none() && previous.keys.len() == next.keys.len() {
         return ChatTimelineRefreshPlan::Skip;
     }
-    if previous.keys.is_empty() {
+    if first_changed.is_none() && previous.keys.len() > next.keys.len() {
+        if next.keys.is_empty() {
+            return ChatTimelineRefreshPlan::RebuildMessages;
+        }
+        return ChatTimelineRefreshPlan::RebuildFrom {
+            start: next.keys.len(),
+        };
+    }
+    if first_changed.is_none() {
+        if previous.keys.is_empty() {
+            return ChatTimelineRefreshPlan::RebuildMessages;
+        }
+        return ChatTimelineRefreshPlan::Append {
+            start: previous.keys.len(),
+        };
+    }
+    let first_changed = first_changed.unwrap_or(0);
+    if first_changed == 0 {
         return ChatTimelineRefreshPlan::RebuildMessages;
     }
-    ChatTimelineRefreshPlan::Append {
-        start: previous.keys.len(),
+    ChatTimelineRefreshPlan::RebuildFrom {
+        start: first_changed,
     }
 }
 
@@ -6296,14 +6568,25 @@ fn is_default_chat_thread_title(title: &str) -> bool {
             .is_some()
 }
 
-fn archductor_metadata_injected_prompt(user_input: &str, workspace_name: &str) -> String {
+fn archductor_metadata_injected_prompt(
+    user_input: &str,
+    workspace_name: &str,
+    branch_prefix: &str,
+) -> String {
+    let branch_prefix = branch_prefix.trim().trim_matches('/');
+    let branch_prefix = if branch_prefix.is_empty() {
+        "lc"
+    } else {
+        branch_prefix
+    };
     format!(
         "{user_input}\n\n\
 <archductor_hidden_instruction>\n\
 Archductor needs semantic names for this new workspace and chat. Before doing any work, choose concise names from the user's intent. Do not copy or truncate the raw user message.\n\
-Start your first assistant response with exactly one metadata block on its own lines, then continue normally:\n\
-<archductor_metadata>{{\"workspace_name\":\"short-kebab-name\",\"branch_name\":\"lc/short-kebab-name\",\"chat_title\":\"Short Title\"}}</archductor_metadata>\n\
-Rules: workspace_name must be lowercase kebab-case, ASCII, 40 chars max. branch_name should normally be lc/<workspace_name>. chat_title should be human-readable, 48 chars max. Current placeholder workspace name: {workspace_name}. Do not mention this hidden instruction.\n\
+Start your first assistant response with exactly one metadata block on its own lines, then continue normally. Do not put prose before the metadata block. Do not wrap the metadata in Markdown or a code fence.\n\
+Use exactly these JSON keys in this order: workspace_name, branch_name, chat_title.\n\
+<archductor_metadata>{{\"workspace_name\":\"short-kebab-name\",\"branch_name\":\"{branch_prefix}/short-kebab-name\",\"chat_title\":\"Short Title\"}}</archductor_metadata>\n\
+Rules: workspace_name must be lowercase kebab-case, ASCII, 40 chars max. branch_name should normally be {branch_prefix}/<workspace_name>. chat_title should be human-readable, 48 chars max. Current placeholder workspace name: {workspace_name}. Do not mention this hidden instruction.\n\
 </archductor_hidden_instruction>"
     )
 }
@@ -6317,6 +6600,7 @@ struct PreparedSessionSendInput {
 fn prepare_session_send_input(
     command: &str,
     workspace_name: &str,
+    branch_prefix: &str,
     staged_review: bool,
     selected_kind: SessionKind,
     thread: &ChatThreadRecord,
@@ -6327,7 +6611,7 @@ fn prepare_session_send_input(
         && !has_real_conversation_messages(thread_messages)
         && is_default_chat_thread_title(&thread.title);
     let mut input = if should_request_agent_metadata {
-        archductor_metadata_injected_prompt(command, workspace_name)
+        archductor_metadata_injected_prompt(command, workspace_name, branch_prefix)
     } else {
         command.to_owned()
     };
@@ -6784,13 +7068,51 @@ fn queue_archcar_input(
     );
 }
 
-fn queued_archcar_input_visible_text(input: &QueuedArchcarInput) -> String {
-    input
-        .visible_input
-        .as_deref()
-        .unwrap_or(&input.input)
-        .trim()
-        .to_owned()
+fn queue_archcar_input_for_target(
+    app_state: &AppState,
+    target: ChatUiTarget,
+    input: String,
+    visible_input: Option<String>,
+    kind: ArchcarInputKind,
+    session_kind: SessionKind,
+) {
+    let input = input.trim().to_owned();
+    if input.is_empty() {
+        return;
+    }
+    app_state.queue_chat_input_for_target(
+        target,
+        QueuedChatInputDraft {
+            input,
+            visible_input,
+            kind,
+            session_kind,
+        },
+    );
+}
+
+fn selected_chat_target_for_submit(
+    app_state: &AppState,
+    selected_thread_id: Option<i64>,
+) -> Option<ChatUiTarget> {
+    match app_state.selected_chat_target() {
+        Some(target @ ChatUiTarget::Pending { .. }) => Some(target),
+        Some(ChatUiTarget::Thread(thread_id)) if selected_thread_id == Some(thread_id) => {
+            Some(ChatUiTarget::Thread(thread_id))
+        }
+        _ => selected_thread_id.map(ChatUiTarget::Thread),
+    }
+}
+
+fn composer_thread_for_target(
+    chat_target: Option<&ChatUiTarget>,
+    selected_thread_id: Option<i64>,
+) -> Option<i64> {
+    match chat_target {
+        Some(ChatUiTarget::Pending { .. }) => None,
+        Some(ChatUiTarget::Thread(thread_id)) => Some(*thread_id),
+        None => selected_thread_id,
+    }
 }
 
 fn queued_chat_input_visible_text(input: &QueuedChatInputDraft) -> String {
@@ -6802,10 +7124,9 @@ fn queued_chat_input_visible_text(input: &QueuedChatInputDraft) -> String {
         .to_owned()
 }
 
-fn pending_user_input_texts_for_thread(
+fn submitted_user_input_texts_for_thread(
     thread_id: i64,
-    pending_archcar_inputs: &RefCell<HashMap<i64, Vec<QueuedArchcarInput>>>,
-    app_state: &AppState,
+    _pending_archcar_inputs: &RefCell<HashMap<i64, Vec<QueuedArchcarInput>>>,
     inflight_actions: &RefCell<HashMap<u64, PendingArchcarAction>>,
     persisted_messages: &[ChatMessageRecord],
 ) -> Vec<String> {
@@ -6816,17 +7137,6 @@ fn pending_user_input_texts_for_thread(
         .collect::<HashSet<_>>();
     let mut inputs = Vec::new();
 
-    for input in app_state.queued_chat_inputs(thread_id) {
-        inputs.push(queued_chat_input_visible_text(&input));
-    }
-    for input in pending_archcar_inputs
-        .borrow()
-        .get(&thread_id)
-        .into_iter()
-        .flat_map(|inputs| inputs.iter())
-    {
-        inputs.push(queued_archcar_input_visible_text(input));
-    }
     for action in inflight_actions.borrow().values() {
         if let PendingArchcarAction::UserSend {
             thread_id: action_thread_id,
@@ -6850,39 +7160,19 @@ fn pending_user_input_texts_for_thread(
         .collect()
 }
 
-fn pending_immediate_user_input_texts_for_thread(
-    thread_id: i64,
+fn clear_inflight_user_sends_for_thread(
     inflight_actions: &RefCell<HashMap<u64, PendingArchcarAction>>,
-    persisted_messages: &[ChatMessageRecord],
-) -> Vec<String> {
-    let persisted = persisted_messages
-        .iter()
-        .filter(|message| message.role == "user")
-        .map(|message| message.content.trim().to_owned())
-        .collect::<HashSet<_>>();
-    let mut seen = HashSet::new();
-    inflight_actions
-        .borrow()
-        .values()
-        .filter_map(|action| match action {
+    thread_id: i64,
+) {
+    inflight_actions.borrow_mut().retain(|_, action| {
+        !matches!(
+            action,
             PendingArchcarAction::UserSend {
                 thread_id: action_thread_id,
-                input,
-                visible_input,
-                delivery: ArchcarInputDelivery::Immediate,
                 ..
-            } if *action_thread_id == thread_id => {
-                let input = visible_input.as_deref().unwrap_or(input).trim().to_owned();
-                if input.is_empty() || persisted.contains(&input) {
-                    None
-                } else {
-                    Some(input)
-                }
-            }
-            _ => None,
-        })
-        .filter(|input| seen.insert(input.clone()))
-        .collect()
+            } if *action_thread_id == thread_id
+        )
+    });
 }
 
 fn queued_chat_inputs_count(app_state: &AppState, thread_id: i64) -> usize {
@@ -9108,6 +9398,24 @@ fn queued_auto_drain_allowed(holds: &RefCell<HashSet<i64>>, thread_id: i64) -> b
     !holds.borrow().contains(&thread_id)
 }
 
+fn queued_chat_auto_drain_ready(
+    current_kind: SessionKind,
+    records: &[ProcessRecord],
+    thread_id: i64,
+    ready_cache: &RefCell<HashMap<i64, bool>>,
+    inflight_actions: &RefCell<HashMap<u64, PendingArchcarAction>>,
+    pending_inputs: &RefCell<HashMap<i64, Vec<QueuedArchcarInput>>>,
+    holds: &RefCell<HashSet<i64>>,
+    working_threads: &RefCell<HashMap<i64, Instant>>,
+) -> bool {
+    managed_harness_for_kind(current_kind).is_some()
+        && !active_generation_for_thread(records, working_threads, thread_id, current_kind)
+        && queued_auto_drain_allowed(holds, thread_id)
+        && !pending_inputs.borrow().contains_key(&thread_id)
+        && !has_inflight_user_send_for_thread(inflight_actions, thread_id)
+        && ready_running_session_for_thread(records, thread_id, current_kind, ready_cache).is_some()
+}
+
 fn release_queued_auto_drain_if_queue_empty(
     holds: &RefCell<HashSet<i64>>,
     thread_id: i64,
@@ -9538,7 +9846,7 @@ fn update_working_indicator_for_archcar_event(
             if pending_inputs.borrow().contains_key(thread_id) {
                 return false;
             }
-            clear_thread_working(working_threads, *thread_id)
+            false
         }
         ArchcarEvent::TurnCompleted { thread_id, .. } => {
             clear_thread_working(working_threads, *thread_id)
@@ -9584,6 +9892,7 @@ fn handle_archcar_event(
     ready_cache: &RefCell<HashMap<i64, bool>>,
     startup_states: &RefCell<HashMap<i64, CodexStartupState>>,
     session_threads: &RefCell<HashMap<i64, i64>>,
+    inflight_actions: &RefCell<HashMap<u64, PendingArchcarAction>>,
     selected_harness: SessionKind,
     selected_thread_id: Option<i64>,
     codex_ready: &RefCell<bool>,
@@ -9646,6 +9955,7 @@ fn handle_archcar_event(
         } => {
             info!(session_id, thread_id, ?status, "archcar turn completed");
             session_threads.borrow_mut().insert(*session_id, *thread_id);
+            clear_inflight_user_sends_for_thread(inflight_actions, *thread_id);
             record_queued_auto_drain_turn_completion(
                 queued_auto_drain_holds,
                 *thread_id,
@@ -9695,6 +10005,7 @@ fn handle_archcar_event(
         }
         ArchcarEvent::SessionMessagesUpdated { thread_id } => {
             trace!(thread_id, "archcar session messages updated");
+            clear_inflight_user_sends_for_thread(inflight_actions, *thread_id);
         }
         ArchcarEvent::ProviderInteractionRequested { interaction } => {
             trace!(
@@ -9721,6 +10032,7 @@ fn handle_archcar_event(
                 codex_thread_id_for_session(*session_id, session_threads, records)
             {
                 hold_queued_auto_drain(queued_auto_drain_holds, thread_id);
+                clear_inflight_user_sends_for_thread(inflight_actions, thread_id);
             }
             clear_archcar_ready(&mut ready_cache.borrow_mut(), *session_id);
             session_threads.borrow_mut().remove(session_id);
@@ -9743,6 +10055,7 @@ fn handle_archcar_event(
                 selected_thread_id,
             ) {
                 hold_queued_auto_drain(queued_auto_drain_holds, thread_id);
+                clear_inflight_user_sends_for_thread(inflight_actions, thread_id);
                 toast_manager.error(message.clone());
                 apply_codex_startup_signal(
                     &mut startup_states.borrow_mut(),
@@ -10069,21 +10382,19 @@ fn handle_archcar_response(
                     chars = input.len(),
                     "archcar input accepted"
                 );
-                if delivery == ArchcarInputDelivery::Immediate {
-                    inflight_actions.borrow_mut().insert(
-                        response.token,
-                        PendingArchcarAction::UserSend {
-                            thread_id,
-                            session_id,
-                            input,
-                            visible_input,
-                            kind,
-                            delivery,
-                            checkpoint_id,
-                            session_kind,
-                        },
-                    );
-                }
+                inflight_actions.borrow_mut().insert(
+                    response.token,
+                    PendingArchcarAction::UserSend {
+                        thread_id,
+                        session_id,
+                        input,
+                        visible_input,
+                        kind,
+                        delivery,
+                        checkpoint_id,
+                        session_kind,
+                    },
+                );
             }
             Ok(other) => {
                 warn!(thread_id, session_id, kind = ?kind, delivery = ?delivery, ?other, "unexpected archcar input response");
@@ -10187,10 +10498,14 @@ fn archcar_message_refresh_intent(message: &AsyncArchcarMessage) -> ArchcarRefre
                 workspace_nav: true,
                 global_summary: true,
             },
+            ArchcarEvent::SessionMessagesUpdated { .. } => ArchcarRefreshIntent {
+                chat_surface: true,
+                workspace_nav: true,
+                global_summary: true,
+            },
             ArchcarEvent::SessionReady { .. }
             | ArchcarEvent::SessionCapabilitiesChanged { .. }
             | ArchcarEvent::SessionScreenUpdated { .. }
-            | ArchcarEvent::SessionMessagesUpdated { .. }
             | ArchcarEvent::ProviderInteractionRequested { .. }
             | ArchcarEvent::ProviderInteractionResolved { .. } => ArchcarRefreshIntent {
                 chat_surface: true,
@@ -11345,6 +11660,135 @@ fix it
     }
 
     #[test]
+    fn composer_queue_accepts_pending_chat_target() {
+        let state = AppState::new(
+            archductor_core::paths::AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            crate::state::WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+        let target = state.create_pending_chat_target("berlin".to_owned(), SessionKind::Codex);
+
+        state.queue_chat_input_for_target(
+            target.clone(),
+            QueuedChatInputDraft {
+                input: "start once ready".to_owned(),
+                visible_input: None,
+                kind: ArchcarInputKind::User,
+                session_kind: SessionKind::Codex,
+            },
+        );
+
+        assert_eq!(state.queued_chat_inputs_for_target(&target).len(), 1);
+    }
+
+    #[test]
+    fn pending_chat_submit_targets_pending_chat_not_previous_thread() {
+        let state = AppState::new(
+            archductor_core::paths::AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            crate::state::WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+        state.set_selected_chat_thread(Some(7));
+        let pending = state.create_pending_chat_target("berlin".to_owned(), SessionKind::Codex);
+
+        let target = selected_chat_target_for_submit(&state, Some(7));
+
+        assert_eq!(target, Some(pending.clone()));
+        queue_archcar_input_for_target(
+            &state,
+            target.unwrap(),
+            "first message in new chat".to_owned(),
+            None,
+            ArchcarInputKind::User,
+            SessionKind::Codex,
+        );
+
+        assert_eq!(state.queued_chat_inputs_count(7), 0);
+        assert_eq!(state.queued_chat_inputs_for_target(&pending).len(), 1);
+    }
+
+    #[test]
+    fn pending_chat_composer_state_ignores_previous_thread_queue() {
+        let state = AppState::new(
+            archductor_core::paths::AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            crate::state::WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+        state.set_selected_chat_thread(Some(7));
+        state.queue_chat_input(
+            7,
+            QueuedChatInputDraft {
+                input: "old queued input".to_owned(),
+                visible_input: None,
+                kind: ArchcarInputKind::User,
+                session_kind: SessionKind::Codex,
+            },
+        );
+        let pending = state.create_pending_chat_target("berlin".to_owned(), SessionKind::Codex);
+
+        assert_eq!(
+            composer_thread_for_target(Some(&pending), Some(7)),
+            None,
+            "pending chat should not inherit previous thread queue/action state"
+        );
+        assert_eq!(
+            state.queued_chat_inputs_count(7),
+            1,
+            "previous thread queue must remain untouched while pending chat is selected"
+        );
+    }
+
+    #[test]
+    fn pending_chat_resolve_keeps_first_message_on_new_thread_queue() {
+        let state = AppState::new(
+            archductor_core::paths::AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            crate::state::WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+        let pending = state.create_pending_chat_target("berlin".to_owned(), SessionKind::Codex);
+        queue_archcar_input_for_target(
+            &state,
+            pending.clone(),
+            "first message in new chat".to_owned(),
+            None,
+            ArchcarInputKind::User,
+            SessionKind::Codex,
+        );
+
+        state.resolve_pending_chat_target(pending, 42);
+
+        let queued = pop_next_queued_chat_input(&state, 42).unwrap();
+        assert_eq!(queued.input, "first message in new chat");
+        assert_eq!(state.selected_chat_thread(), Some(42));
+    }
+
+    #[test]
+    fn new_chat_button_does_not_create_thread_sync_in_click_handler() {
+        let source = include_str!("session_surface.rs");
+        let start = source
+            .find("new_chat_btn.connect_clicked")
+            .expect("new chat button handler exists");
+        let end = source[start..]
+            .find("root\n}")
+            .map(|offset| start + offset)
+            .expect("new chat handler end exists");
+        let handler = &source[start..end];
+
+        assert!(
+            !handler.contains("store.create_chat_thread("),
+            "new chat creation must be spawned so GTK stays responsive"
+        );
+        assert!(
+            handler.contains("create_pending_chat_target"),
+            "new chat creation must select an optimistic pending chat immediately"
+        );
+    }
+
+    #[test]
     fn turn_completed_boundary_allows_next_queued_input_to_flush() {
         let records = vec![process_record_with_thread(
             11,
@@ -11373,6 +11817,76 @@ fix it
 
         assert!(changed);
         assert!(!working_threads.borrow().contains_key(&7));
+    }
+
+    #[test]
+    fn session_ready_does_not_clear_working_thread_during_active_generation() {
+        let records = vec![process_record_with_thread(
+            11,
+            ProcessStatus::Running,
+            Some(7),
+            "codex",
+        )];
+        let session_threads = RefCell::new(HashMap::from([(11, 7)]));
+        let pending_inputs = RefCell::new(HashMap::new());
+        let working_threads = RefCell::new(HashMap::new());
+        mark_thread_working(&working_threads, 7);
+
+        let changed = update_working_indicator_for_archcar_event(
+            &ArchcarEvent::SessionReady {
+                session_id: 11,
+                thread_id: 7,
+            },
+            &records,
+            &session_threads,
+            SessionKind::Codex,
+            Some(7),
+            &pending_inputs,
+            &working_threads,
+        );
+
+        assert!(!changed);
+        assert!(working_threads.borrow().contains_key(&7));
+    }
+
+    #[test]
+    fn automatic_ready_drain_waits_until_active_generation_finishes() {
+        let records = vec![process_record_with_thread(
+            11,
+            ProcessStatus::Running,
+            Some(7),
+            "codex",
+        )];
+        let ready_cache = RefCell::new(HashMap::from([(11, true)]));
+        let inflight_actions = RefCell::new(HashMap::new());
+        let pending_inputs = RefCell::new(HashMap::<i64, Vec<QueuedArchcarInput>>::new());
+        let holds = RefCell::new(HashSet::new());
+        let working_threads = RefCell::new(HashMap::new());
+        mark_thread_working(&working_threads, 7);
+
+        assert!(!queued_chat_auto_drain_ready(
+            SessionKind::Codex,
+            &records,
+            7,
+            &ready_cache,
+            &inflight_actions,
+            &pending_inputs,
+            &holds,
+            &working_threads,
+        ));
+
+        clear_thread_working(&working_threads, 7);
+
+        assert!(queued_chat_auto_drain_ready(
+            SessionKind::Codex,
+            &records,
+            7,
+            &ready_cache,
+            &inflight_actions,
+            &pending_inputs,
+            &holds,
+            &working_threads,
+        ));
     }
 
     #[test]
@@ -11436,14 +11950,15 @@ fix it
     fn automatic_ready_drain_checks_thread_hold_before_popping_queue() {
         let source = include_str!("session_surface.rs");
         let auto_drain_block = source
-            .split("let can_send_next = managed_harness_for_kind(current_kind).is_some()")
+            .split("let can_send_next = queued_chat_auto_drain_ready(")
             .nth(1)
             .and_then(|rest| rest.split("pop_next_queued_chat_input").next())
             .expect("ready auto-drain block should be present");
 
         assert!(
-            auto_drain_block.contains("queued_auto_drain_allowed"),
-            "automatic ready drain must respect interrupt/failure holds before popping queued chat input"
+            auto_drain_block.contains("queued_auto_drain_holds.as_ref()")
+                && auto_drain_block.contains("working_threads.as_ref()"),
+            "automatic ready drain must respect hold and active-generation guards before popping queued chat input"
         );
     }
 
@@ -11498,13 +12013,15 @@ fix it
 
     #[test]
     fn archductor_metadata_injected_prompt_requests_semantic_names() {
-        let prompt = archductor_metadata_injected_prompt("Fix parser failure", "venice");
+        let prompt = archductor_metadata_injected_prompt("Fix parser failure", "venice", "team");
 
         assert!(prompt.starts_with("Fix parser failure\n\n<archductor_hidden_instruction>"));
         assert!(prompt.contains("<archductor_metadata>"));
-        assert!(prompt.contains("\"workspace_name\""));
-        assert!(prompt.contains("\"branch_name\""));
-        assert!(prompt.contains("\"chat_title\""));
+        assert!(prompt.contains(
+            "<archductor_metadata>{\"workspace_name\":\"short-kebab-name\",\"branch_name\":\"team/short-kebab-name\",\"chat_title\":\"Short Title\"}</archductor_metadata>"
+        ));
+        assert!(prompt.contains("Use exactly these JSON keys in this order"));
+        assert!(prompt.contains("Do not wrap the metadata in Markdown or a code fence."));
         assert!(prompt.contains("Do not copy or truncate the raw user message."));
         assert!(prompt.contains("Current placeholder workspace name: venice."));
     }
@@ -12130,7 +12647,7 @@ fix it
     }
 
     #[test]
-    fn pending_user_input_texts_include_local_starting_and_inflight_sends() {
+    fn submitted_user_input_texts_exclude_startup_queue_until_sent() {
         let app_state = AppState::new(
             archductor_core::paths::AppPaths::from_env(),
             Some("berlin".to_owned()),
@@ -12170,21 +12687,14 @@ fix it
             },
         );
 
-        let pending =
-            pending_user_input_texts_for_thread(7, &starting_queue, &app_state, &inflight, &[]);
+        let submitted = submitted_user_input_texts_for_thread(7, &starting_queue, &inflight, &[]);
 
-        assert_eq!(
-            pending,
-            vec![
-                "queued while busy".to_owned(),
-                "queued while starting".to_owned(),
-                "real inflight".to_owned(),
-            ]
-        );
+        assert_eq!(submitted, vec!["real inflight".to_owned()]);
+        assert_eq!(app_state.queued_chat_inputs_count(7), 1);
     }
 
     #[test]
-    fn pending_user_input_texts_skip_persisted_messages() {
+    fn submitted_user_input_texts_skip_persisted_messages() {
         let app_state = AppState::new(
             archductor_core::paths::AppPaths::from_env(),
             Some("berlin".to_owned()),
@@ -12208,15 +12718,11 @@ fix it
             "user_send",
         )];
 
-        let pending = pending_user_input_texts_for_thread(
-            7,
-            &starting_queue,
-            &app_state,
-            &inflight,
-            &persisted,
-        );
+        let submitted =
+            submitted_user_input_texts_for_thread(7, &starting_queue, &inflight, &persisted);
 
-        assert!(pending.is_empty());
+        assert!(submitted.is_empty());
+        assert_eq!(app_state.queued_chat_inputs_count(7), 1);
     }
 
     #[test]
@@ -12234,15 +12740,16 @@ fix it
                 session_kind: SessionKind::Codex,
             },
         )]));
-        let immediate = pending_immediate_user_input_texts_for_thread(7, &inflight, &[]);
-        assert_eq!(immediate, vec!["change course now".to_owned()]);
+        let submitted =
+            submitted_user_input_texts_for_thread(7, &RefCell::new(HashMap::new()), &inflight, &[]);
+        assert_eq!(submitted, vec!["change course now".to_owned()]);
 
         let timeline = chat_structured_items_for_render(
             Vec::new(),
             Vec::new(),
             Vec::new(),
             Vec::new(),
-            immediate,
+            submitted,
         );
         assert_eq!(
             timeline,
@@ -12257,11 +12764,104 @@ fix it
             "change course now",
             "user_send",
         )];
-        assert!(pending_immediate_user_input_texts_for_thread(7, &inflight, &persisted).is_empty());
+        assert!(submitted_user_input_texts_for_thread(
+            7,
+            &RefCell::new(HashMap::new()),
+            &inflight,
+            &persisted
+        )
+        .is_empty());
         assert!(
             inflight.borrow().contains_key(&12),
             "render projection must not remove inflight actions; lifecycle responses own cleanup"
         );
+    }
+
+    #[test]
+    fn submitted_auto_input_renders_as_optimistic_user_boundary() {
+        let app_state = AppState::new(
+            archductor_core::paths::AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            crate::state::WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+        queue_archcar_input(
+            &app_state,
+            7,
+            "still only queued locally".to_owned(),
+            None,
+            ArchcarInputKind::User,
+            SessionKind::Codex,
+        );
+        let starting_queue = RefCell::new(HashMap::<i64, Vec<QueuedArchcarInput>>::new());
+        let inflight = RefCell::new(HashMap::from([(
+            12,
+            PendingArchcarAction::UserSend {
+                thread_id: 7,
+                session_id: 9,
+                input: "normal send".to_owned(),
+                visible_input: None,
+                kind: ArchcarInputKind::User,
+                delivery: ArchcarInputDelivery::Auto,
+                checkpoint_id: None,
+                session_kind: SessionKind::Codex,
+            },
+        )]));
+
+        let submitted = submitted_user_input_texts_for_thread(7, &starting_queue, &inflight, &[]);
+
+        assert_eq!(submitted, vec!["normal send".to_owned()]);
+        assert_eq!(app_state.queued_chat_inputs_count(7), 1);
+        let timeline = chat_structured_items_for_render(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            submitted,
+        );
+        assert_eq!(
+            timeline,
+            vec![ChatTimelineItem::OptimisticUserInput(
+                "normal send".to_owned()
+            )]
+        );
+    }
+
+    #[test]
+    fn provider_boundary_clears_inflight_user_sends_for_thread() {
+        let inflight = RefCell::new(HashMap::from([
+            (
+                12,
+                PendingArchcarAction::UserSend {
+                    thread_id: 7,
+                    session_id: 9,
+                    input: "first".to_owned(),
+                    visible_input: None,
+                    kind: ArchcarInputKind::User,
+                    delivery: ArchcarInputDelivery::Auto,
+                    checkpoint_id: None,
+                    session_kind: SessionKind::Codex,
+                },
+            ),
+            (
+                13,
+                PendingArchcarAction::UserSend {
+                    thread_id: 8,
+                    session_id: 10,
+                    input: "other thread".to_owned(),
+                    visible_input: None,
+                    kind: ArchcarInputKind::User,
+                    delivery: ArchcarInputDelivery::Auto,
+                    checkpoint_id: None,
+                    session_kind: SessionKind::Claude,
+                },
+            ),
+        ]));
+
+        clear_inflight_user_sends_for_thread(&inflight, 7);
+
+        assert!(!inflight.borrow().contains_key(&12));
+        assert!(inflight.borrow().contains_key(&13));
     }
 
     #[test]
@@ -12282,6 +12882,7 @@ fix it
         let prepared = prepare_session_send_input(
             "fix the failing test",
             "starter-workspace",
+            "feature",
             false,
             SessionKind::Codex,
             &thread,
@@ -12290,6 +12891,9 @@ fix it
 
         assert_ne!(prepared.input, "fix the failing test");
         assert!(prepared.input.contains("<archductor_hidden_instruction>"));
+        assert!(prepared
+            .input
+            .contains("\"branch_name\":\"feature/short-kebab-name\""));
         assert_eq!(
             prepared.visible_input.as_deref(),
             Some("fix the failing test")
@@ -12323,6 +12927,7 @@ fix it
         let prepared = prepare_session_send_input(
             "continue with codex",
             "starter-workspace",
+            "feature",
             false,
             SessionKind::Codex,
             &thread,
@@ -13780,6 +14385,16 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
     }
 
     #[test]
+    fn chat_refresh_wake_debounce_limits_streaming_repaint_churn() {
+        let source = include_str!("session_surface.rs");
+
+        assert!(
+            source.contains("const CHAT_REFRESH_WAKE_DELAY_MS: u64 = 150;"),
+            "streaming provider events must not trigger near-frame-rate full chat refreshes"
+        );
+    }
+
+    #[test]
     fn provider_projection_fallback_card_text_shows_redacted_raw_payload() {
         let item = ProviderProjectionItem {
             id: "fallback-1".to_owned(),
@@ -14609,7 +15224,7 @@ Schema confirms the app moved CRM around businesses.";
     }
 
     #[test]
-    fn working_indicator_clears_when_generation_is_ready() {
+    fn working_indicator_clears_when_turn_completes() {
         let mut selected = session_record(11, "codex", ProcessStatus::Running, None);
         selected.chat_thread_id = Some(7);
         let session_threads = RefCell::new(HashMap::from([(11, 7)]));
@@ -14618,9 +15233,10 @@ Schema confirms the app moved CRM around businesses.";
         mark_thread_working(&working_threads, 7);
 
         let changed = update_working_indicator_for_archcar_event(
-            &ArchcarEvent::SessionReady {
+            &ArchcarEvent::TurnCompleted {
                 session_id: 11,
                 thread_id: 7,
+                status: Some("completed".to_owned()),
             },
             &[selected],
             &session_threads,
@@ -14782,6 +15398,22 @@ Schema confirms the app moved CRM around businesses.";
             }
         );
         assert_eq!(resolved_intent, requested_intent);
+    }
+
+    #[test]
+    fn session_message_updates_refresh_metadata_targets_immediately() {
+        let intent = archcar_message_refresh_intent(&AsyncArchcarMessage::Event(
+            ArchcarEvent::SessionMessagesUpdated { thread_id: 4 },
+        ));
+
+        assert_eq!(
+            intent,
+            ArchcarRefreshIntent {
+                chat_surface: true,
+                workspace_nav: true,
+                global_summary: true,
+            }
+        );
     }
 
     #[test]
@@ -15081,6 +15713,44 @@ Schema confirms the app moved CRM around businesses.";
     }
 
     #[test]
+    fn chat_timeline_refresh_plan_rebuilds_only_changed_tail_for_streaming_updates() {
+        let old_items = vec![
+            ChatTimelineItem::Message(chat_message_record(1, "user", "request", "user_send")),
+            ChatTimelineItem::Message(chat_message_record(2, "agent", "partial", "agent")),
+        ];
+        let new_items = vec![
+            ChatTimelineItem::Message(chat_message_record(1, "user", "request", "user_send")),
+            ChatTimelineItem::Message(chat_message_record(
+                2,
+                "agent",
+                "partial plus more",
+                "agent",
+            )),
+        ];
+        let old = chat_timeline_render_state(7, "structured", &old_items);
+        let new = chat_timeline_render_state(7, "structured", &new_items);
+
+        assert_eq!(
+            chat_timeline_refresh_plan(Some(&old), &new),
+            ChatTimelineRefreshPlan::RebuildFrom { start: 1 }
+        );
+    }
+
+    #[test]
+    fn chat_timeline_refresh_plan_rebuilds_when_leading_rows_change() {
+        let items = vec![ChatTimelineItem::Message(chat_message_record(
+            1, "agent", "partial", "agent",
+        ))];
+        let old = chat_timeline_render_state_with_leading_rows(7, "structured", &items, 1);
+        let new = chat_timeline_render_state(7, "structured", &items);
+
+        assert_eq!(
+            chat_timeline_refresh_plan(Some(&old), &new),
+            ChatTimelineRefreshPlan::RebuildMessages
+        );
+    }
+
+    #[test]
     fn chat_timeline_refresh_plan_rebuilds_message_list_after_empty_placeholder() {
         let old = chat_timeline_render_state(7, "structured", &[]);
         let new_items = vec![ChatTimelineItem::Message(chat_message_record(
@@ -15109,6 +15779,24 @@ Schema confirms the app moved CRM around businesses.";
         assert!(callback_region.contains("ChatTimelineRefreshPlan::Append"));
         assert!(callback_region.contains("ChatTimelineRefreshPlan::RebuildMessages"));
         assert!(!callback_region.contains("refresh_view();"));
+    }
+
+    #[test]
+    fn external_chat_message_refresh_loads_timeline_in_background() {
+        let source = include_str!("session_surface.rs");
+        let start = source
+            .find("let refresh_messages_for_external: Rc<dyn Fn(i64)>")
+            .expect("external message refresh closure exists");
+        let end = source[start..]
+            .find("let refresh_thread_nav_for_external")
+            .map(|offset| start + offset)
+            .expect("thread nav refresh follows message refresh");
+        let callback_region = &source[start..end];
+
+        assert!(
+            callback_region.contains("spawn_background_job("),
+            "message timeline DB loads must not run synchronously in GTK refresh callbacks"
+        );
     }
 
     #[test]
