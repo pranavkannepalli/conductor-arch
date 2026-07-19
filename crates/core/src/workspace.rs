@@ -1712,7 +1712,7 @@ impl WorkspaceStore {
             validate_workspace_artifact_cleanup_target(&repository, &workspace)?;
         }
 
-        self.stop_workspace_processes(workspace.id)?;
+        self.stop_workspace_processes(&workspace)?;
 
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| -> Result<()> {
@@ -2104,7 +2104,7 @@ impl WorkspaceStore {
         let repository = self.load_repository_by_id(workspace.repository_id)?;
         let settings = self.repository_settings(&repository.root_path)?;
 
-        self.stop_workspace_processes(workspace.id)?;
+        self.stop_workspace_processes(&workspace)?;
 
         if let Some(archive_script) = &settings.scripts.archive {
             if workspace.path.exists() {
@@ -2149,7 +2149,7 @@ impl WorkspaceStore {
         Ok(archived)
     }
 
-    fn stop_workspace_processes(&self, workspace_id: i64) -> Result<()> {
+    fn stop_workspace_processes(&self, workspace: &Workspace) -> Result<()> {
         let mut stmt = self.conn.prepare(
             "SELECT id, workspace_id, chat_thread_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata, session_resume_id
              FROM processes
@@ -2157,7 +2157,7 @@ impl WorkspaceStore {
         )?;
         let processes = stmt
             .query_map(
-                params![workspace_id, ProcessStatus::Running.as_str()],
+                params![workspace.id, ProcessStatus::Running.as_str()],
                 row_to_process,
             )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -2174,8 +2174,8 @@ impl WorkspaceStore {
                 ],
             )?;
             self.record_workspace_event(
-                workspace_id,
-                &self.workspace_name_by_id(workspace_id)?,
+                workspace.id,
+                &workspace.name,
                 "session.stopped",
                 &format!("Stopped session process #{}", process.id),
             )?;
@@ -2517,12 +2517,14 @@ impl WorkspaceStore {
             params![ProcessStatus::Stopped.as_str(), now, exit_code, process_id,],
         )?;
         let process = self.get_process(process_id)?;
-        self.record_workspace_event(
-            process.workspace_id,
-            &self.workspace_name_by_id(process.workspace_id)?,
-            "session.stopped",
-            &format!("Stopped session process #{}", process.id),
-        )?;
+        if let Some(workspace_name) = self.workspace_name_by_id_optional(process.workspace_id)? {
+            self.record_workspace_event(
+                process.workspace_id,
+                &workspace_name,
+                "session.stopped",
+                &format!("Stopped session process #{}", process.id),
+            )?;
+        }
         Ok(process)
     }
 
@@ -2537,12 +2539,14 @@ impl WorkspaceStore {
             params![ProcessStatus::Exited.as_str(), now, exit_code, process_id,],
         )?;
         let process = self.get_process(process_id)?;
-        self.record_workspace_event(
-            process.workspace_id,
-            &self.workspace_name_by_id(process.workspace_id)?,
-            "session.exited",
-            &format!("Session process #{} exited", process.id),
-        )?;
+        if let Some(workspace_name) = self.workspace_name_by_id_optional(process.workspace_id)? {
+            self.record_workspace_event(
+                process.workspace_id,
+                &workspace_name,
+                "session.exited",
+                &format!("Session process #{} exited", process.id),
+            )?;
+        }
         Ok(process)
     }
 
@@ -7716,6 +7720,15 @@ mutation($threadId: ID!) {{
             .query_row("SELECT name FROM workspaces WHERE id = ?1", [id], |row| {
                 row.get(0)
             })
+            .with_context(|| format!("load workspace name for id {id}"))
+    }
+
+    fn workspace_name_by_id_optional(&self, id: i64) -> Result<Option<String>> {
+        self.conn
+            .query_row("SELECT name FROM workspaces WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .optional()
             .with_context(|| format!("load workspace name for id {id}"))
     }
 
@@ -22545,6 +22558,53 @@ spotlight_testing = true
             .unwrap()
             .len();
         assert_eq!(reread_commit_count, commit_count);
+    }
+
+    #[test]
+    fn stale_session_exit_after_workspace_delete_does_not_report_missing_workspace_name() {
+        let (_temp, store) = test_workspace_store();
+        let workspace = store.get_by_name("berlin").unwrap();
+        let launch = store.session_launch("berlin", SessionKind::Shell).unwrap();
+        let process = store
+            .record_session_process("berlin", &launch, exited_child_pid())
+            .unwrap();
+
+        store
+            .conn
+            .execute_batch("PRAGMA foreign_keys = OFF")
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "DELETE FROM workspaces WHERE id = ?1",
+                params![workspace.id],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute_batch("PRAGMA foreign_keys = ON")
+            .unwrap();
+
+        let process = store
+            .mark_session_process_exited(process.id, Some(0))
+            .unwrap();
+
+        assert_eq!(process.status, ProcessStatus::Exited);
+    }
+
+    #[test]
+    fn workspace_delete_stops_sessions_without_reloading_workspace_name_by_id() {
+        let source = include_str!("workspace.rs");
+        let stop_workspace_processes = source
+            .split("fn stop_workspace_processes")
+            .nth(1)
+            .and_then(|source| source.split("fn delete_workspace_rows").next())
+            .expect("workspace source should contain stop_workspace_processes before delete rows");
+
+        assert!(
+            !stop_workspace_processes.contains("workspace_name_by_id"),
+            "workspace delete should record stop events from the loaded workspace snapshot"
+        );
     }
 
     #[test]
