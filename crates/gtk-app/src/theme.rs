@@ -546,6 +546,13 @@ button.ui-button-sm {
     padding: 5px 10px;
 }
 
+button.icon-button.ui-button-sm,
+button.ui-button-icon.ui-button-sm {
+    padding: 0;
+    min-width: 30px;
+    min-height: 30px;
+}
+
 button.ui-button-md {
     min-height: 34px;
     padding: 7px 12px;
@@ -1725,6 +1732,23 @@ button.ws-tab-shell {
 .ws-tab-shell:hover .ws-tab-label,
 .ws-tab-shell:hover .ws-tab-close-icon {
     color: #c6c6c6;
+}
+.ws-tab-shell.ws-tab-running {
+    border-bottom-color: #4f8cff;
+}
+.ws-tab-shell.ws-tab-running .ws-tab-label,
+.ws-tab-shell.ws-tab-running .ws-tab-close-icon {
+    color: #d7e5ff;
+    font-weight: 500;
+}
+.ws-tab-shell.ws-tab-unread {
+    background-color: #242424;
+    border-bottom-color: #f0c36a;
+}
+.ws-tab-shell.ws-tab-unread .ws-tab-label,
+.ws-tab-shell.ws-tab-unread .ws-tab-close-icon {
+    color: #f2f2f2;
+    font-weight: 600;
 }
 .ws-tab-shell.ws-tab-active {
     background-color: #242424;
@@ -3251,6 +3275,8 @@ mod tests {
             "button.ui-button-flat",
             "button.ui-button-destructive",
             "button.ui-button-icon",
+            ".ws-tab-shell.ws-tab-running",
+            ".ws-tab-shell.ws-tab-unread",
             ".text-page-title",
             ".text-section-title",
             ".text-mono",
@@ -3260,6 +3286,27 @@ mod tests {
                 "missing shared class {class_name}"
             );
         }
+    }
+
+    #[test]
+    fn compact_icon_button_padding_wins_after_small_button_rules() {
+        let css = app_css();
+        let small_rule = css
+            .find("button.ui-button-sm")
+            .expect("small button rule exists");
+        let compact_icon_rule = css[small_rule..]
+            .find("button.icon-button.ui-button-sm,\nbutton.ui-button-icon.ui-button-sm")
+            .map(|offset| small_rule + offset)
+            .expect("compact icon button rule follows small button rule");
+        assert!(compact_icon_rule > small_rule);
+
+        let compact_icon_block = selector_block(
+            css,
+            "button.icon-button.ui-button-sm,\nbutton.ui-button-icon.ui-button-sm",
+        );
+        assert!(compact_icon_block.contains("padding: 0;"));
+        assert!(compact_icon_block.contains("min-width: 30px;"));
+        assert!(compact_icon_block.contains("min-height: 30px;"));
     }
 
     #[test]

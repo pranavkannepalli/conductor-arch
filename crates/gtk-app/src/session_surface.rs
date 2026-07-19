@@ -113,6 +113,24 @@ pub(crate) fn chat_refresh_kind_for_event(event: &RefreshEvent) -> ChatRefreshKi
     }
 }
 
+fn dispatch_chat_surface_refresh_kind(
+    kind: ChatRefreshKind,
+    selected_thread: Option<i64>,
+    refresh_full: &dyn Fn(),
+    refresh_messages: &dyn Fn(i64),
+    refresh_thread_nav: &dyn Fn(),
+) {
+    match kind {
+        ChatRefreshKind::Full => refresh_full(),
+        ChatRefreshKind::Messages { thread_id } => {
+            if selected_thread == Some(thread_id) {
+                refresh_messages(thread_id);
+            }
+        }
+        ChatRefreshKind::ThreadNav => refresh_thread_nav(),
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ChatRefreshOutcome {
     pub messages_changed: bool,
@@ -2028,7 +2046,24 @@ pub fn agent_session_panel(
     if let Some(external_chat_tabs) = external_chat_tabs.as_ref() {
         if let Some(register_refresh) = external_chat_tabs.on_chat_surface_refresh_ready.as_ref() {
             let refresh_view_for_external = refresh_view.clone();
-            register_refresh(Rc::new(move |_| refresh_view_for_external()));
+            let refresh_messages_for_external: Rc<dyn Fn(i64)> = {
+                let refresh_view = refresh_view.clone();
+                Rc::new(move |thread_id| {
+                    let _ = thread_id;
+                    refresh_view();
+                })
+            };
+            let refresh_thread_nav_for_external = refresh_view.clone();
+            let selected_thread_for_external = selected_thread.clone();
+            register_refresh(Rc::new(move |kind| {
+                dispatch_chat_surface_refresh_kind(
+                    kind,
+                    *selected_thread_for_external.borrow(),
+                    refresh_view_for_external.as_ref(),
+                    refresh_messages_for_external.as_ref(),
+                    refresh_thread_nav_for_external.as_ref(),
+                );
+            }));
         }
     }
     install_archcar_wake(&root, &archcar_bridge, refresh_view.clone());
@@ -14757,6 +14792,62 @@ Schema confirms the app moved CRM around businesses.";
             chat_refresh_kind_for_event(&event),
             ChatRefreshKind::ThreadNav
         );
+    }
+
+    #[test]
+    fn chat_surface_refresh_dispatch_uses_kind_specific_paths() {
+        let full = Cell::new(0);
+        let messages = RefCell::new(Vec::new());
+        let thread_nav = Cell::new(0);
+
+        dispatch_chat_surface_refresh_kind(
+            ChatRefreshKind::Messages { thread_id: 42 },
+            Some(42),
+            &|| full.set(full.get() + 1),
+            &|thread_id| messages.borrow_mut().push(thread_id),
+            &|| thread_nav.set(thread_nav.get() + 1),
+        );
+        dispatch_chat_surface_refresh_kind(
+            ChatRefreshKind::Messages { thread_id: 99 },
+            Some(42),
+            &|| full.set(full.get() + 1),
+            &|thread_id| messages.borrow_mut().push(thread_id),
+            &|| thread_nav.set(thread_nav.get() + 1),
+        );
+        dispatch_chat_surface_refresh_kind(
+            ChatRefreshKind::ThreadNav,
+            Some(42),
+            &|| full.set(full.get() + 1),
+            &|thread_id| messages.borrow_mut().push(thread_id),
+            &|| thread_nav.set(thread_nav.get() + 1),
+        );
+        dispatch_chat_surface_refresh_kind(
+            ChatRefreshKind::Full,
+            Some(42),
+            &|| full.set(full.get() + 1),
+            &|thread_id| messages.borrow_mut().push(thread_id),
+            &|| thread_nav.set(thread_nav.get() + 1),
+        );
+
+        assert_eq!(*messages.borrow(), vec![42]);
+        assert_eq!(thread_nav.get(), 1);
+        assert_eq!(full.get(), 1);
+    }
+
+    #[test]
+    fn external_chat_surface_refresh_callback_uses_received_kind() {
+        let source = include_str!("session_surface.rs");
+        let start = source
+            .find("register_refresh(Rc::new(move |kind|")
+            .expect("external refresh callback registers with kind");
+        let end = source[start..]
+            .find("install_archcar_wake")
+            .map(|offset| start + offset)
+            .expect("archcar wake follows refresh registration");
+        let callback_region = &source[start..end];
+
+        assert!(callback_region.contains("dispatch_chat_surface_refresh_kind("));
+        assert!(!callback_region.contains("move |_|"));
     }
 
     #[test]
