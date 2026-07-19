@@ -25,6 +25,42 @@ use crate::state::{AppPage, AppState, WorkspaceTab};
 use crate::title_case_workspace;
 use crate::toast::{surface_label_error, ToastManager};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SidebarWorkspaceSelection {
+    Ready { default_tab: Option<WorkspaceTab> },
+    Stale,
+    Unavailable { message: String },
+}
+
+enum SidebarWorkspaceLookup {
+    Ready { default_visible_tab: Option<String> },
+    MissingWorkspace,
+}
+
+fn validate_sidebar_workspace_selection<F>(
+    state: &AppState,
+    workspace: &str,
+    load_defaults: F,
+) -> SidebarWorkspaceSelection
+where
+    F: FnOnce(&str) -> anyhow::Result<SidebarWorkspaceLookup>,
+{
+    match load_defaults(workspace) {
+        Ok(SidebarWorkspaceLookup::Ready {
+            default_visible_tab,
+        }) => SidebarWorkspaceSelection::Ready {
+            default_tab: default_visible_tab.and_then(|tab| WorkspaceTab::from_config(&tab)),
+        },
+        Ok(SidebarWorkspaceLookup::MissingWorkspace) => {
+            state.remove_workspace_from_navigation(workspace, AppPage::Dashboard);
+            SidebarWorkspaceSelection::Stale
+        }
+        Err(err) => SidebarWorkspaceSelection::Unavailable {
+            message: err.to_string(),
+        },
+    }
+}
+
 pub(crate) fn build_app_sidebar(
     app_state: &AppState,
     refresh_hub: RefreshHub,
@@ -502,6 +538,7 @@ pub(crate) fn build_app_sidebar(
     let refresh_workspace_select = refresh_workspace.clone();
     let archcar_paths = app_state.paths.clone();
     let restoring_workspace_selection_select = restoring_workspace_selection.clone();
+    let toast_select = toast_manager.clone();
     list.connect_row_selected(move |_, row| {
         guarded_gtk_callback((), || {
             if !workspace_row_selection_should_open_workspace(
@@ -517,6 +554,29 @@ pub(crate) fn build_app_sidebar(
             }) else {
                 return;
             };
+            let default_tab =
+                match validate_sidebar_workspace_selection(&state_select, &name, |workspace| {
+                    WorkspaceStore::open_app(db_path_select.clone()).and_then(|store| {
+                        if !store.workspace_exists_by_name(workspace)? {
+                            return Ok(SidebarWorkspaceLookup::MissingWorkspace);
+                        }
+                        store.workspace_view_defaults(workspace).map(|defaults| {
+                            SidebarWorkspaceLookup::Ready {
+                                default_visible_tab: defaults.default_visible_tab,
+                            }
+                        })
+                    })
+                }) {
+                    SidebarWorkspaceSelection::Ready { default_tab } => default_tab,
+                    SidebarWorkspaceSelection::Stale => {
+                        refresh_select.refresh_event(RefreshEvent::WorkspaceInventoryChanged);
+                        return;
+                    }
+                    SidebarWorkspaceSelection::Unavailable { message } => {
+                        toast_select.error(format!("Open workspace failed: {message}"));
+                        return;
+                    }
+                };
             spawn_archcar_request(
                 archcar_paths.clone(),
                 ArchcarRequest::EnsureWorkspaceDefaultSession {
@@ -525,11 +585,6 @@ pub(crate) fn build_app_sidebar(
                     harness: None,
                 },
             );
-            let default_tab = WorkspaceStore::open_app(db_path_select.clone())
-                .and_then(|store| store.workspace_view_defaults(&name))
-                .ok()
-                .and_then(|defaults| defaults.default_visible_tab)
-                .and_then(|tab| WorkspaceTab::from_config(&tab));
             state_select.navigate_to_workspace_with_default_tab(Some(name), default_tab);
             refresh_view_preferences_select();
             refresh_workspace_select();
@@ -1596,10 +1651,11 @@ fn relative_time(ts: &str) -> String {
 mod tests {
     use super::{
         primary_sidebar_nav_labels, sidebar_should_restore_workspace_selection,
-        workspace_context_actions, workspace_row_selection_should_open_workspace,
-        workspace_status_allows_sidebar_actions,
+        validate_sidebar_workspace_selection, workspace_context_actions,
+        workspace_row_selection_should_open_workspace, workspace_status_allows_sidebar_actions,
+        SidebarWorkspaceLookup, SidebarWorkspaceSelection,
     };
-    use crate::state::AppPage;
+    use crate::state::{AppPage, AppState, WorkspaceTab};
 
     #[test]
     fn primary_sidebar_nav_labels_gate_session_logs_under_history() {
@@ -1673,5 +1729,72 @@ mod tests {
         assert!(!production_source.contains(
             "state.remove_workspace_from_navigation(\n                                                &workspace_name,\n                                                AppPage::Dashboard,\n                                            );\n                                            if was_selected_workspace {\n                                                stack.set_visible_child_name(\"dashboard\");\n                                            }\n                                            if let Some(list) =\n                                                row.parent().and_downcast::<ListBox>()\n                                            {\n                                                list.remove(&row);\n                                            }\n                                            refresh_view_preferences();\n                                            refresh_workspace();"
         ));
+    }
+
+    #[test]
+    fn stale_sidebar_workspace_selection_clears_navigation_without_spawn_action() {
+        let state = AppState::new(
+            archductor_core::paths::AppPaths::from_env(),
+            Some("deleted".to_owned()),
+            WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+
+        let selection = validate_sidebar_workspace_selection(&state, "deleted", |_| {
+            Ok(SidebarWorkspaceLookup::MissingWorkspace)
+        });
+
+        assert_eq!(selection, SidebarWorkspaceSelection::Stale);
+        assert_eq!(state.snapshot().selected_workspace, None);
+        assert_eq!(state.snapshot().active_page, AppPage::Dashboard);
+    }
+
+    #[test]
+    fn sidebar_workspace_selection_nested_defaults_query_no_rows_preserves_navigation() {
+        let state = AppState::new(
+            archductor_core::paths::AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+
+        let selection = validate_sidebar_workspace_selection(&state, "berlin", |_| {
+            Err(anyhow::Error::new(rusqlite::Error::QueryReturnedNoRows)
+                .context("load repository settings"))
+        });
+
+        assert!(matches!(
+            selection,
+            SidebarWorkspaceSelection::Unavailable { .. }
+        ));
+        assert_eq!(
+            state.snapshot().selected_workspace.as_deref(),
+            Some("berlin")
+        );
+        assert_eq!(state.snapshot().active_page, AppPage::Workspace);
+    }
+
+    #[test]
+    fn sidebar_workspace_selection_operational_error_preserves_navigation_without_spawn_action() {
+        let state = AppState::new(
+            archductor_core::paths::AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+
+        let selection = validate_sidebar_workspace_selection(&state, "berlin", |_| {
+            Err(anyhow::anyhow!("database is locked"))
+        });
+
+        assert!(matches!(
+            selection,
+            SidebarWorkspaceSelection::Unavailable { .. }
+        ));
+        assert_eq!(
+            state.snapshot().selected_workspace.as_deref(),
+            Some("berlin")
+        );
+        assert_eq!(state.snapshot().active_page, AppPage::Workspace);
     }
 }

@@ -334,8 +334,9 @@ struct SessionChatCreateUi {
     app_state: AppState,
     selected_thread: Rc<RefCell<Option<i64>>>,
     thread_state: Rc<RefCell<Vec<ChatThreadRecord>>>,
+    external_chat_tabs: Option<ExternalChatTabs>,
     refresh_view: Rc<dyn Fn()>,
-    send_text: Rc<dyn Fn(String, bool) -> bool>,
+    eager_start: Rc<dyn Fn(String, i64, SessionKind)>,
     on_selected: Rc<dyn Fn()>,
     toast_manager: ToastManager,
 }
@@ -368,18 +369,15 @@ fn spawn_session_chat_thread_create(
                 ui.thread_state.borrow_mut().insert(0, thread.clone());
                 ui.app_state
                     .resolve_pending_chat_target(pending_target.clone(), thread.id);
-                ui.app_state.mark_chat_phase(
-                    ChatUiTarget::Thread(thread.id),
-                    ChatUiPhase::StartingAgent { provider: kind },
-                );
                 *ui.selected_thread.borrow_mut() = Some(thread.id);
                 (ui.on_selected)();
-                if let Some(queued_input) = pop_next_queued_chat_input(&ui.app_state, thread.id) {
-                    let staged_review = matches!(queued_input.kind, ArchcarInputKind::ReviewPrompt);
-                    if !(ui.send_text)(queued_input.input.clone(), staged_review) {
-                        requeue_pending_input_front(&ui.app_state, thread.id, queued_input);
-                    }
+                if let Some(external_chat_tabs) = ui.external_chat_tabs.as_ref() {
+                    (external_chat_tabs.on_threads_changed)(
+                        ui.thread_state.borrow().clone(),
+                        Some(thread.id),
+                    );
                 }
+                (ui.eager_start)(workspace_name.clone(), thread.id, kind);
                 (ui.refresh_view)();
             }
             Err(message) => {
@@ -729,6 +727,7 @@ pub fn agent_session_panel(
             let pending_commands = pending_commands.clone();
             let selected_thread = selected_thread.clone();
             let thread_state = thread_state.clone();
+            let external_chat_tabs = external_chat_tabs.clone();
             let app_state = app_state.clone();
             let sync_live_controls = sync_live_controls.clone();
             let archcar_bridge = archcar_bridge.clone();
@@ -904,6 +903,12 @@ pub fn agent_session_panel(
                                         }
                                     },
                                 );
+                                if let Some(external_chat_tabs) = external_chat_tabs.as_ref() {
+                                    (external_chat_tabs.on_threads_changed)(
+                                        thread_state.borrow().clone(),
+                                        Some(thread.id),
+                                    );
+                                }
                                 if let Some(refresh_view) =
                                     clone_refresh_chat_surface_controller(&refresh_chat_surface)
                                 {
@@ -1221,7 +1226,7 @@ pub fn agent_session_panel(
             let has_active_generation = action_thread_id.is_some_and(|thread_id| {
                 active_generation_for_thread(
                     &record_state.borrow(),
-                    working_threads.as_ref(),
+                    &working_threads,
                     thread_id,
                     *selected_harness.borrow(),
                 )
@@ -1251,11 +1256,12 @@ pub fn agent_session_panel(
             } else {
                 true
             };
-            let managed_waiting_for_startup = if managed_harness_waits {
-                !managed_thread_ready && !has_active_generation
-            } else {
-                false
-            };
+            let managed_waiting_for_startup = managed_harness_waits
+                && action_thread_id.is_some_and(|thread_id| {
+                    chat_thread_waiting_for_starting_agent(&app_state, thread_id)
+                })
+                && !managed_thread_ready
+                && !has_active_generation;
             placeholder.set_text("Ask to make changes, @mention files, or run /commands");
             placeholder.set_visible(!has_text);
             let is_editing_queued_message = action_thread_id
@@ -1302,6 +1308,43 @@ pub fn agent_session_panel(
     });
     update_composer_state();
 
+    let eager_start_chat_agent: Rc<dyn Fn(String, i64, SessionKind)> = Rc::new({
+        let app_state = app_state.clone();
+        let record_state = record_state.clone();
+        let archcar_ready_cache = archcar_ready_cache.clone();
+        let inflight_archcar_actions = inflight_archcar_actions.clone();
+        let codex_startup_states = codex_startup_states.clone();
+        let working_threads = working_threads.clone();
+        let codex_ready = codex_ready.clone();
+        let update_composer_state = update_composer_state.clone();
+        let archcar_bridge = archcar_bridge.clone();
+        move |workspace: String, thread_id: i64, kind: SessionKind| {
+            let records = record_state.borrow().clone();
+            let _ = eager_chat_agent_start(
+                &app_state,
+                &records,
+                archcar_ready_cache.as_ref(),
+                inflight_archcar_actions.as_ref(),
+                codex_startup_states.as_ref(),
+                working_threads.as_ref(),
+                codex_ready.as_ref(),
+                update_composer_state.as_ref(),
+                workspace,
+                thread_id,
+                kind,
+                |workspace, thread_id, harness| {
+                    request_archcar_ensure(
+                        &archcar_bridge,
+                        inflight_archcar_actions.as_ref(),
+                        workspace,
+                        Some(thread_id),
+                        harness,
+                    )
+                },
+            );
+        }
+    });
+
     let refresh_chat_surface_for_view = refresh_chat_surface.clone();
     let refresh_for_metadata = refresh.clone();
 
@@ -1346,6 +1389,7 @@ pub fn agent_session_panel(
         let sync_live_controls = sync_live_controls.clone();
         let send_text_after_ready_queue = send_text_after_ready_queue.clone();
         let refresh_queue_overlay = refresh_queue_overlay.clone();
+        let eager_start_chat_agent = eager_start_chat_agent.clone();
         let refresh_for_metadata = refresh_for_metadata.clone();
         Rc::new(move || {
             let mut outcome = ChatRefreshOutcome::default();
@@ -1516,6 +1560,7 @@ pub fn agent_session_panel(
                 if let Some(sync) = clone_refresh_chat_surface_controller(&sync_live_controls) {
                     sync();
                 }
+                eager_start_chat_agent(workspace_name.clone(), thread.id, kind);
                 restore_composer_draft();
             }
             update_composer_for_view();
@@ -1534,7 +1579,7 @@ pub fn agent_session_panel(
                             current_kind,
                             selected_thread_id,
                             pending_archcar_inputs.as_ref(),
-                            working_threads.as_ref(),
+                            &working_threads,
                         );
                         handle_archcar_event(
                             &event,
@@ -1543,9 +1588,10 @@ pub fn agent_session_panel(
                             codex_startup_states.as_ref(),
                             archcar_session_threads.as_ref(),
                             inflight_archcar_actions.as_ref(),
+                            &app_state,
                             current_kind,
                             selected_thread_id,
-                            codex_ready.as_ref(),
+                            &codex_ready,
                             update_composer_for_view.as_ref(),
                             queued_auto_drain_holds.as_ref(),
                             &toast_manager,
@@ -1564,8 +1610,8 @@ pub fn agent_session_panel(
                             pending_archcar_inputs.as_ref(),
                             queued_auto_drain_holds.as_ref(),
                             codex_startup_states.as_ref(),
-                            working_threads.as_ref(),
-                            codex_ready.as_ref(),
+                            &working_threads,
+                            &codex_ready,
                             update_composer_for_view.as_ref(),
                             &toast_manager,
                         );
@@ -1588,9 +1634,9 @@ pub fn agent_session_panel(
                                             message: visible_message,
                                         },
                                     );
-                                    clear_thread_working(working_threads.as_ref(), thread_id);
+                                    clear_thread_working(&working_threads, thread_id);
                                     set_codex_ready_state(
-                                        codex_ready.as_ref(),
+                                        &codex_ready,
                                         update_composer_for_view.as_ref(),
                                         false,
                                     );
@@ -1622,7 +1668,7 @@ pub fn agent_session_panel(
                             inflight_archcar_actions.as_ref(),
                             pending_archcar_inputs.as_ref(),
                             queued_auto_drain_holds.as_ref(),
-                            working_threads.as_ref(),
+                            &working_threads,
                         );
                         if can_send_next {
                             if let Some(send_text) =
@@ -1712,6 +1758,8 @@ pub fn agent_session_panel(
                             let update_composer_state = update_composer_for_view.clone();
                             let restore_composer_draft = restore_composer_draft.clone();
                             let refresh_queue_overlay = refresh_queue_overlay.clone();
+                            let eager_start_chat_agent = eager_start_chat_agent.clone();
+                            let workspace_name = workspace_name.clone();
                             move |thread_id| {
                                 apply_thread_selection(
                                     selected_thread.as_ref(),
@@ -1726,6 +1774,11 @@ pub fn agent_session_panel(
                                             refresh();
                                         }
                                     },
+                                );
+                                eager_start_chat_agent(
+                                    workspace_name.clone(),
+                                    thread_id,
+                                    current_kind,
                                 );
                                 if let Some(refresh_view) =
                                     clone_refresh_chat_surface_controller(&refresh_chat_surface)
@@ -1824,8 +1877,7 @@ pub fn agent_session_panel(
                     } else {
                         CodexStartupState::Idle
                     };
-                    let working_elapsed =
-                        working_elapsed_for_thread(working_threads.as_ref(), thread_id);
+                    let working_elapsed = working_elapsed_for_thread(&working_threads, thread_id);
                     if let Some(harness) = managed_harness_for_kind(current_kind) {
                         let descriptor = harness.descriptor();
                         if thread_has_live_managed_session(&current, thread_id, descriptor)
@@ -2364,6 +2416,7 @@ pub fn agent_session_panel(
     let selected_model_for_send = selected_model.clone();
     let thread_state_for_send = thread_state.clone();
     let selected_thread_for_send = selected_thread.clone();
+    let external_chat_tabs_for_send = external_chat_tabs.clone();
     let pending_commands_for_send = pending_commands.clone();
     let pending_archcar_inputs_for_send = pending_archcar_inputs.clone();
     let active_sessions_for_send = active_sessions.clone();
@@ -2426,6 +2479,9 @@ pub fn agent_session_panel(
                     );
                 }
             }
+            let previous_thread_nav_signature =
+                chat_thread_nav_signature(&thread_state_for_send.borrow());
+            let previous_selected_thread = *selected_thread_for_send.borrow();
             let thread_id = match resolve_or_create_thread_id_for_send(
                 thread_state_for_send.as_ref(),
                 selected_thread_for_send.as_ref(),
@@ -2447,6 +2503,17 @@ pub fn agent_session_panel(
             ) {
                 Ok(thread_id) => {
                     app_state_for_send.set_selected_chat_thread(Some(thread_id));
+                    if previous_thread_nav_signature
+                        != chat_thread_nav_signature(&thread_state_for_send.borrow())
+                        || previous_selected_thread != Some(thread_id)
+                    {
+                        if let Some(external_chat_tabs) = external_chat_tabs_for_send.as_ref() {
+                            (external_chat_tabs.on_threads_changed)(
+                                thread_state_for_send.borrow().clone(),
+                                Some(thread_id),
+                            );
+                        }
+                    }
                     thread_id
                 }
                 Err(err) => {
@@ -2880,6 +2947,7 @@ pub fn agent_session_panel(
         let restore_composer_draft_for_switch = restore_composer_draft.clone();
         let refresh_queue_overlay_for_switch = refresh_queue_overlay.clone();
         let toast_for_switch = toast_manager.clone();
+        let eager_start_chat_agent_for_switch = eager_start_chat_agent.clone();
         let switch_action = Rc::new(move |next_kind: SessionKind| {
             let workspace_for_switch = current_workspace_name_for_switch.borrow().clone();
             let (records, threads) =
@@ -2936,6 +3004,13 @@ pub fn agent_session_panel(
                     }
                 },
             );
+            if let Some(thread_id) = next_thread {
+                eager_start_chat_agent_for_switch(
+                    workspace_for_switch.clone(),
+                    thread_id,
+                    next_kind,
+                );
+            }
             let next_process = next_thread.and_then(|thread_id| {
                 let thread_records = records
                     .iter()
@@ -2972,6 +3047,9 @@ pub fn agent_session_panel(
         let update_composer_state = update_composer_state.clone();
         let restore_composer_draft = restore_composer_draft.clone();
         let refresh_queue_overlay = refresh_queue_overlay.clone();
+        let eager_start_chat_agent = eager_start_chat_agent.clone();
+        let thread_state = thread_state.clone();
+        let current_workspace_name = current_workspace_name.clone();
         *external_chat_tabs.selection_controller.borrow_mut() = Some(Rc::new(move |thread_id| {
             apply_thread_selection(
                 selected_thread.as_ref(),
@@ -2985,6 +3063,21 @@ pub fn agent_session_panel(
                     }
                 },
             );
+            if let Some(thread_id) = thread_id {
+                if let Some(thread) = thread_state
+                    .borrow()
+                    .iter()
+                    .find(|thread| thread.id == thread_id)
+                    .cloned()
+                {
+                    let (kind, _) = selected_thread_harness_state(&thread);
+                    eager_start_chat_agent(
+                        current_workspace_name.borrow().clone(),
+                        thread_id,
+                        kind,
+                    );
+                }
+            }
             if let Some(refresh_view) = clone_refresh_chat_surface_controller(&refresh_chat_surface)
             {
                 refresh_view();
@@ -3039,7 +3132,7 @@ pub fn agent_session_panel(
             ) {
                 hold_queued_auto_drain(queued_auto_drain_holds.as_ref(), thread_id);
                 note_archcar_ready(&mut archcar_ready_cache.borrow_mut(), session_id, false);
-                set_codex_ready_state(codex_ready.as_ref(), &|| {}, false);
+                set_codex_ready_state(&codex_ready, &|| {}, false);
             } else {
                 toast_manager.error(
                     "Could not interrupt the active agent turn because archcar is unavailable."
@@ -3100,7 +3193,7 @@ pub fn agent_session_panel(
             let has_active_generation = thread_id.is_some_and(|thread_id| {
                 active_generation_for_thread(
                     &record_state.borrow(),
-                    working_threads.as_ref(),
+                    &working_threads,
                     thread_id,
                     *selected_harness.borrow(),
                 )
@@ -3130,8 +3223,12 @@ pub fn agent_session_panel(
             } else {
                 true
             };
-            let managed_waiting_for_startup =
-                managed_harness_waits && !managed_thread_ready && !has_active_generation;
+            let managed_waiting_for_startup = managed_harness_waits
+                && action_thread_id.is_some_and(|thread_id| {
+                    chat_thread_waiting_for_starting_agent(&app_state, thread_id)
+                })
+                && !managed_thread_ready
+                && !has_active_generation;
             let action = composer_action_for_startup_state(
                 has_text,
                 has_active_generation,
@@ -3140,7 +3237,13 @@ pub fn agent_session_panel(
                 managed_waiting_for_startup,
             );
             let selected_kind = *selected_harness.borrow();
-            match composer_action_for_submit_intent(action, intent, has_text, selected_kind) {
+            match composer_action_for_submit_intent(
+                action,
+                intent,
+                has_text,
+                selected_kind,
+                managed_waiting_for_startup,
+            ) {
                 ComposerAction::Queue => {
                     if let Some(target @ ChatUiTarget::Pending { .. }) = chat_target.clone() {
                         queue_archcar_input_for_target(
@@ -3290,14 +3393,15 @@ pub fn agent_session_panel(
         let selected_model = selected_model.clone();
         let thread_state = thread_state.clone();
         let selected_thread = selected_thread.clone();
+        let external_chat_tabs = external_chat_tabs.clone();
         let app_state = app_state.clone();
         let refresh_view = refresh_view.clone();
-        let send_text = send_text.clone();
         let update_composer_state = update_composer_state.clone();
         let restore_composer_draft = restore_composer_draft.clone();
         let refresh_queue_overlay = refresh_queue_overlay.clone();
         let setup_readiness = setup_readiness.clone();
         let toast_manager = toast_manager.clone();
+        let eager_start_chat_agent = eager_start_chat_agent.clone();
         move |_| {
             let workspace_name = current_workspace_name.borrow().clone();
             let kind = *selected_harness.borrow();
@@ -3341,8 +3445,9 @@ pub fn agent_session_panel(
                     app_state: app_state.clone(),
                     selected_thread: selected_thread.clone(),
                     thread_state: thread_state.clone(),
+                    external_chat_tabs: external_chat_tabs.clone(),
                     refresh_view: refresh_view.clone(),
-                    send_text: send_text.clone(),
+                    eager_start: eager_start_chat_agent.clone(),
                     on_selected,
                     toast_manager: toast_manager.clone(),
                 },
@@ -7223,6 +7328,19 @@ fn pop_next_queued_chat_input(
     app_state.pop_next_queued_chat_input(thread_id)
 }
 
+fn chat_thread_waiting_for_starting_agent(app_state: &AppState, thread_id: i64) -> bool {
+    matches!(
+        app_state.chat_phase(&ChatUiTarget::Thread(thread_id)),
+        Some(ChatUiPhase::StartingAgent { .. })
+    )
+}
+
+fn mark_chat_startup_finished(app_state: &AppState, thread_id: i64) {
+    if chat_thread_waiting_for_starting_agent(app_state, thread_id) {
+        app_state.mark_chat_phase(ChatUiTarget::Thread(thread_id), ChatUiPhase::Ready);
+    }
+}
+
 fn remove_queued_chat_input_at(
     app_state: &AppState,
     thread_id: i64,
@@ -7388,7 +7506,11 @@ fn composer_action_for_submit_intent(
     intent: ComposerSubmitIntent,
     has_text: bool,
     selected_kind: SessionKind,
+    waiting_for_startup: bool,
 ) -> ComposerAction {
+    if waiting_for_startup {
+        return action;
+    }
     if has_text
         && intent == ComposerSubmitIntent::Immediate
         && managed_harness_for_kind(selected_kind).is_some()
@@ -9893,6 +10015,7 @@ fn handle_archcar_event(
     startup_states: &RefCell<HashMap<i64, CodexStartupState>>,
     session_threads: &RefCell<HashMap<i64, i64>>,
     inflight_actions: &RefCell<HashMap<u64, PendingArchcarAction>>,
+    app_state: &AppState,
     selected_harness: SessionKind,
     selected_thread_id: Option<i64>,
     codex_ready: &RefCell<bool>,
@@ -9946,6 +10069,7 @@ fn handle_archcar_event(
                     thread_id: *thread_id,
                 },
             );
+            mark_chat_startup_finished(app_state, *thread_id);
             set_codex_ready_state(codex_ready, update_composer_state, true);
         }
         ArchcarEvent::TurnCompleted {
@@ -9970,6 +10094,7 @@ fn handle_archcar_event(
                         thread_id: *thread_id,
                     },
                 );
+                mark_chat_startup_finished(app_state, *thread_id);
             } else {
                 apply_codex_startup_signal(
                     &mut startup_states.borrow_mut(),
@@ -10033,6 +10158,7 @@ fn handle_archcar_event(
             {
                 hold_queued_auto_drain(queued_auto_drain_holds, thread_id);
                 clear_inflight_user_sends_for_thread(inflight_actions, thread_id);
+                mark_chat_startup_finished(app_state, thread_id);
             }
             clear_archcar_ready(&mut ready_cache.borrow_mut(), *session_id);
             session_threads.borrow_mut().remove(session_id);
@@ -10056,6 +10182,7 @@ fn handle_archcar_event(
             ) {
                 hold_queued_auto_drain(queued_auto_drain_holds, thread_id);
                 clear_inflight_user_sends_for_thread(inflight_actions, thread_id);
+                mark_chat_startup_finished(app_state, thread_id);
                 toast_manager.error(message.clone());
                 apply_codex_startup_signal(
                     &mut startup_states.borrow_mut(),
@@ -10605,6 +10732,84 @@ fn has_inflight_user_send_for_thread(
             } if *action_thread_id == thread_id
         )
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EagerChatAgentStartOutcome {
+    NotManaged,
+    AlreadyReady,
+    AlreadyActive,
+    Pending,
+    Requested,
+    RequestUnavailable,
+}
+
+fn eager_chat_agent_start<F>(
+    app_state: &AppState,
+    records: &[ProcessRecord],
+    ready_cache: &RefCell<HashMap<i64, bool>>,
+    inflight_actions: &RefCell<HashMap<u64, PendingArchcarAction>>,
+    startup_states: &RefCell<HashMap<i64, CodexStartupState>>,
+    working_threads: &RefCell<HashMap<i64, Instant>>,
+    codex_ready: &RefCell<bool>,
+    update_composer_state: &dyn Fn(),
+    workspace: String,
+    thread_id: i64,
+    kind: SessionKind,
+    request_ensure: F,
+) -> EagerChatAgentStartOutcome
+where
+    F: FnOnce(String, i64, &'static HarnessDescriptor) -> bool,
+{
+    let Some(harness) = managed_harness_for_kind(kind).map(|harness| harness.descriptor()) else {
+        return EagerChatAgentStartOutcome::NotManaged;
+    };
+
+    if managed_thread_ready_for_ui(
+        kind,
+        thread_id,
+        records,
+        ready_cache,
+        startup_states.borrow().get(&thread_id),
+    ) {
+        app_state.mark_chat_phase(ChatUiTarget::Thread(thread_id), ChatUiPhase::Ready);
+        set_codex_ready_state(codex_ready, update_composer_state, true);
+        return EagerChatAgentStartOutcome::AlreadyReady;
+    }
+
+    if active_generation_for_thread(records, working_threads, thread_id, kind) {
+        return EagerChatAgentStartOutcome::AlreadyActive;
+    }
+
+    app_state.mark_chat_phase(
+        ChatUiTarget::Thread(thread_id),
+        ChatUiPhase::StartingAgent { provider: kind },
+    );
+    apply_codex_startup_signal(
+        &mut startup_states.borrow_mut(),
+        CodexStartupSignal::Loading { thread_id },
+    );
+    set_codex_ready_state(codex_ready, update_composer_state, false);
+
+    if has_pending_archcar_ensure_for_thread(inflight_actions, thread_id) {
+        return EagerChatAgentStartOutcome::Pending;
+    }
+
+    if request_ensure(workspace, thread_id, harness) {
+        EagerChatAgentStartOutcome::Requested
+    } else {
+        apply_codex_startup_signal(
+            &mut startup_states.borrow_mut(),
+            CodexStartupSignal::Error {
+                thread_id,
+                message: "Request channel is closed. Reopen the workspace or restart the app."
+                    .to_owned(),
+            },
+        );
+        app_state.mark_chat_phase(ChatUiTarget::Thread(thread_id), ChatUiPhase::Ready);
+        update_composer_state();
+        EagerChatAgentStartOutcome::RequestUnavailable
+    }
 }
 
 fn apply_archcar_ensure_success(
@@ -11297,6 +11502,7 @@ fix it
                 ComposerSubmitIntent::Default,
                 true,
                 SessionKind::Codex,
+                false,
             ),
             ComposerAction::Queue
         );
@@ -11306,6 +11512,7 @@ fix it
                 ComposerSubmitIntent::Immediate,
                 true,
                 SessionKind::Codex,
+                false,
             ),
             ComposerAction::Send
         );
@@ -11315,6 +11522,7 @@ fix it
                 ComposerSubmitIntent::Immediate,
                 true,
                 SessionKind::Codex,
+                false,
             ),
             ComposerAction::Send
         );
@@ -11324,6 +11532,7 @@ fix it
                 ComposerSubmitIntent::Immediate,
                 false,
                 SessionKind::Codex,
+                false,
             ),
             ComposerAction::SendQueued
         );
@@ -11333,8 +11542,43 @@ fix it
                 ComposerSubmitIntent::Immediate,
                 true,
                 SessionKind::Claude,
+                false,
             ),
             ComposerAction::Send
+        );
+    }
+
+    #[test]
+    fn composer_immediate_send_does_not_bypass_starting_agent() {
+        assert_eq!(
+            composer_action_for_submit_intent(
+                ComposerAction::Queue,
+                ComposerSubmitIntent::Immediate,
+                true,
+                SessionKind::Codex,
+                true,
+            ),
+            ComposerAction::Queue
+        );
+        assert_eq!(
+            composer_action_for_submit_intent(
+                ComposerAction::SendQueued,
+                ComposerSubmitIntent::Immediate,
+                true,
+                SessionKind::Codex,
+                true,
+            ),
+            ComposerAction::SendQueued
+        );
+        assert_eq!(
+            composer_action_for_submit_intent(
+                ComposerAction::Queue,
+                ComposerSubmitIntent::Immediate,
+                true,
+                SessionKind::Claude,
+                true,
+            ),
+            ComposerAction::Queue
         );
     }
 
@@ -11767,6 +12011,24 @@ fix it
     }
 
     #[test]
+    fn resolved_empty_pending_chat_becomes_ready_for_first_send() {
+        let state = AppState::new(
+            archductor_core::paths::AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            crate::state::WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+        let pending = state.create_pending_chat_target("berlin".to_owned(), SessionKind::Codex);
+
+        state.resolve_pending_chat_target(pending, 42);
+
+        assert_eq!(
+            state.chat_phase(&ChatUiTarget::Thread(42)),
+            Some(ChatUiPhase::Ready)
+        );
+    }
+
+    #[test]
     fn new_chat_button_does_not_create_thread_sync_in_click_handler() {
         let source = include_str!("session_surface.rs");
         let start = source
@@ -11847,6 +12109,29 @@ fix it
 
         assert!(!changed);
         assert!(working_threads.borrow().contains_key(&7));
+    }
+
+    #[test]
+    fn session_ready_clears_starting_chat_phase() {
+        let state = AppState::new(
+            archductor_core::paths::AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            crate::state::WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+        state.mark_chat_phase(
+            ChatUiTarget::Thread(7),
+            ChatUiPhase::StartingAgent {
+                provider: SessionKind::Codex,
+            },
+        );
+
+        mark_chat_startup_finished(&state, 7);
+
+        assert_eq!(
+            state.chat_phase(&ChatUiTarget::Thread(7)),
+            Some(ChatUiPhase::Ready)
+        );
     }
 
     #[test]
@@ -11957,7 +12242,7 @@ fix it
 
         assert!(
             auto_drain_block.contains("queued_auto_drain_holds.as_ref()")
-                && auto_drain_block.contains("working_threads.as_ref()"),
+                && auto_drain_block.contains("&working_threads"),
             "automatic ready drain must respect hold and active-generation guards before popping queued chat input"
         );
     }
@@ -13035,6 +13320,244 @@ fix it
 
         assert!(has_pending_archcar_ensure_for_thread(&pending, 7));
         assert!(!has_pending_archcar_ensure_for_thread(&pending, 8));
+    }
+
+    #[test]
+    fn eager_chat_agent_start_requests_managed_thread_before_first_input() {
+        let app_state = AppState::new(
+            archductor_core::paths::AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            crate::state::WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+        let ready_cache = RefCell::new(HashMap::new());
+        let inflight = RefCell::new(HashMap::new());
+        let startup_states = RefCell::new(HashMap::new());
+        let working_threads = RefCell::new(HashMap::new());
+        let codex_ready = RefCell::new(true);
+        let requested = Rc::new(RefCell::new(Vec::new()));
+        let requested_for_call = requested.clone();
+        queue_archcar_input(
+            &app_state,
+            7,
+            "first message waits for ready".to_owned(),
+            None,
+            ArchcarInputKind::User,
+            SessionKind::Codex,
+        );
+
+        let outcome = eager_chat_agent_start(
+            &app_state,
+            &[],
+            &ready_cache,
+            &inflight,
+            &startup_states,
+            &working_threads,
+            &codex_ready,
+            &|| {},
+            "berlin".to_owned(),
+            7,
+            SessionKind::Codex,
+            |workspace, thread_id, harness| {
+                requested_for_call
+                    .borrow_mut()
+                    .push((workspace, thread_id, harness.kind));
+                true
+            },
+        );
+
+        assert_eq!(outcome, EagerChatAgentStartOutcome::Requested);
+        assert_eq!(
+            requested.borrow().as_slice(),
+            &[("berlin".to_owned(), 7, SessionKind::Codex)]
+        );
+        assert_eq!(
+            app_state.chat_phase(&ChatUiTarget::Thread(7)),
+            Some(ChatUiPhase::StartingAgent {
+                provider: SessionKind::Codex,
+            })
+        );
+        assert_eq!(
+            startup_states.borrow().get(&7),
+            Some(&CodexStartupState::Loading {
+                message: "Starting agent...".to_owned(),
+            })
+        );
+        assert_eq!(queued_chat_inputs_count(&app_state, 7), 1);
+        assert!(!*codex_ready.borrow());
+    }
+
+    #[test]
+    fn eager_chat_agent_start_dedupes_pending_thread_ensure() {
+        let app_state = AppState::new(
+            archductor_core::paths::AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            crate::state::WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+        let ready_cache = RefCell::new(HashMap::new());
+        let inflight = RefCell::new(HashMap::from([(
+            55,
+            PendingArchcarAction::EnsureWorkspace {
+                workspace: "berlin".to_owned(),
+                thread_id: Some(7),
+                kind: SessionKind::Codex,
+            },
+        )]));
+        let startup_states = RefCell::new(HashMap::new());
+        let working_threads = RefCell::new(HashMap::new());
+        let codex_ready = RefCell::new(true);
+
+        let outcome = eager_chat_agent_start(
+            &app_state,
+            &[],
+            &ready_cache,
+            &inflight,
+            &startup_states,
+            &working_threads,
+            &codex_ready,
+            &|| {},
+            "berlin".to_owned(),
+            7,
+            SessionKind::Codex,
+            |_, _, _| panic!("pending ensure must not request again"),
+        );
+
+        assert_eq!(outcome, EagerChatAgentStartOutcome::Pending);
+        assert_eq!(
+            app_state.chat_phase(&ChatUiTarget::Thread(7)),
+            Some(ChatUiPhase::StartingAgent {
+                provider: SessionKind::Codex,
+            })
+        );
+    }
+
+    #[test]
+    fn eager_chat_agent_start_request_failure_releases_starting_phase() {
+        let app_state = AppState::new(
+            archductor_core::paths::AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            crate::state::WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+        let ready_cache = RefCell::new(HashMap::new());
+        let inflight = RefCell::new(HashMap::new());
+        let startup_states = RefCell::new(HashMap::new());
+        let working_threads = RefCell::new(HashMap::new());
+        let codex_ready = RefCell::new(true);
+        let composer_updates = Cell::new(0);
+
+        let outcome = eager_chat_agent_start(
+            &app_state,
+            &[],
+            &ready_cache,
+            &inflight,
+            &startup_states,
+            &working_threads,
+            &codex_ready,
+            &|| composer_updates.set(composer_updates.get() + 1),
+            "berlin".to_owned(),
+            7,
+            SessionKind::Codex,
+            |_, _, _| false,
+        );
+
+        assert_eq!(outcome, EagerChatAgentStartOutcome::RequestUnavailable);
+        assert_eq!(
+            app_state.chat_phase(&ChatUiTarget::Thread(7)),
+            Some(ChatUiPhase::Ready)
+        );
+        assert_eq!(
+            startup_states.borrow().get(&7),
+            Some(&CodexStartupState::Error {
+                message: "Request channel is closed. Reopen the workspace or restart the app."
+                    .to_owned(),
+            })
+        );
+        assert!(!*codex_ready.borrow());
+        assert_eq!(composer_updates.get(), 2);
+    }
+
+    #[test]
+    fn eager_chat_agent_start_skips_ready_managed_thread() {
+        let app_state = AppState::new(
+            archductor_core::paths::AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            crate::state::WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+        let records = vec![process_record_with_thread(
+            11,
+            ProcessStatus::Running,
+            Some(7),
+            "codex",
+        )];
+        let ready_cache = RefCell::new(HashMap::from([(11, true)]));
+        let inflight = RefCell::new(HashMap::new());
+        let startup_states = RefCell::new(HashMap::new());
+        let working_threads = RefCell::new(HashMap::new());
+        let codex_ready = RefCell::new(false);
+
+        let outcome = eager_chat_agent_start(
+            &app_state,
+            &records,
+            &ready_cache,
+            &inflight,
+            &startup_states,
+            &working_threads,
+            &codex_ready,
+            &|| {},
+            "berlin".to_owned(),
+            7,
+            SessionKind::Codex,
+            |_, _, _| panic!("ready thread must not request ensure"),
+        );
+
+        assert_eq!(outcome, EagerChatAgentStartOutcome::AlreadyReady);
+        assert_eq!(
+            app_state.chat_phase(&ChatUiTarget::Thread(7)),
+            Some(ChatUiPhase::Ready)
+        );
+        assert!(*codex_ready.borrow());
+    }
+
+    #[test]
+    fn eager_chat_agent_start_does_not_block_active_generation() {
+        let app_state = AppState::new(
+            archductor_core::paths::AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            crate::state::WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+        let records = vec![process_record_with_thread(
+            11,
+            ProcessStatus::Running,
+            Some(7),
+            "codex",
+        )];
+        let ready_cache = RefCell::new(HashMap::new());
+        let inflight = RefCell::new(HashMap::new());
+        let startup_states = RefCell::new(HashMap::new());
+        let working_threads = RefCell::new(HashMap::from([(7, Instant::now())]));
+        let codex_ready = RefCell::new(false);
+
+        let outcome = eager_chat_agent_start(
+            &app_state,
+            &records,
+            &ready_cache,
+            &inflight,
+            &startup_states,
+            &working_threads,
+            &codex_ready,
+            &|| {},
+            "berlin".to_owned(),
+            7,
+            SessionKind::Codex,
+            |_, _, _| panic!("active generation must not request ensure"),
+        );
+
+        assert_eq!(outcome, EagerChatAgentStartOutcome::AlreadyActive);
+        assert_eq!(app_state.chat_phase(&ChatUiTarget::Thread(7)), None);
     }
 
     #[test]
@@ -15796,6 +16319,24 @@ Schema confirms the app moved CRM around businesses.";
         assert!(
             callback_region.contains("spawn_background_job("),
             "message timeline DB loads must not run synchronously in GTK refresh callbacks"
+        );
+    }
+
+    #[test]
+    fn provider_switch_creation_notifies_external_chat_tabs() {
+        let source = include_str!("session_surface.rs");
+        let start = source
+            .find("ModelSelectionRoute::CrossProvider(kind) =>")
+            .expect("cross-provider switch branch exists");
+        let end = source[start..]
+            .find("if let Some(sync) = clone_refresh_chat_surface_controller")
+            .map(|offset| start + offset)
+            .expect("cross-provider branch ends before live-control sync");
+        let success_branch = &source[start..end];
+
+        assert!(
+            success_branch.contains("external_chat_tabs.on_threads_changed"),
+            "provider switch creates and selects a chat thread before refresh_view, so it must notify external chat tabs directly"
         );
     }
 

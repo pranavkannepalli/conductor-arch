@@ -615,9 +615,13 @@ impl AppState {
                 emit_queue_changed = true;
             }
             if let Some(phase) = state.chat_phases.remove(&pending) {
+                let resolved_phase = match phase {
+                    ChatUiPhase::Creating { .. } => ChatUiPhase::Ready,
+                    phase => phase,
+                };
                 state
                     .chat_phases
-                    .insert(ChatUiTarget::Thread(thread_id), phase);
+                    .insert(ChatUiTarget::Thread(thread_id), resolved_phase);
             }
             state.selected_chat_thread = Some(thread_id);
             state.selected_chat_target = Some(ChatUiTarget::Thread(thread_id));
