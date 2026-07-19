@@ -82,7 +82,7 @@ const CONTEXT_DETAIL_CONTRIBUTOR_LIMIT: usize = 5;
 const CHAT_SCROLL_BOTTOM_EPSILON: f64 = 48.0;
 const CHAT_SCROLL_RESTORE_LAYOUT_PASSES: u8 = 4;
 const CHAT_SCROLL_RESTORE_LAYOUT_PASS_MS: u64 = 16;
-const CHAT_REFRESH_WAKE_DELAY_MS: u64 = 33;
+const CHAT_REFRESH_WAKE_DELAY_MS: u64 = 150;
 const INLINE_EVENT_BODY_MAX_HEIGHT: i32 = 220;
 static NEXT_CHAT_WAKE_ID: AtomicUsize = AtomicUsize::new(1);
 
@@ -219,6 +219,7 @@ enum ChatTimelineItemKey {
 struct ChatTimelineRenderState {
     thread_id: i64,
     transcript_display: String,
+    leading_rows: usize,
     keys: Vec<ChatTimelineItemKey>,
 }
 
@@ -226,6 +227,7 @@ struct ChatTimelineRenderState {
 enum ChatTimelineRefreshPlan {
     Skip,
     Append { start: usize },
+    RebuildFrom { start: usize },
     RebuildMessages,
 }
 
@@ -1511,23 +1513,16 @@ pub fn agent_session_panel(
                 );
                 if !flushed_pending {
                     if let Some(thread_id) = selected_thread_id {
-                        let can_send_next = managed_harness_for_kind(current_kind).is_some()
-                            && queued_auto_drain_allowed(
-                                queued_auto_drain_holds.as_ref(),
-                                thread_id,
-                            )
-                            && !pending_archcar_inputs.borrow().contains_key(&thread_id)
-                            && !has_inflight_user_send_for_thread(
-                                inflight_archcar_actions.as_ref(),
-                                thread_id,
-                            )
-                            && ready_running_session_for_thread(
-                                &record_state.borrow(),
-                                thread_id,
-                                current_kind,
-                                archcar_ready_cache.as_ref(),
-                            )
-                            .is_some();
+                        let can_send_next = queued_chat_auto_drain_ready(
+                            current_kind,
+                            &record_state.borrow(),
+                            thread_id,
+                            archcar_ready_cache.as_ref(),
+                            inflight_archcar_actions.as_ref(),
+                            pending_archcar_inputs.as_ref(),
+                            queued_auto_drain_holds.as_ref(),
+                            working_threads.as_ref(),
+                        );
                         if can_send_next {
                             if let Some(send_text) =
                                 send_text_after_ready_queue.borrow().as_ref().cloned()
@@ -1914,18 +1909,6 @@ pub fn agent_session_panel(
                                     debug!(?outcome, "chat refresh_view outcome");
                                     return;
                                 }
-                                outcome.messages_changed = true;
-                                clear_box(&messages);
-                                apply_context_usage_state(
-                                    &context_usage,
-                                    latest_context_usage_from_messages(&thread_messages),
-                                );
-                                append_chat_status_banner(
-                                    &messages,
-                                    status_banner,
-                                    &startup_state,
-                                    working_elapsed,
-                                );
                                 let timeline = chat_structured_items_for_render(
                                     thread_messages.clone(),
                                     thread_events,
@@ -1933,21 +1916,77 @@ pub fn agent_session_panel(
                                     pending_user_inputs.clone(),
                                     pending_immediate_inputs,
                                 );
-                                for item in &timeline {
-                                    if let Some(widget) = chat_timeline_item_widget(
-                                        item,
-                                        render_raw_message_content(&transcript_display),
-                                        render_legacy_inline_events,
-                                    ) {
-                                        append_chat_refresh_row(&messages, &widget);
-                                    }
-                                }
-                                *last_timeline_render_state.borrow_mut() =
-                                    Some(chat_timeline_render_state(
+                                let timeline_leading_rows =
+                                    usize::from(status_banner != ChatStatusBannerKind::None);
+                                let next_timeline_state =
+                                    chat_timeline_render_state_with_leading_rows(
                                         thread_id,
                                         &transcript_display,
                                         &timeline,
-                                    ));
+                                        timeline_leading_rows,
+                                    );
+                                let previous_timeline_state =
+                                    last_timeline_render_state.borrow().clone();
+                                let previous_timeline_leading_rows = previous_timeline_state
+                                    .as_ref()
+                                    .map_or(0, |state| state.leading_rows);
+                                let mut plan = chat_timeline_refresh_plan(
+                                    previous_timeline_state.as_ref(),
+                                    &next_timeline_state,
+                                );
+                                if status_banner != ChatStatusBannerKind::None {
+                                    plan = ChatTimelineRefreshPlan::RebuildMessages;
+                                }
+                                outcome.messages_changed =
+                                    !matches!(plan, ChatTimelineRefreshPlan::Skip);
+                                apply_context_usage_state(
+                                    &context_usage,
+                                    latest_context_usage_from_messages(&thread_messages),
+                                );
+                                match plan {
+                                    ChatTimelineRefreshPlan::Skip => {
+                                        debug!(?outcome, "chat refresh_view outcome");
+                                        restore_chat_scroll_after_refresh(&scroll, chat_scroll);
+                                        return;
+                                    }
+                                    ChatTimelineRefreshPlan::Append { start } => {
+                                        append_chat_timeline_items(
+                                            &messages,
+                                            &timeline[start..],
+                                            &transcript_display,
+                                            render_legacy_inline_events,
+                                        );
+                                    }
+                                    ChatTimelineRefreshPlan::RebuildFrom { start } => {
+                                        remove_box_children_from(
+                                            &messages,
+                                            previous_timeline_leading_rows + start,
+                                        );
+                                        append_chat_timeline_items(
+                                            &messages,
+                                            &timeline[start..],
+                                            &transcript_display,
+                                            render_legacy_inline_events,
+                                        );
+                                    }
+                                    ChatTimelineRefreshPlan::RebuildMessages => {
+                                        clear_box(&messages);
+                                        append_chat_status_banner(
+                                            &messages,
+                                            status_banner,
+                                            &startup_state,
+                                            working_elapsed,
+                                        );
+                                        append_chat_timeline_items(
+                                            &messages,
+                                            &timeline,
+                                            &transcript_display,
+                                            render_legacy_inline_events,
+                                        );
+                                    }
+                                }
+                                *last_timeline_render_state.borrow_mut() =
+                                    Some(next_timeline_state);
                                 debug!(?outcome, "chat refresh_view outcome");
                                 restore_chat_scroll_after_refresh(&scroll, chat_scroll);
                                 return;
@@ -2125,10 +2164,12 @@ pub fn agent_session_panel(
                     );
                     let next_state =
                         chat_timeline_render_state(thread_id, &transcript_display, &timeline);
-                    let plan = chat_timeline_refresh_plan(
-                        last_timeline_render_state.borrow().as_ref(),
-                        &next_state,
-                    );
+                    let previous_timeline_state = last_timeline_render_state.borrow().clone();
+                    let previous_timeline_leading_rows = previous_timeline_state
+                        .as_ref()
+                        .map_or(0, |state| state.leading_rows);
+                    let plan =
+                        chat_timeline_refresh_plan(previous_timeline_state.as_ref(), &next_state);
                     match plan {
                         ChatTimelineRefreshPlan::Skip => return,
                         ChatTimelineRefreshPlan::Append { start } => {
@@ -2136,15 +2177,28 @@ pub fn agent_session_panel(
                                 &context_usage,
                                 latest_context_usage_from_messages(&thread_messages),
                             );
-                            for item in &timeline[start..] {
-                                if let Some(widget) = chat_timeline_item_widget(
-                                    item,
-                                    render_raw_message_content(&transcript_display),
-                                    render_legacy_inline_events,
-                                ) {
-                                    append_chat_refresh_row(&messages, &widget);
-                                }
-                            }
+                            append_chat_timeline_items(
+                                &messages,
+                                &timeline[start..],
+                                &transcript_display,
+                                render_legacy_inline_events,
+                            );
+                        }
+                        ChatTimelineRefreshPlan::RebuildFrom { start } => {
+                            remove_box_children_from(
+                                &messages,
+                                previous_timeline_leading_rows + start,
+                            );
+                            apply_context_usage_state(
+                                &context_usage,
+                                latest_context_usage_from_messages(&thread_messages),
+                            );
+                            append_chat_timeline_items(
+                                &messages,
+                                &timeline[start..],
+                                &transcript_display,
+                                render_legacy_inline_events,
+                            );
                         }
                         ChatTimelineRefreshPlan::RebuildMessages => {
                             clear_box(&messages);
@@ -2152,15 +2206,12 @@ pub fn agent_session_panel(
                                 &context_usage,
                                 latest_context_usage_from_messages(&thread_messages),
                             );
-                            for item in &timeline {
-                                if let Some(widget) = chat_timeline_item_widget(
-                                    item,
-                                    render_raw_message_content(&transcript_display),
-                                    render_legacy_inline_events,
-                                ) {
-                                    append_chat_refresh_row(&messages, &widget);
-                                }
-                            }
+                            append_chat_timeline_items(
+                                &messages,
+                                &timeline,
+                                &transcript_display,
+                                render_legacy_inline_events,
+                            );
                         }
                     }
                     *last_timeline_render_state.borrow_mut() = Some(next_state);
@@ -3296,6 +3347,35 @@ fn append_chat_refresh_row<W: IsA<Widget>>(container: &GBox, child: &W) {
     }
 }
 
+fn append_chat_timeline_items(
+    container: &GBox,
+    items: &[ChatTimelineItem],
+    transcript_display: &str,
+    render_legacy_inline_events: bool,
+) {
+    for item in items {
+        if let Some(widget) = chat_timeline_item_widget(
+            item,
+            render_raw_message_content(transcript_display),
+            render_legacy_inline_events,
+        ) {
+            append_chat_refresh_row(container, &widget);
+        }
+    }
+}
+
+fn remove_box_children_from(container: &GBox, start: usize) {
+    let mut index = 0;
+    let mut child = container.first_child();
+    while let Some(widget) = child {
+        child = widget.next_sibling();
+        if index >= start {
+            container.remove(&widget);
+        }
+        index += 1;
+    }
+}
+
 fn capture_chat_scroll(scroll: &ScrolledWindow) -> ChatScrollSnapshot {
     let adjustment = scroll.vadjustment();
     ChatScrollSnapshot {
@@ -3940,9 +4020,19 @@ fn chat_timeline_render_state(
     transcript_display: &str,
     items: &[ChatTimelineItem],
 ) -> ChatTimelineRenderState {
+    chat_timeline_render_state_with_leading_rows(thread_id, transcript_display, items, 0)
+}
+
+fn chat_timeline_render_state_with_leading_rows(
+    thread_id: i64,
+    transcript_display: &str,
+    items: &[ChatTimelineItem],
+    leading_rows: usize,
+) -> ChatTimelineRenderState {
     ChatTimelineRenderState {
         thread_id,
         transcript_display: transcript_display.to_owned(),
+        leading_rows,
         keys: items.iter().map(chat_timeline_item_key).collect(),
     }
 }
@@ -3956,21 +4046,40 @@ fn chat_timeline_refresh_plan(
     };
     if previous.thread_id != next.thread_id
         || previous.transcript_display != next.transcript_display
-        || previous.keys.len() > next.keys.len()
+        || previous.leading_rows != next.leading_rows
     {
         return ChatTimelineRefreshPlan::RebuildMessages;
     }
-    if !next.keys.starts_with(&previous.keys) {
-        return ChatTimelineRefreshPlan::RebuildMessages;
-    }
-    if previous.keys.len() == next.keys.len() {
+    let first_changed = previous
+        .keys
+        .iter()
+        .zip(next.keys.iter())
+        .position(|(left, right)| left != right);
+    if first_changed.is_none() && previous.keys.len() == next.keys.len() {
         return ChatTimelineRefreshPlan::Skip;
     }
-    if previous.keys.is_empty() {
+    if first_changed.is_none() && previous.keys.len() > next.keys.len() {
+        if next.keys.is_empty() {
+            return ChatTimelineRefreshPlan::RebuildMessages;
+        }
+        return ChatTimelineRefreshPlan::RebuildFrom {
+            start: next.keys.len(),
+        };
+    }
+    if first_changed.is_none() {
+        if previous.keys.is_empty() {
+            return ChatTimelineRefreshPlan::RebuildMessages;
+        }
+        return ChatTimelineRefreshPlan::Append {
+            start: previous.keys.len(),
+        };
+    }
+    let first_changed = first_changed.unwrap_or(0);
+    if first_changed == 0 {
         return ChatTimelineRefreshPlan::RebuildMessages;
     }
-    ChatTimelineRefreshPlan::Append {
-        start: previous.keys.len(),
+    ChatTimelineRefreshPlan::RebuildFrom {
+        start: first_changed,
     }
 }
 
@@ -9108,6 +9217,24 @@ fn queued_auto_drain_allowed(holds: &RefCell<HashSet<i64>>, thread_id: i64) -> b
     !holds.borrow().contains(&thread_id)
 }
 
+fn queued_chat_auto_drain_ready(
+    current_kind: SessionKind,
+    records: &[ProcessRecord],
+    thread_id: i64,
+    ready_cache: &RefCell<HashMap<i64, bool>>,
+    inflight_actions: &RefCell<HashMap<u64, PendingArchcarAction>>,
+    pending_inputs: &RefCell<HashMap<i64, Vec<QueuedArchcarInput>>>,
+    holds: &RefCell<HashSet<i64>>,
+    working_threads: &RefCell<HashMap<i64, Instant>>,
+) -> bool {
+    managed_harness_for_kind(current_kind).is_some()
+        && !active_generation_for_thread(records, working_threads, thread_id, current_kind)
+        && queued_auto_drain_allowed(holds, thread_id)
+        && !pending_inputs.borrow().contains_key(&thread_id)
+        && !has_inflight_user_send_for_thread(inflight_actions, thread_id)
+        && ready_running_session_for_thread(records, thread_id, current_kind, ready_cache).is_some()
+}
+
 fn release_queued_auto_drain_if_queue_empty(
     holds: &RefCell<HashSet<i64>>,
     thread_id: i64,
@@ -9538,7 +9665,7 @@ fn update_working_indicator_for_archcar_event(
             if pending_inputs.borrow().contains_key(thread_id) {
                 return false;
             }
-            clear_thread_working(working_threads, *thread_id)
+            false
         }
         ArchcarEvent::TurnCompleted { thread_id, .. } => {
             clear_thread_working(working_threads, *thread_id)
@@ -11376,6 +11503,76 @@ fix it
     }
 
     #[test]
+    fn session_ready_does_not_clear_working_thread_during_active_generation() {
+        let records = vec![process_record_with_thread(
+            11,
+            ProcessStatus::Running,
+            Some(7),
+            "codex",
+        )];
+        let session_threads = RefCell::new(HashMap::from([(11, 7)]));
+        let pending_inputs = RefCell::new(HashMap::new());
+        let working_threads = RefCell::new(HashMap::new());
+        mark_thread_working(&working_threads, 7);
+
+        let changed = update_working_indicator_for_archcar_event(
+            &ArchcarEvent::SessionReady {
+                session_id: 11,
+                thread_id: 7,
+            },
+            &records,
+            &session_threads,
+            SessionKind::Codex,
+            Some(7),
+            &pending_inputs,
+            &working_threads,
+        );
+
+        assert!(!changed);
+        assert!(working_threads.borrow().contains_key(&7));
+    }
+
+    #[test]
+    fn automatic_ready_drain_waits_until_active_generation_finishes() {
+        let records = vec![process_record_with_thread(
+            11,
+            ProcessStatus::Running,
+            Some(7),
+            "codex",
+        )];
+        let ready_cache = RefCell::new(HashMap::from([(11, true)]));
+        let inflight_actions = RefCell::new(HashMap::new());
+        let pending_inputs = RefCell::new(HashMap::<i64, Vec<QueuedArchcarInput>>::new());
+        let holds = RefCell::new(HashSet::new());
+        let working_threads = RefCell::new(HashMap::new());
+        mark_thread_working(&working_threads, 7);
+
+        assert!(!queued_chat_auto_drain_ready(
+            SessionKind::Codex,
+            &records,
+            7,
+            &ready_cache,
+            &inflight_actions,
+            &pending_inputs,
+            &holds,
+            &working_threads,
+        ));
+
+        clear_thread_working(&working_threads, 7);
+
+        assert!(queued_chat_auto_drain_ready(
+            SessionKind::Codex,
+            &records,
+            7,
+            &ready_cache,
+            &inflight_actions,
+            &pending_inputs,
+            &holds,
+            &working_threads,
+        ));
+    }
+
+    #[test]
     fn failed_or_interrupted_turn_completion_does_not_allow_queue_drain() {
         assert!(archcar_turn_completion_allows_queue_drain(Some("success")));
         assert!(archcar_turn_completion_allows_queue_drain(Some(
@@ -11436,14 +11633,15 @@ fix it
     fn automatic_ready_drain_checks_thread_hold_before_popping_queue() {
         let source = include_str!("session_surface.rs");
         let auto_drain_block = source
-            .split("let can_send_next = managed_harness_for_kind(current_kind).is_some()")
+            .split("let can_send_next = queued_chat_auto_drain_ready(")
             .nth(1)
             .and_then(|rest| rest.split("pop_next_queued_chat_input").next())
             .expect("ready auto-drain block should be present");
 
         assert!(
-            auto_drain_block.contains("queued_auto_drain_allowed"),
-            "automatic ready drain must respect interrupt/failure holds before popping queued chat input"
+            auto_drain_block.contains("queued_auto_drain_holds.as_ref()")
+                && auto_drain_block.contains("working_threads.as_ref()"),
+            "automatic ready drain must respect hold and active-generation guards before popping queued chat input"
         );
     }
 
@@ -13780,6 +13978,16 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
     }
 
     #[test]
+    fn chat_refresh_wake_debounce_limits_streaming_repaint_churn() {
+        let source = include_str!("session_surface.rs");
+
+        assert!(
+            source.contains("const CHAT_REFRESH_WAKE_DELAY_MS: u64 = 150;"),
+            "streaming provider events must not trigger near-frame-rate full chat refreshes"
+        );
+    }
+
+    #[test]
     fn provider_projection_fallback_card_text_shows_redacted_raw_payload() {
         let item = ProviderProjectionItem {
             id: "fallback-1".to_owned(),
@@ -14609,7 +14817,7 @@ Schema confirms the app moved CRM around businesses.";
     }
 
     #[test]
-    fn working_indicator_clears_when_generation_is_ready() {
+    fn working_indicator_clears_when_turn_completes() {
         let mut selected = session_record(11, "codex", ProcessStatus::Running, None);
         selected.chat_thread_id = Some(7);
         let session_threads = RefCell::new(HashMap::from([(11, 7)]));
@@ -14618,9 +14826,10 @@ Schema confirms the app moved CRM around businesses.";
         mark_thread_working(&working_threads, 7);
 
         let changed = update_working_indicator_for_archcar_event(
-            &ArchcarEvent::SessionReady {
+            &ArchcarEvent::TurnCompleted {
                 session_id: 11,
                 thread_id: 7,
+                status: Some("completed".to_owned()),
             },
             &[selected],
             &session_threads,
@@ -15073,6 +15282,44 @@ Schema confirms the app moved CRM around businesses.";
         ))];
         let old = chat_timeline_render_state(7, "structured", &old_items);
         let new = chat_timeline_render_state(7, "structured", &new_items);
+
+        assert_eq!(
+            chat_timeline_refresh_plan(Some(&old), &new),
+            ChatTimelineRefreshPlan::RebuildMessages
+        );
+    }
+
+    #[test]
+    fn chat_timeline_refresh_plan_rebuilds_only_changed_tail_for_streaming_updates() {
+        let old_items = vec![
+            ChatTimelineItem::Message(chat_message_record(1, "user", "request", "user_send")),
+            ChatTimelineItem::Message(chat_message_record(2, "agent", "partial", "agent")),
+        ];
+        let new_items = vec![
+            ChatTimelineItem::Message(chat_message_record(1, "user", "request", "user_send")),
+            ChatTimelineItem::Message(chat_message_record(
+                2,
+                "agent",
+                "partial plus more",
+                "agent",
+            )),
+        ];
+        let old = chat_timeline_render_state(7, "structured", &old_items);
+        let new = chat_timeline_render_state(7, "structured", &new_items);
+
+        assert_eq!(
+            chat_timeline_refresh_plan(Some(&old), &new),
+            ChatTimelineRefreshPlan::RebuildFrom { start: 1 }
+        );
+    }
+
+    #[test]
+    fn chat_timeline_refresh_plan_rebuilds_when_leading_rows_change() {
+        let items = vec![ChatTimelineItem::Message(chat_message_record(
+            1, "agent", "partial", "agent",
+        ))];
+        let old = chat_timeline_render_state_with_leading_rows(7, "structured", &items, 1);
+        let new = chat_timeline_render_state(7, "structured", &items);
 
         assert_eq!(
             chat_timeline_refresh_plan(Some(&old), &new),
