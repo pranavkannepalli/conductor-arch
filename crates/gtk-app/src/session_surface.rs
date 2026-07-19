@@ -57,15 +57,17 @@ use std::{env, fs as stdfs};
 use tracing::{debug, error, info, trace, warn};
 
 use crate::archcar_async::{
-    clear_archcar_ready, note_archcar_ready, AsyncArchcarBridge, AsyncArchcarMessage,
-    AsyncArchcarResponse,
+    clear_archcar_ready, note_archcar_ready, spawn_background_job, AsyncArchcarBridge,
+    AsyncArchcarMessage, AsyncArchcarResponse,
 };
 use crate::buttons::{
     icon_button, resolve_icon_name, style_icon_button, style_text_button, text_button,
 };
 use crate::motion::{append_revealed, clear_box};
 use crate::refresh::RefreshEvent;
-use crate::state::{AppPage, AppState, AppStateSnapshot, QueuedChatInputDraft};
+use crate::state::{
+    AppPage, AppState, AppStateSnapshot, ChatUiPhase, ChatUiTarget, QueuedChatInputDraft,
+};
 use crate::terminal::terminal_display_text;
 use crate::toast::ToastManager;
 
@@ -297,6 +299,66 @@ fn clear_deleted_workspace_surface(
     clear_box(thread_row);
     clear_box(messages);
     apply_context_usage_state(context_usage, None);
+}
+
+struct SessionChatCreateUi {
+    app_state: AppState,
+    selected_thread: Rc<RefCell<Option<i64>>>,
+    thread_state: Rc<RefCell<Vec<ChatThreadRecord>>>,
+    refresh_view: Rc<dyn Fn()>,
+    on_selected: Rc<dyn Fn()>,
+    toast_manager: ToastManager,
+}
+
+fn spawn_session_chat_thread_create(
+    database_path: PathBuf,
+    workspace_name: String,
+    kind: SessionKind,
+    title: String,
+    metadata: Option<String>,
+    pending_target: ChatUiTarget,
+    ui: SessionChatCreateUi,
+) {
+    let workspace_for_job = workspace_name.clone();
+    spawn_background_job(
+        move || {
+            WorkspaceStore::open_app(database_path)
+                .and_then(|store| {
+                    store.create_chat_thread(
+                        &workspace_for_job,
+                        session_kind_provider(kind),
+                        &title,
+                        metadata.as_deref(),
+                    )
+                })
+                .map_err(|err| format!("{err:#}"))
+        },
+        move |result| match result {
+            Ok(thread) => {
+                ui.thread_state.borrow_mut().insert(0, thread.clone());
+                ui.app_state
+                    .resolve_pending_chat_target(pending_target.clone(), thread.id);
+                ui.app_state.mark_chat_phase(
+                    ChatUiTarget::Thread(thread.id),
+                    ChatUiPhase::StartingAgent { provider: kind },
+                );
+                *ui.selected_thread.borrow_mut() = Some(thread.id);
+                (ui.on_selected)();
+                (ui.refresh_view)();
+            }
+            Err(message) => {
+                ui.app_state.mark_chat_phase(
+                    pending_target,
+                    ChatUiPhase::Failed {
+                        message: format!("Create chat thread failed: {message}"),
+                    },
+                );
+                ui.toast_manager
+                    .error(format!("Create chat thread failed: {message}"));
+                error!(workspace = %workspace_name, error = %message, "failed to create chat thread");
+            }
+        },
+    );
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3153,37 +3215,43 @@ pub fn agent_session_panel(
             let title = default_chat_thread_title(kind, &thread_state.borrow());
             let metadata =
                 provider_model_harness_metadata(None, selected_model.borrow().as_deref());
-            match WorkspaceStore::open_app(database_path.clone()).and_then(|store| {
-                store.create_chat_thread(
-                    &workspace_name,
-                    session_kind_provider(kind),
-                    &title,
-                    metadata.as_deref(),
-                )
-            }) {
-                Ok(thread) => {
-                    thread_state.borrow_mut().insert(0, thread.clone());
-                    apply_thread_selection(
-                        selected_thread.as_ref(),
-                        Some(thread.id),
-                        |thread_id| app_state.set_selected_chat_thread(thread_id),
-                        || {
-                            restore_composer_draft();
-                            update_composer_state();
-                            if let Some(refresh) =
-                                refresh_queue_overlay.borrow().as_ref().cloned()
-                            {
-                                refresh();
-                            }
-                        },
-                    );
-                    refresh_view();
+            let pending_target = app_state.create_pending_chat_target(workspace_name.clone(), kind);
+            app_state.mark_chat_phase(
+                pending_target.clone(),
+                ChatUiPhase::Creating { provider: kind },
+            );
+            let on_selected: Rc<dyn Fn()> = Rc::new({
+                let restore_composer_draft = restore_composer_draft.clone();
+                let update_composer_state = update_composer_state.clone();
+                let refresh_queue_overlay = refresh_queue_overlay.clone();
+                move || {
+                    restore_composer_draft();
+                    update_composer_state();
+                    if let Some(refresh) = refresh_queue_overlay.borrow().as_ref().cloned() {
+                        refresh();
+                    }
                 }
-                Err(err) => {
-                    toast_manager.error(format!("Create chat thread failed: {err:#}"));
-                    error!(workspace = %workspace_name, error = %err, "failed to create chat thread");
-                }
+            });
+            update_composer_state();
+            if let Some(refresh) = refresh_queue_overlay.borrow().as_ref().cloned() {
+                refresh();
             }
+            spawn_session_chat_thread_create(
+                database_path.clone(),
+                workspace_name,
+                kind,
+                title,
+                metadata,
+                pending_target,
+                SessionChatCreateUi {
+                    app_state: app_state.clone(),
+                    selected_thread: selected_thread.clone(),
+                    thread_state: thread_state.clone(),
+                    refresh_view: refresh_view.clone(),
+                    on_selected,
+                    toast_manager: toast_manager.clone(),
+                },
+            );
         }
     });
     root
@@ -11469,6 +11537,51 @@ fix it
             &item,
             QueuedComposerAction::SendImmediately
         ));
+    }
+
+    #[test]
+    fn composer_queue_accepts_pending_chat_target() {
+        let state = AppState::new(
+            archductor_core::paths::AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            crate::state::WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+        let target = state.create_pending_chat_target("berlin".to_owned(), SessionKind::Codex);
+
+        state.queue_chat_input_for_target(
+            target.clone(),
+            QueuedChatInputDraft {
+                input: "start once ready".to_owned(),
+                visible_input: None,
+                kind: ArchcarInputKind::User,
+                session_kind: SessionKind::Codex,
+            },
+        );
+
+        assert_eq!(state.queued_chat_inputs_for_target(&target).len(), 1);
+    }
+
+    #[test]
+    fn new_chat_button_does_not_create_thread_sync_in_click_handler() {
+        let source = include_str!("session_surface.rs");
+        let start = source
+            .find("new_chat_btn.connect_clicked")
+            .expect("new chat button handler exists");
+        let end = source[start..]
+            .find("root\n}")
+            .map(|offset| start + offset)
+            .expect("new chat handler end exists");
+        let handler = &source[start..end];
+
+        assert!(
+            !handler.contains("store.create_chat_thread("),
+            "new chat creation must be spawned so GTK stays responsive"
+        );
+        assert!(
+            handler.contains("create_pending_chat_target"),
+            "new chat creation must select an optimistic pending chat immediately"
+        );
     }
 
     #[test]

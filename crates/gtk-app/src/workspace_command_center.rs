@@ -56,7 +56,7 @@ fn clone_external_thread_selection_controller(
 }
 
 use crate::refresh::{RefreshEvent, RefreshHub, RefreshScope};
-use crate::state::{AppState, WorkspaceRightPanelTab, WorkspaceTab};
+use crate::state::{AppState, ChatUiPhase, ChatUiTarget, WorkspaceRightPanelTab, WorkspaceTab};
 use crate::toast::{show_toast as emit_toast, surface_label_error, ToastManager, ToastMessage};
 use crate::{
     archcar_async::{spawn_archcar_request, spawn_background_job},
@@ -999,6 +999,7 @@ fn ws_center_panel(
         let content = content.clone();
         let setup_readiness = setup_readiness.clone();
         let add_tab_btn_for_feedback = add_tab_btn.clone();
+        let closed_chat_tabs = closed_chat_tabs.clone();
         add_tab_btn.connect_clicked(move |_| {
             let workspace_name = current_workspace_name.borrow().clone();
             let existing = { known_threads.borrow().clone() };
@@ -1029,27 +1030,32 @@ fn ws_center_panel(
                 return;
             };
             let title = workspace_chat_default_title(&visible_existing);
-            let Ok(store) = WorkspaceStore::open_app(db_path.clone()) else {
-                return;
-            };
-            let Ok(thread) = store.create_chat_thread(&workspace_name, &provider, &title, None)
-            else {
-                return;
-            };
-            let mut threads = store.list_chat_threads(&workspace_name).unwrap_or_default();
-            if !threads.iter().any(|item| item.id == thread.id) {
-                threads.insert(0, thread.clone());
-            }
-            *selected_thread.borrow_mut() = Some(thread.id);
-            closed_chat_tabs.borrow_mut().remove(&thread.id);
-            state.set_selected_chat_thread(Some(thread.id));
+            let provider_kind = session_kind_for_chat_provider(&provider);
+            let pending_target = state.create_pending_chat_target(workspace_name.clone(), provider_kind);
+            state.mark_chat_phase(
+                pending_target.clone(),
+                ChatUiPhase::Creating {
+                    provider: provider_kind,
+                },
+            );
+            state.set_active_workspace_tab(WorkspaceTab::Chats);
             content.set_visible_child_name("chat");
-            (on_threads_changed)(threads, Some(thread.id));
-            if let Some(select_thread) =
-                clone_external_thread_selection_controller(&external_thread_selection)
-            {
-                select_thread(Some(thread.id));
-            }
+            spawn_workspace_chat_thread_create(
+                db_path.clone(),
+                workspace_name,
+                provider,
+                provider_kind,
+                title,
+                pending_target,
+                WorkspaceChatCreateUi {
+                    state: state.clone(),
+                    selected_thread: selected_thread.clone(),
+                    known_threads: known_threads.clone(),
+                    closed_chat_tabs: closed_chat_tabs.clone(),
+                    external_thread_selection: external_thread_selection.clone(),
+                    on_threads_changed: on_threads_changed.clone(),
+                },
+            );
         });
     }
     // Sync active tab state
@@ -1408,6 +1414,85 @@ fn ready_chat_provider_for_new_thread(
         .or_else(|| {
             default_launchable_chat_provider_for_workspace(db_path, workspace_name, &readiness)
         })
+}
+
+fn session_kind_for_chat_provider(provider: &str) -> SessionKind {
+    match provider {
+        "claude" => SessionKind::Claude,
+        "shell" => SessionKind::Shell,
+        _ => SessionKind::Codex,
+    }
+}
+
+struct WorkspaceChatCreateUi {
+    state: AppState,
+    selected_thread: Rc<RefCell<Option<i64>>>,
+    known_threads: Rc<RefCell<Vec<ChatThreadRecord>>>,
+    closed_chat_tabs: Rc<RefCell<HashSet<i64>>>,
+    external_thread_selection: session_surface::ExternalThreadSelectionController,
+    on_threads_changed: Rc<dyn Fn(Vec<ChatThreadRecord>, Option<i64>)>,
+}
+
+fn spawn_workspace_chat_thread_create(
+    db_path: PathBuf,
+    workspace_name: String,
+    provider: String,
+    provider_kind: SessionKind,
+    title: String,
+    pending_target: ChatUiTarget,
+    ui: WorkspaceChatCreateUi,
+) {
+    let workspace_for_job = workspace_name.clone();
+    spawn_background_job(
+        move || {
+            WorkspaceStore::open_app(db_path)
+                .and_then(|store| {
+                    let thread =
+                        store.create_chat_thread(&workspace_for_job, &provider, &title, None)?;
+                    let mut threads = store
+                        .list_chat_threads(&workspace_for_job)
+                        .unwrap_or_default();
+                    if !threads.iter().any(|item| item.id == thread.id) {
+                        threads.insert(0, thread.clone());
+                    }
+                    Ok((thread, threads))
+                })
+                .map_err(|err| format!("{err:#}"))
+        },
+        move |result| match result {
+            Ok((thread, threads)) => {
+                ui.state
+                    .resolve_pending_chat_target(pending_target.clone(), thread.id);
+                ui.state.mark_chat_phase(
+                    ChatUiTarget::Thread(thread.id),
+                    ChatUiPhase::StartingAgent {
+                        provider: provider_kind,
+                    },
+                );
+                *ui.selected_thread.borrow_mut() = Some(thread.id);
+                *ui.known_threads.borrow_mut() = threads.clone();
+                ui.closed_chat_tabs.borrow_mut().remove(&thread.id);
+                (ui.on_threads_changed)(threads, Some(thread.id));
+                if let Some(select_thread) =
+                    clone_external_thread_selection_controller(&ui.external_thread_selection)
+                {
+                    select_thread(Some(thread.id));
+                }
+                ui.state
+                    .request_refresh(RefreshEvent::WorkspaceChatLifecycleChanged {
+                        workspace: workspace_name,
+                    });
+            }
+            Err(message) => {
+                ui.state.mark_chat_phase(
+                    pending_target,
+                    ChatUiPhase::Failed {
+                        message: format!("Create chat thread failed: {message}"),
+                    },
+                );
+            }
+        },
+    );
 }
 
 fn default_launchable_chat_provider_for_workspace(
@@ -9869,6 +9954,28 @@ mod tests {
             !production_source
                 .contains("(on_threads_changed)(threads, *selected_thread.borrow());"),
             "chat tab refresh must copy selected_thread before invoking on_threads_changed"
+        );
+    }
+
+    #[test]
+    fn workspace_chat_add_does_not_create_thread_sync_in_click_handler() {
+        let source = include_str!("workspace_command_center.rs");
+        let start = source
+            .find("add_tab_btn.connect_clicked")
+            .expect("add chat button handler exists");
+        let end = source[start..]
+            .find("content.connect_visible_child_name_notify")
+            .map(|offset| start + offset)
+            .expect("add chat handler end exists");
+        let handler = &source[start..end];
+
+        assert!(
+            !handler.contains("store.create_chat_thread("),
+            "chat creation must be spawned so GTK stays responsive"
+        );
+        assert!(
+            handler.contains("create_pending_chat_target"),
+            "chat creation must select an optimistic pending chat immediately"
         );
     }
 }
