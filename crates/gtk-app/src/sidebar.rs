@@ -1092,7 +1092,6 @@ fn attach_workspace_row_context_menu(
                                             list.remove(&row);
                                         }
                                         refresh_view_preferences();
-                                        refresh_workspace();
                                         refresh_hub
                                             .refresh_event(RefreshEvent::WorkspaceInventoryChanged);
                                     }
@@ -1148,7 +1147,6 @@ fn attach_workspace_row_context_menu(
                                                 list.remove(&row);
                                             }
                                             refresh_view_preferences();
-                                            refresh_workspace();
                                             refresh_hub.refresh_event(
                                                 RefreshEvent::WorkspaceInventoryChanged,
                                             );
@@ -1658,6 +1656,22 @@ mod tests {
         assert!(production_source.contains("RefreshEvent::WorkspaceMetadataChanged"));
         assert!(!production_source.contains(
             "state.rename_workspace_in_navigation(&workspace_name, &workspace.name);\n                        refresh_view_preferences();\n                        refresh_workspace();\n                        refresh_hub.refresh_event(RefreshEvent::WorkspaceInventoryChanged);"
+        ));
+    }
+
+    #[test]
+    fn sidebar_workspace_removal_success_does_not_rebuild_deleted_workspace() {
+        let source = include_str!("sidebar.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("sidebar source should contain production code");
+
+        assert!(!production_source.contains(
+            "state.remove_workspace_from_navigation(\n                                            &workspace_name,\n                                            AppPage::Dashboard,\n                                        );\n                                        if was_selected_workspace {\n                                            stack.set_visible_child_name(\"dashboard\");\n                                        }\n                                        if let Some(list) = row.parent().and_downcast::<ListBox>() {\n                                            list.remove(&row);\n                                        }\n                                        refresh_view_preferences();\n                                        refresh_workspace();"
+        ));
+        assert!(!production_source.contains(
+            "state.remove_workspace_from_navigation(\n                                                &workspace_name,\n                                                AppPage::Dashboard,\n                                            );\n                                            if was_selected_workspace {\n                                                stack.set_visible_child_name(\"dashboard\");\n                                            }\n                                            if let Some(list) =\n                                                row.parent().and_downcast::<ListBox>()\n                                            {\n                                                list.remove(&row);\n                                            }\n                                            refresh_view_preferences();\n                                            refresh_workspace();"
         ));
     }
 }
