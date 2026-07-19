@@ -9,6 +9,7 @@ use archductor_core::archcar::harness_contract::{
 use archductor_core::archcar::protocol::{
     ArchcarEvent, ArchcarInputDelivery, ArchcarInputKind, ArchcarResponse,
 };
+use archductor_core::archcar::session::CODEX_RECOVERY_CURRENT_USER_MESSAGE_HEADER;
 use archductor_core::codex_tui::{
     parse_codex_context_usage, parse_codex_file_change_block, parse_codex_inline_event,
     CodexFileChangeAction as CoreCodexFileChangeAction,
@@ -21,12 +22,10 @@ use archductor_core::provider_events::{
     ProviderEventKind, ProviderEventPhase, ProviderEventRecord, ProviderEventStore,
 };
 use archductor_core::provider_interactions::ProviderInteractionRecord;
-#[cfg(test)]
-use archductor_core::provider_projection::ProviderProjectionCategory;
 use archductor_core::provider_projection::{
     provider_projection_from_records, provider_projection_item_is_relevant_chat_event,
-    ProjectionRenderClass, ProviderProjectionItem, ProviderProjectionStatus,
-    ProviderProjectionStreamState,
+    ProjectionRenderClass, ProviderProjectionCategory, ProviderProjectionItem,
+    ProviderProjectionStatus, ProviderProjectionStreamState,
 };
 #[cfg(test)]
 use archductor_core::session_state::AgentSessionState;
@@ -166,6 +165,7 @@ enum ChatTimelineItem {
     Message(ChatMessageRecord),
     Event(ChatEventRecord),
     ProviderProjection(ProviderProjectionItem),
+    InterruptedNotice { sequence: i64 },
     OptimisticUserInput(String),
 }
 
@@ -1797,6 +1797,12 @@ pub fn agent_session_panel(
                                             append_chat_refresh_row(
                                                 &messages,
                                                 &provider_projection_item_widget(&item),
+                                            );
+                                        }
+                                        ChatTimelineItem::InterruptedNotice { .. } => {
+                                            append_chat_refresh_row(
+                                                &messages,
+                                                &chat_interrupted_notice_widget(),
                                             );
                                         }
                                         ChatTimelineItem::OptimisticUserInput(input) => {
@@ -3467,7 +3473,8 @@ fn chat_timeline_item_sort_key(item: &ChatTimelineItem) -> (i64, u8, i64) {
             2,
             i64::try_from(item.sequence).unwrap_or(i64::MAX),
         ),
-        ChatTimelineItem::OptimisticUserInput(_) => (i64::MAX, 3, i64::MAX),
+        ChatTimelineItem::InterruptedNotice { sequence } => (*sequence, 3, i64::MAX - 1),
+        ChatTimelineItem::OptimisticUserInput(_) => (i64::MAX, 4, i64::MAX),
     }
 }
 
@@ -3491,8 +3498,10 @@ fn chat_structured_items_for_render(
                     ChatTimelineItem::Message(message) if message.timeline_seq.is_none()
                 )
             });
-    let provider_items =
+    let mut provider_items =
         provider_projection_items_for_timeline(provider_projection_items, &messages);
+    let interrupted_sequence = interrupted_notice_sequence(&messages, &provider_items);
+    provider_items.retain(|item| !provider_projection_item_is_interrupted_notice(item));
     if provider_items
         .iter()
         .any(|item| item.render_class == ProjectionRenderClass::UserChat)
@@ -3506,6 +3515,14 @@ fn chat_structured_items_for_render(
                 .map(ChatTimelineItem::ProviderProjection),
         );
         items.append(&mut unsequenced_messages);
+    }
+    if let Some(sequence) = interrupted_sequence {
+        items.push(ChatTimelineItem::InterruptedNotice { sequence });
+        items.sort_by(|left, right| {
+            let left_seq = chat_timeline_item_sort_key(left);
+            let right_seq = chat_timeline_item_sort_key(right);
+            left_seq.cmp(&right_seq)
+        });
     }
     items.extend(
         optimistic_immediate_inputs
@@ -3522,11 +3539,11 @@ fn chat_timeline_items_anchored_to_provider_user_events(
     let mut items = Vec::new();
     for provider_item in provider_items {
         if provider_item.render_class == ProjectionRenderClass::UserChat {
-            if let Some(index) =
-                matching_persisted_user_message_index(&persisted_items, provider_item.body.trim())
+            let user_body = provider_projection_user_body_for_render(&provider_item);
+            if let Some(index) = matching_persisted_user_message_index(&persisted_items, &user_body)
             {
                 items.push(persisted_items.remove(index));
-            } else if !provider_item.body.trim().is_empty() {
+            } else if !user_body.is_empty() {
                 items.push(ChatTimelineItem::ProviderProjection(provider_item));
             }
             continue;
@@ -3542,9 +3559,30 @@ fn matching_persisted_user_message_index(items: &[ChatTimelineItem], body: &str)
         matches!(
             item,
             ChatTimelineItem::Message(message)
-                if message.role == "user" && message.content.trim() == body
+                if message.role == "user" && message.content.trim() == body.trim()
         )
     })
+}
+
+fn interrupted_notice_sequence(
+    messages: &[ChatMessageRecord],
+    provider_items: &[ProviderProjectionItem],
+) -> Option<i64> {
+    let interrupted = provider_items
+        .iter()
+        .filter(|item| provider_projection_item_is_interrupted_notice(item))
+        .filter_map(|item| i64::try_from(item.sequence).ok())
+        .max()?;
+    let latest_user = messages
+        .iter()
+        .filter(|message| message.role == "user")
+        .filter_map(|message| message.timeline_seq)
+        .max();
+    if latest_user.is_some_and(|sequence| sequence > interrupted) {
+        None
+    } else {
+        Some(interrupted)
+    }
 }
 
 fn chat_message_is_renderable(message: &ChatMessageRecord) -> bool {
@@ -3768,6 +3806,7 @@ fn provider_projection_items_for_render(
         .into_iter()
         .filter(provider_projection_item_is_relevant_chat_event)
         .filter(|item| item.render_class != ProjectionRenderClass::HookCard)
+        .filter(|item| !provider_projection_item_is_interrupted_notice(item))
         .filter(provider_projection_item_has_renderable_content)
         .filter(|item| !provider_projection_item_has_persisted_message(item, messages))
         .collect()
@@ -3789,6 +3828,14 @@ fn provider_projection_items_for_timeline(
         .collect()
 }
 
+fn provider_projection_item_is_interrupted_notice(item: &ProviderProjectionItem) -> bool {
+    item.category == ProviderProjectionCategory::Status
+        && item.status == ProviderProjectionStatus::Canceled
+        && (item.title.to_ascii_lowercase().contains("turn")
+            || item.body.to_ascii_lowercase().contains("interrupt")
+            || item.body.to_ascii_lowercase().contains("cancel"))
+}
+
 fn provider_projection_item_has_renderable_content(item: &ProviderProjectionItem) -> bool {
     match item.render_class {
         ProjectionRenderClass::UserChat => false,
@@ -3804,7 +3851,9 @@ fn provider_projection_item_has_renderable_content(item: &ProviderProjectionItem
 
 fn provider_projection_timeline_item_has_renderable_content(item: &ProviderProjectionItem) -> bool {
     match item.render_class {
-        ProjectionRenderClass::UserChat => !item.body.trim().is_empty(),
+        ProjectionRenderClass::UserChat => {
+            !provider_projection_user_body_for_render(item).is_empty()
+        }
         _ => provider_projection_item_has_renderable_content(item),
     }
 }
@@ -3814,9 +3863,19 @@ fn provider_projection_item_has_persisted_message(
     messages: &[ChatMessageRecord],
 ) -> bool {
     item.render_class == ProjectionRenderClass::UserChat
-        && messages
-            .iter()
-            .any(|message| message.role == "user" && message.content.trim() == item.body.trim())
+        && messages.iter().any(|message| {
+            message.role == "user"
+                && message.content.trim() == provider_projection_user_body_for_render(item)
+        })
+}
+
+fn provider_projection_user_body_for_render(item: &ProviderProjectionItem) -> String {
+    recovered_current_user_message(&item.body).unwrap_or_else(|| item.body.trim().to_owned())
+}
+
+fn recovered_current_user_message(body: &str) -> Option<String> {
+    let (_, current) = body.split_once(CODEX_RECOVERY_CURRENT_USER_MESSAGE_HEADER)?;
+    Some(current.trim().to_owned()).filter(|value| !value.is_empty())
 }
 
 fn apply_provider_projection_agent_metadata(
@@ -3899,7 +3958,9 @@ fn provider_projection_item_widget(item: &ProviderProjectionItem) -> Widget {
     }
 
     match item.render_class {
-        ProjectionRenderClass::UserChat => chat_user_bubble(&item.body).upcast(),
+        ProjectionRenderClass::UserChat => {
+            chat_user_bubble(&provider_projection_user_body_for_render(item)).upcast()
+        }
         ProjectionRenderClass::AssistantChat => {
             provider_projection_text_widget(&provider_projection_assistant_body_for_render(item))
         }
@@ -8239,6 +8300,21 @@ fn codex_working_indicator_widget(elapsed: Duration) -> Widget {
     label.add_css_class("card-meta");
     label.set_xalign(0.0);
     label.set_hexpand(true);
+    row.append(&label);
+
+    row.upcast()
+}
+
+fn chat_interrupted_notice_widget() -> Widget {
+    let row = GBox::new(Orientation::Horizontal, 0);
+    row.set_halign(Align::Start);
+    row.set_margin_top(4);
+    row.set_margin_bottom(10);
+    row.add_css_class("chat-interrupted-row");
+
+    let label = Label::new(Some("Interrupted"));
+    label.add_css_class("chat-interrupted-pill");
+    label.set_xalign(0.0);
     row.append(&label);
 
     row.upcast()
@@ -13214,6 +13290,73 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
 
         assert!(items_without_message.is_empty());
         assert!(items.is_empty());
+    }
+
+    #[test]
+    fn recovered_provider_user_echo_matches_visible_user_message() {
+        let mut user_event =
+            provider_event_record(ProviderEventKind::UserInput, ProviderEventPhase::Completed);
+        user_event.provider_item_id = Some("user-recovered".to_owned());
+        user_event.normalized_payload = serde_json::json!({
+            "title": "User",
+            "body": "hidden recovered context\n\nCurrent user message:\nrun tests"
+        });
+        let projection = provider_projection_from_records(&[user_event]);
+        let messages = vec![chat_message_record(1, "user", "run tests", "user_send")];
+
+        let timeline = chat_structured_items_for_render(
+            messages,
+            Vec::new(),
+            projection.items,
+            Vec::new(),
+            Vec::new(),
+        );
+
+        assert_eq!(timeline.len(), 1);
+        assert!(matches!(timeline[0], ChatTimelineItem::Message(_)));
+    }
+
+    #[test]
+    fn interrupted_notice_renders_inline_until_next_user_message() {
+        let interrupted = ProviderProjectionItem {
+            id: "codex:thread-7:turn-1".to_owned(),
+            sequence: 2,
+            category: ProviderProjectionCategory::Status,
+            render_class: ProjectionRenderClass::StatusCard,
+            title: "Turn".to_owned(),
+            body: "Interrupted".to_owned(),
+            status: ProviderProjectionStatus::Canceled,
+            stream_state: ProviderProjectionStreamState::Complete,
+            parent_id: None,
+            nested_thread_id: None,
+            raw_payload: None,
+            inspectable: false,
+        };
+        let before_continue = chat_structured_items_for_render(
+            vec![chat_message_record(1, "agent", "partial answer", "agent")],
+            Vec::new(),
+            vec![interrupted.clone()],
+            Vec::new(),
+            Vec::new(),
+        );
+        let after_continue = chat_structured_items_for_render(
+            vec![
+                chat_message_record(1, "agent", "partial answer", "agent"),
+                chat_message_record(3, "user", "continue", "user_send"),
+            ],
+            Vec::new(),
+            vec![interrupted],
+            Vec::new(),
+            Vec::new(),
+        );
+
+        assert!(matches!(
+            before_continue.last(),
+            Some(ChatTimelineItem::InterruptedNotice { .. })
+        ));
+        assert!(!after_continue
+            .iter()
+            .any(|item| matches!(item, ChatTimelineItem::InterruptedNotice { .. })));
     }
 
     #[test]

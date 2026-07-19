@@ -2287,6 +2287,19 @@ popover.context-menu-popover arrow {
     line-height: 1.4;
     padding: 0;
 }
+.chat-interrupted-row {
+    margin-top: 4px;
+    margin-bottom: 10px;
+}
+.chat-interrupted-pill {
+    background-color: #262626;
+    color: #a5a5a5;
+    border: 1px solid #3a3a3a;
+    border-radius: 999px;
+    padding: 4px 10px;
+    font-size: 11px;
+    font-weight: 700;
+}
 .chat-agent-text {
     color: #c6c6c6;
     line-height: 1.55;

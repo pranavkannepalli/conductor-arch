@@ -17,6 +17,7 @@ use crate::local_chat::{
     local_chat_agent_type, parse_local_chat_transcript, session_events_to_local_chat_messages,
     truncate_chars,
 };
+use crate::redaction::redact_sensitive_text;
 use crate::session_event::{
     codex_parsed_item_to_session_event, SessionEvent, SessionEventPayload, SessionEventSource,
 };
@@ -70,6 +71,8 @@ const UNTRACKED_FILE_COUNT_BYTE_LIMIT: usize = 1024 * 1024;
 const DIFF_HUNK_PATCH_LIMIT_BYTES: usize = 200 * 1024;
 const TURN_CHECKPOINT_DIFF_LIMIT: usize = 25;
 const TURN_CHECKPOINT_DIFF_MAX_BYTES: usize = 64 * 1024;
+const CODEX_RECOVERY_CONTEXT_MAX_BYTES: usize = 16 * 1024;
+const CODEX_RECOVERY_ITEM_MAX_CHARS: usize = 1200;
 const WORKSPACE_LIFECYCLE_MAX_ATTEMPTS: i64 = 3;
 const WORKSPACE_PORT_START: u16 = 42000;
 const WORKSPACE_CITY_NAMES: [&str; 200] = [
@@ -6985,6 +6988,71 @@ mutation($threadId: ID!) {{
         codex_rollout_session_id_exists(native_thread_id)
     }
 
+    pub fn codex_recovery_context_for_thread(
+        &self,
+        thread_id: i64,
+        stale_native_thread_id: &str,
+    ) -> Result<String> {
+        let thread = self.get_chat_thread(thread_id)?;
+        let workspace = self.get_workspace_record(thread.workspace_id)?;
+        let mut context = format!(
+            "Archductor recovered this chat because the previous Codex native thread could not be resumed.\n\
+             Missing Codex rollout thread id: {}\n\
+             Continue as the same Archductor chat. Treat the recovered context below as prior conversation and do not repeat completed work unless needed.\n\n\
+             Workspace: {}\n\
+             Working tree: {}\n\
+             Thread: {}\n\
+             Provider: {}\n",
+            stale_native_thread_id.trim(),
+            workspace.name,
+            workspace.path.display(),
+            thread.title,
+            thread.provider,
+        );
+
+        let messages = self.list_chat_messages(thread_id)?;
+        if !messages.is_empty() {
+            append_recovery_context_line(&mut context, "\nPrior visible messages:\n");
+            for message in messages.iter().rev().take(24).rev() {
+                let line = format!(
+                    "- {}: {}\n",
+                    message.role,
+                    recovery_context_snippet(&message.content)
+                );
+                if !append_recovery_context_line(&mut context, &line) {
+                    return Ok(context);
+                }
+            }
+        }
+
+        let events = self.list_chat_events(thread_id)?;
+        if !events.is_empty() {
+            append_recovery_context_line(&mut context, "\nRecent provider events:\n");
+            for event in events.iter().rev().take(24).rev() {
+                let body = recovery_context_snippet(&event.body);
+                let line = if body.is_empty() {
+                    format!(
+                        "- {}: {}\n",
+                        event.kind,
+                        recovery_context_snippet(&event.title)
+                    )
+                } else {
+                    format!(
+                        "- {}: {} - {}\n",
+                        event.kind,
+                        recovery_context_snippet(&event.title),
+                        body
+                    )
+                };
+                if !append_recovery_context_line(&mut context, &line) {
+                    return Ok(context);
+                }
+            }
+        }
+
+        Ok(context)
+    }
+
     pub fn record_session_process_for_thread(
         &self,
         name: &str,
@@ -8033,6 +8101,26 @@ fn codex_rollout_session_id_exists(session_id: &str) -> Result<bool> {
         }
     }
     Ok(false)
+}
+
+fn recovery_context_snippet(value: &str) -> String {
+    truncate_chars(
+        &redact_sensitive_text(value)
+            .replace('\r', "")
+            .replace('\n', " "),
+        CODEX_RECOVERY_ITEM_MAX_CHARS,
+    )
+}
+
+fn append_recovery_context_line(context: &mut String, line: &str) -> bool {
+    if context.len() + line.len() > CODEX_RECOVERY_CONTEXT_MAX_BYTES {
+        if context.len() < CODEX_RECOVERY_CONTEXT_MAX_BYTES {
+            context.push_str("\n[Recovered context truncated]\n");
+        }
+        return false;
+    }
+    context.push_str(line);
+    true
 }
 
 struct CodexRolloutMeta {
@@ -21557,6 +21645,48 @@ spotlight_testing = true
         assert_eq!(summary.message_count, 1);
         assert_eq!(summary.event_count, 1);
         assert_eq!(summary.transcript_bytes, expected_bytes);
+    }
+
+    #[test]
+    fn codex_recovery_context_redacts_and_summarizes_thread_history() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Bugfix A", None)
+            .unwrap();
+        store
+            .append_chat_message(
+                thread.id,
+                "user",
+                "fix auth with token=secret-value",
+                "user_send",
+            )
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "agent", "started the fix", "agent")
+            .unwrap();
+        let process = process_record_for_thread(&store, thread.id);
+        store
+            .append_chat_event(
+                thread.id,
+                process.id,
+                &CodexTranscriptEvent::Tool {
+                    title: "cargo test".to_owned(),
+                    body: "failed because API_KEY=super-secret".to_owned(),
+                },
+            )
+            .unwrap();
+
+        let context = store
+            .codex_recovery_context_for_thread(thread.id, "missing-rollout")
+            .unwrap();
+
+        assert!(context.contains("Missing Codex rollout thread id: missing-rollout"));
+        assert!(context.contains("Workspace: berlin"));
+        assert!(context.contains("- user: fix auth with token=[redacted]"));
+        assert!(context.contains("- agent: started the fix"));
+        assert!(context.contains("cargo test"));
+        assert!(!context.contains("secret-value"));
+        assert!(!context.contains("super-secret"));
     }
 
     #[test]
