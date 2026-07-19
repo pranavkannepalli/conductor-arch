@@ -1560,6 +1560,7 @@ pub fn agent_session_panel(
                             codex_startup_states.as_ref(),
                             archcar_session_threads.as_ref(),
                             inflight_archcar_actions.as_ref(),
+                            &app_state,
                             current_kind,
                             selected_thread_id,
                             codex_ready.as_ref(),
@@ -7308,6 +7309,12 @@ fn chat_thread_waiting_for_starting_agent(app_state: &AppState, thread_id: i64) 
     )
 }
 
+fn mark_chat_startup_finished(app_state: &AppState, thread_id: i64) {
+    if chat_thread_waiting_for_starting_agent(app_state, thread_id) {
+        app_state.mark_chat_phase(ChatUiTarget::Thread(thread_id), ChatUiPhase::Ready);
+    }
+}
+
 fn remove_queued_chat_input_at(
     app_state: &AppState,
     thread_id: i64,
@@ -9982,6 +9989,7 @@ fn handle_archcar_event(
     startup_states: &RefCell<HashMap<i64, CodexStartupState>>,
     session_threads: &RefCell<HashMap<i64, i64>>,
     inflight_actions: &RefCell<HashMap<u64, PendingArchcarAction>>,
+    app_state: &AppState,
     selected_harness: SessionKind,
     selected_thread_id: Option<i64>,
     codex_ready: &RefCell<bool>,
@@ -10035,6 +10043,7 @@ fn handle_archcar_event(
                     thread_id: *thread_id,
                 },
             );
+            mark_chat_startup_finished(app_state, *thread_id);
             set_codex_ready_state(codex_ready, update_composer_state, true);
         }
         ArchcarEvent::TurnCompleted {
@@ -10059,6 +10068,7 @@ fn handle_archcar_event(
                         thread_id: *thread_id,
                     },
                 );
+                mark_chat_startup_finished(app_state, *thread_id);
             } else {
                 apply_codex_startup_signal(
                     &mut startup_states.borrow_mut(),
@@ -10122,6 +10132,7 @@ fn handle_archcar_event(
             {
                 hold_queued_auto_drain(queued_auto_drain_holds, thread_id);
                 clear_inflight_user_sends_for_thread(inflight_actions, thread_id);
+                mark_chat_startup_finished(app_state, thread_id);
             }
             clear_archcar_ready(&mut ready_cache.borrow_mut(), *session_id);
             session_threads.borrow_mut().remove(session_id);
@@ -10145,6 +10156,7 @@ fn handle_archcar_event(
             ) {
                 hold_queued_auto_drain(queued_auto_drain_holds, thread_id);
                 clear_inflight_user_sends_for_thread(inflight_actions, thread_id);
+                mark_chat_startup_finished(app_state, thread_id);
                 toast_manager.error(message.clone());
                 apply_codex_startup_signal(
                     &mut startup_states.borrow_mut(),
@@ -12032,6 +12044,29 @@ fix it
 
         assert!(!changed);
         assert!(working_threads.borrow().contains_key(&7));
+    }
+
+    #[test]
+    fn session_ready_clears_starting_chat_phase() {
+        let state = AppState::new(
+            archductor_core::paths::AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            crate::state::WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+        state.mark_chat_phase(
+            ChatUiTarget::Thread(7),
+            ChatUiPhase::StartingAgent {
+                provider: SessionKind::Codex,
+            },
+        );
+
+        mark_chat_startup_finished(&state, 7);
+
+        assert_eq!(
+            state.chat_phase(&ChatUiTarget::Thread(7)),
+            Some(ChatUiPhase::Ready)
+        );
     }
 
     #[test]
