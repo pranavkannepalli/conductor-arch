@@ -335,6 +335,7 @@ struct SessionChatCreateUi {
     selected_thread: Rc<RefCell<Option<i64>>>,
     thread_state: Rc<RefCell<Vec<ChatThreadRecord>>>,
     refresh_view: Rc<dyn Fn()>,
+    send_text: Rc<dyn Fn(String, bool) -> bool>,
     on_selected: Rc<dyn Fn()>,
     toast_manager: ToastManager,
 }
@@ -373,6 +374,12 @@ fn spawn_session_chat_thread_create(
                 );
                 *ui.selected_thread.borrow_mut() = Some(thread.id);
                 (ui.on_selected)();
+                if let Some(queued_input) = pop_next_queued_chat_input(&ui.app_state, thread.id) {
+                    let staged_review = matches!(queued_input.kind, ArchcarInputKind::ReviewPrompt);
+                    if !(ui.send_text)(queued_input.input.clone(), staged_review) {
+                        requeue_pending_input_front(&ui.app_state, thread.id, queued_input);
+                    }
+                }
                 (ui.refresh_view)();
             }
             Err(message) => {
@@ -3058,6 +3065,7 @@ pub fn agent_session_panel(
                 .to_string();
             let has_text = !command.trim().is_empty();
             let thread_id = *selected_thread.borrow();
+            let chat_target = selected_chat_target_for_submit(&app_state, thread_id);
             if let Some(thread_id) = thread_id {
                 if app_state.editing_queued_chat_input(thread_id).is_some() {
                     if has_text {
@@ -3120,6 +3128,20 @@ pub fn agent_session_panel(
             let selected_kind = *selected_harness.borrow();
             match composer_action_for_submit_intent(action, intent, has_text, selected_kind) {
                 ComposerAction::Queue => {
+                    if let Some(target @ ChatUiTarget::Pending { .. }) = chat_target.clone() {
+                        queue_archcar_input_for_target(
+                            &app_state,
+                            target,
+                            command.clone(),
+                            None,
+                            ArchcarInputKind::User,
+                            *selected_harness.borrow(),
+                        );
+                        buffer.set_text("");
+                        refresh_view();
+                        update_composer_state();
+                        return;
+                    }
                     let Some(thread_id) = thread_id else {
                         buffer.set_text("");
                         (send_text)(command, false);
@@ -3168,6 +3190,19 @@ pub fn agent_session_panel(
                 ComposerAction::Send => {
                     if has_text {
                         buffer.set_text("");
+                        if let Some(target @ ChatUiTarget::Pending { .. }) = chat_target.clone() {
+                            queue_archcar_input_for_target(
+                                &app_state,
+                                target,
+                                command.clone(),
+                                None,
+                                ArchcarInputKind::User,
+                                *selected_harness.borrow(),
+                            );
+                            refresh_view();
+                            update_composer_state();
+                            return;
+                        }
                         if intent == ComposerSubmitIntent::Immediate
                             && managed_harness_for_kind(selected_kind).is_some()
                         {
@@ -3243,6 +3278,7 @@ pub fn agent_session_panel(
         let selected_thread = selected_thread.clone();
         let app_state = app_state.clone();
         let refresh_view = refresh_view.clone();
+        let send_text = send_text.clone();
         let update_composer_state = update_composer_state.clone();
         let restore_composer_draft = restore_composer_draft.clone();
         let refresh_queue_overlay = refresh_queue_overlay.clone();
@@ -3292,6 +3328,7 @@ pub fn agent_session_panel(
                     selected_thread: selected_thread.clone(),
                     thread_state: thread_state.clone(),
                     refresh_view: refresh_view.clone(),
+                    send_text: send_text.clone(),
                     on_selected,
                     toast_manager: toast_manager.clone(),
                 },
@@ -7003,6 +7040,42 @@ fn queue_archcar_input(
             session_kind,
         },
     );
+}
+
+fn queue_archcar_input_for_target(
+    app_state: &AppState,
+    target: ChatUiTarget,
+    input: String,
+    visible_input: Option<String>,
+    kind: ArchcarInputKind,
+    session_kind: SessionKind,
+) {
+    let input = input.trim().to_owned();
+    if input.is_empty() {
+        return;
+    }
+    app_state.queue_chat_input_for_target(
+        target,
+        QueuedChatInputDraft {
+            input,
+            visible_input,
+            kind,
+            session_kind,
+        },
+    );
+}
+
+fn selected_chat_target_for_submit(
+    app_state: &AppState,
+    selected_thread_id: Option<i64>,
+) -> Option<ChatUiTarget> {
+    match app_state.selected_chat_target() {
+        Some(target @ ChatUiTarget::Pending { .. }) => Some(target),
+        Some(ChatUiTarget::Thread(thread_id)) if selected_thread_id == Some(thread_id) => {
+            Some(ChatUiTarget::Thread(thread_id))
+        }
+        _ => selected_thread_id.map(ChatUiTarget::Thread),
+    }
 }
 
 fn queued_archcar_input_visible_text(input: &QueuedArchcarInput) -> String {
@@ -11583,6 +11656,58 @@ fix it
         );
 
         assert_eq!(state.queued_chat_inputs_for_target(&target).len(), 1);
+    }
+
+    #[test]
+    fn pending_chat_submit_targets_pending_chat_not_previous_thread() {
+        let state = AppState::new(
+            archductor_core::paths::AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            crate::state::WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+        state.set_selected_chat_thread(Some(7));
+        let pending = state.create_pending_chat_target("berlin".to_owned(), SessionKind::Codex);
+
+        let target = selected_chat_target_for_submit(&state, Some(7));
+
+        assert_eq!(target, Some(pending.clone()));
+        queue_archcar_input_for_target(
+            &state,
+            target.unwrap(),
+            "first message in new chat".to_owned(),
+            None,
+            ArchcarInputKind::User,
+            SessionKind::Codex,
+        );
+
+        assert_eq!(state.queued_chat_inputs_count(7), 0);
+        assert_eq!(state.queued_chat_inputs_for_target(&pending).len(), 1);
+    }
+
+    #[test]
+    fn pending_chat_resolve_keeps_first_message_on_new_thread_queue() {
+        let state = AppState::new(
+            archductor_core::paths::AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            crate::state::WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+        let pending = state.create_pending_chat_target("berlin".to_owned(), SessionKind::Codex);
+        queue_archcar_input_for_target(
+            &state,
+            pending.clone(),
+            "first message in new chat".to_owned(),
+            None,
+            ArchcarInputKind::User,
+            SessionKind::Codex,
+        );
+
+        state.resolve_pending_chat_target(pending, 42);
+
+        let queued = pop_next_queued_chat_input(&state, 42).unwrap();
+        assert_eq!(queued.input, "first message in new chat");
+        assert_eq!(state.selected_chat_thread(), Some(42));
     }
 
     #[test]
