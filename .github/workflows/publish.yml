@@ -477,9 +477,12 @@ jobs:
         run: |
           set -euxo pipefail
           brew --version
-          brew audit --strict --online --formula packaging/homebrew/Formula/archductor.rb
-          brew install --build-from-source packaging/homebrew/Formula/archductor.rb
-          brew test archductor
+          brew tap-new perceo-ai/tap
+          tap_formula="$(brew --repository perceo-ai/tap)/Formula/archductor.rb"
+          cp packaging/homebrew/Formula/archductor.rb "$tap_formula"
+          brew audit --strict --online --formula perceo-ai/tap/archductor
+          brew install --build-from-source perceo-ai/tap/archductor
+          brew test perceo-ai/tap/archductor
           archductor doctor
           gtk_status=0
           xvfb-run -a timeout 15s archductor-gtk --page dashboard || gtk_status=$?
