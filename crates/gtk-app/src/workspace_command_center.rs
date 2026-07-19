@@ -3107,8 +3107,12 @@ fn lifecycle_panel(
             .and_then(|store| store.rename(&current_name, &new_name))
         {
             Ok(workspace) => {
-                state_after_rename.set_selected_workspace(Some(workspace.name.clone()));
+                state_after_rename.rename_workspace_in_navigation(&current_name, &workspace.name);
                 progress_rename.set_text(&format!("Renamed to {}", workspace.name));
+                refresh_after_rename.refresh_event(RefreshEvent::WorkspaceMetadataChanged {
+                    old_workspace: current_name.clone(),
+                    workspace: workspace.name,
+                });
             }
             Err(err) => apply_runtime_action_feedback(
                 &progress_rename,
@@ -3116,7 +3120,6 @@ fn lifecycle_panel(
                 lifecycle_action_failure_feedback("Rename", &err),
             ),
         }
-        refresh_after_rename.refresh_event(RefreshEvent::WorkspaceInventoryChanged);
     });
 
     let db_duplicate = db_path.to_path_buf();
@@ -9815,6 +9818,20 @@ mod tests {
                 Some("berlin")
             );
         }
+    }
+
+    #[test]
+    fn workspace_action_rename_uses_metadata_refresh() {
+        let source = include_str!("workspace_command_center.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("workspace command center source should contain production code");
+
+        assert!(production_source.contains("RefreshEvent::WorkspaceMetadataChanged"));
+        assert!(!production_source.contains(
+            "state_after_rename.set_selected_workspace(Some(workspace.name.clone()));\n                progress_rename.set_text(&format!(\"Renamed to {}\", workspace.name));\n            }\n            Err(err) => apply_runtime_action_feedback(\n                &progress_rename,\n                &toast_rename,\n                lifecycle_action_failure_feedback(\"Rename\", &err),\n            ),\n        }\n        refresh_after_rename.refresh_event(RefreshEvent::WorkspaceInventoryChanged);"
+        ));
     }
 
     #[test]

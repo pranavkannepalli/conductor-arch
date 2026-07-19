@@ -205,7 +205,10 @@ pub(crate) fn build_app_sidebar(
     let list = ListBox::new();
     list.add_css_class("workspace-list");
     list.set_selection_mode(gtk::SelectionMode::Single);
-    let names: Rc<RefCell<HashMap<i32, String>>> = Rc::new(RefCell::new(HashMap::new()));
+    let names: Rc<RefCell<HashMap<i32, Rc<RefCell<String>>>>> =
+        Rc::new(RefCell::new(HashMap::new()));
+    let workspace_rows: Rc<RefCell<HashMap<String, SidebarWorkspaceRow>>> =
+        Rc::new(RefCell::new(HashMap::new()));
     let pending_workspace_creates: Rc<RefCell<HashSet<String>>> =
         Rc::new(RefCell::new(HashSet::new()));
     let db_path = app_state.workspace_database_path();
@@ -214,6 +217,7 @@ pub(crate) fn build_app_sidebar(
     let populate = {
         let list = list.clone();
         let names = Rc::clone(&names);
+        let workspace_rows = Rc::clone(&workspace_rows);
         let state = app_state.clone();
         let app_state = app_state.clone();
         let search_entry = search_entry.clone();
@@ -231,6 +235,7 @@ pub(crate) fn build_app_sidebar(
                 list.remove(&child);
             }
             names.borrow_mut().clear();
+            workspace_rows.borrow_mut().clear();
             let filter = search_entry.text().to_string().to_lowercase();
             let prev_selected = state.selected_workspace();
             let mut row_idx = 0;
@@ -396,10 +401,18 @@ pub(crate) fn build_app_sidebar(
                             line.diff_deletions,
                             &ws.updated_at,
                         );
+                        let workspace_name = Rc::new(RefCell::new(ws.name.clone()));
+                        workspace_rows.borrow_mut().insert(
+                            ws.name.clone(),
+                            SidebarWorkspaceRow {
+                                name: Rc::clone(&workspace_name),
+                                name_label: row.name_label.clone(),
+                            },
+                        );
                         if workspace_status_allows_sidebar_actions(&ws.status) {
                             attach_workspace_row_context_menu(
-                                &row,
-                                ws.name.clone(),
+                                &row.row,
+                                Rc::clone(&workspace_name),
                                 ws.status.clone(),
                                 app_state.clone(),
                                 stack.clone(),
@@ -409,9 +422,11 @@ pub(crate) fn build_app_sidebar(
                                 refresh_view_preferences.clone(),
                                 toast_populate.clone(),
                             );
-                            names.borrow_mut().insert(row_idx, ws.name.clone());
+                            names
+                                .borrow_mut()
+                                .insert(row_idx, Rc::clone(&workspace_name));
                         }
-                        list.append(&row);
+                        list.append(&row.row);
                         row_idx += 1;
                     }
                 }
@@ -428,9 +443,9 @@ pub(crate) fn build_app_sidebar(
             if sidebar_should_restore_workspace_selection(&state.snapshot().active_page) {
                 let names_ref = names.borrow();
                 let target_idx = prev_selected.as_deref().and_then(|name| {
-                    names_ref
-                        .iter()
-                        .find_map(|(&idx, row_name)| (row_name == name).then_some(idx))
+                    names_ref.iter().find_map(|(&idx, row_name)| {
+                        (row_name.borrow().as_str() == name).then_some(idx)
+                    })
                 });
                 drop(names_ref);
                 if let Some(idx) = target_idx {
@@ -441,6 +456,33 @@ pub(crate) fn build_app_sidebar(
             }
         }
     };
+
+    {
+        let names = Rc::clone(&names);
+        let workspace_rows = Rc::clone(&workspace_rows);
+        refresh_hub.set_workspace_nav_row(move |event| {
+            let RefreshEvent::WorkspaceMetadataChanged {
+                old_workspace,
+                workspace,
+            } = event
+            else {
+                return;
+            };
+
+            let row = { workspace_rows.borrow_mut().remove(old_workspace) };
+            if let Some(row) = row {
+                row.name_label.set_text(&title_case_workspace(workspace));
+                *row.name.borrow_mut() = workspace.clone();
+                workspace_rows.borrow_mut().insert(workspace.clone(), row);
+            }
+
+            for name in names.borrow_mut().values() {
+                if name.borrow().as_str() == old_workspace {
+                    *name.borrow_mut() = workspace.clone();
+                }
+            }
+        });
+    }
 
     populate();
     let pop_search = populate.clone();
@@ -457,8 +499,12 @@ pub(crate) fn build_app_sidebar(
     let archcar_paths = app_state.paths.clone();
     list.connect_row_selected(move |_, row| {
         guarded_gtk_callback((), || {
-            let Some(name) = row.and_then(|r| names_select.borrow().get(&r.index()).cloned())
-            else {
+            let Some(name) = row.and_then(|r| {
+                names_select
+                    .borrow()
+                    .get(&r.index())
+                    .map(|name| name.borrow().clone())
+            }) else {
                 return;
             };
             spawn_archcar_request(
@@ -649,6 +695,17 @@ where
     }
 }
 
+#[derive(Clone)]
+struct SidebarWorkspaceRow {
+    name: Rc<RefCell<String>>,
+    name_label: Label,
+}
+
+struct BuiltWorkspaceRow {
+    row: ListBoxRow,
+    name_label: Label,
+}
+
 fn build_workspace_row(
     name: &str,
     branch: &str,
@@ -656,7 +713,7 @@ fn build_workspace_row(
     diff_additions: usize,
     diff_deletions: usize,
     updated_at: &str,
-) -> ListBoxRow {
+) -> BuiltWorkspaceRow {
     let row_box = GBox::new(Orientation::Horizontal, 10);
     row_box.add_css_class("project-row");
     row_box.add_css_class("workspace-row-shell");
@@ -727,7 +784,7 @@ fn build_workspace_row(
         row.set_selectable(false);
         row.set_activatable(false);
     }
-    row
+    BuiltWorkspaceRow { row, name_label }
 }
 
 fn workspace_diff_stats(additions: usize, deletions: usize) -> GBox {
@@ -750,7 +807,7 @@ fn workspace_diff_stats(additions: usize, deletions: usize) -> GBox {
 
 fn attach_workspace_row_context_menu(
     row: &ListBoxRow,
-    workspace_name: String,
+    workspace_name: Rc<RefCell<String>>,
     workspace_status: String,
     state: AppState,
     stack: Stack,
@@ -768,10 +825,9 @@ fn attach_workspace_row_context_menu(
 
     let rename_btn = menu_text_button("Rename");
     {
-        let workspace_name = workspace_name.clone();
+        let workspace_name = Rc::clone(&workspace_name);
         let state = state.clone();
         let refresh_hub = refresh_hub.clone();
-        let refresh_workspace = refresh_workspace.clone();
         let refresh_view_preferences = refresh_view_preferences.clone();
         let popover_for_item = popover.downgrade();
         let window = window.downgrade();
@@ -783,30 +839,33 @@ fn attach_workspace_row_context_menu(
             let Some(window) = window.upgrade() else {
                 return;
             };
+            let current_workspace_name = workspace_name.borrow().clone();
             show_workspace_text_dialog(
                 &window,
                 "Rename workspace",
                 "Workspace name",
-                &workspace_name,
+                &current_workspace_name,
                 "Rename",
                 toast_manager.clone(),
                 Rc::new({
-                    let workspace_name = workspace_name.clone();
+                    let workspace_name = Rc::clone(&workspace_name);
                     let state = state.clone();
                     let refresh_hub = refresh_hub.clone();
-                    let refresh_workspace = refresh_workspace.clone();
                     let refresh_view_preferences = refresh_view_preferences.clone();
                     move |new_name| {
-                        if new_name.is_empty() || new_name == workspace_name {
+                        let old_name = workspace_name.borrow().clone();
+                        if new_name.is_empty() || new_name == old_name {
                             return Ok(());
                         }
                         let workspace = WorkspaceStore::open_app(state.workspace_database_path())
-                            .and_then(|store| store.rename(&workspace_name, &new_name))
+                            .and_then(|store| store.rename(&old_name, &new_name))
                             .map_err(|err| format!("{err:#}"))?;
-                        state.rename_workspace_in_navigation(&workspace_name, &workspace.name);
+                        state.rename_workspace_in_navigation(&old_name, &workspace.name);
                         refresh_view_preferences();
-                        refresh_workspace();
-                        refresh_hub.refresh_event(RefreshEvent::WorkspaceInventoryChanged);
+                        refresh_hub.refresh_event(RefreshEvent::WorkspaceMetadataChanged {
+                            old_workspace: old_name,
+                            workspace: workspace.name,
+                        });
                         Ok(())
                     }
                 }),
@@ -819,7 +878,7 @@ fn attach_workspace_row_context_menu(
 
     let duplicate_btn = menu_text_button("Duplicate");
     {
-        let workspace_name = workspace_name.clone();
+        let workspace_name = Rc::clone(&workspace_name);
         let refresh_hub = refresh_hub.clone();
         let refresh_workspace = refresh_workspace.clone();
         let refresh_view_preferences = refresh_view_preferences.clone();
@@ -843,7 +902,7 @@ fn attach_workspace_row_context_menu(
                 "Duplicate",
                 toast_manager.clone(),
                 Rc::new({
-                    let workspace_name = workspace_name.clone();
+                    let workspace_name = Rc::clone(&workspace_name);
                     let refresh_hub = refresh_hub.clone();
                     let refresh_workspace = refresh_workspace.clone();
                     let refresh_view_preferences = refresh_view_preferences.clone();
@@ -865,7 +924,7 @@ fn attach_workspace_row_context_menu(
                         spawn_background_job(
                             {
                                 let db_path = state.workspace_database_path().to_path_buf();
-                                let workspace_name = workspace_name.clone();
+                                let workspace_name = workspace_name.borrow().clone();
                                 let new_name = new_name.clone();
                                 move || {
                                     WorkspaceStore::open_app(db_path)
@@ -910,7 +969,7 @@ fn attach_workspace_row_context_menu(
         if destructive {
             item.add_css_class("destructive-action");
         }
-        let workspace_name = workspace_name.clone();
+        let workspace_name = Rc::clone(&workspace_name);
         let refresh_hub = refresh_hub.clone();
         let refresh_workspace = refresh_workspace.clone();
         let refresh_view_preferences = refresh_view_preferences.clone();
@@ -935,13 +994,14 @@ fn attach_workspace_row_context_menu(
             } else {
                 "Delete workspace"
             };
+            let current_workspace_name = workspace_name.borrow().clone();
             let message = if action == "archive" {
-                format!("Archive {workspace_name}?")
+                format!("Archive {current_workspace_name}?")
             } else if workspace_status_for_action == "failed" {
-                format!("Delete {workspace_name}? This removes failed workspace metadata and any created worktree, but leaves the local branch alone.")
+                format!("Delete {current_workspace_name}? This removes failed workspace metadata and any created worktree, but leaves the local branch alone.")
             } else {
                 format!(
-                    "Delete {workspace_name}? This removes the worktree, deletes the local branch, and can discard unmerged commits."
+                    "Delete {current_workspace_name}? This removes the worktree, deletes the local branch, and can discard unmerged commits."
                 )
             };
             show_workspace_confirm_dialog(
@@ -952,7 +1012,7 @@ fn attach_workspace_row_context_menu(
                 destructive,
                 toast_manager.clone(),
                 Rc::new({
-                    let workspace_name = workspace_name.clone();
+                    let workspace_name = Rc::clone(&workspace_name);
                     let workspace_status = workspace_status_for_action.clone();
                     let refresh_hub = refresh_hub.clone();
                     let refresh_workspace = refresh_workspace.clone();
@@ -969,9 +1029,9 @@ fn attach_workspace_row_context_menu(
                         let state = state.clone();
                         let stack = stack.clone();
                         let row = row.clone();
-                        let workspace_name = workspace_name.clone();
-	                        let force_delete_workspace = workspace_status == "failed";
-	                        let delete_branch_after_delete = workspace_status != "failed";
+                        let workspace_name = workspace_name.borrow().clone();
+                        let force_delete_workspace = workspace_status == "failed";
+                        let delete_branch_after_delete = workspace_status != "failed";
                         let window = window.clone();
                         let toast_manager = toast_manager.clone();
                         if action == "delete" {
@@ -1564,5 +1624,19 @@ mod tests {
             workspace_context_actions("active"),
             vec![("Archive", false, "archive"), ("Delete", true, "delete")]
         );
+    }
+
+    #[test]
+    fn sidebar_rename_uses_workspace_metadata_refresh() {
+        let source = include_str!("sidebar.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("sidebar source should contain production code");
+
+        assert!(production_source.contains("RefreshEvent::WorkspaceMetadataChanged"));
+        assert!(!production_source.contains(
+            "state.rename_workspace_in_navigation(&workspace_name, &workspace.name);\n                        refresh_view_preferences();\n                        refresh_workspace();\n                        refresh_hub.refresh_event(RefreshEvent::WorkspaceInventoryChanged);"
+        ));
     }
 }

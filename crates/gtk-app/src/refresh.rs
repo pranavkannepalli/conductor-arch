@@ -27,11 +27,26 @@ pub enum RefreshEvent {
     SettingsChanged,
     WorkspaceSelectionChanged,
     WorkspaceInventoryChanged,
-    WorkspaceRuntimeChanged { workspace: String },
-    WorkspaceReviewChanged { workspace: String },
-    WorkspaceChatLifecycleChanged { workspace: String },
-    WorkspaceChatMessagesChanged { workspace: String, thread_id: i64 },
-    TerminalChanged { workspace: String },
+    WorkspaceMetadataChanged {
+        old_workspace: String,
+        workspace: String,
+    },
+    WorkspaceRuntimeChanged {
+        workspace: String,
+    },
+    WorkspaceReviewChanged {
+        workspace: String,
+    },
+    WorkspaceChatLifecycleChanged {
+        workspace: String,
+    },
+    WorkspaceChatMessagesChanged {
+        workspace: String,
+        thread_id: i64,
+    },
+    TerminalChanged {
+        workspace: String,
+    },
 }
 
 type RefreshHandler = Rc<dyn Fn()>;
@@ -48,6 +63,7 @@ enum RefreshMetricTarget {
     WorkspaceChatTabs,
     WorkspaceRuntime,
     WorkspaceReview,
+    WorkspaceNavRow,
 }
 
 impl RefreshMetricTarget {
@@ -62,6 +78,7 @@ impl RefreshMetricTarget {
             Self::WorkspaceChatTabs => "workspace_chat_tabs",
             Self::WorkspaceRuntime => "workspace_runtime",
             Self::WorkspaceReview => "workspace_review",
+            Self::WorkspaceNavRow => "workspace_nav_row",
         }
     }
 }
@@ -78,6 +95,7 @@ struct RefreshMetricSnapshot {
     workspace_chat_tabs: u64,
     workspace_runtime: u64,
     workspace_review: u64,
+    workspace_nav_row: u64,
 }
 
 #[derive(Default)]
@@ -93,6 +111,7 @@ struct RefreshMetrics {
     workspace_chat_tabs: Cell<u64>,
     workspace_runtime: Cell<u64>,
     workspace_review: Cell<u64>,
+    workspace_nav_row: Cell<u64>,
 }
 
 impl RefreshMetrics {
@@ -118,6 +137,9 @@ impl RefreshMetrics {
             RefreshMetricTarget::WorkspaceReview => {
                 self.workspace_review.set(self.workspace_review.get() + 1)
             }
+            RefreshMetricTarget::WorkspaceNavRow => {
+                self.workspace_nav_row.set(self.workspace_nav_row.get() + 1)
+            }
         }
         if self.enabled() {
             let snapshot = self.snapshot();
@@ -133,6 +155,7 @@ impl RefreshMetrics {
                 workspace_chat_tabs = snapshot.workspace_chat_tabs,
                 workspace_runtime = snapshot.workspace_runtime,
                 workspace_review = snapshot.workspace_review,
+                workspace_nav_row = snapshot.workspace_nav_row,
                 "gtk refresh metric"
             );
         }
@@ -159,6 +182,7 @@ impl RefreshMetrics {
             workspace_chat_tabs: self.workspace_chat_tabs.get(),
             workspace_runtime: self.workspace_runtime.get(),
             workspace_review: self.workspace_review.get(),
+            workspace_nav_row: self.workspace_nav_row.get(),
         }
     }
 }
@@ -180,6 +204,7 @@ pub struct RefreshHub {
     workspace_chat_tabs: Rc<RefCell<Option<RefreshEventHandler>>>,
     workspace_runtime: Rc<RefCell<Option<RefreshEventHandler>>>,
     workspace_review: Rc<RefCell<Option<RefreshEventHandler>>>,
+    workspace_nav_row: Rc<RefCell<Option<RefreshEventHandler>>>,
     metrics: Rc<RefreshMetrics>,
 }
 
@@ -224,6 +249,10 @@ impl RefreshHub {
         *self.workspace_review.borrow_mut() = Some(Rc::new(handler));
     }
 
+    pub fn set_workspace_nav_row(&self, handler: impl Fn(&RefreshEvent) + 'static) {
+        *self.workspace_nav_row.borrow_mut() = Some(Rc::new(handler));
+    }
+
     pub fn refresh_event(&self, event: RefreshEvent) {
         match event {
             RefreshEvent::Manual => self.refresh(RefreshScope::All),
@@ -245,6 +274,13 @@ impl RefreshHub {
                 self.refresh(RefreshScope::Dashboard);
                 self.refresh(RefreshScope::History);
                 self.refresh_workspace(WorkspaceRefreshTarget::Shell);
+            }
+            RefreshEvent::WorkspaceMetadataChanged { .. } => {
+                self.run_event(
+                    RefreshMetricTarget::WorkspaceNavRow,
+                    &self.workspace_nav_row,
+                    &event,
+                );
             }
             RefreshEvent::WorkspaceRuntimeChanged { .. } | RefreshEvent::TerminalChanged { .. } => {
                 self.refresh(RefreshScope::Sidebar);
@@ -413,6 +449,7 @@ mod tests {
         workspace_chat_tabs: Rc<Cell<u32>>,
         workspace_runtime: Rc<Cell<u32>>,
         workspace_review: Rc<Cell<u32>>,
+        workspace_nav_row: Rc<Cell<u32>>,
     }
 
     impl RefreshCounts {
@@ -447,9 +484,12 @@ mod tests {
 
             let workspace_review = Rc::clone(&self.workspace_review);
             hub.set_workspace_review(move |_| workspace_review.set(workspace_review.get() + 1));
+
+            let workspace_nav_row = Rc::clone(&self.workspace_nav_row);
+            hub.set_workspace_nav_row(move |_| workspace_nav_row.set(workspace_nav_row.get() + 1));
         }
 
-        fn values(&self) -> (u32, u32, u32, u32, u32, u32, u32, u32, u32) {
+        fn values(&self) -> (u32, u32, u32, u32, u32, u32, u32, u32, u32, u32) {
             (
                 self.sidebar.get(),
                 self.dashboard.get(),
@@ -460,6 +500,7 @@ mod tests {
                 self.workspace_chat_tabs.get(),
                 self.workspace_runtime.get(),
                 self.workspace_review.get(),
+                self.workspace_nav_row.get(),
             )
         }
     }
@@ -485,7 +526,7 @@ mod tests {
             workspace: "demo".to_owned(),
         });
 
-        assert_eq!(counts.values(), (1, 1, 0, 1, 0, 0, 0, 1, 0));
+        assert_eq!(counts.values(), (1, 1, 0, 1, 0, 0, 0, 1, 0, 0));
     }
 
     #[test]
@@ -500,7 +541,21 @@ mod tests {
             thread_id: 7,
         });
 
-        assert_eq!(counts.values(), (0, 0, 0, 0, 0, 1, 0, 0, 0));
+        assert_eq!(counts.values(), (0, 0, 0, 0, 0, 1, 0, 0, 0, 0));
+    }
+
+    #[test]
+    fn workspace_metadata_refresh_updates_only_workspace_nav_row() {
+        let hub = RefreshHub::default();
+        let counts = RefreshCounts::default();
+        counts.install(&hub);
+
+        hub.refresh_event(RefreshEvent::WorkspaceMetadataChanged {
+            old_workspace: "old-name".to_owned(),
+            workspace: "new-name".to_owned(),
+        });
+
+        assert_eq!(counts.values(), (0, 0, 0, 0, 0, 0, 0, 0, 0, 1));
     }
 
     #[test]
@@ -531,7 +586,7 @@ mod tests {
             workspace: "demo".to_owned(),
         });
 
-        assert_eq!(counts.values(), (1, 1, 0, 1, 0, 1, 1, 0, 0));
+        assert_eq!(counts.values(), (1, 1, 0, 1, 0, 1, 1, 0, 0, 0));
     }
 
     #[test]
@@ -597,7 +652,7 @@ mod tests {
             workspace: "demo".to_owned(),
         });
 
-        assert_eq!(counts.values(), (0, 1, 0, 1, 0, 0, 0, 0, 1));
+        assert_eq!(counts.values(), (0, 1, 0, 1, 0, 0, 0, 0, 1, 0));
     }
 
     #[test]
@@ -643,7 +698,7 @@ mod tests {
 
         hub.refresh_event(RefreshEvent::ProjectInventoryChanged);
 
-        assert_eq!(counts.values(), (1, 1, 1, 0, 0, 0, 0, 0, 0));
+        assert_eq!(counts.values(), (1, 1, 1, 0, 0, 0, 0, 0, 0, 0));
     }
 
     #[test]
