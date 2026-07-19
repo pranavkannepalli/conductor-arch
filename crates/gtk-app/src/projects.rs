@@ -17,11 +17,13 @@ use std::sync::{Arc, Mutex};
 use crate::archcar_async::spawn_background_job_with_progress;
 use crate::buttons::{resolve_icon_name, text_button};
 use crate::motion::{append_revealed, append_revealed_row, clear_box, clear_list};
+use crate::state::{AppState, WorkspaceUiPhase};
 use crate::toast::{surface_label_error, ToastManager};
 use crate::{default_clone_parent, detail_row, repo_name_from_url};
 
 pub(crate) fn build_projects_page(
     paths: &AppPaths,
+    app_state: AppState,
     refresh_dashboard: impl Fn() + Clone + 'static,
     refresh_workspace: impl Fn() + Clone + 'static,
     navigate_created_workspace: Rc<dyn Fn(String)>,
@@ -394,6 +396,7 @@ pub(crate) fn build_projects_page(
     let result_inline = result.clone();
     let toast_create_inline = toast_manager.clone();
     let navigate_created_workspace_inline = navigate_created_workspace.clone();
+    let app_state_inline = app_state.clone();
     create_btn.connect_clicked(move |_| {
         let repo = repo_entry.text().trim().to_owned();
         let typed_name = name_entry.text().trim().to_owned();
@@ -438,6 +441,7 @@ pub(crate) fn build_projects_page(
         let navigate_created_workspace_inline = navigate_created_workspace_inline.clone();
         spawn_workspace_create_with_navigation(
             db_path_create.clone(),
+            app_state_inline.clone(),
             repo.clone(),
             request,
             navigate_created_workspace_inline,
@@ -469,9 +473,11 @@ pub(crate) fn build_projects_page(
     let refresh_workspace_modal_workspace = refresh_workspace.clone();
     let navigate_modal_workspace = navigate_created_workspace.clone();
     let toast_modal_workspace = toast_manager.clone();
+    let app_state_modal_workspace = app_state.clone();
     open_workspace_modal_btn.connect_clicked(move |_| {
         show_create_workspace_dialog(
             db_path_modal_workspace.clone(),
+            app_state_modal_workspace.clone(),
             Rc::new(refresh_after_modal_workspace.clone()),
             Rc::new(refresh_dashboard_modal_workspace.clone()),
             Rc::new(refresh_workspace_modal_workspace.clone()),
@@ -487,6 +493,7 @@ pub(crate) fn build_projects_page(
 
 pub(crate) fn show_create_workspace_dialog(
     database_path: PathBuf,
+    app_state: AppState,
     refresh: Rc<dyn Fn()>,
     refresh_dashboard: Rc<dyn Fn()>,
     _refresh_workspace: Rc<dyn Fn()>,
@@ -960,8 +967,10 @@ pub(crate) fn show_create_workspace_dialog(
         let dialog_for_create = dialog_for_create.clone();
         let toast_create = toast_create.clone();
         let navigate_created_workspace = navigate_created_workspace.clone();
+        let app_state = app_state.clone();
         spawn_workspace_create_with_navigation(
             db_path_for_create.clone(),
+            app_state,
             repo.clone(),
             request,
             navigate_created_workspace,
@@ -1005,6 +1014,7 @@ fn repository_root(db_path: &PathBuf, name: &str) -> anyhow::Result<PathBuf> {
 
 fn spawn_workspace_create_with_navigation<P, C>(
     db_path: PathBuf,
+    app_state: AppState,
     repository_name: String,
     request: WorkspaceSourceRequest,
     navigate_created_workspace: Rc<dyn Fn(String)>,
@@ -1031,16 +1041,34 @@ fn spawn_workspace_create_with_navigation<P, C>(
         },
         {
             let inserted_workspace_name = inserted_workspace_name.clone();
+            let app_state = app_state.clone();
             move || {
                 if let Ok(mut name) = inserted_workspace_name.lock() {
                     if let Some(name) = name.take() {
+                        app_state.mark_workspace_phase(
+                            name.clone(),
+                            WorkspaceUiPhase::Creating {
+                                detail: "Preparing workspace".to_owned(),
+                            },
+                        );
                         navigate_created_workspace(name);
                     }
                 }
                 on_inserted_progress();
             }
         },
-        on_complete,
+        move |result| {
+            if let Ok(workspace) = result.as_ref() {
+                app_state.mark_workspace_phase(
+                    workspace.name.clone(),
+                    WorkspaceUiPhase::StartingAgent {
+                        detail: "Workspace ready. Agent can start when a message is queued."
+                            .to_owned(),
+                    },
+                );
+            }
+            on_complete(result);
+        },
     );
 }
 
@@ -2249,6 +2277,24 @@ mod tests {
         assert!(
             !modal_create.contains("refresh_workspace_for_create();"),
             "modal workspace create should rely on navigation for selected-shell refresh"
+        );
+    }
+
+    #[test]
+    fn workspace_create_progress_marks_workspace_phase() {
+        let source = include_str!("projects.rs");
+        let function = source
+            .split("fn spawn_workspace_create_with_navigation")
+            .nth(1)
+            .expect("spawn_workspace_create_with_navigation exists");
+
+        assert!(
+            function.contains("mark_workspace_phase"),
+            "workspace creation must publish a visible creating phase"
+        );
+        assert!(
+            function.contains("navigate_created_workspace(name);"),
+            "workspace should open as soon as the inserted workspace name is known"
         );
     }
 

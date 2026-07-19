@@ -47,6 +47,25 @@ fn chat_message_event_matches_selected_thread(
     selected_workspace == Some(event_workspace) && selected_thread == Some(event_thread_id)
 }
 
+fn workspace_phase_status_text(phase: Option<WorkspaceUiPhase>) -> Option<String> {
+    match phase {
+        Some(WorkspaceUiPhase::Creating { detail }) => Some(detail),
+        Some(WorkspaceUiPhase::StartingAgent { detail }) => Some(detail),
+        Some(WorkspaceUiPhase::Failed { message }) => Some(message),
+        Some(WorkspaceUiPhase::Ready) | None => None,
+    }
+}
+
+fn apply_workspace_phase_status(label: &Label, phase: Option<WorkspaceUiPhase>) {
+    if let Some(text) = workspace_phase_status_text(phase) {
+        label.set_text(&text);
+        label.set_visible(true);
+    } else {
+        label.set_text("");
+        label.set_visible(false);
+    }
+}
+
 type OpenWorkspaceFile = Rc<dyn Fn(&str)>;
 
 fn clone_external_thread_selection_controller(
@@ -56,7 +75,10 @@ fn clone_external_thread_selection_controller(
 }
 
 use crate::refresh::{RefreshEvent, RefreshHub, RefreshScope};
-use crate::state::{AppState, ChatUiPhase, ChatUiTarget, WorkspaceRightPanelTab, WorkspaceTab};
+use crate::state::{
+    AppState, AppStateEvent, ChatUiPhase, ChatUiTarget, WorkspaceRightPanelTab, WorkspaceTab,
+    WorkspaceUiPhase,
+};
 use crate::toast::{show_toast as emit_toast, surface_label_error, ToastManager, ToastMessage};
 use crate::{
     archcar_async::{spawn_archcar_request, spawn_background_job},
@@ -621,6 +643,33 @@ fn ws_center_panel(
         collapse_sidebar.clone(),
     );
     panel.append(&session_header);
+    let workspace_phase_label = Label::new(None);
+    workspace_phase_label.add_css_class("surface-note");
+    workspace_phase_label.set_xalign(0.0);
+    workspace_phase_label.set_wrap(true);
+    workspace_phase_label.set_margin_start(12);
+    workspace_phase_label.set_margin_end(12);
+    workspace_phase_label.set_margin_bottom(6);
+    apply_workspace_phase_status(&workspace_phase_label, state.workspace_phase(&ws.name));
+    panel.append(&workspace_phase_label);
+    {
+        let workspace_name = ws.name.clone();
+        let state_for_phase = state.clone();
+        let label_for_phase = workspace_phase_label.clone();
+        let workspace_phase_subscription = state.subscribe(move |event, _| {
+            if let AppStateEvent::WorkspacePhaseChanged { workspace } = event {
+                if workspace == &workspace_name {
+                    apply_workspace_phase_status(
+                        &label_for_phase,
+                        state_for_phase.workspace_phase(&workspace_name),
+                    );
+                }
+            }
+        });
+        workspace_phase_label.connect_destroy(move |_| {
+            let _keep_subscription_alive = &workspace_phase_subscription;
+        });
+    }
 
     let tab_bar = GBox::new(Orientation::Horizontal, 8);
     tab_bar.add_css_class("ws-tab-bar");
@@ -8107,6 +8156,33 @@ mod tests {
             Some("tokyo"),
             Some(7),
         ));
+    }
+
+    #[test]
+    fn workspace_phase_status_text_shows_only_pending_or_failed_states() {
+        assert_eq!(
+            workspace_phase_status_text(Some(WorkspaceUiPhase::Creating {
+                detail: "Preparing workspace".to_owned(),
+            })),
+            Some("Preparing workspace".to_owned())
+        );
+        assert_eq!(
+            workspace_phase_status_text(Some(WorkspaceUiPhase::StartingAgent {
+                detail: "Ready".to_owned(),
+            })),
+            Some("Ready".to_owned())
+        );
+        assert_eq!(
+            workspace_phase_status_text(Some(WorkspaceUiPhase::Failed {
+                message: "failed".to_owned(),
+            })),
+            Some("failed".to_owned())
+        );
+        assert_eq!(
+            workspace_phase_status_text(Some(WorkspaceUiPhase::Ready)),
+            None
+        );
+        assert_eq!(workspace_phase_status_text(None), None);
     }
 
     #[test]

@@ -425,7 +425,10 @@ impl AppState {
             .unwrap_or_default()
     }
 
-    pub fn queued_chat_inputs_for_target(&self, target: &ChatUiTarget) -> Vec<QueuedChatInputDraft> {
+    pub fn queued_chat_inputs_for_target(
+        &self,
+        target: &ChatUiTarget,
+    ) -> Vec<QueuedChatInputDraft> {
         match target {
             ChatUiTarget::Thread(thread_id) => self.queued_chat_inputs(*thread_id),
             target => self
@@ -612,7 +615,9 @@ impl AppState {
                 emit_queue_changed = true;
             }
             if let Some(phase) = state.chat_phases.remove(&pending) {
-                state.chat_phases.insert(ChatUiTarget::Thread(thread_id), phase);
+                state
+                    .chat_phases
+                    .insert(ChatUiTarget::Thread(thread_id), phase);
             }
             state.selected_chat_thread = Some(thread_id);
             state.selected_chat_target = Some(ChatUiTarget::Thread(thread_id));

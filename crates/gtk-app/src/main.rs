@@ -856,6 +856,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     );
     let (projects_page, refresh_projects) = projects::build_projects_page(
         &app_state.paths,
+        app_state.clone(),
         refresh_dashboard.clone(),
         {
             let refresh_workspace_detail = refresh_workspace_detail.clone();
