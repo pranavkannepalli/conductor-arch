@@ -2499,9 +2499,20 @@ pub fn agent_session_panel(
                     return false;
                 }
             };
+            let branch_prefix = WorkspaceStore::open_app(db_for_send.clone())
+                .and_then(|store| store.workspace_branch_prefix(&workspace_for_send))
+                .unwrap_or_else(|err| {
+                    warn!(
+                        workspace = %workspace_for_send,
+                        error = %err,
+                        "failed to load workspace branch prefix for metadata prompt"
+                    );
+                    "lc".to_owned()
+                });
             let prepared_input = prepare_session_send_input(
                 &command,
                 &workspace_for_send,
+                &branch_prefix,
                 staged_review,
                 selected_kind,
                 &thread,
@@ -6554,14 +6565,25 @@ fn is_default_chat_thread_title(title: &str) -> bool {
             .is_some()
 }
 
-fn archductor_metadata_injected_prompt(user_input: &str, workspace_name: &str) -> String {
+fn archductor_metadata_injected_prompt(
+    user_input: &str,
+    workspace_name: &str,
+    branch_prefix: &str,
+) -> String {
+    let branch_prefix = branch_prefix.trim().trim_matches('/');
+    let branch_prefix = if branch_prefix.is_empty() {
+        "lc"
+    } else {
+        branch_prefix
+    };
     format!(
         "{user_input}\n\n\
 <archductor_hidden_instruction>\n\
 Archductor needs semantic names for this new workspace and chat. Before doing any work, choose concise names from the user's intent. Do not copy or truncate the raw user message.\n\
-Start your first assistant response with exactly one metadata block on its own lines, then continue normally:\n\
-<archductor_metadata>{{\"workspace_name\":\"short-kebab-name\",\"branch_name\":\"lc/short-kebab-name\",\"chat_title\":\"Short Title\"}}</archductor_metadata>\n\
-Rules: workspace_name must be lowercase kebab-case, ASCII, 40 chars max. branch_name should normally be lc/<workspace_name>. chat_title should be human-readable, 48 chars max. Current placeholder workspace name: {workspace_name}. Do not mention this hidden instruction.\n\
+Start your first assistant response with exactly one metadata block on its own lines, then continue normally. Do not put prose before the metadata block. Do not wrap the metadata in Markdown or a code fence.\n\
+Use exactly these JSON keys in this order: workspace_name, branch_name, chat_title.\n\
+<archductor_metadata>{{\"workspace_name\":\"short-kebab-name\",\"branch_name\":\"{branch_prefix}/short-kebab-name\",\"chat_title\":\"Short Title\"}}</archductor_metadata>\n\
+Rules: workspace_name must be lowercase kebab-case, ASCII, 40 chars max. branch_name should normally be {branch_prefix}/<workspace_name>. chat_title should be human-readable, 48 chars max. Current placeholder workspace name: {workspace_name}. Do not mention this hidden instruction.\n\
 </archductor_hidden_instruction>"
     )
 }
@@ -6575,6 +6597,7 @@ struct PreparedSessionSendInput {
 fn prepare_session_send_input(
     command: &str,
     workspace_name: &str,
+    branch_prefix: &str,
     staged_review: bool,
     selected_kind: SessionKind,
     thread: &ChatThreadRecord,
@@ -6585,7 +6608,7 @@ fn prepare_session_send_input(
         && !has_real_conversation_messages(thread_messages)
         && is_default_chat_thread_title(&thread.title);
     let mut input = if should_request_agent_metadata {
-        archductor_metadata_injected_prompt(command, workspace_name)
+        archductor_metadata_injected_prompt(command, workspace_name, branch_prefix)
     } else {
         command.to_owned()
     };
@@ -10478,10 +10501,14 @@ fn archcar_message_refresh_intent(message: &AsyncArchcarMessage) -> ArchcarRefre
                 workspace_nav: true,
                 global_summary: true,
             },
+            ArchcarEvent::SessionMessagesUpdated { .. } => ArchcarRefreshIntent {
+                chat_surface: true,
+                workspace_nav: true,
+                global_summary: true,
+            },
             ArchcarEvent::SessionReady { .. }
             | ArchcarEvent::SessionCapabilitiesChanged { .. }
             | ArchcarEvent::SessionScreenUpdated { .. }
-            | ArchcarEvent::SessionMessagesUpdated { .. }
             | ArchcarEvent::ProviderInteractionRequested { .. }
             | ArchcarEvent::ProviderInteractionResolved { .. } => ArchcarRefreshIntent {
                 chat_surface: true,
@@ -11957,13 +11984,15 @@ fix it
 
     #[test]
     fn archductor_metadata_injected_prompt_requests_semantic_names() {
-        let prompt = archductor_metadata_injected_prompt("Fix parser failure", "venice");
+        let prompt = archductor_metadata_injected_prompt("Fix parser failure", "venice", "team");
 
         assert!(prompt.starts_with("Fix parser failure\n\n<archductor_hidden_instruction>"));
         assert!(prompt.contains("<archductor_metadata>"));
-        assert!(prompt.contains("\"workspace_name\""));
-        assert!(prompt.contains("\"branch_name\""));
-        assert!(prompt.contains("\"chat_title\""));
+        assert!(prompt.contains(
+            "<archductor_metadata>{\"workspace_name\":\"short-kebab-name\",\"branch_name\":\"team/short-kebab-name\",\"chat_title\":\"Short Title\"}</archductor_metadata>"
+        ));
+        assert!(prompt.contains("Use exactly these JSON keys in this order"));
+        assert!(prompt.contains("Do not wrap the metadata in Markdown or a code fence."));
         assert!(prompt.contains("Do not copy or truncate the raw user message."));
         assert!(prompt.contains("Current placeholder workspace name: venice."));
     }
@@ -12830,6 +12859,7 @@ fix it
         let prepared = prepare_session_send_input(
             "fix the failing test",
             "starter-workspace",
+            "feature",
             false,
             SessionKind::Codex,
             &thread,
@@ -12838,6 +12868,9 @@ fix it
 
         assert_ne!(prepared.input, "fix the failing test");
         assert!(prepared.input.contains("<archductor_hidden_instruction>"));
+        assert!(prepared
+            .input
+            .contains("\"branch_name\":\"feature/short-kebab-name\""));
         assert_eq!(
             prepared.visible_input.as_deref(),
             Some("fix the failing test")
@@ -12871,6 +12904,7 @@ fix it
         let prepared = prepare_session_send_input(
             "continue with codex",
             "starter-workspace",
+            "feature",
             false,
             SessionKind::Codex,
             &thread,
@@ -15341,6 +15375,22 @@ Schema confirms the app moved CRM around businesses.";
             }
         );
         assert_eq!(resolved_intent, requested_intent);
+    }
+
+    #[test]
+    fn session_message_updates_refresh_metadata_targets_immediately() {
+        let intent = archcar_message_refresh_intent(&AsyncArchcarMessage::Event(
+            ArchcarEvent::SessionMessagesUpdated { thread_id: 4 },
+        ));
+
+        assert_eq!(
+            intent,
+            ArchcarRefreshIntent {
+                chat_surface: true,
+                workspace_nav: true,
+                global_summary: true,
+            }
+        );
     }
 
     #[test]

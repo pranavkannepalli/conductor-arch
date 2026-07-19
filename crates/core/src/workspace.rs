@@ -6157,6 +6157,17 @@ mutation($threadId: ID!) {{
         })
     }
 
+    pub fn workspace_branch_prefix(&self, name: &str) -> Result<String> {
+        let workspace = self.get_by_name(name)?;
+        let repository = self.load_repository_by_id(workspace.repository_id)?;
+        let settings = self.repository_settings(&repository.root_path)?;
+        Ok(settings
+            .customization
+            .workspace_defaults
+            .branch_prefix
+            .unwrap_or_else(|| "lc".to_owned()))
+    }
+
     pub fn workspace_repo_settings(
         &self,
         workspace_name: &str,
@@ -15249,6 +15260,7 @@ working_directory = "apps/web"
             r##"
 [customization.workspace_defaults]
 default_visible_tab = "checks"
+branch_prefix = "team"
 
 [scripts]
 test = "cargo test --workspace"
@@ -15307,8 +15319,10 @@ accent = "#0ea5e9"
             .unwrap();
 
         let defaults = store.workspace_view_defaults("berlin").unwrap();
+        let branch_prefix = store.workspace_branch_prefix("berlin").unwrap();
 
         assert_eq!(defaults.default_visible_tab.as_deref(), Some("checks"));
+        assert_eq!(branch_prefix, "team");
         assert_eq!(defaults.theme.as_deref(), Some("dark"));
         assert_eq!(defaults.accent_color.as_deref(), Some("blue"));
         assert_eq!(defaults.colors.get("accent"), Some(&"#0ea5e9".to_owned()));
