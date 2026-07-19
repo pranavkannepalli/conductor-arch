@@ -148,9 +148,15 @@ impl RefreshHub {
             WorkspaceRefreshTarget::ChatSurface => {
                 self.run_event(&self.workspace_chat_surface, &RefreshEvent::Manual)
             }
-            WorkspaceRefreshTarget::ChatTabs => self.run(&self.workspace_chat_tabs),
-            WorkspaceRefreshTarget::Runtime => self.run(&self.workspace_runtime),
-            WorkspaceRefreshTarget::Review => self.run(&self.workspace_review),
+            WorkspaceRefreshTarget::ChatTabs => {
+                self.run_or_shell(&self.workspace_chat_tabs, &self.workspace_shell)
+            }
+            WorkspaceRefreshTarget::Runtime => {
+                self.run_or_shell(&self.workspace_runtime, &self.workspace_shell)
+            }
+            WorkspaceRefreshTarget::Review => {
+                self.run_or_shell(&self.workspace_review, &self.workspace_shell)
+            }
         }
     }
 
@@ -184,6 +190,19 @@ impl RefreshHub {
         let handler = slot.borrow().as_ref().cloned();
         if let Some(handler) = handler {
             handler();
+        }
+    }
+
+    fn run_or_shell(
+        &self,
+        slot: &Rc<RefCell<Option<RefreshHandler>>>,
+        shell: &Rc<RefCell<Option<RefreshHandler>>>,
+    ) {
+        let handler = slot.borrow().as_ref().cloned();
+        if let Some(handler) = handler {
+            handler();
+        } else {
+            self.run(shell);
         }
     }
 
@@ -324,6 +343,41 @@ mod tests {
         });
 
         assert_eq!(counts.values(), (0, 1, 0, 1, 0, 0, 0, 0, 1));
+    }
+
+    #[test]
+    fn unregistered_granular_workspace_handlers_fall_back_to_shell() {
+        let hub = RefreshHub::default();
+        let shell_count = Rc::new(Cell::new(0));
+        let shell_count_for_handler = Rc::clone(&shell_count);
+        hub.set_workspace(move || shell_count_for_handler.set(shell_count_for_handler.get() + 1));
+
+        hub.refresh_event(RefreshEvent::WorkspaceRuntimeChanged {
+            workspace: "demo".to_owned(),
+        });
+        hub.refresh_event(RefreshEvent::WorkspaceReviewChanged {
+            workspace: "demo".to_owned(),
+        });
+        hub.refresh_event(RefreshEvent::WorkspaceChatLifecycleChanged {
+            workspace: "demo".to_owned(),
+        });
+
+        assert_eq!(shell_count.get(), 3);
+    }
+
+    #[test]
+    fn unregistered_chat_message_handler_does_not_rebuild_shell() {
+        let hub = RefreshHub::default();
+        let shell_count = Rc::new(Cell::new(0));
+        let shell_count_for_handler = Rc::clone(&shell_count);
+        hub.set_workspace(move || shell_count_for_handler.set(shell_count_for_handler.get() + 1));
+
+        hub.refresh_event(RefreshEvent::WorkspaceChatMessagesChanged {
+            workspace: "demo".to_owned(),
+            thread_id: 7,
+        });
+
+        assert_eq!(shell_count.get(), 0);
     }
 
     #[test]
