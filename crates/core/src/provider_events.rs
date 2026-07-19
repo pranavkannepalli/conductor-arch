@@ -409,6 +409,7 @@ pub struct ProviderEventRecord {
     pub provider_subtype: Option<String>,
     pub provider_sequence: Option<i64>,
     pub received_sequence: i64,
+    pub timeline_seq: Option<i64>,
     pub occurred_at_ms: u64,
     pub normalized_payload: Value,
     pub raw_json: Value,
@@ -881,18 +882,18 @@ fn provider_event_select_sql(where_clause: &str) -> String {
             provider_thread_id, provider_turn_id, parent_provider_item_id,
             parent_provider_thread_id, workspace_id, chat_thread_id, process_id,
             phase, kind, provider_subtype, provider_sequence, received_sequence,
-            occurred_at_ms, normalized_payload_json, raw_json, schema_version,
+            timeline_seq, occurred_at_ms, normalized_payload_json, raw_json, schema_version,
             adapter_version, created_at, updated_at
          FROM provider_events {where_clause}"
     )
 }
 
 fn row_to_provider_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProviderEventRecord> {
-    let normalized_payload_json: String = row.get(18)?;
-    let raw_json: String = row.get(19)?;
+    let normalized_payload_json: String = row.get(19)?;
+    let raw_json: String = row.get(20)?;
     let phase: String = row.get(12)?;
     let kind: String = row.get(13)?;
-    let occurred_at_ms: i64 = row.get(17)?;
+    let occurred_at_ms: i64 = row.get(18)?;
     Ok(ProviderEventRecord {
         id: row.get(0)?,
         identity_key: row.get(1)?,
@@ -911,13 +912,14 @@ fn row_to_provider_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProviderEv
         provider_subtype: row.get(14)?,
         provider_sequence: row.get(15)?,
         received_sequence: row.get(16)?,
+        timeline_seq: row.get(17)?,
         occurred_at_ms: occurred_at_ms.max(0) as u64,
         normalized_payload: serde_json::from_str(&normalized_payload_json).unwrap_or(Value::Null),
         raw_json: serde_json::from_str(&raw_json).unwrap_or(Value::Null),
-        schema_version: row.get(20)?,
-        adapter_version: row.get(21)?,
-        created_at: row.get(22)?,
-        updated_at: row.get(23)?,
+        schema_version: row.get(21)?,
+        adapter_version: row.get(22)?,
+        created_at: row.get(23)?,
+        updated_at: row.get(24)?,
     })
 }
 

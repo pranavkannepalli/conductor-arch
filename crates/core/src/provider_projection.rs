@@ -141,6 +141,7 @@ impl ProjectionRenderClass {
 pub struct ProviderProjectionEvent {
     pub canonical_id: String,
     pub sequence: u64,
+    pub timeline_seq: Option<i64>,
     pub category: ProviderProjectionCategory,
     pub title: String,
     pub body: String,
@@ -155,6 +156,7 @@ pub struct ProviderProjectionEvent {
 pub struct ProviderProjectionItem {
     pub id: String,
     pub sequence: u64,
+    pub timeline_seq: Option<i64>,
     pub category: ProviderProjectionCategory,
     pub render_class: ProjectionRenderClass,
     pub title: String,
@@ -222,6 +224,7 @@ pub fn render_provider_event_projection(
             }
             items[index] = ProviderProjectionItem {
                 sequence: items[index].sequence,
+                timeline_seq: items[index].timeline_seq.or(item.timeline_seq),
                 ..item
             };
         } else {
@@ -286,6 +289,7 @@ fn provider_projection_event_from_record(record: &ProviderEventRecord) -> Provid
     ProviderProjectionEvent {
         canonical_id: provider_projection_canonical_id(record),
         sequence: record.received_sequence.max(0) as u64,
+        timeline_seq: record.timeline_seq,
         category,
         title: record
             .normalized_payload
@@ -486,6 +490,7 @@ fn projection_item_from_event(
     ProviderProjectionItem {
         id,
         sequence: event.sequence,
+        timeline_seq: event.timeline_seq,
         category: event.category,
         render_class,
         title,
@@ -683,6 +688,7 @@ mod tests {
             provider_subtype: Some(subtype.to_owned()),
             provider_sequence: Some(1),
             received_sequence: 1,
+            timeline_seq: Some(1),
             occurred_at_ms: 1,
             normalized_payload: json!({
                 "title": "Event",

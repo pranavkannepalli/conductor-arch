@@ -43,5 +43,6 @@ sed -E \
     -e "s/^  sha256 \".*\"/  sha256 \"${checksum}\"/" \
     "$formula" > "$tmp"
 mv "$tmp" "$formula"
+chmod 0644 "$formula"
 
 echo "Updated $formula to v$version"

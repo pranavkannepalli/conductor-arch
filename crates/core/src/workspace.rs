@@ -17,6 +17,7 @@ use crate::local_chat::{
     local_chat_agent_type, parse_local_chat_transcript, session_events_to_local_chat_messages,
     truncate_chars,
 };
+use crate::redaction::redact_sensitive_text;
 use crate::session_event::{
     codex_parsed_item_to_session_event, SessionEvent, SessionEventPayload, SessionEventSource,
 };
@@ -70,6 +71,8 @@ const UNTRACKED_FILE_COUNT_BYTE_LIMIT: usize = 1024 * 1024;
 const DIFF_HUNK_PATCH_LIMIT_BYTES: usize = 200 * 1024;
 const TURN_CHECKPOINT_DIFF_LIMIT: usize = 25;
 const TURN_CHECKPOINT_DIFF_MAX_BYTES: usize = 64 * 1024;
+const CODEX_RECOVERY_CONTEXT_MAX_BYTES: usize = 16 * 1024;
+const CODEX_RECOVERY_ITEM_MAX_CHARS: usize = 1200;
 const WORKSPACE_LIFECYCLE_MAX_ATTEMPTS: i64 = 3;
 const WORKSPACE_PORT_START: u16 = 42000;
 const WORKSPACE_CITY_NAMES: [&str; 200] = [
@@ -6953,6 +6956,36 @@ mutation($threadId: ID!) {{
         Ok(messages)
     }
 
+    fn recent_chat_messages(&self, thread_id: i64, limit: usize) -> Result<Vec<ChatMessageRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, thread_id, role, content, source, timeline_seq, created_at, updated_at
+             FROM chat_messages
+             WHERE thread_id = ?1
+             ORDER BY COALESCE(timeline_seq, id) DESC, id DESC
+             LIMIT ?2",
+        )?;
+        let mut messages = stmt
+            .query_map(params![thread_id, limit as i64], row_to_chat_message)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        messages.reverse();
+        Ok(messages)
+    }
+
+    fn recent_chat_events(&self, thread_id: i64, limit: usize) -> Result<Vec<ChatEventRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, thread_id, process_id, kind, title, body, path, payload_json, timeline_seq, created_at, updated_at
+             FROM chat_events
+             WHERE thread_id = ?1
+             ORDER BY timeline_seq DESC, id DESC
+             LIMIT ?2",
+        )?;
+        let mut events = stmt
+            .query_map(params![thread_id, limit as i64], row_to_chat_event)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        events.reverse();
+        Ok(events)
+    }
+
     pub fn update_chat_thread_native_id(
         &self,
         thread_id: i64,
@@ -6968,6 +7001,86 @@ mutation($threadId: ID!) {{
             params![native_thread_id, now, thread_id],
         )?;
         self.get_chat_thread(thread_id)
+    }
+
+    pub fn clear_chat_thread_native_id(&self, thread_id: i64) -> Result<ChatThreadRecord> {
+        let now = timestamp();
+        self.conn.execute(
+            "UPDATE chat_threads
+             SET native_thread_id = NULL, updated_at = ?1
+             WHERE id = ?2",
+            params![now, thread_id],
+        )?;
+        self.get_chat_thread(thread_id)
+    }
+
+    pub fn codex_native_thread_id_has_rollout(&self, native_thread_id: &str) -> Result<bool> {
+        codex_rollout_session_id_exists(native_thread_id)
+    }
+
+    pub fn codex_recovery_context_for_thread(
+        &self,
+        thread_id: i64,
+        stale_native_thread_id: &str,
+    ) -> Result<String> {
+        let thread = self.get_chat_thread(thread_id)?;
+        let workspace = self.get_workspace_record(thread.workspace_id)?;
+        let mut context = format!(
+            "Archductor recovered this chat because the previous Codex native thread could not be resumed.\n\
+             Missing Codex rollout thread id: {}\n\
+             Continue as the same Archductor chat. Treat the recovered context below as prior conversation and do not repeat completed work unless needed.\n\n\
+             Workspace: {}\n\
+             Working tree: {}\n\
+             Thread: {}\n\
+             Provider: {}\n",
+            stale_native_thread_id.trim(),
+            workspace.name,
+            workspace.path.display(),
+            thread.title,
+            thread.provider,
+        );
+
+        let messages = self.recent_chat_messages(thread_id, 24)?;
+        if !messages.is_empty() {
+            append_recovery_context_line(&mut context, "\nPrior visible messages:\n");
+            for message in &messages {
+                let line = format!(
+                    "- {}: {}\n",
+                    message.role,
+                    recovery_context_snippet(&message.content)
+                );
+                if !append_recovery_context_line(&mut context, &line) {
+                    return Ok(context);
+                }
+            }
+        }
+
+        let events = self.recent_chat_events(thread_id, 24)?;
+        if !events.is_empty() {
+            append_recovery_context_line(&mut context, "\nRecent provider events:\n");
+            for event in &events {
+                let body = recovery_context_snippet(&event.body);
+                let line = if body.is_empty() {
+                    format!(
+                        "- {}: {}\n",
+                        event.kind,
+                        recovery_context_snippet(&event.title)
+                    )
+                } else {
+                    format!(
+                        "- {}: {} - {}\n",
+                        event.kind,
+                        recovery_context_snippet(&event.title),
+                        body
+                    )
+                };
+                if !append_recovery_context_line(&mut context, &line) {
+                    return Ok(context);
+                }
+            }
+        }
+
+        Ok(context)
     }
 
     pub fn record_session_process_for_thread(
@@ -7985,6 +8098,59 @@ fn find_codex_rollout_session_id(cwd: &Path, started_at: &str) -> Result<Option<
     }
     candidates.sort_by_key(|candidate| candidate.0);
     Ok(candidates.into_iter().next().map(|candidate| candidate.1))
+}
+
+fn codex_rollout_session_id_exists(session_id: &str) -> Result<bool> {
+    let session_id = session_id.trim();
+    if session_id.is_empty() {
+        return Ok(false);
+    }
+    let Some(home) = crate::platform::home_dir() else {
+        return Ok(false);
+    };
+    let root = home.join(".codex/sessions");
+    if !root.exists() {
+        return Ok(false);
+    }
+    for entry in WalkDir::new(&root)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let file_name = entry.file_name().to_string_lossy();
+        if !file_name.starts_with("rollout-") || !file_name.ends_with(".jsonl") {
+            continue;
+        }
+        let Some(meta) = read_codex_rollout_session_meta(entry.path())? else {
+            continue;
+        };
+        if meta.session_id == session_id {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn recovery_context_snippet(value: &str) -> String {
+    truncate_chars(
+        &redact_sensitive_text(value)
+            .replace('\r', "")
+            .replace('\n', " "),
+        CODEX_RECOVERY_ITEM_MAX_CHARS,
+    )
+}
+
+fn append_recovery_context_line(context: &mut String, line: &str) -> bool {
+    if context.len() + line.len() > CODEX_RECOVERY_CONTEXT_MAX_BYTES {
+        if context.len() < CODEX_RECOVERY_CONTEXT_MAX_BYTES {
+            context.push_str("\n[Recovered context truncated]\n");
+        }
+        return false;
+    }
+    context.push_str(line);
+    true
 }
 
 struct CodexRolloutMeta {
@@ -13618,12 +13784,9 @@ CUSTOM_VALUE = "from-settings"
             })
             .unwrap();
         let run = store.run_workspace("berlin").unwrap();
-        wait_for_path(&workspace.path.join(".context/env-file-result"));
+        let result = wait_for_file_lines(&workspace.path.join(".context/env-file-result"), 1);
 
-        assert_eq!(
-            fs::read_to_string(workspace.path.join(".context/env-file-result")).unwrap(),
-            "from-file:from-settings\n"
-        );
+        assert_eq!(result, "from-file:from-settings\n");
         assert!(!fs::read_to_string(&run.log_path)
             .unwrap()
             .contains("from-file"));
@@ -21509,6 +21672,69 @@ spotlight_testing = true
         assert_eq!(summary.message_count, 1);
         assert_eq!(summary.event_count, 1);
         assert_eq!(summary.transcript_bytes, expected_bytes);
+    }
+
+    #[test]
+    fn codex_recovery_context_redacts_and_summarizes_thread_history() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Bugfix A", None)
+            .unwrap();
+        store
+            .append_chat_message(
+                thread.id,
+                "user",
+                "fix auth with token=secret-value",
+                "user_send",
+            )
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "agent", "started the fix", "agent")
+            .unwrap();
+        let process = process_record_for_thread(&store, thread.id);
+        store
+            .append_chat_event(
+                thread.id,
+                process.id,
+                &CodexTranscriptEvent::Tool {
+                    title: "cargo test".to_owned(),
+                    body: "failed because API_KEY=super-secret".to_owned(),
+                },
+            )
+            .unwrap();
+
+        let context = store
+            .codex_recovery_context_for_thread(thread.id, "missing-rollout")
+            .unwrap();
+
+        assert!(context.contains("Missing Codex rollout thread id: missing-rollout"));
+        assert!(context.contains("Workspace: berlin"));
+        assert!(context.contains("- user: fix auth with token=[redacted]"));
+        assert!(context.contains("- agent: started the fix"));
+        assert!(context.contains("cargo test"));
+        assert!(!context.contains("secret-value"));
+        assert!(!context.contains("super-secret"));
+    }
+
+    #[test]
+    fn codex_recovery_context_uses_bounded_recent_history_queries() {
+        let source = include_str!("workspace.rs");
+        let body = source
+            .split("pub fn codex_recovery_context_for_thread(")
+            .nth(1)
+            .and_then(|tail| {
+                tail.split("pub fn record_session_process_for_thread")
+                    .next()
+            })
+            .expect("codex recovery context body should be present");
+
+        assert!(source.contains("fn recent_chat_messages("));
+        assert!(source.contains("fn recent_chat_events("));
+        assert!(body.contains("recent_chat_messages(thread_id, 24)"));
+        assert!(body.contains("recent_chat_events(thread_id, 24)"));
+        assert!(!body.contains("list_chat_messages(thread_id)"));
+        assert!(!body.contains("list_chat_events(thread_id)"));
+        assert!(source.matches("LIMIT ?2").count() >= 2);
     }
 
     #[test]

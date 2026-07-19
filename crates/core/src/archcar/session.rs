@@ -52,6 +52,8 @@ use crate::workspace::{
 };
 use serde_json::json;
 
+pub const CODEX_RECOVERY_CURRENT_USER_MESSAGE_HEADER: &str = "Current user message:";
+
 /// Builds the provider-facing first-turn text while keeping visible chat text separate.
 ///
 /// General instructions are prepended only for the first visible user turn in a
@@ -64,6 +66,13 @@ pub fn compose_first_turn_input(general: Option<&str>, visible: &str, first_turn
         }
     }
     visible.to_owned()
+}
+
+pub fn compose_recovered_thread_input(recovery: Option<&str>, input: &str) -> String {
+    let Some(recovery) = recovery.map(str::trim).filter(|value| !value.is_empty()) else {
+        return input.to_owned();
+    };
+    format!("{recovery}\n\n{CODEX_RECOVERY_CURRENT_USER_MESSAGE_HEADER}\n{input}")
 }
 
 fn resolved_general_prompt(db_path: &std::path::Path, workspace: &str) -> Result<Option<String>> {
@@ -138,6 +147,7 @@ struct ProviderProcessConnection {
     reasoning_mode: Option<String>,
     effort_mode: Option<String>,
     personality: Option<String>,
+    pending_recovery_context: Option<String>,
 }
 
 static PROVIDER_NATIVE_SESSION_LAUNCH_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -286,6 +296,7 @@ pub fn spawn_managed_session(
     let ThreadSessionLaunch {
         launch,
         provider_port_reservation,
+        startup_recovery_context,
     } = build_thread_session_launch(
         &store,
         &workspace,
@@ -302,6 +313,7 @@ pub fn spawn_managed_session(
         thread_id: thread_record.id,
         kind,
         launch,
+        startup_recovery_context,
         provider_port_reservation,
         controller,
         event_tx,
@@ -316,6 +328,7 @@ struct LiveSessionStart<'a> {
     thread_id: i64,
     kind: SessionKind,
     launch: SessionLaunch,
+    startup_recovery_context: Option<String>,
     provider_port_reservation: Option<TcpListener>,
     controller: Box<dyn HarnessController>,
     event_tx: Sender<ArchcarEvent>,
@@ -413,6 +426,7 @@ fn spawn_provider_native_managed_session(start: LiveSessionStart<'_>) -> Result<
         reasoning_mode: reasoning_from_harness_metadata(start.launch.harness_metadata.as_deref()),
         effort_mode: effort_from_harness_metadata(start.launch.harness_metadata.as_deref()),
         personality: personality_from_harness_metadata(start.launch.harness_metadata.as_deref()),
+        pending_recovery_context: start.startup_recovery_context.clone(),
     };
     let connection = match start.kind {
         SessionKind::Codex => ManagedSessionConnection::CodexAppServer(connection),
@@ -731,6 +745,7 @@ pub fn spawn_managed_session_for_thread(
     let ThreadSessionLaunch {
         launch,
         provider_port_reservation,
+        startup_recovery_context,
     } = build_thread_session_launch(
         &store,
         &workspace,
@@ -747,6 +762,7 @@ pub fn spawn_managed_session_for_thread(
         thread_id,
         kind,
         launch,
+        startup_recovery_context,
         provider_port_reservation,
         controller,
         event_tx,
@@ -755,6 +771,7 @@ pub fn spawn_managed_session_for_thread(
 
 struct ThreadSessionLaunch {
     launch: SessionLaunch,
+    startup_recovery_context: Option<String>,
     provider_port_reservation: Option<TcpListener>,
 }
 
@@ -774,6 +791,7 @@ fn build_thread_session_launch(
     }
     Ok(ThreadSessionLaunch {
         launch: controller.build_launch(store, workspace, harness)?,
+        startup_recovery_context: None,
         provider_port_reservation: None,
     })
 }
@@ -794,12 +812,44 @@ fn codex_app_server_session_launch(
         .map(|arg| (*arg).to_owned())
         .collect();
     launch.harness_metadata = non_interactive_harness_metadata("codex-app-server", &harness);
-    launch.session_resume_id = thread_record.native_thread_id.clone();
+    let resume_plan = codex_resume_plan_for_thread(store, thread_record.id, thread_record)?;
+    launch.session_resume_id = resume_plan.native_thread_id;
     let provider_port_reservation =
         assign_provider_native_thread_port(store, workspace, thread_record, &mut launch)?;
     Ok(ThreadSessionLaunch {
         launch,
+        startup_recovery_context: resume_plan.recovery_context,
         provider_port_reservation: Some(provider_port_reservation),
+    })
+}
+
+struct CodexResumePlan {
+    native_thread_id: Option<String>,
+    recovery_context: Option<String>,
+}
+
+fn codex_resume_plan_for_thread(
+    store: &WorkspaceStore,
+    thread_id: i64,
+    thread_record: &ChatThreadRecord,
+) -> Result<CodexResumePlan> {
+    let Some(native_thread_id) = thread_record.native_thread_id.as_deref() else {
+        return Ok(CodexResumePlan {
+            native_thread_id: None,
+            recovery_context: None,
+        });
+    };
+    if store.codex_native_thread_id_has_rollout(native_thread_id)? {
+        return Ok(CodexResumePlan {
+            native_thread_id: Some(native_thread_id.to_owned()),
+            recovery_context: None,
+        });
+    }
+    let recovery_context = store.codex_recovery_context_for_thread(thread_id, native_thread_id)?;
+    let _ = store.clear_chat_thread_native_id(thread_id)?;
+    Ok(CodexResumePlan {
+        native_thread_id: None,
+        recovery_context: Some(recovery_context),
     })
 }
 
@@ -833,6 +883,7 @@ fn claude_stream_session_launch(
         assign_provider_native_thread_port(store, workspace, thread_record, &mut launch)?;
     Ok(ThreadSessionLaunch {
         launch,
+        startup_recovery_context: None,
         provider_port_reservation: Some(provider_port_reservation),
     })
 }
@@ -2089,6 +2140,12 @@ fn run_codex_app_server_session_loop(
                     let request_id = next_turn_request_id(next_input_sequence);
                     let auto_active = snapshot.lock().map(|state| !state.ready).unwrap_or(false);
                     let route = codex_input_route(delivery, active_turn_id.as_deref(), auto_active);
+                    let recovery_context = matches!(route, CodexInputRoute::Start)
+                        .then(|| connection.pending_recovery_context.as_deref())
+                        .flatten();
+                    let uses_recovery_context = recovery_context.is_some();
+                    let provider_input =
+                        compose_recovered_thread_input(recovery_context, &provider_input);
                     let request_kind = match (&route, delivery) {
                         (CodexInputRoute::Start, _) => CodexInputRequestKind::Start,
                         (CodexInputRoute::Steer { .. }, ArchcarInputDelivery::Immediate) => {
@@ -2164,6 +2221,9 @@ fn run_codex_app_server_session_loop(
                             format!("Codex input written-state persistence failed: {err:#}"),
                         );
                     } else {
+                        if uses_recovery_context {
+                            connection.pending_recovery_context = None;
+                        }
                         pending_input_requests.insert(
                             request_id,
                             PendingCodexInputRequest {
@@ -2997,6 +3057,15 @@ mod tests {
     }
 
     #[test]
+    fn recovered_thread_context_is_hidden_prefix_for_provider_input() {
+        assert_eq!(compose_recovered_thread_input(None, "continue"), "continue");
+        assert_eq!(
+            compose_recovered_thread_input(Some("prior context"), "continue"),
+            "prior context\n\nCurrent user message:\ncontinue"
+        );
+    }
+
+    #[test]
     fn provider_echoes_do_not_persist_as_visible_user_messages() {
         assert!(!should_persist_provider_native_event(
             ProviderEventKind::UserInput
@@ -3317,6 +3386,7 @@ mod tests {
             reasoning_mode: None,
             effort_mode: None,
             personality: None,
+            pending_recovery_context: None,
         };
         let snapshot = Arc::new(Mutex::new(running_session_snapshot(
             process.id,
@@ -3444,6 +3514,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             reasoning_mode: None,
             effort_mode: None,
             personality: None,
+            pending_recovery_context: None,
         };
         let snapshot = Arc::new(Mutex::new(running_session_snapshot(
             process.id,
@@ -3547,6 +3618,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
         let ThreadSessionLaunch {
             launch,
             provider_port_reservation: _reservation,
+            startup_recovery_context: _,
         } = codex_app_server_session_launch(
             &store,
             "berlin",
@@ -3597,6 +3669,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             reasoning_mode: None,
             effort_mode: None,
             personality: None,
+            pending_recovery_context: None,
         };
         let snapshot =
             running_session_snapshot(7, 11, "berlin".to_owned(), SessionKind::Codex, 123, false);
@@ -3664,6 +3737,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             reasoning_mode: None,
             effort_mode: None,
             personality: None,
+            pending_recovery_context: None,
         };
         let snapshot =
             running_session_snapshot(7, 11, "berlin".to_owned(), SessionKind::Codex, 123, false);
@@ -3796,6 +3870,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             reasoning_mode: None,
             effort_mode: None,
             personality: None,
+            pending_recovery_context: None,
         };
 
         apply_provider_connection_controls(
@@ -3846,6 +3921,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
         let ThreadSessionLaunch {
             launch,
             provider_port_reservation: _reservation,
+            startup_recovery_context: _,
         } = claude_stream_session_launch(
             &store,
             "berlin",
@@ -4246,9 +4322,30 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
 
     #[test]
     fn codex_thread_launch_with_native_id_resumes_that_session() {
+        let _guard = env_lock().lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
         let store = seeded_workspace_store(temp.path());
         let controller = controller_for_kind(SessionKind::Codex);
+        let fake_home = temp.path().join("home");
+        let rollout_dir = fake_home.join(".codex/sessions/2026/07/18");
+        fs::create_dir_all(&rollout_dir).unwrap();
+        fs::write(
+            rollout_dir.join("rollout-valid.jsonl"),
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"session_id\":\"codex-native-thread\",\"cwd\":\"{}\"}}}}\n",
+                store
+                    .list()
+                    .unwrap()
+                    .into_iter()
+                    .find(|workspace| workspace.name == "berlin")
+                    .unwrap()
+                    .path
+                    .display()
+            ),
+        )
+        .unwrap();
+        let previous_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", &fake_home);
 
         let ThreadSessionLaunch { launch, .. } = build_thread_session_launch(
             &store,
@@ -4270,6 +4367,62 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             launch.session_resume_id.as_deref(),
             Some("codex-native-thread")
         );
+
+        if let Some(previous) = previous_home {
+            std::env::set_var("HOME", previous);
+        } else {
+            std::env::remove_var("HOME");
+        }
+    }
+
+    #[test]
+    fn codex_thread_launch_clears_native_id_when_rollout_is_missing() {
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let store = seeded_workspace_store(temp.path());
+        let controller = controller_for_kind(SessionKind::Codex);
+        let fake_home = temp.path().join("home");
+        fs::create_dir_all(fake_home.join(".codex/sessions")).unwrap();
+        let previous_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", &fake_home);
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .and_then(|thread| store.update_chat_thread_native_id(thread.id, "missing-rollout"))
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "continue the fix", "user_send")
+            .unwrap();
+
+        let ThreadSessionLaunch {
+            launch,
+            startup_recovery_context,
+            ..
+        } = build_thread_session_launch(
+            &store,
+            "berlin",
+            &thread,
+            SessionKind::Codex,
+            SessionHarnessOptions::default(),
+            controller.as_ref(),
+        )
+        .unwrap();
+
+        assert_eq!(launch.args, vec!["app-server"]);
+        assert!(launch.session_resume_id.is_none());
+        let recovery_context = startup_recovery_context.unwrap();
+        assert!(recovery_context.contains("Missing Codex rollout thread id: missing-rollout"));
+        assert!(recovery_context.contains("- user: continue the fix"));
+        assert!(store
+            .get_chat_thread_record(thread.id)
+            .unwrap()
+            .native_thread_id
+            .is_none());
+
+        if let Some(previous) = previous_home {
+            std::env::set_var("HOME", previous);
+        } else {
+            std::env::remove_var("HOME");
+        }
     }
 
     #[test]

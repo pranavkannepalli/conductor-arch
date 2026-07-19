@@ -38,7 +38,9 @@ pub(crate) fn resolve_icon_name(icon: &str) -> &'static str {
         "sidebar-hide-symbolic" => "view-left-pane-symbolic",
         "sidebar-show-symbolic" => "view-left-pane-symbolic",
         "emblem-system-symbolic" => "preferences-system-symbolic",
+        "document-edit-symbolic" => "document-edit-symbolic",
         "document-new-symbolic" => "document-new-symbolic",
+        "edit-delete-symbolic" => "edit-delete-symbolic",
         "folder-new-symbolic" => "folder-new-symbolic",
         "folder-open-symbolic" => "folder-open-symbolic",
         "network-workgroup-symbolic" => "network-workgroup-symbolic",
@@ -62,6 +64,7 @@ pub(crate) fn resolve_icon_name(icon: &str) -> &'static str {
         "window-close-symbolic" => "window-close-symbolic",
         "window-minimize-symbolic" => "window-minimize-symbolic",
         "window-maximize-symbolic" => "window-maximize-symbolic",
+        "user-trash-symbolic" => "edit-delete-symbolic",
         _ => "application-x-executable-symbolic",
     }
 }
@@ -115,5 +118,18 @@ mod tests {
             resolve_icon_name("utilities-terminal-symbolic"),
             "utilities-terminal-symbolic"
         );
+    }
+
+    #[test]
+    fn queue_action_icons_resolve_to_distinct_names() {
+        let edit = resolve_icon_name("document-edit-symbolic");
+        let delete = resolve_icon_name("user-trash-symbolic");
+        let send = resolve_icon_name("send-symbolic");
+
+        assert_ne!(edit, delete);
+        assert_ne!(edit, send);
+        assert_ne!(delete, send);
+        assert_ne!(edit, "application-x-executable-symbolic");
+        assert_ne!(delete, "application-x-executable-symbolic");
     }
 }

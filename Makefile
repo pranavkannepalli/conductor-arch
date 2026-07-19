@@ -31,7 +31,7 @@ dev:
 	trap cleanup_dev INT TERM EXIT; \
 	$(DEV_ENV) cargo run --bin archcar & \
 	archcar_pid=$$!; \
-	$(DEV_ENV) cargo watch -x "run --bin archductor-gtk" & \
+	$(DEV_ENV) cargo watch -w crates -w Cargo.toml -w Cargo.lock -x "run --bin archductor-gtk" & \
 	gtk_pid=$$!; \
 	wait "$$archcar_pid" "$$gtk_pid"
 

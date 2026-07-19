@@ -4,6 +4,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 script="$repo_root/scripts/release-readiness.sh"
 aur_script="$repo_root/scripts/update-aur-checksum.sh"
+homebrew_script="$repo_root/scripts/update-homebrew-formula.sh"
 required_docs=(
     docs/conductor-gui-mvp-handoff.md
     docs/mvp-scope.md
@@ -52,5 +53,23 @@ set -e
 [[ "$status" -eq 2 ]] || fail "invalid AUR checksum exited $status, expected 2"
 [[ "$output" == *"64-character SHA-256"* ]] \
     || fail "invalid AUR checksum output did not explain checksum format"
+
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
+mkdir -p "$tmpdir/scripts" "$tmpdir/packaging/homebrew/Formula"
+cp "$homebrew_script" "$tmpdir/scripts/update-homebrew-formula.sh"
+cp "$repo_root/packaging/homebrew/Formula/archductor.rb" \
+    "$tmpdir/packaging/homebrew/Formula/archductor.rb"
+chmod 600 "$tmpdir/packaging/homebrew/Formula/archductor.rb"
+(
+    cd "$tmpdir"
+    scripts/update-homebrew-formula.sh \
+        0.1.1 \
+        0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+        >/dev/null
+)
+formula_mode="$(stat -c '%a' "$tmpdir/packaging/homebrew/Formula/archductor.rb")"
+[[ "$formula_mode" == "644" ]] \
+    || fail "Homebrew formula update wrote mode $formula_mode, expected 644"
 
 echo "release-readiness-test: ok"

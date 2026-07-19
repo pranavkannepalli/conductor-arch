@@ -2287,6 +2287,19 @@ popover.context-menu-popover arrow {
     line-height: 1.4;
     padding: 0;
 }
+.chat-interrupted-row {
+    margin-top: 4px;
+    margin-bottom: 10px;
+}
+.chat-interrupted-pill {
+    background-color: #262626;
+    color: #a5a5a5;
+    border: 1px solid #3a3a3a;
+    border-radius: 999px;
+    padding: 4px 10px;
+    font-size: 11px;
+    font-weight: 700;
+}
 .chat-agent-text {
     color: #c6c6c6;
     line-height: 1.55;
@@ -2373,6 +2386,16 @@ button.chat-inline-event-chip:checked {
     padding: 5px 6px;
     border-radius: 6px;
     background-color: #181818;
+}
+.chat-queue-editing-row {
+    padding: 5px 6px;
+    border-radius: 6px;
+    background-color: #20242a;
+}
+.chat-queue-editing-label {
+    color: #dce6f6;
+    font-size: 13px;
+    padding: 0;
 }
 .chat-queued-composer-body {
     color: #d6d6d6;
