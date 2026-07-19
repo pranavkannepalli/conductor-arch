@@ -60,7 +60,7 @@ use crate::state::{AppState, WorkspaceRightPanelTab, WorkspaceTab};
 use crate::toast::{show_toast as emit_toast, surface_label_error, ToastManager, ToastMessage};
 use crate::{
     archcar_async::{spawn_archcar_request, spawn_background_job},
-    buttons::{menu_text_button, resolve_icon_name, text_button},
+    buttons::{menu_text_button, text_button},
     cli_binary, detail_row, history, session_surface, shell_quote, spawn_terminal_command,
     terminal, title_case_workspace,
 };
@@ -1179,27 +1179,7 @@ fn ws_center_panel(
 }
 
 fn ws_tab_surface(label: &str) -> (GBox, Button) {
-    let shell = GBox::new(Orientation::Horizontal, 6);
-    shell.add_css_class("ws-tab-shell");
-    shell.set_valign(Align::Center);
-
-    let label = Label::new(Some(label));
-    label.add_css_class("ws-tab-label");
-    label.set_valign(Align::Center);
-    label.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    shell.append(&label);
-
-    let close = Button::new();
-    close.add_css_class("ws-tab-close-button");
-    close.set_valign(Align::Center);
-    close.set_tooltip_text(Some("Close tab"));
-    let close_icon = Image::from_icon_name(resolve_icon_name("window-close-symbolic"));
-    close_icon.add_css_class("ws-tab-close-icon");
-    close_icon.set_valign(Align::Center);
-    close.set_child(Some(&close_icon));
-    shell.append(&close);
-
-    (shell, close)
+    crate::tabs::closable_tab_surface(label)
 }
 
 fn install_horizontal_wheel_scroll(scroll: &ScrolledWindow) {

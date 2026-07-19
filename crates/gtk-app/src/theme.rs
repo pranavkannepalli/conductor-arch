@@ -17,6 +17,16 @@ const APP_CSS: &str = r#"
 @define-color lc-success #d0d0d0;
 @define-color lc-danger #ff8a8a;
 
+@define-color lc-surface-base #191919;
+@define-color lc-surface-selected #2a2a2a;
+@define-color lc-border-subtle #2a2a2a;
+@define-color lc-border-active #3a3a3a;
+@define-color lc-text-primary #e4e4e4;
+@define-color lc-text-secondary #8a8a8a;
+@define-color lc-status-success #d0d0d0;
+@define-color lc-status-warning #f59e0b;
+@define-color lc-status-danger #ff8a8a;
+
 toast {
     background-color: #202020;
     color: @lc-text-strong;
@@ -185,6 +195,38 @@ textview,
 .card-title,
 .workspace-name {
     color: #e4e4e4;
+}
+
+.text-page-title {
+    color: #e4e4e4;
+    font-size: 22px;
+    font-weight: 600;
+}
+
+.text-section-title {
+    color: #8a8a8a;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.text-body {
+    color: #e4e4e4;
+    font-size: 13px;
+}
+
+.text-meta,
+.text-empty,
+.text-status {
+    color: #8a8a8a;
+    font-size: 13px;
+}
+
+.text-mono {
+    color: #b4b4b4;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-size: 12px;
 }
 
 .sidebar {
@@ -468,19 +510,45 @@ button.icon-button {
     letter-spacing: 0;
 }
 
+button.ui-button {
+    background-image: none;
+    background-color: transparent;
+    color: #e4e4e4;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    box-shadow: none;
+    text-shadow: none;
+    font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", "Cantarell", "Noto Sans", sans-serif;
+    font-size: 13px;
+    font-weight: 500;
+    letter-spacing: 0;
+}
+
 button.text-button {
     padding: 7px 12px;
     min-height: 34px;
 }
 
-button.icon-button {
+button.icon-button,
+button.ui-button-icon {
     padding: 0;
     min-width: 30px;
     min-height: 30px;
 }
 
-button.icon-button image {
+button.icon-button image,
+button.ui-button-icon image {
     min-width: 16px;
+}
+
+button.ui-button-sm {
+    min-height: 30px;
+    padding: 5px 10px;
+}
+
+button.ui-button-md {
+    min-height: 34px;
+    padding: 7px 12px;
 }
 
 button:hover {
@@ -498,43 +566,58 @@ button.suggested-action {
     border-color: transparent;
 }
 
-button.suggested-action:hover {
+button.ui-button-primary {
+    background-color: #282828;
+    color: #e4e4e4;
+    border-color: transparent;
+}
+
+button.suggested-action:hover,
+button.ui-button-primary:hover {
     background-color: #333333;
     border-color: transparent;
 }
 
-button.secondary-action {
+button.secondary-action,
+button.ui-button-secondary {
     background-color: #202020;
     color: #b4b4b4;
     border-color: #2a2a2a;
 }
 
-button.secondary-action:hover {
+button.secondary-action:hover,
+button.ui-button-secondary:hover {
     background-color: #2c2c2c;
     color: #e4e4e4;
     border-color: #2a2a2a;
 }
 
-button.flat-action {
+button.flat-action,
+button.ui-button-flat,
+button.ui-button-menu-item {
     background-image: none;
     background-color: transparent;
     color: #b4b4b4;
     border-color: transparent;
 }
 
-button.flat-action:hover {
+button.flat-action:hover,
+button.ui-button-flat:hover,
+button.ui-button-menu-item:hover {
     background-color: #2c2c2c;
     color: #e4e4e4;
     border-color: transparent;
 }
 
-button.destructive-action {
+button.destructive-action,
+button.ui-button-destructive {
     background-color: #3a1f24;
     color: #e4e4e4;
     border-color: transparent;
 }
 
-button.destructive-action:hover {
+button.destructive-action:hover,
+button.ui-button-destructive:hover {
     background-color: #4a252c;
     border-color: transparent;
 }
@@ -3118,6 +3201,42 @@ mod tests {
         let changes_menu_block = selector_block(css, ".ws-changes-menu-btn,\n.ws-run-collapse-btn");
         assert!(changes_menu_block.contains("font-family: \"Mona Sans\""));
         assert!(changes_menu_block.contains("font-size: 13px;"));
+    }
+
+    #[test]
+    fn theme_exposes_semantic_tokens_and_shared_primitive_classes() {
+        let css = app_css();
+
+        for token in [
+            "lc-surface-base",
+            "lc-surface-raised",
+            "lc-surface-selected",
+            "lc-border-subtle",
+            "lc-border-active",
+            "lc-text-primary",
+            "lc-text-secondary",
+            "lc-status-success",
+            "lc-status-warning",
+            "lc-status-danger",
+        ] {
+            assert!(css.contains(token), "missing semantic token {token}");
+        }
+
+        for class_name in [
+            "button.ui-button-primary",
+            "button.ui-button-secondary",
+            "button.ui-button-flat",
+            "button.ui-button-destructive",
+            "button.ui-button-icon",
+            ".text-page-title",
+            ".text-section-title",
+            ".text-mono",
+        ] {
+            assert!(
+                css.contains(class_name),
+                "missing shared class {class_name}"
+            );
+        }
     }
 
     #[test]

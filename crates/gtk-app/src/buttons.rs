@@ -1,14 +1,37 @@
 use gtk::prelude::*;
 use gtk::{Align, Button, Label, Widget};
 
-pub(crate) fn text_button(label: &str) -> Button {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ButtonVariant {
+    Primary,
+    Secondary,
+    Flat,
+    Destructive,
+    Icon,
+    MenuItem,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ButtonSize {
+    Sm,
+    Md,
+}
+
+pub(crate) fn button(label: &str, variant: ButtonVariant, size: ButtonSize) -> Button {
     let button = Button::with_label(label);
+    style_button(&button, variant, size);
+    button
+}
+
+pub(crate) fn text_button(label: &str) -> Button {
+    let button = button(label, ButtonVariant::Secondary, ButtonSize::Md);
     style_text_button(&button);
     button
 }
 
 pub(crate) fn menu_text_button(label: &str) -> Button {
     let button = Button::new();
+    style_button(&button, ButtonVariant::MenuItem, ButtonSize::Md);
     style_text_button(&button);
     button.add_css_class("chat-menu-item");
 
@@ -24,6 +47,7 @@ pub(crate) fn menu_text_button(label: &str) -> Button {
 
 pub(crate) fn icon_button(icon: &str, tooltip: &str) -> Button {
     let button = Button::from_icon_name(resolve_icon_name(icon));
+    style_button(&button, ButtonVariant::Icon, ButtonSize::Sm);
     style_icon_button(&button);
     button.set_tooltip_text(Some(tooltip));
     button
@@ -78,9 +102,35 @@ pub(crate) fn style_text_toggle_button<W: IsA<Widget>>(button: &W) {
     button.add_css_class("text-button");
 }
 
+pub(crate) fn style_button<W: IsA<Widget>>(button: &W, variant: ButtonVariant, size: ButtonSize) {
+    button.add_css_class("ui-button");
+    button.add_css_class(button_variant_class(variant));
+    button.add_css_class(button_size_class(size));
+}
+
+pub(crate) fn button_variant_class(variant: ButtonVariant) -> &'static str {
+    match variant {
+        ButtonVariant::Primary => "ui-button-primary",
+        ButtonVariant::Secondary => "ui-button-secondary",
+        ButtonVariant::Flat => "ui-button-flat",
+        ButtonVariant::Destructive => "ui-button-destructive",
+        ButtonVariant::Icon => "ui-button-icon",
+        ButtonVariant::MenuItem => "ui-button-menu-item",
+    }
+}
+
+pub(crate) fn button_size_class(size: ButtonSize) -> &'static str {
+    match size {
+        ButtonSize::Sm => "ui-button-sm",
+        ButtonSize::Md => "ui-button-md",
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::resolve_icon_name;
+    use super::{
+        button_size_class, button_variant_class, resolve_icon_name, ButtonSize, ButtonVariant,
+    };
 
     #[test]
     fn resolves_custom_icon_names_to_common_symbolic_fallbacks() {
@@ -115,5 +165,33 @@ mod tests {
             resolve_icon_name("utilities-terminal-symbolic"),
             "utilities-terminal-symbolic"
         );
+    }
+
+    #[test]
+    fn button_variants_map_to_shared_ui_classes() {
+        assert_eq!(
+            button_variant_class(ButtonVariant::Primary),
+            "ui-button-primary"
+        );
+        assert_eq!(
+            button_variant_class(ButtonVariant::Secondary),
+            "ui-button-secondary"
+        );
+        assert_eq!(button_variant_class(ButtonVariant::Flat), "ui-button-flat");
+        assert_eq!(
+            button_variant_class(ButtonVariant::Destructive),
+            "ui-button-destructive"
+        );
+        assert_eq!(button_variant_class(ButtonVariant::Icon), "ui-button-icon");
+        assert_eq!(
+            button_variant_class(ButtonVariant::MenuItem),
+            "ui-button-menu-item"
+        );
+    }
+
+    #[test]
+    fn button_sizes_map_to_shared_ui_classes() {
+        assert_eq!(button_size_class(ButtonSize::Sm), "ui-button-sm");
+        assert_eq!(button_size_class(ButtonSize::Md), "ui-button-md");
     }
 }

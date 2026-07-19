@@ -19,6 +19,7 @@ mod sidebar;
 mod state;
 mod tabs;
 mod terminal;
+mod text;
 mod theme;
 mod toast;
 mod workspace_command_center;
@@ -1638,12 +1639,10 @@ pub(crate) fn title_case_workspace(name: &str) -> String {
 pub(crate) fn detail_row(label: &str, value: &str) -> GBox {
     let row = GBox::new(Orientation::Horizontal, 12);
     row.add_css_class("detail-row");
-    let label_widget = Label::new(Some(label));
-    label_widget.add_css_class("detail-label");
+    let label_widget = text::detail_label(label);
     label_widget.set_xalign(0.0);
     label_widget.set_width_chars(18);
-    let value_widget = Label::new(Some(value));
-    value_widget.add_css_class("detail-value");
+    let value_widget = text::detail_value(value);
     value_widget.set_xalign(0.0);
     value_widget.set_wrap(true);
     value_widget.set_hexpand(true);
