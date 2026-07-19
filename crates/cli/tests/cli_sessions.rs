@@ -355,9 +355,10 @@ fn cli_session_send_hides_general_prompt_while_provider_receives_first_turn_pref
     let workspace_parent = temp.path().join("workspaces/demo");
     let fake_codex = fake_codex_path(temp.path());
     let provider_inputs = temp.path().join("provider-inputs.txt");
+    let fake_home = temp.path().join("home");
     write_fake_codex(&fake_codex).unwrap();
 
-    app(temp.path())
+    app_with_home(temp.path(), &fake_home)
         .args([
             "repo",
             "add",
@@ -371,7 +372,7 @@ fn cli_session_send_hides_general_prompt_while_provider_receives_first_turn_pref
         ])
         .assert()
         .success();
-    app(temp.path())
+    app_with_home(temp.path(), &fake_home)
         .args([
             "workspace",
             "create",
@@ -394,7 +395,7 @@ fn cli_session_send_hides_general_prompt_while_provider_receives_first_turn_pref
     )
     .unwrap();
 
-    app(temp.path())
+    app_with_home(temp.path(), &fake_home)
         .env("ARCHDUCTOR_CAPTURE_PATH", &provider_inputs)
         .args([
             "session",
@@ -418,14 +419,14 @@ fn cli_session_send_hides_general_prompt_while_provider_receives_first_turn_pref
         .find(|thread| thread.provider == "codex")
         .unwrap();
     let first_session = store.list_sessions("berlin").unwrap()[0].id;
-    app(temp.path())
+    app_with_home(temp.path(), &fake_home)
         .env("ARCHDUCTOR_CAPTURE_PATH", &provider_inputs)
         .args(["archcar", "kill", &first_session.to_string()])
         .assert()
         .success();
     wait_for_session_exit(temp.path(), first_session);
 
-    app(temp.path())
+    app_with_home(temp.path(), &fake_home)
         .env("ARCHDUCTOR_CAPTURE_PATH", &provider_inputs)
         .args([
             "session",
@@ -465,7 +466,7 @@ fn cli_session_send_hides_general_prompt_while_provider_receives_first_turn_pref
         .find(|session| session.id != first_session)
         .unwrap()
         .id;
-    app(temp.path())
+    app_with_home(temp.path(), &fake_home)
         .env("ARCHDUCTOR_CAPTURE_PATH", &provider_inputs)
         .args(["archcar", "kill", &second_session.to_string()])
         .assert()
@@ -494,6 +495,18 @@ import json
 import os
 import sys
 
+def write_rollout(message):
+    home = os.environ.get("HOME")
+    if not home:
+        return
+    cwd = message.get("params", {}).get("cwd", ".")
+    rollout_dir = os.path.join(home, ".codex", "sessions", "2026", "07", "19")
+    os.makedirs(rollout_dir, exist_ok=True)
+    rollout_path = os.path.join(rollout_dir, "rollout-thread-test.jsonl")
+    meta = {"type": "session_meta", "payload": {"session_id": "thread-test", "cwd": cwd}}
+    with open(rollout_path, "w", encoding="utf-8") as output:
+        output.write(json.dumps(meta) + "\n")
+
 capture = os.environ["ARCHDUCTOR_CAPTURE_PATH"]
 for raw in sys.stdin:
     message = json.loads(raw)
@@ -501,6 +514,7 @@ for raw in sys.stdin:
     if method == "initialize":
         print(json.dumps({"id": message["id"], "result": {}}), flush=True)
     elif method in ("thread/start", "thread/resume"):
+        write_rollout(message)
         print(json.dumps({"id": message["id"], "result": {"thread": {"id": "thread-test"}}}), flush=True)
     elif method == "turn/start":
         text = message["params"]["input"][0]["text"]
@@ -528,12 +542,22 @@ fn write_fake_codex(path: &Path) -> std::io::Result<()> {
         script,
         r#"
 $capture = $env:ARCHDUCTOR_CAPTURE_PATH
+function Write-Rollout($message) {
+  $homeDir = if ($env:USERPROFILE) { $env:USERPROFILE } else { $env:HOME }
+  if (-not $homeDir) { return }
+  $cwd = if ($message.params -and $message.params.cwd) { $message.params.cwd } else { "." }
+  $rolloutDir = Join-Path $homeDir ".codex/sessions/2026/07/19"
+  New-Item -ItemType Directory -Force -Path $rolloutDir | Out-Null
+  $meta = @{ type = "session_meta"; payload = @{ session_id = "thread-test"; cwd = $cwd } }
+  Set-Content -Path (Join-Path $rolloutDir "rollout-thread-test.jsonl") -Encoding UTF8 -Value ($meta | ConvertTo-Json -Compress -Depth 8)
+}
 while (($raw = [Console]::In.ReadLine()) -ne $null) {
   $message = $raw | ConvertFrom-Json
   $method = $message.method
   if ($method -eq "initialize") {
     Write-Output (@{ id = $message.id; result = @{} } | ConvertTo-Json -Compress -Depth 8)
   } elseif ($method -eq "thread/start" -or $method -eq "thread/resume") {
+    Write-Rollout $message
     Write-Output (@{ id = $message.id; result = @{ thread = @{ id = "thread-test" } } } | ConvertTo-Json -Compress -Depth 8)
   } elseif ($method -eq "turn/start") {
     $text = $message.params.input[0].text
@@ -870,6 +894,12 @@ fn app(root: &Path) -> AssertCommand {
         .env("XDG_DATA_HOME", root.join("xdg/data"))
         .env("XDG_STATE_HOME", root.join("xdg/state"))
         .env("XDG_CACHE_HOME", root.join("xdg/cache"));
+    command
+}
+
+fn app_with_home(root: &Path, home: &Path) -> AssertCommand {
+    let mut command = app(root);
+    command.env("HOME", home).env("USERPROFILE", home);
     command
 }
 
