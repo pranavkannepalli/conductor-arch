@@ -1,8 +1,11 @@
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
+use archductor_core::archcar::protocol::ArchcarInputKind;
 use archductor_core::paths::AppPaths;
+use archductor_core::workspace::SessionKind;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NavigationEntry {
@@ -74,8 +77,26 @@ pub struct AppStateSnapshot {
     pub selected_agent_session: Option<i64>,
     pub staged_review_prompt: Option<String>,
     pub pending_chat_prompt: Option<String>,
+    queued_chat_inputs: HashMap<i64, Vec<QueuedChatInputDraft>>,
+    editing_queued_chat_inputs: HashMap<i64, EditingQueuedChatInput>,
     navigation_back: Vec<NavigationEntry>,
     navigation_forward: Vec<NavigationEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedChatInputDraft {
+    pub input: String,
+    pub visible_input: Option<String>,
+    pub kind: ArchcarInputKind,
+    pub session_kind: SessionKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditingQueuedChatInput {
+    pub thread_id: i64,
+    pub index: usize,
+    pub original: QueuedChatInputDraft,
+    pub previous_composer_text: String,
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +127,8 @@ impl AppState {
                 selected_agent_session: None,
                 staged_review_prompt: None,
                 pending_chat_prompt: None,
+                queued_chat_inputs: HashMap::new(),
+                editing_queued_chat_inputs: HashMap::new(),
                 navigation_back: Vec::new(),
                 navigation_forward: Vec::new(),
             })),
@@ -230,6 +253,155 @@ impl AppState {
 
     pub fn take_pending_chat_prompt(&self) -> Option<String> {
         self.inner.borrow_mut().pending_chat_prompt.take()
+    }
+
+    pub fn queue_chat_input(&self, thread_id: i64, draft: QueuedChatInputDraft) {
+        let mut draft = draft;
+        draft.input = draft.input.trim().to_owned();
+        if draft.input.is_empty() {
+            return;
+        }
+        self.inner
+            .borrow_mut()
+            .queued_chat_inputs
+            .entry(thread_id)
+            .or_default()
+            .push(draft);
+    }
+
+    pub fn queued_chat_inputs(&self, thread_id: i64) -> Vec<QueuedChatInputDraft> {
+        self.inner
+            .borrow()
+            .queued_chat_inputs
+            .get(&thread_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn queued_chat_inputs_count(&self, thread_id: i64) -> usize {
+        self.inner
+            .borrow()
+            .queued_chat_inputs
+            .get(&thread_id)
+            .map(Vec::len)
+            .unwrap_or_default()
+    }
+
+    pub fn pop_next_queued_chat_input(&self, thread_id: i64) -> Option<QueuedChatInputDraft> {
+        let mut state = self.inner.borrow_mut();
+        let entry = state.queued_chat_inputs.get_mut(&thread_id)?;
+        if entry.is_empty() {
+            state.queued_chat_inputs.remove(&thread_id);
+            return None;
+        }
+        let next = entry.remove(0);
+        if entry.is_empty() {
+            state.queued_chat_inputs.remove(&thread_id);
+        }
+        Some(next)
+    }
+
+    pub fn remove_queued_chat_input_at(
+        &self,
+        thread_id: i64,
+        index: usize,
+    ) -> Option<QueuedChatInputDraft> {
+        let mut state = self.inner.borrow_mut();
+        let entry = state.queued_chat_inputs.get_mut(&thread_id)?;
+        if index >= entry.len() {
+            return None;
+        }
+        let removed = entry.remove(index);
+        if entry.is_empty() {
+            state.queued_chat_inputs.remove(&thread_id);
+        }
+        Some(removed)
+    }
+
+    pub fn requeue_chat_input_front(&self, thread_id: i64, draft: QueuedChatInputDraft) {
+        self.insert_queued_chat_input(thread_id, 0, draft);
+    }
+
+    pub fn begin_editing_queued_chat_input(
+        &self,
+        thread_id: i64,
+        index: usize,
+        previous_composer_text: String,
+    ) -> Option<EditingQueuedChatInput> {
+        let mut state = self.inner.borrow_mut();
+        if state.editing_queued_chat_inputs.contains_key(&thread_id) {
+            return None;
+        }
+        let entry = state.queued_chat_inputs.get_mut(&thread_id)?;
+        if index >= entry.len() {
+            return None;
+        }
+        let original = entry.remove(index);
+        if entry.is_empty() {
+            state.queued_chat_inputs.remove(&thread_id);
+        }
+        let editing = EditingQueuedChatInput {
+            thread_id,
+            index,
+            original,
+            previous_composer_text,
+        };
+        state
+            .editing_queued_chat_inputs
+            .insert(thread_id, editing.clone());
+        Some(editing)
+    }
+
+    pub fn editing_queued_chat_input(&self, thread_id: i64) -> Option<EditingQueuedChatInput> {
+        self.inner
+            .borrow()
+            .editing_queued_chat_inputs
+            .get(&thread_id)
+            .cloned()
+    }
+
+    pub fn save_editing_queued_chat_input(
+        &self,
+        thread_id: i64,
+        replacement_text: String,
+    ) -> Option<String> {
+        let editing = self
+            .inner
+            .borrow_mut()
+            .editing_queued_chat_inputs
+            .remove(&thread_id)?;
+        let previous_composer_text = editing.previous_composer_text.clone();
+        let replacement_text = replacement_text.trim().to_owned();
+        if !replacement_text.is_empty() {
+            let mut replacement = editing.original;
+            replacement.input = replacement_text;
+            replacement.visible_input = None;
+            self.insert_queued_chat_input(thread_id, editing.index, replacement);
+        }
+        Some(previous_composer_text)
+    }
+
+    pub fn cancel_editing_queued_chat_input(&self, thread_id: i64) -> Option<String> {
+        let editing = self
+            .inner
+            .borrow_mut()
+            .editing_queued_chat_inputs
+            .remove(&thread_id)?;
+        let previous_composer_text = editing.previous_composer_text.clone();
+        self.insert_queued_chat_input(thread_id, editing.index, editing.original);
+        Some(previous_composer_text)
+    }
+
+    fn insert_queued_chat_input(&self, thread_id: i64, index: usize, draft: QueuedChatInputDraft) {
+        let mut draft = draft;
+        draft.input = draft.input.trim().to_owned();
+        if draft.input.is_empty() {
+            return;
+        }
+        let mut state = self.inner.borrow_mut();
+        let entry = state.queued_chat_inputs.entry(thread_id).or_default();
+        let index = index.min(entry.len());
+        entry.insert(index, draft);
     }
 
     pub fn set_active_page(&self, page: AppPage) {
@@ -399,6 +571,8 @@ fn apply_navigation_entry(state: &mut AppStateSnapshot, entry: NavigationEntry) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use archductor_core::archcar::protocol::ArchcarInputKind;
+    use archductor_core::workspace::SessionKind;
 
     #[test]
     fn workspace_tab_from_config_accepts_view_default_aliases() {
@@ -499,6 +673,140 @@ mod tests {
             Some("Create a PR")
         );
         assert_eq!(state.take_pending_chat_prompt(), None);
+    }
+
+    fn queued_chat_input(text: &str) -> QueuedChatInputDraft {
+        QueuedChatInputDraft {
+            input: text.to_owned(),
+            visible_input: None,
+            kind: ArchcarInputKind::User,
+            session_kind: SessionKind::Codex,
+        }
+    }
+
+    #[test]
+    fn queued_chat_inputs_survive_navigation() {
+        let state = AppState::new(
+            AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+
+        state.queue_chat_input(7, queued_chat_input(" queued steer "));
+        state.navigate_to_page(AppPage::History);
+        state.navigate_to_workspace(Some("berlin".to_owned()));
+
+        let queued = state.queued_chat_inputs(7);
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].input, "queued steer");
+    }
+
+    #[test]
+    fn queued_chat_input_pop_remove_and_requeue_are_thread_scoped() {
+        let state = AppState::new(
+            AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+
+        state.queue_chat_input(7, queued_chat_input("first"));
+        state.queue_chat_input(7, queued_chat_input("second"));
+        state.queue_chat_input(8, queued_chat_input("other"));
+
+        let removed = state.remove_queued_chat_input_at(7, 1).unwrap();
+        assert_eq!(removed.input, "second");
+        state.requeue_chat_input_front(7, removed);
+
+        assert_eq!(state.queued_chat_inputs_count(7), 2);
+        assert_eq!(state.queued_chat_inputs_count(8), 1);
+        assert_eq!(state.pop_next_queued_chat_input(7).unwrap().input, "second");
+        assert_eq!(state.pop_next_queued_chat_input(7).unwrap().input, "first");
+        assert_eq!(state.pop_next_queued_chat_input(8).unwrap().input, "other");
+        assert_eq!(state.pop_next_queued_chat_input(7), None);
+    }
+
+    #[test]
+    fn begin_editing_queued_chat_input_removes_item_and_stashes_composer() {
+        let state = AppState::new(
+            AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+
+        state.queue_chat_input(7, queued_chat_input("first"));
+        state.queue_chat_input(7, queued_chat_input("second"));
+
+        let editing = state
+            .begin_editing_queued_chat_input(7, 0, "draft composer".to_owned())
+            .unwrap();
+
+        assert_eq!(editing.original.input, "first");
+        assert_eq!(editing.previous_composer_text, "draft composer");
+        assert_eq!(state.queued_chat_inputs_count(7), 1);
+        assert_eq!(state.queued_chat_inputs(7)[0].input, "second");
+        assert_eq!(
+            state.editing_queued_chat_input(7).unwrap().original.input,
+            "first"
+        );
+    }
+
+    #[test]
+    fn save_editing_queued_chat_input_requeues_replacement_and_restores_composer() {
+        let state = AppState::new(
+            AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+
+        state.queue_chat_input(7, queued_chat_input("first"));
+        state.queue_chat_input(7, queued_chat_input("third"));
+        state.begin_editing_queued_chat_input(7, 0, "draft composer".to_owned());
+
+        let previous = state
+            .save_editing_queued_chat_input(7, " updated first ".to_owned())
+            .unwrap();
+
+        assert_eq!(previous, "draft composer");
+        assert_eq!(state.editing_queued_chat_input(7), None);
+        let queued = state.queued_chat_inputs(7);
+        assert_eq!(
+            queued
+                .iter()
+                .map(|item| item.input.as_str())
+                .collect::<Vec<_>>(),
+            ["updated first", "third"]
+        );
+    }
+
+    #[test]
+    fn cancel_editing_queued_chat_input_restores_original_queue_item_and_composer() {
+        let state = AppState::new(
+            AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+
+        state.queue_chat_input(7, queued_chat_input("first"));
+        state.queue_chat_input(7, queued_chat_input("second"));
+        state.begin_editing_queued_chat_input(7, 0, "draft composer".to_owned());
+
+        let previous = state.cancel_editing_queued_chat_input(7).unwrap();
+
+        assert_eq!(previous, "draft composer");
+        assert_eq!(state.editing_queued_chat_input(7), None);
+        let queued = state.queued_chat_inputs(7);
+        assert_eq!(
+            queued
+                .iter()
+                .map(|item| item.input.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "second"]
+        );
     }
 
     #[test]

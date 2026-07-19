@@ -2387,6 +2387,16 @@ button.chat-inline-event-chip:checked {
     border-radius: 6px;
     background-color: #181818;
 }
+.chat-queue-editing-row {
+    padding: 5px 6px;
+    border-radius: 6px;
+    background-color: #20242a;
+}
+.chat-queue-editing-label {
+    color: #dce6f6;
+    font-size: 13px;
+    padding: 0;
+}
 .chat-queued-composer-body {
     color: #d6d6d6;
     font-size: 13px;
