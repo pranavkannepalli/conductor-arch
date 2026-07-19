@@ -1515,12 +1515,14 @@ fn spawn_workspace_chat_thread_create(
             Ok((thread, threads)) => {
                 ui.state
                     .resolve_pending_chat_target(pending_target.clone(), thread.id);
-                ui.state.mark_chat_phase(
-                    ChatUiTarget::Thread(thread.id),
-                    ChatUiPhase::StartingAgent {
-                        provider: provider_kind,
-                    },
-                );
+                if ui.state.queued_chat_inputs_count(thread.id) > 0 {
+                    ui.state.mark_chat_phase(
+                        ChatUiTarget::Thread(thread.id),
+                        ChatUiPhase::StartingAgent {
+                            provider: provider_kind,
+                        },
+                    );
+                }
                 *ui.selected_thread.borrow_mut() = Some(thread.id);
                 *ui.known_threads.borrow_mut() = threads.clone();
                 ui.closed_chat_tabs.borrow_mut().remove(&thread.id);

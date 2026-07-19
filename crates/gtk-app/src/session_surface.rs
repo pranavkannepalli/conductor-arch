@@ -369,10 +369,6 @@ fn spawn_session_chat_thread_create(
                 ui.thread_state.borrow_mut().insert(0, thread.clone());
                 ui.app_state
                     .resolve_pending_chat_target(pending_target.clone(), thread.id);
-                ui.app_state.mark_chat_phase(
-                    ChatUiTarget::Thread(thread.id),
-                    ChatUiPhase::StartingAgent { provider: kind },
-                );
                 *ui.selected_thread.borrow_mut() = Some(thread.id);
                 (ui.on_selected)();
                 if let Some(external_chat_tabs) = ui.external_chat_tabs.as_ref() {
@@ -382,9 +378,15 @@ fn spawn_session_chat_thread_create(
                     );
                 }
                 if let Some(queued_input) = pop_next_queued_chat_input(&ui.app_state, thread.id) {
+                    ui.app_state.mark_chat_phase(
+                        ChatUiTarget::Thread(thread.id),
+                        ChatUiPhase::StartingAgent { provider: kind },
+                    );
                     let staged_review = matches!(queued_input.kind, ArchcarInputKind::ReviewPrompt);
                     if !(ui.send_text)(queued_input.input.clone(), staged_review) {
                         requeue_pending_input_front(&ui.app_state, thread.id, queued_input);
+                        ui.app_state
+                            .mark_chat_phase(ChatUiTarget::Thread(thread.id), ChatUiPhase::Ready);
                     }
                 }
                 (ui.refresh_view)();
@@ -1265,11 +1267,12 @@ pub fn agent_session_panel(
             } else {
                 true
             };
-            let managed_waiting_for_startup = if managed_harness_waits {
-                !managed_thread_ready && !has_active_generation
-            } else {
-                false
-            };
+            let managed_waiting_for_startup = managed_harness_waits
+                && action_thread_id.is_some_and(|thread_id| {
+                    chat_thread_waiting_for_starting_agent(&app_state, thread_id)
+                })
+                && !managed_thread_ready
+                && !has_active_generation;
             placeholder.set_text("Ask to make changes, @mention files, or run /commands");
             placeholder.set_visible(!has_text);
             let is_editing_queued_message = action_thread_id
@@ -3167,8 +3170,12 @@ pub fn agent_session_panel(
             } else {
                 true
             };
-            let managed_waiting_for_startup =
-                managed_harness_waits && !managed_thread_ready && !has_active_generation;
+            let managed_waiting_for_startup = managed_harness_waits
+                && action_thread_id.is_some_and(|thread_id| {
+                    chat_thread_waiting_for_starting_agent(&app_state, thread_id)
+                })
+                && !managed_thread_ready
+                && !has_active_generation;
             let action = composer_action_for_startup_state(
                 has_text,
                 has_active_generation,
@@ -3177,7 +3184,13 @@ pub fn agent_session_panel(
                 managed_waiting_for_startup,
             );
             let selected_kind = *selected_harness.borrow();
-            match composer_action_for_submit_intent(action, intent, has_text, selected_kind) {
+            match composer_action_for_submit_intent(
+                action,
+                intent,
+                has_text,
+                selected_kind,
+                managed_waiting_for_startup,
+            ) {
                 ComposerAction::Queue => {
                     if let Some(target @ ChatUiTarget::Pending { .. }) = chat_target.clone() {
                         queue_archcar_input_for_target(
@@ -7288,6 +7301,13 @@ where
     }
 }
 
+fn chat_thread_waiting_for_starting_agent(app_state: &AppState, thread_id: i64) -> bool {
+    matches!(
+        app_state.chat_phase(&ChatUiTarget::Thread(thread_id)),
+        Some(ChatUiPhase::StartingAgent { .. })
+    )
+}
+
 fn remove_queued_chat_input_at(
     app_state: &AppState,
     thread_id: i64,
@@ -7453,7 +7473,11 @@ fn composer_action_for_submit_intent(
     intent: ComposerSubmitIntent,
     has_text: bool,
     selected_kind: SessionKind,
+    waiting_for_startup: bool,
 ) -> ComposerAction {
+    if waiting_for_startup {
+        return action;
+    }
     if has_text
         && intent == ComposerSubmitIntent::Immediate
         && managed_harness_for_kind(selected_kind).is_some()
@@ -11362,6 +11386,7 @@ fix it
                 ComposerSubmitIntent::Default,
                 true,
                 SessionKind::Codex,
+                false,
             ),
             ComposerAction::Queue
         );
@@ -11371,6 +11396,7 @@ fix it
                 ComposerSubmitIntent::Immediate,
                 true,
                 SessionKind::Codex,
+                false,
             ),
             ComposerAction::Send
         );
@@ -11380,6 +11406,7 @@ fix it
                 ComposerSubmitIntent::Immediate,
                 true,
                 SessionKind::Codex,
+                false,
             ),
             ComposerAction::Send
         );
@@ -11389,6 +11416,7 @@ fix it
                 ComposerSubmitIntent::Immediate,
                 false,
                 SessionKind::Codex,
+                false,
             ),
             ComposerAction::SendQueued
         );
@@ -11398,8 +11426,43 @@ fix it
                 ComposerSubmitIntent::Immediate,
                 true,
                 SessionKind::Claude,
+                false,
             ),
             ComposerAction::Send
+        );
+    }
+
+    #[test]
+    fn composer_immediate_send_does_not_bypass_starting_agent() {
+        assert_eq!(
+            composer_action_for_submit_intent(
+                ComposerAction::Queue,
+                ComposerSubmitIntent::Immediate,
+                true,
+                SessionKind::Codex,
+                true,
+            ),
+            ComposerAction::Queue
+        );
+        assert_eq!(
+            composer_action_for_submit_intent(
+                ComposerAction::SendQueued,
+                ComposerSubmitIntent::Immediate,
+                true,
+                SessionKind::Codex,
+                true,
+            ),
+            ComposerAction::SendQueued
+        );
+        assert_eq!(
+            composer_action_for_submit_intent(
+                ComposerAction::Queue,
+                ComposerSubmitIntent::Immediate,
+                true,
+                SessionKind::Claude,
+                true,
+            ),
+            ComposerAction::Queue
         );
     }
 
@@ -11868,6 +11931,24 @@ fix it
             &[("first message in new chat".to_owned(), false)]
         );
         assert_eq!(queued_chat_inputs_count(&state, 42), 0);
+    }
+
+    #[test]
+    fn resolved_empty_pending_chat_becomes_ready_for_first_send() {
+        let state = AppState::new(
+            archductor_core::paths::AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            crate::state::WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+        let pending = state.create_pending_chat_target("berlin".to_owned(), SessionKind::Codex);
+
+        state.resolve_pending_chat_target(pending, 42);
+
+        assert_eq!(
+            state.chat_phase(&ChatUiTarget::Thread(42)),
+            Some(ChatUiPhase::Ready)
+        );
     }
 
     #[test]
