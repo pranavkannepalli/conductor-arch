@@ -846,9 +846,8 @@ fn ws_center_panel(
                         select_thread(Some(thread_id));
                     }
                     refresh_hub_for_click.refresh_event(
-                        RefreshEvent::WorkspaceChatMessagesChanged {
+                        RefreshEvent::WorkspaceChatLifecycleChanged {
                             workspace: current_workspace_name_for_click.borrow().clone(),
-                            thread_id,
                         },
                     );
                 });
@@ -967,21 +966,26 @@ fn ws_center_panel(
                 Some(Rc::new(move |refresh_chat_surface| {
                     let state = state.clone();
                     refresh_hub.set_workspace_chat_surface(move |event| {
-                        if let RefreshEvent::WorkspaceChatMessagesChanged {
-                            workspace,
-                            thread_id,
-                        } = event
-                        {
-                            if chat_message_event_matches_selected_thread(
+                        let selected_workspace = state.selected_workspace();
+                        let should_refresh = match event {
+                            RefreshEvent::WorkspaceChatMessagesChanged {
+                                workspace,
+                                thread_id,
+                            } => chat_message_event_matches_selected_thread(
                                 workspace,
                                 *thread_id,
-                                state.selected_workspace().as_deref(),
+                                selected_workspace.as_deref(),
                                 state.selected_chat_thread(),
-                            ) {
-                                refresh_chat_surface(session_surface::chat_refresh_kind_for_event(
-                                    event,
-                                ));
+                            ),
+                            RefreshEvent::WorkspaceChatLifecycleChanged { workspace } => {
+                                selected_workspace.as_deref() == Some(workspace.as_str())
                             }
+                            _ => false,
+                        };
+                        if should_refresh {
+                            refresh_chat_surface(session_surface::chat_refresh_kind_for_event(
+                                event,
+                            ));
                         }
                     });
                 }))
@@ -8719,6 +8723,22 @@ mod tests {
         assert!(
             !chat_region.contains("RefreshScope::Workspace"),
             "chat tab region must not rebuild the workspace shell"
+        );
+    }
+
+    #[test]
+    fn chat_tab_selection_refreshes_tabs_to_clear_unread_state() {
+        let source = include_str!("workspace_command_center.rs");
+        let start = source.find("let select_tab: Rc<dyn Fn()>").unwrap();
+        let end = source[start..]
+            .find("let close_tab: Rc<dyn Fn()>")
+            .map(|offset| start + offset)
+            .unwrap();
+        let select_tab_region = &source[start..end];
+
+        assert!(
+            select_tab_region.contains("WorkspaceChatLifecycleChanged"),
+            "selecting a chat tab must refresh tab nav so unread labels/classes are recomputed"
         );
     }
 

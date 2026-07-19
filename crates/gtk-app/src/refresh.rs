@@ -130,6 +130,7 @@ impl RefreshHub {
                 self.refresh(RefreshScope::Dashboard);
                 self.refresh(RefreshScope::History);
                 self.refresh_workspace_event(WorkspaceRefreshTarget::ChatTabs, &event);
+                self.refresh_workspace_event(WorkspaceRefreshTarget::ChatSurface, &event);
             }
             RefreshEvent::WorkspaceReviewChanged { .. } => {
                 self.refresh(RefreshScope::Dashboard);
@@ -345,7 +346,7 @@ mod tests {
             workspace: "demo".to_owned(),
         });
 
-        assert_eq!(counts.values(), (1, 1, 0, 1, 0, 0, 1, 0, 0));
+        assert_eq!(counts.values(), (1, 1, 0, 1, 0, 1, 1, 0, 0));
     }
 
     #[test]
@@ -354,6 +355,23 @@ mod tests {
         let seen = Rc::new(RefCell::new(None));
         let seen_for_handler = Rc::clone(&seen);
         hub.set_workspace_chat_tabs(move |event| {
+            *seen_for_handler.borrow_mut() = Some(event.clone());
+        });
+
+        let event = RefreshEvent::WorkspaceChatLifecycleChanged {
+            workspace: "demo".to_owned(),
+        };
+        hub.refresh_event(event.clone());
+
+        assert_eq!(*seen.borrow(), Some(event));
+    }
+
+    #[test]
+    fn chat_lifecycle_event_is_passed_to_chat_surface_handler() {
+        let hub = RefreshHub::default();
+        let seen = Rc::new(RefCell::new(None));
+        let seen_for_handler = Rc::clone(&seen);
+        hub.set_workspace_chat_surface(move |event| {
             *seen_for_handler.borrow_mut() = Some(event.clone());
         });
 
