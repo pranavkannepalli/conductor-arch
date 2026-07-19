@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -99,9 +99,33 @@ pub struct EditingQueuedChatInput {
     pub previous_composer_text: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppStateEvent {
+    WorkspaceSelectionChanged { workspace: Option<String> },
+    WorkspaceTabChanged { tab: WorkspaceTab },
+    ChatThreadSelectionChanged { thread_id: Option<i64> },
+    ComposerQueueChanged { thread_id: i64 },
+    RefreshRequested(crate::refresh::RefreshEvent),
+}
+
+type AppStateWatcher = Rc<dyn Fn(&AppStateEvent, &AppStateSnapshot)>;
+
+pub struct AppStateSubscription {
+    id: usize,
+    watchers: Rc<RefCell<HashMap<usize, AppStateWatcher>>>,
+}
+
+impl Drop for AppStateSubscription {
+    fn drop(&mut self) {
+        self.watchers.borrow_mut().remove(&self.id);
+    }
+}
+
+#[derive(Clone)]
 pub struct AppState {
     inner: Rc<RefCell<AppStateSnapshot>>,
+    watchers: Rc<RefCell<HashMap<usize, AppStateWatcher>>>,
+    next_watcher_id: Rc<Cell<usize>>,
     pub paths: AppPaths,
 }
 
@@ -132,8 +156,35 @@ impl AppState {
                 navigation_back: Vec::new(),
                 navigation_forward: Vec::new(),
             })),
+            watchers: Rc::new(RefCell::new(HashMap::new())),
+            next_watcher_id: Rc::new(Cell::new(1)),
             paths,
         }
+    }
+
+    pub fn subscribe(
+        &self,
+        watcher: impl Fn(&AppStateEvent, &AppStateSnapshot) + 'static,
+    ) -> AppStateSubscription {
+        let id = self.next_watcher_id.get();
+        self.next_watcher_id.set(id + 1);
+        self.watchers.borrow_mut().insert(id, Rc::new(watcher));
+        AppStateSubscription {
+            id,
+            watchers: self.watchers.clone(),
+        }
+    }
+
+    pub fn emit(&self, event: AppStateEvent) {
+        let snapshot = self.snapshot();
+        let watchers = self.watchers.borrow().values().cloned().collect::<Vec<_>>();
+        for watcher in watchers {
+            watcher(&event, &snapshot);
+        }
+    }
+
+    pub fn with_snapshot<R>(&self, f: impl FnOnce(&AppStateSnapshot) -> R) -> R {
+        f(&self.inner.borrow())
     }
 
     pub fn selected_workspace(&self) -> Option<String> {
@@ -141,15 +192,23 @@ impl AppState {
     }
 
     pub fn set_selected_workspace(&self, workspace: Option<String>) {
-        let mut state = self.inner.borrow_mut();
-        if state.selected_workspace != workspace {
-            state.selected_chat_thread = None;
-            state.selected_agent_session = None;
-            state.staged_review_prompt = None;
-            state.pending_chat_prompt = None;
+        let changed = {
+            let mut state = self.inner.borrow_mut();
+            if state.selected_workspace == workspace {
+                false
+            } else {
+                state.selected_chat_thread = None;
+                state.selected_agent_session = None;
+                state.staged_review_prompt = None;
+                state.pending_chat_prompt = None;
+                state.selected_workspace = workspace.clone();
+                state.active_page = AppPage::Workspace;
+                true
+            }
+        };
+        if changed {
+            self.emit(AppStateEvent::WorkspaceSelectionChanged { workspace });
         }
-        state.selected_workspace = workspace;
-        state.active_page = AppPage::Workspace;
     }
 
     pub fn navigate_to_page(&self, page: AppPage) {
@@ -162,19 +221,26 @@ impl AppState {
     }
 
     pub fn navigate_to_workspace(&self, workspace: Option<String>) {
-        let mut state = self.inner.borrow_mut();
-        if state.selected_workspace == workspace && state.active_page == AppPage::Workspace {
-            return;
+        let changed = {
+            let mut state = self.inner.borrow_mut();
+            if state.selected_workspace == workspace && state.active_page == AppPage::Workspace {
+                false
+            } else {
+                push_navigation_entry(&mut state);
+                if state.selected_workspace != workspace {
+                    state.selected_chat_thread = None;
+                    state.selected_agent_session = None;
+                    state.staged_review_prompt = None;
+                    state.pending_chat_prompt = None;
+                }
+                state.selected_workspace = workspace.clone();
+                state.active_page = AppPage::Workspace;
+                true
+            }
+        };
+        if changed {
+            self.emit(AppStateEvent::WorkspaceSelectionChanged { workspace });
         }
-        push_navigation_entry(&mut state);
-        if state.selected_workspace != workspace {
-            state.selected_chat_thread = None;
-            state.selected_agent_session = None;
-            state.staged_review_prompt = None;
-            state.pending_chat_prompt = None;
-        }
-        state.selected_workspace = workspace;
-        state.active_page = AppPage::Workspace;
     }
 
     pub fn set_selected_workspace_with_default_tab(
@@ -228,7 +294,18 @@ impl AppState {
     }
 
     pub fn set_selected_chat_thread(&self, thread_id: Option<i64>) {
-        self.inner.borrow_mut().selected_chat_thread = thread_id;
+        let changed = {
+            let mut state = self.inner.borrow_mut();
+            if state.selected_chat_thread == thread_id {
+                false
+            } else {
+                state.selected_chat_thread = thread_id;
+                true
+            }
+        };
+        if changed {
+            self.emit(AppStateEvent::ChatThreadSelectionChanged { thread_id });
+        }
     }
 
     pub fn set_selected_agent_session(&self, session_id: Option<i64>) {
@@ -267,6 +344,7 @@ impl AppState {
             .entry(thread_id)
             .or_default()
             .push(draft);
+        self.emit(AppStateEvent::ComposerQueueChanged { thread_id });
     }
 
     pub fn queued_chat_inputs(&self, thread_id: i64) -> Vec<QueuedChatInputDraft> {
@@ -298,6 +376,8 @@ impl AppState {
         if entry.is_empty() {
             state.queued_chat_inputs.remove(&thread_id);
         }
+        drop(state);
+        self.emit(AppStateEvent::ComposerQueueChanged { thread_id });
         Some(next)
     }
 
@@ -315,6 +395,8 @@ impl AppState {
         if entry.is_empty() {
             state.queued_chat_inputs.remove(&thread_id);
         }
+        drop(state);
+        self.emit(AppStateEvent::ComposerQueueChanged { thread_id });
         Some(removed)
     }
 
@@ -349,6 +431,8 @@ impl AppState {
         state
             .editing_queued_chat_inputs
             .insert(thread_id, editing.clone());
+        drop(state);
+        self.emit(AppStateEvent::ComposerQueueChanged { thread_id });
         Some(editing)
     }
 
@@ -377,6 +461,8 @@ impl AppState {
             replacement.input = replacement_text;
             replacement.visible_input = None;
             self.insert_queued_chat_input(thread_id, editing.index, replacement);
+        } else {
+            self.emit(AppStateEvent::ComposerQueueChanged { thread_id });
         }
         Some(previous_composer_text)
     }
@@ -402,6 +488,8 @@ impl AppState {
         let entry = state.queued_chat_inputs.entry(thread_id).or_default();
         let index = index.min(entry.len());
         entry.insert(index, draft);
+        drop(state);
+        self.emit(AppStateEvent::ComposerQueueChanged { thread_id });
     }
 
     pub fn set_active_page(&self, page: AppPage) {
@@ -444,17 +532,35 @@ impl AppState {
     }
 
     pub fn navigate_to_workspace_tab(&self, tab: WorkspaceTab) {
-        let mut state = self.inner.borrow_mut();
-        if state.active_page == AppPage::Workspace && state.active_workspace_tab == tab {
-            return;
+        let changed = {
+            let mut state = self.inner.borrow_mut();
+            if state.active_page == AppPage::Workspace && state.active_workspace_tab == tab {
+                false
+            } else {
+                push_navigation_entry(&mut state);
+                state.active_page = AppPage::Workspace;
+                state.active_workspace_tab = tab.clone();
+                true
+            }
+        };
+        if changed {
+            self.emit(AppStateEvent::WorkspaceTabChanged { tab });
         }
-        push_navigation_entry(&mut state);
-        state.active_page = AppPage::Workspace;
-        state.active_workspace_tab = tab;
     }
 
     pub fn set_active_workspace_tab(&self, tab: WorkspaceTab) {
-        self.inner.borrow_mut().active_workspace_tab = tab;
+        let changed = {
+            let mut state = self.inner.borrow_mut();
+            if state.active_workspace_tab == tab {
+                false
+            } else {
+                state.active_workspace_tab = tab.clone();
+                true
+            }
+        };
+        if changed {
+            self.emit(AppStateEvent::WorkspaceTabChanged { tab });
+        }
     }
 
     pub fn active_workspace_right_panel_tab(&self) -> WorkspaceRightPanelTab {
@@ -573,6 +679,57 @@ mod tests {
     use super::*;
     use archductor_core::archcar::protocol::ArchcarInputKind;
     use archductor_core::workspace::SessionKind;
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    #[test]
+    fn app_state_notifies_subscribers_after_mutation() {
+        let state = AppState::new(
+            AppPaths::from_env(),
+            None,
+            WorkspaceTab::Chats,
+            AppPage::Dashboard,
+        );
+        let observed = Rc::new(RefCell::new(Vec::new()));
+        let observed_for_sub = observed.clone();
+        let _subscription = state.subscribe(move |event, snapshot| {
+            observed_for_sub
+                .borrow_mut()
+                .push((event.clone(), snapshot.selected_workspace.clone()));
+        });
+
+        state.set_selected_workspace(Some("berlin".to_owned()));
+
+        assert_eq!(
+            *observed.borrow(),
+            vec![(
+                AppStateEvent::WorkspaceSelectionChanged {
+                    workspace: Some("berlin".to_owned())
+                },
+                Some("berlin".to_owned())
+            )]
+        );
+    }
+
+    #[test]
+    fn app_state_subscription_drops_cleanly() {
+        let state = AppState::new(
+            AppPaths::from_env(),
+            None,
+            WorkspaceTab::Chats,
+            AppPage::Dashboard,
+        );
+        let observed = Rc::new(Cell::new(0));
+        let subscription = state.subscribe({
+            let observed = observed.clone();
+            move |_, _| observed.set(observed.get() + 1)
+        });
+        drop(subscription);
+
+        state.set_selected_workspace(Some("berlin".to_owned()));
+
+        assert_eq!(observed.get(), 0);
+    }
 
     #[test]
     fn workspace_tab_from_config_accepts_view_default_aliases() {
