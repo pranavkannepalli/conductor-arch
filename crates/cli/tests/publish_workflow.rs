@@ -75,8 +75,10 @@ fn publish_build_uses_ci_verified_release_packaging() {
     assert!(
         publish.contains("Validate Homebrew formula")
             && publish.contains("brew audit --strict --online --formula")
-            && publish.contains("brew install --build-from-source packaging/homebrew/Formula/archductor.rb")
-            && publish.contains("brew test archductor")
+            && publish.contains("git config --global user.name \"Archductor Release Bot\"")
+            && publish.contains("brew tap-new perceo-ai/tap")
+            && publish.contains("brew install --build-from-source perceo-ai/tap/archductor")
+            && publish.contains("brew test perceo-ai/tap/archductor")
             && publish.contains("xvfb-run -a timeout 15s archductor-gtk --page dashboard")
             && publish.contains("[ \"$gtk_status\" -ne 0 ] && [ \"$gtk_status\" -ne 124 ]"),
         "publish should audit, install, test, and smoke-test the Homebrew formula before publishing"
@@ -124,8 +126,8 @@ fn publish_build_uses_ci_verified_release_packaging() {
         (
             "homebrew",
             &homebrew,
-            vec!["bin.install \"target/release/archductor\""],
-            vec!["bin.install \"target/release/archductor-gtk\""],
+            vec!["std_cargo_args(path: \"crates/cli\")"],
+            vec!["std_cargo_args(path: \"crates/gtk-app\")"],
         ),
         (
             "publish",
