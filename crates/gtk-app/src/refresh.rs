@@ -51,9 +51,9 @@ pub struct RefreshHub {
     history: Rc<RefCell<Option<RefreshHandler>>>,
     workspace_shell: Rc<RefCell<Option<RefreshHandler>>>,
     workspace_chat_surface: Rc<RefCell<Option<RefreshEventHandler>>>,
-    workspace_chat_tabs: Rc<RefCell<Option<RefreshHandler>>>,
-    workspace_runtime: Rc<RefCell<Option<RefreshHandler>>>,
-    workspace_review: Rc<RefCell<Option<RefreshHandler>>>,
+    workspace_chat_tabs: Rc<RefCell<Option<RefreshEventHandler>>>,
+    workspace_runtime: Rc<RefCell<Option<RefreshEventHandler>>>,
+    workspace_review: Rc<RefCell<Option<RefreshEventHandler>>>,
 }
 
 impl RefreshHub {
@@ -85,15 +85,15 @@ impl RefreshHub {
         *self.workspace_chat_surface.borrow_mut() = Some(Rc::new(handler));
     }
 
-    pub fn set_workspace_chat_tabs(&self, handler: impl Fn() + 'static) {
+    pub fn set_workspace_chat_tabs(&self, handler: impl Fn(&RefreshEvent) + 'static) {
         *self.workspace_chat_tabs.borrow_mut() = Some(Rc::new(handler));
     }
 
-    pub fn set_workspace_runtime(&self, handler: impl Fn() + 'static) {
+    pub fn set_workspace_runtime(&self, handler: impl Fn(&RefreshEvent) + 'static) {
         *self.workspace_runtime.borrow_mut() = Some(Rc::new(handler));
     }
 
-    pub fn set_workspace_review(&self, handler: impl Fn() + 'static) {
+    pub fn set_workspace_review(&self, handler: impl Fn(&RefreshEvent) + 'static) {
         *self.workspace_review.borrow_mut() = Some(Rc::new(handler));
     }
 
@@ -123,18 +123,18 @@ impl RefreshHub {
                 self.refresh(RefreshScope::Sidebar);
                 self.refresh(RefreshScope::Dashboard);
                 self.refresh(RefreshScope::History);
-                self.refresh_workspace(WorkspaceRefreshTarget::Runtime);
+                self.refresh_workspace_event(WorkspaceRefreshTarget::Runtime, &event);
             }
             RefreshEvent::WorkspaceChatLifecycleChanged { .. } => {
                 self.refresh(RefreshScope::Sidebar);
                 self.refresh(RefreshScope::Dashboard);
                 self.refresh(RefreshScope::History);
-                self.refresh_workspace(WorkspaceRefreshTarget::ChatTabs);
+                self.refresh_workspace_event(WorkspaceRefreshTarget::ChatTabs, &event);
             }
             RefreshEvent::WorkspaceReviewChanged { .. } => {
                 self.refresh(RefreshScope::Dashboard);
                 self.refresh(RefreshScope::History);
-                self.refresh_workspace(WorkspaceRefreshTarget::Review);
+                self.refresh_workspace_event(WorkspaceRefreshTarget::Review, &event);
             }
             RefreshEvent::WorkspaceChatMessagesChanged { .. } => {
                 self.refresh_workspace_event(WorkspaceRefreshTarget::ChatSurface, &event);
@@ -148,15 +148,21 @@ impl RefreshHub {
             WorkspaceRefreshTarget::ChatSurface => {
                 self.run_event(&self.workspace_chat_surface, &RefreshEvent::Manual)
             }
-            WorkspaceRefreshTarget::ChatTabs => {
-                self.run_or_shell(&self.workspace_chat_tabs, &self.workspace_shell)
-            }
-            WorkspaceRefreshTarget::Runtime => {
-                self.run_or_shell(&self.workspace_runtime, &self.workspace_shell)
-            }
-            WorkspaceRefreshTarget::Review => {
-                self.run_or_shell(&self.workspace_review, &self.workspace_shell)
-            }
+            WorkspaceRefreshTarget::ChatTabs => self.run_event_or_shell(
+                &self.workspace_chat_tabs,
+                &RefreshEvent::Manual,
+                &self.workspace_shell,
+            ),
+            WorkspaceRefreshTarget::Runtime => self.run_event_or_shell(
+                &self.workspace_runtime,
+                &RefreshEvent::Manual,
+                &self.workspace_shell,
+            ),
+            WorkspaceRefreshTarget::Review => self.run_event_or_shell(
+                &self.workspace_review,
+                &RefreshEvent::Manual,
+                &self.workspace_shell,
+            ),
         }
     }
 
@@ -164,6 +170,15 @@ impl RefreshHub {
         match target {
             WorkspaceRefreshTarget::ChatSurface => {
                 self.run_event(&self.workspace_chat_surface, event)
+            }
+            WorkspaceRefreshTarget::ChatTabs => {
+                self.run_event_or_shell(&self.workspace_chat_tabs, event, &self.workspace_shell)
+            }
+            WorkspaceRefreshTarget::Runtime => {
+                self.run_event_or_shell(&self.workspace_runtime, event, &self.workspace_shell)
+            }
+            WorkspaceRefreshTarget::Review => {
+                self.run_event_or_shell(&self.workspace_review, event, &self.workspace_shell)
             }
             _ => self.refresh_workspace(target),
         }
@@ -193,14 +208,15 @@ impl RefreshHub {
         }
     }
 
-    fn run_or_shell(
+    fn run_event_or_shell(
         &self,
-        slot: &Rc<RefCell<Option<RefreshHandler>>>,
+        slot: &Rc<RefCell<Option<RefreshEventHandler>>>,
+        event: &RefreshEvent,
         shell: &Rc<RefCell<Option<RefreshHandler>>>,
     ) {
         let handler = slot.borrow().as_ref().cloned();
         if let Some(handler) = handler {
-            handler();
+            handler(event);
         } else {
             self.run(shell);
         }
@@ -255,15 +271,15 @@ mod tests {
             });
 
             let workspace_chat_tabs = Rc::clone(&self.workspace_chat_tabs);
-            hub.set_workspace_chat_tabs(move || {
+            hub.set_workspace_chat_tabs(move |_| {
                 workspace_chat_tabs.set(workspace_chat_tabs.get() + 1)
             });
 
             let workspace_runtime = Rc::clone(&self.workspace_runtime);
-            hub.set_workspace_runtime(move || workspace_runtime.set(workspace_runtime.get() + 1));
+            hub.set_workspace_runtime(move |_| workspace_runtime.set(workspace_runtime.get() + 1));
 
             let workspace_review = Rc::clone(&self.workspace_review);
-            hub.set_workspace_review(move || workspace_review.set(workspace_review.get() + 1));
+            hub.set_workspace_review(move |_| workspace_review.set(workspace_review.get() + 1));
         }
 
         fn values(&self) -> (u32, u32, u32, u32, u32, u32, u32, u32, u32) {
@@ -330,6 +346,23 @@ mod tests {
         });
 
         assert_eq!(counts.values(), (1, 1, 0, 1, 0, 0, 1, 0, 0));
+    }
+
+    #[test]
+    fn chat_lifecycle_event_is_passed_to_chat_tabs_handler() {
+        let hub = RefreshHub::default();
+        let seen = Rc::new(RefCell::new(None));
+        let seen_for_handler = Rc::clone(&seen);
+        hub.set_workspace_chat_tabs(move |event| {
+            *seen_for_handler.borrow_mut() = Some(event.clone());
+        });
+
+        let event = RefreshEvent::WorkspaceChatLifecycleChanged {
+            workspace: "demo".to_owned(),
+        };
+        hub.refresh_event(event.clone());
+
+        assert_eq!(*seen.borrow(), Some(event));
     }
 
     #[test]

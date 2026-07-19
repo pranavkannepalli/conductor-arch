@@ -776,7 +776,13 @@ fn ws_center_panel(
                     {
                         select_thread(Some(thread_id));
                     }
-                    refresh_hub.refresh(RefreshScope::Workspace);
+                    refresh_hub.refresh_event(RefreshEvent::WorkspaceChatLifecycleChanged {
+                        workspace: workspace_name.clone(),
+                    });
+                    refresh_hub.refresh_event(RefreshEvent::WorkspaceChatMessagesChanged {
+                        workspace: workspace_name,
+                        thread_id,
+                    });
                     reopen_popover.popdown();
                 });
                 reopen_menu.append(&item);
@@ -824,6 +830,7 @@ fn ws_center_panel(
                 let chat_tab_buttons_for_click = chat_tab_buttons.clone();
                 let file_tab_buttons_for_click = file_tab_buttons.clone();
                 let state_for_click = state.clone();
+                let current_workspace_name_for_click = current_workspace_name.clone();
                 let refresh_hub_for_click = refresh_hub.clone();
                 let thread_id = thread.id;
                 let select_tab: Rc<dyn Fn()> = Rc::new(move || {
@@ -838,7 +845,12 @@ fn ws_center_panel(
                     {
                         select_thread(Some(thread_id));
                     }
-                    refresh_hub_for_click.refresh(RefreshScope::Workspace);
+                    refresh_hub_for_click.refresh_event(
+                        RefreshEvent::WorkspaceChatMessagesChanged {
+                            workspace: current_workspace_name_for_click.borrow().clone(),
+                            thread_id,
+                        },
+                    );
                 });
                 let close_tab: Rc<dyn Fn()> = Rc::new({
                     let db_path = db_path.clone();
@@ -895,7 +907,15 @@ fn ws_center_panel(
                         {
                             select_thread(next);
                         }
-                        refresh_hub.refresh(RefreshScope::Workspace);
+                        refresh_hub.refresh_event(RefreshEvent::WorkspaceChatLifecycleChanged {
+                            workspace: workspace_name.clone(),
+                        });
+                        if let Some(thread_id) = next {
+                            refresh_hub.refresh_event(RefreshEvent::WorkspaceChatMessagesChanged {
+                                workspace: workspace_name,
+                                thread_id,
+                            });
+                        }
                     }
                 });
                 connect_ws_tab_surface_clicks(&tab_shell, select_tab.clone());
@@ -971,6 +991,25 @@ fn ws_center_panel(
     {
         let db_path = db_path.to_path_buf();
         let current_workspace_name = current_workspace_name.clone();
+        let selected_thread = selected_thread.clone();
+        let on_threads_changed = on_threads_changed.clone();
+        refresh_hub.set_workspace_chat_tabs(move |event| {
+            let workspace_name = current_workspace_name.borrow().clone();
+            if let RefreshEvent::WorkspaceChatLifecycleChanged { workspace } = event {
+                if workspace != &workspace_name {
+                    return;
+                }
+            }
+            let Ok(store) = WorkspaceStore::open_app(db_path.clone()) else {
+                return;
+            };
+            let threads = store.list_chat_threads(&workspace_name).unwrap_or_default();
+            (on_threads_changed)(threads, *selected_thread.borrow());
+        });
+    }
+    {
+        let db_path = db_path.to_path_buf();
+        let current_workspace_name = current_workspace_name.clone();
         let known_threads = known_threads.clone();
         let selected_thread = selected_thread.clone();
         let state = state.clone();
@@ -1031,7 +1070,13 @@ fn ws_center_panel(
             {
                 select_thread(Some(thread.id));
             }
-            refresh_hub.refresh(RefreshScope::Workspace);
+            refresh_hub.refresh_event(RefreshEvent::WorkspaceChatLifecycleChanged {
+                workspace: workspace_name.clone(),
+            });
+            refresh_hub.refresh_event(RefreshEvent::WorkspaceChatMessagesChanged {
+                workspace: workspace_name,
+                thread_id: thread.id,
+            });
         });
     }
     // Sync active tab state
@@ -8655,6 +8700,24 @@ mod tests {
         let mut unread = running;
         unread.unread = true;
         assert_eq!(workspace_chat_nav_label(&unread), "Fix auth *");
+    }
+
+    #[test]
+    fn chat_tab_interactions_do_not_request_workspace_shell_refresh() {
+        let source = include_str!("workspace_command_center.rs");
+        let start = source
+            .find("let on_threads_changed")
+            .expect("chat tab refresh closure exists");
+        let end = source[start..]
+            .find("let chat_widget = session_surface::agent_session_panel")
+            .map(|offset| start + offset)
+            .expect("chat widget construction follows chat tabs");
+        let chat_region = &source[start..end];
+
+        assert!(
+            !chat_region.contains("RefreshScope::Workspace"),
+            "chat tab region must not rebuild the workspace shell"
+        );
     }
 
     #[test]
