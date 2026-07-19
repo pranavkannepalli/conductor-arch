@@ -1,0 +1,28 @@
+crates/core/src/workspace.rs
+  s_a93eecca5eed1d::t_43651ec7431318 15263,15322,15325
+  s_a93eecca5eed1d::t_e5e80e8596890f 6160-6170
+crates/gtk-app/src/session_surface.rs
+  s_a93eecca5eed1d::t_feb35182f9fadd 2502-2511,2515
+  s_a93eecca5eed1d::t_5a01dfe87df9f5 15381-15395
+  s_a93eecca5eed1d::t_91322f9dc703d2 12862,12871-12873,12907
+  s_a93eecca5eed1d::t_b29eee92a22edd 11987,11991-11995
+  s_a93eecca5eed1d::t_f43305d6bfd1fe 6568-6578,6583-6586,6600,6611
+  s_a93eecca5eed1d::t_794017d9b89829 10504-10508
+  s_a93eecca5eed1d::t_15297b7a15f0bf 15380
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "4a2264aed8240b5bef039306c393300230045510",
+  "prompts": {},
+  "sessions": {
+    "s_a93eecca5eed1d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f7941-3b72-7c23-9d9f-414feb3d559d",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
