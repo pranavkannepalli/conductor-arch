@@ -1,0 +1,22 @@
+scripts/update-homebrew-formula.sh
+  s_24b2db5b4c814e::t_f137be50e65ebc 46
+tests/release-readiness-test.sh
+  s_24b2db5b4c814e::t_7dfde9dafbc604 7,57-73
+  s_24b2db5b4c814e::t_614ba65c42cf18 74
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "ed9f98cc9216e4185137a6936056c79b2c08df40",
+  "prompts": {},
+  "sessions": {
+    "s_24b2db5b4c814e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f7849-8341-7772-a7a9-5c500356ce77",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
