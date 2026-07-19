@@ -16,10 +16,9 @@ class Archductor < Formula
 
   def install
     ENV["LIBSQLITE3_SYS_USE_PKG_CONFIG"] = "1"
-    system "cargo", "build", "--workspace", "--release", "--locked"
-    bin.install "target/release/archductor"
-    bin.install "target/release/archductor-gtk"
-    bin.install "target/release/archcar"
+    system "cargo", "install", *std_cargo_args(path: "crates/cli")
+    system "cargo", "install", *std_cargo_args(path: "crates/gtk-app")
+    system "cargo", "install", *std_cargo_args(path: "crates/archcar")
     pkgshare.install "README.md"
     share.install "packaging/archductor-gtk.desktop"
     share.install "packaging/archductor.svg"

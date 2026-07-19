@@ -479,6 +479,8 @@ jobs:
         run: |
           set -euxo pipefail
           brew --version
+          git config --global user.name "Archductor Release Bot"
+          git config --global user.email "pranav.kannepalli@gmail.com"
           brew tap-new perceo-ai/tap
           tap_formula="$(brew --repository perceo-ai/tap)/Formula/archductor.rb"
           cp packaging/homebrew/Formula/archductor.rb "$tap_formula"
