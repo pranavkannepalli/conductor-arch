@@ -205,6 +205,7 @@ enum ChatTimelineItem {
     ProviderProjection(ProviderProjectionItem),
     InterruptedNotice { sequence: i64 },
     OptimisticUserInput(String),
+    WorkingIndicator(Duration),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -214,6 +215,7 @@ enum ChatTimelineItemKey {
     Provider(ChatRenderProviderEventSignature),
     InterruptedNotice(i64),
     OptimisticUserInput(String),
+    WorkingIndicator(u64),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -623,21 +625,6 @@ pub fn agent_session_panel(
     chat_overlay.set_hexpand(true);
     chat_overlay.set_child(Some(&scroll));
     root.append(&chat_overlay);
-
-    let working_status_row = GBox::new(Orientation::Horizontal, 8);
-    working_status_row.add_css_class("chat-working-status-row");
-    working_status_row.set_halign(Align::Fill);
-    working_status_row.set_hexpand(true);
-    working_status_row.set_visible(false);
-    let working_status_spinner = Spinner::new();
-    working_status_spinner.start();
-    working_status_row.append(&working_status_spinner);
-    let working_status_label = Label::new(None);
-    working_status_label.add_css_class("card-meta");
-    working_status_label.set_xalign(0.0);
-    working_status_label.set_hexpand(true);
-    working_status_row.append(&working_status_label);
-    root.append(&working_status_row);
 
     // ── Composer ─────────────────────────────────────────────────────
     let composer_wrap = GBox::new(Orientation::Vertical, 0);
@@ -1379,8 +1366,6 @@ pub fn agent_session_panel(
         let refresh_queue_overlay = refresh_queue_overlay.clone();
         let eager_start_chat_agent = eager_start_chat_agent.clone();
         let refresh_for_metadata = refresh_for_metadata.clone();
-        let working_status_row = working_status_row.clone();
-        let working_status_label = working_status_label.clone();
         Rc::new(move || {
             let mut outcome = ChatRefreshOutcome::default();
             let workspace = current_workspace_name.borrow().clone();
@@ -1389,7 +1374,6 @@ pub fn agent_session_panel(
             if chat_refresh_workspace_decision(&workspace, &app_state.snapshot(), true)
                 == ChatRefreshWorkspaceDecision::SkipStaleSurface
             {
-                update_working_status_row(&working_status_row, &working_status_label, None);
                 return;
             }
             match WorkspaceStore::open_app(database_path.clone())
@@ -1414,7 +1398,6 @@ pub fn agent_session_panel(
                             &messages,
                             &context_usage,
                         );
-                        update_working_status_row(&working_status_row, &working_status_label, None);
                         restore_chat_scroll_after_refresh(&scroll, chat_scroll);
                         return;
                     }
@@ -1453,11 +1436,6 @@ pub fn agent_session_panel(
                             error!(workspace = %workspace, error = %err, "chat refresh_view failed to load workspace state");
                             clear_box(&thread_row);
                             clear_box(&messages);
-                            update_working_status_row(
-                                &working_status_row,
-                                &working_status_label,
-                                None,
-                            );
                             apply_context_usage_state(&context_usage, None);
                             let message = session_refresh_error_text("load sessions", &err);
                             toast_manager.error(message.clone());
@@ -1475,7 +1453,6 @@ pub fn agent_session_panel(
                         clear_box(&thread_row);
                         clear_box(&messages);
                         *last_timeline_render_state.borrow_mut() = None;
-                        update_working_status_row(&working_status_row, &working_status_label, None);
                         apply_context_usage_state(&context_usage, None);
                         let message = session_refresh_error_text("load sessions", &err);
                         toast_manager.error(message.clone());
@@ -1838,15 +1815,9 @@ pub fn agent_session_panel(
                             None,
                         );
                         if chat_render_is_unchanged(last_render_signature.as_ref(), signature) {
-                            update_working_status_row(
-                                &working_status_row,
-                                &working_status_label,
-                                None,
-                            );
                             return;
                         }
                         clear_box(&messages);
-                        update_working_status_row(&working_status_row, &working_status_label, None);
                         apply_context_usage_state(&context_usage, None);
                         let label = Label::new(Some("No chat selected."));
                         label.add_css_class("chat-agent-text");
@@ -1882,11 +1853,6 @@ pub fn agent_session_panel(
                         CodexStartupState::Idle
                     };
                     let working_elapsed = working_elapsed_for_thread(&working_threads, thread_id);
-                    update_working_status_row(
-                        &working_status_row,
-                        &working_status_label,
-                        working_elapsed,
-                    );
                     if let Some(harness) = managed_harness_for_kind(current_kind) {
                         let descriptor = harness.descriptor();
                         if thread_has_live_managed_session(&current, thread_id, descriptor)
@@ -1963,11 +1929,6 @@ pub fn agent_session_panel(
                                         clear_box(&messages);
                                         *last_timeline_render_state.borrow_mut() = None;
                                         *last_render_signature.borrow_mut() = None;
-                                        update_working_status_row(
-                                            &working_status_row,
-                                            &working_status_label,
-                                            None,
-                                        );
                                         apply_context_usage_state(&context_usage, None);
                                         append_chat_refresh_row(&messages, &label);
                                         restore_chat_scroll_after_refresh(&scroll, chat_scroll);
@@ -2072,6 +2033,7 @@ pub fn agent_session_panel(
                                     provider_projection.items,
                                     Vec::new(),
                                     submitted_user_inputs,
+                                    working_elapsed,
                                 );
                                 let timeline_leading_rows =
                                     usize::from(status_banner != ChatStatusBannerKind::None);
@@ -2204,6 +2166,9 @@ pub fn agent_session_panel(
                             append_chat_refresh_row(&messages, &chat_user_bubble(&input));
                         }
                     }
+                    if let Some(elapsed) = working_elapsed {
+                        append_chat_refresh_row(&messages, &working_indicator_widget(elapsed));
+                    }
                     restore_chat_scroll_after_refresh(&scroll, chat_scroll);
                 }
                 (None, _) => {
@@ -2234,12 +2199,10 @@ pub fn agent_session_panel(
                         None,
                     );
                     if chat_render_is_unchanged(last_render_signature.as_ref(), signature) {
-                        update_working_status_row(&working_status_row, &working_status_label, None);
                         return;
                     }
                     clear_box(&messages);
                     *last_timeline_render_state.borrow_mut() = None;
-                    update_working_status_row(&working_status_row, &working_status_label, None);
                     apply_context_usage_state(&context_usage, None);
                     let prompt =
                         pending_chat_placeholder_text(pending_chat_phase.as_ref(), current_kind);
@@ -2341,6 +2304,7 @@ pub fn agent_session_panel(
                                 provider_projection.items,
                                 Vec::new(),
                                 submitted_user_inputs,
+                                None,
                             );
                             let next_state = chat_timeline_render_state(
                                 thread_id,
@@ -4241,6 +4205,7 @@ fn chat_timeline_item_sort_key(item: &ChatTimelineItem) -> (i64, u8, i64) {
         ),
         ChatTimelineItem::InterruptedNotice { sequence } => (*sequence, 3, i64::MAX - 1),
         ChatTimelineItem::OptimisticUserInput(_) => (i64::MAX, 4, i64::MAX),
+        ChatTimelineItem::WorkingIndicator(_) => (i64::MAX, 5, i64::MAX),
     }
 }
 
@@ -4250,6 +4215,7 @@ fn chat_structured_items_for_render(
     provider_projection_items: Vec<ProviderProjectionItem>,
     _pending_inputs: Vec<String>,
     optimistic_immediate_inputs: Vec<String>,
+    working_elapsed: Option<Duration>,
 ) -> Vec<ChatTimelineItem> {
     let (mut items, mut unsequenced_messages): (Vec<_>, Vec<_>) =
         merge_chat_timeline_for_render(messages.clone(), events)
@@ -4295,6 +4261,9 @@ fn chat_structured_items_for_render(
             .into_iter()
             .map(ChatTimelineItem::OptimisticUserInput),
     );
+    if let Some(elapsed) = working_elapsed {
+        items.push(ChatTimelineItem::WorkingIndicator(elapsed));
+    }
     items
 }
 
@@ -4404,6 +4373,9 @@ fn chat_timeline_item_key(item: &ChatTimelineItem) -> ChatTimelineItemKey {
         }
         ChatTimelineItem::OptimisticUserInput(input) => {
             ChatTimelineItemKey::OptimisticUserInput(input.clone())
+        }
+        ChatTimelineItem::WorkingIndicator(elapsed) => {
+            ChatTimelineItemKey::WorkingIndicator(elapsed.as_secs())
         }
     }
 }
@@ -4631,6 +4603,7 @@ fn chat_timeline_item_widget(
         ChatTimelineItem::ProviderProjection(item) => Some(provider_projection_item_widget(item)),
         ChatTimelineItem::InterruptedNotice { .. } => Some(chat_interrupted_notice_widget()),
         ChatTimelineItem::OptimisticUserInput(input) => Some(chat_user_bubble(input).upcast()),
+        ChatTimelineItem::WorkingIndicator(elapsed) => Some(working_indicator_widget(*elapsed)),
     }
 }
 
@@ -9362,13 +9335,21 @@ fn working_indicator_label_text(elapsed: Duration) -> String {
     format!("Working... ({})", format_working_elapsed(elapsed))
 }
 
-fn update_working_status_row(row: &GBox, label: &Label, elapsed: Option<Duration>) {
-    if let Some(elapsed) = elapsed {
-        label.set_text(&working_indicator_label_text(elapsed));
-        row.set_visible(true);
-    } else {
-        row.set_visible(false);
-    }
+fn working_indicator_widget(elapsed: Duration) -> Widget {
+    let row = GBox::new(Orientation::Horizontal, 8);
+    row.add_css_class("chat-working-indicator");
+    row.set_halign(Align::Start);
+
+    let spinner = Spinner::new();
+    spinner.start();
+    row.append(&spinner);
+
+    let label = Label::new(Some(&working_indicator_label_text(elapsed)));
+    label.add_css_class("card-meta");
+    label.set_xalign(0.0);
+    row.append(&label);
+
+    row.upcast()
 }
 
 fn chat_interrupted_notice_widget() -> Widget {
@@ -10261,9 +10242,21 @@ fn update_working_indicator_for_archcar_event(
         | ArchcarEvent::SessionStarted { .. }
         | ArchcarEvent::SessionCapabilitiesChanged { .. }
         | ArchcarEvent::SessionScreenUpdated { .. }
-        | ArchcarEvent::SessionMessagesUpdated { .. }
         | ArchcarEvent::ProviderInteractionRequested { .. }
         | ArchcarEvent::ProviderInteractionResolved { .. } => false,
+        ArchcarEvent::SessionMessagesUpdated { thread_id } => {
+            let has_live_managed_session = [SessionKind::Codex, SessionKind::Claude]
+                .into_iter()
+                .filter_map(managed_harness_for_kind)
+                .any(|harness| {
+                    thread_has_live_managed_session(records, *thread_id, harness.descriptor())
+                });
+            if !has_live_managed_session || working_threads.borrow().contains_key(thread_id) {
+                return false;
+            }
+            mark_thread_working(working_threads, *thread_id);
+            true
+        }
     }
 }
 
@@ -13652,6 +13645,7 @@ fix it
             Vec::new(),
             Vec::new(),
             submitted,
+            None,
         );
         assert_eq!(
             timeline,
@@ -13720,6 +13714,7 @@ fix it
             Vec::new(),
             Vec::new(),
             submitted,
+            None,
         );
         assert_eq!(
             timeline,
@@ -14772,6 +14767,7 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            None,
         );
 
         assert!(timeline.is_empty());
@@ -14811,6 +14807,7 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
             vec![provider_item],
             vec!["new user message".to_owned()],
             Vec::new(),
+            None,
         );
 
         assert!(matches!(timeline[0], ChatTimelineItem::Message(_)));
@@ -14819,6 +14816,37 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
             ChatTimelineItem::ProviderProjection(_)
         ));
         assert_eq!(timeline.len(), 2);
+    }
+
+    #[test]
+    fn chat_render_places_working_indicator_after_submitted_inputs() {
+        let timeline = chat_structured_items_for_render(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            vec!["already sent".to_owned()],
+            Some(Duration::from_secs(9)),
+        );
+
+        assert_eq!(
+            timeline,
+            vec![
+                ChatTimelineItem::OptimisticUserInput("already sent".to_owned()),
+                ChatTimelineItem::WorkingIndicator(Duration::from_secs(9)),
+            ]
+        );
+    }
+
+    #[test]
+    fn working_indicator_is_rendered_in_transcript_not_bottom_bar() {
+        let source = include_str!("session_surface.rs");
+        let removed_class = concat!("chat-working", "-status-row");
+        assert!(
+            !source.contains(removed_class),
+            "working timer must be a transcript item after the latest chat message"
+        );
+        assert!(source.contains("ChatTimelineItem::WorkingIndicator"));
     }
 
     #[test]
@@ -14864,6 +14892,7 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
             vec![provider_item],
             Vec::new(),
             Vec::new(),
+            None,
         );
 
         assert!(matches!(
@@ -14907,6 +14936,7 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
             vec![provider_item],
             Vec::new(),
             Vec::new(),
+            None,
         );
 
         assert!(matches!(timeline[0], ChatTimelineItem::Message(_)));
@@ -15009,6 +15039,7 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
             provider_items,
             Vec::new(),
             Vec::new(),
+            None,
         );
 
         assert!(matches!(timeline[0], ChatTimelineItem::Message(_)));
@@ -15074,6 +15105,7 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
             provider_items,
             Vec::new(),
             Vec::new(),
+            None,
         );
 
         assert!(matches!(timeline[0], ChatTimelineItem::Message(_)));
@@ -15721,6 +15753,7 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
             projection.items,
             Vec::new(),
             Vec::new(),
+            None,
         );
 
         assert_eq!(timeline.len(), 1);
@@ -15769,6 +15802,7 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
             projection.items,
             Vec::new(),
             Vec::new(),
+            None,
         );
 
         assert_eq!(timeline.len(), 1);
@@ -15809,6 +15843,7 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
             projection.items,
             Vec::new(),
             Vec::new(),
+            None,
         );
 
         assert_eq!(timeline.len(), 1);
@@ -15838,6 +15873,7 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
             vec![interrupted.clone()],
             Vec::new(),
             Vec::new(),
+            None,
         );
         let after_continue = chat_structured_items_for_render(
             vec![
@@ -15848,6 +15884,7 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
             vec![interrupted],
             Vec::new(),
             Vec::new(),
+            None,
         );
 
         assert!(matches!(
@@ -15893,6 +15930,7 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
             vec![interrupted],
             Vec::new(),
             Vec::new(),
+            None,
         );
 
         assert!(!timeline
@@ -16462,6 +16500,32 @@ Schema confirms the app moved CRM around businesses.";
             working_indicator_label_text(Duration::from_secs(12)),
             "Working... (0:12)"
         );
+    }
+
+    #[test]
+    fn live_session_messages_mark_thread_working() {
+        let records = vec![process_record_with_thread(
+            11,
+            ProcessStatus::Running,
+            Some(7),
+            "claude",
+        )];
+        let session_threads = RefCell::new(HashMap::from([(11, 7)]));
+        let pending_inputs = RefCell::new(HashMap::new());
+        let working_threads = RefCell::new(HashMap::new());
+
+        let changed = update_working_indicator_for_archcar_event(
+            &ArchcarEvent::SessionMessagesUpdated { thread_id: 7 },
+            &records,
+            &session_threads,
+            SessionKind::Claude,
+            Some(7),
+            &pending_inputs,
+            &working_threads,
+        );
+
+        assert!(changed);
+        assert!(working_threads.borrow().contains_key(&7));
     }
 
     #[test]

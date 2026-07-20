@@ -2363,8 +2363,8 @@ popover.context-menu-popover arrow {
 .chat-messages {
     padding: 22px 24px 180px;
 }
-.chat-working-status-row {
-    margin: 0 24px 8px;
+.chat-working-indicator {
+    margin: 2px 24px 12px;
     padding: 6px 0;
     color: #b8c7de;
 }
