@@ -597,7 +597,6 @@ pub fn agent_session_panel(
     let switch_chat_harness: SwitchChatHarnessController = Rc::new(RefCell::new(None));
     let sync_live_controls: RefreshChatSurfaceController = Rc::new(RefCell::new(None));
     let send_text_after_ready_queue: SendChatTextController = Rc::new(RefCell::new(None));
-    let send_immediate_after_ready_queue: SendChatTextController = Rc::new(RefCell::new(None));
     let refresh_queue_overlay: RefreshChatSurfaceController = Rc::new(RefCell::new(None));
 
     let thread_row = GBox::new(Orientation::Horizontal, 8);
@@ -1060,7 +1059,6 @@ pub fn agent_session_panel(
         let app_state = app_state.clone();
         let queued_auto_drain_holds = queued_auto_drain_holds.clone();
         let buffer = buffer.clone();
-        let send_immediate_after_ready_queue = send_immediate_after_ready_queue.clone();
         let refresh_chat_surface = refresh_chat_surface.clone();
         let refresh_queue_overlay = refresh_queue_overlay.clone();
         let last_queue_overlay_signature = last_queue_overlay_signature.clone();
@@ -1168,38 +1166,7 @@ pub fn agent_session_panel(
                         refresh_after_action();
                     }
                 });
-                let send_immediately = Rc::new({
-                    let app_state = app_state.clone();
-                    let queued_auto_drain_holds = queued_auto_drain_holds.clone();
-                    let send_immediate_after_ready_queue = send_immediate_after_ready_queue.clone();
-                    let refresh_after_action = refresh_after_action.clone();
-                    let index = item.index;
-                    move || {
-                        if let Some(input) =
-                            remove_queued_chat_input_at(&app_state, thread_id, index)
-                        {
-                            let staged_review =
-                                matches!(input.kind, ArchcarInputKind::ReviewPrompt);
-                            let sent = send_immediate_after_ready_queue
-                                .borrow()
-                                .as_ref()
-                                .cloned()
-                                .is_some_and(|send| send(input.input.clone(), staged_review));
-                            if !sent {
-                                requeue_pending_input_front(&app_state, thread_id, input);
-                            } else {
-                                release_queued_auto_drain_if_queue_empty(
-                                    queued_auto_drain_holds.as_ref(),
-                                    thread_id,
-                                    queued_chat_inputs_count(&app_state, thread_id),
-                                );
-                            }
-                        }
-                        refresh_after_action();
-                    }
-                });
-                let row =
-                    queued_composer_overlay_row(&item, delete_item, edit_item, send_immediately);
+                let row = queued_composer_overlay_row(&item, delete_item, edit_item);
                 queue_overlay.append(&row);
             }
         }
@@ -3258,8 +3225,6 @@ pub fn agent_session_panel(
             send_text_with_delivery(command, staged_review, ArchcarInputDelivery::Immediate)
         }
     });
-    *send_immediate_after_ready_queue.borrow_mut() = Some(send_immediate_input.clone());
-
     let submit_composer_action = Rc::new({
         let buffer = buffer.clone();
         let selected_thread = selected_thread.clone();
@@ -3644,7 +3609,6 @@ fn queued_composer_overlay_row(
     item: &QueuedComposerItem,
     on_delete: Rc<dyn Fn()>,
     on_edit: Rc<dyn Fn()>,
-    on_send_immediately: Rc<dyn Fn()>,
 ) -> GBox {
     let row = GBox::new(Orientation::Horizontal, 8);
     row.add_css_class("chat-queued-composer-row");
@@ -3676,13 +3640,6 @@ fn queued_composer_overlay_row(
         delete_btn.add_css_class("chat-queued-action-btn");
         delete_btn.connect_clicked(move |_| on_delete());
         actions.append(&delete_btn);
-    }
-
-    if queued_composer_item_allows_action(item, QueuedComposerAction::SendImmediately) {
-        let send_btn = icon_button("send-symbolic", "Steer now");
-        send_btn.add_css_class("chat-queued-action-btn");
-        send_btn.connect_clicked(move |_| on_send_immediately());
-        actions.append(&send_btn);
     }
 
     row.append(&actions);
@@ -7528,7 +7485,7 @@ fn queued_chat_inputs_count(app_state: &AppState, thread_id: i64) -> usize {
 fn queued_composer_overlay_items_for_thread(
     app_state: &AppState,
     thread_id: Option<i64>,
-    selected_kind: SessionKind,
+    _selected_kind: SessionKind,
 ) -> Vec<QueuedComposerItem> {
     let Some(thread_id) = thread_id else {
         return Vec::new();
@@ -7537,16 +7494,10 @@ fn queued_composer_overlay_items_for_thread(
         .queued_chat_inputs(thread_id)
         .into_iter()
         .enumerate()
-        .map(|(index, input)| {
-            let mut actions = vec![QueuedComposerAction::Delete, QueuedComposerAction::Edit];
-            if managed_harness_for_kind(selected_kind).is_some() {
-                actions.push(QueuedComposerAction::SendImmediately);
-            }
-            QueuedComposerItem {
-                index,
-                preview: truncate_queue_preview(&queued_chat_input_visible_text(&input)),
-                actions,
-            }
+        .map(|(index, input)| QueuedComposerItem {
+            index,
+            preview: truncate_queue_preview(&queued_chat_input_visible_text(&input)),
+            actions: vec![QueuedComposerAction::Delete, QueuedComposerAction::Edit],
         })
         .collect()
 }
@@ -7679,7 +7630,6 @@ enum ComposerSubmitIntent {
 enum QueuedComposerAction {
     Delete,
     Edit,
-    SendImmediately,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -7762,7 +7712,7 @@ fn composer_submit_intent_for_modifiers(modifiers: gtk::gdk::ModifierType) -> Co
 }
 
 fn composer_send_button_submit_intent() -> ComposerSubmitIntent {
-    ComposerSubmitIntent::Immediate
+    ComposerSubmitIntent::Default
 }
 
 fn composer_action_for_submit_intent(
@@ -12109,10 +12059,10 @@ fix it
     }
 
     #[test]
-    fn composer_send_button_uses_immediate_submit_intent() {
+    fn composer_send_button_uses_default_submit_intent() {
         assert_eq!(
             composer_send_button_submit_intent(),
-            ComposerSubmitIntent::Immediate
+            ComposerSubmitIntent::Default
         );
     }
 
@@ -12124,7 +12074,7 @@ fix it
             items: vec![QueuedComposerItem {
                 index: 0,
                 preview: "queued message".to_owned(),
-                actions: vec![QueuedComposerAction::SendImmediately],
+                actions: vec![QueuedComposerAction::Edit],
             }],
         };
 
@@ -12412,7 +12362,7 @@ fix it
         let immediate_body = source
             .split("let send_immediate_input: Rc<dyn Fn(String, bool) -> bool> = Rc::new({")
             .nth(1)
-            .and_then(|tail| tail.split("*send_immediate_after_ready_queue").next())
+            .and_then(|tail| tail.split("let submit_composer_action").next())
             .expect("send_immediate_input body should be present");
 
         assert!(
@@ -12449,31 +12399,30 @@ fix it
 
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].preview, "first follow-up");
-        assert!(items[0].actions.contains(&QueuedComposerAction::Delete));
-        assert!(items[0].actions.contains(&QueuedComposerAction::Edit));
-        assert!(items[0]
-            .actions
-            .contains(&QueuedComposerAction::SendImmediately));
+        assert_eq!(
+            items[0].actions,
+            vec![QueuedComposerAction::Delete, QueuedComposerAction::Edit]
+        );
 
         let claude_items =
             queued_composer_overlay_items_for_thread(&app_state, Some(7), SessionKind::Claude);
-        assert!(claude_items[0]
-            .actions
-            .contains(&QueuedComposerAction::SendImmediately));
+        assert_eq!(
+            claude_items[0].actions,
+            vec![QueuedComposerAction::Delete, QueuedComposerAction::Edit]
+        );
     }
 
     #[test]
-    fn queued_row_send_uses_immediate_steer_path() {
+    fn queued_rows_do_not_offer_steer_during_generation() {
         let source = include_str!("session_surface.rs");
-        let send_row_body = source
-            .split("let send_immediately = Rc::new({")
-            .nth(1)
-            .and_then(|tail| tail.split("let row =").next())
-            .expect("queue row send callback should be present");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source should precede tests");
 
-        assert!(send_row_body.contains("send_immediate_after_ready_queue"));
-        assert!(send_row_body.contains("requeue_pending_input_front(&app_state"));
-        assert!(source.contains("icon_button(\"send-symbolic\", \"Steer now\")"));
+        assert!(!production_source.contains("let send_immediately = Rc::new({"));
+        assert!(!production_source.contains("send_immediate_after_ready_queue"));
+        assert!(!production_source.contains("icon_button(\"send-symbolic\", \"Steer now\")"));
     }
 
     #[test]
@@ -12482,7 +12431,7 @@ fix it
         let edit_row_body = source
             .split("let edit_item = Rc::new({")
             .nth(1)
-            .and_then(|tail| tail.split("let send_immediately = Rc::new({").next())
+            .and_then(|tail| tail.split("let row = queued_composer_overlay_row").next())
             .expect("queue row edit callback should be present");
 
         assert!(edit_row_body.contains("begin_editing_queued_chat_input"));
@@ -12504,10 +12453,6 @@ fix it
         assert!(queued_composer_item_allows_action(
             &item,
             QueuedComposerAction::Edit
-        ));
-        assert!(!queued_composer_item_allows_action(
-            &item,
-            QueuedComposerAction::SendImmediately
         ));
     }
 
