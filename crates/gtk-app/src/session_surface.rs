@@ -7700,6 +7700,19 @@ fn ready_queued_session_for_thread(
     ready_running_session_for_thread(records, thread_id, harness.kind, ready_cache)
 }
 
+fn pending_input_session_for_thread(
+    records: &[ProcessRecord],
+    thread_id: i64,
+    harness: &'static HarnessDescriptor,
+    ready_cache: &RefCell<HashMap<i64, bool>>,
+    thread_has_visible_history: bool,
+) -> Option<i64> {
+    if harness.kind == SessionKind::Claude && !thread_has_visible_history {
+        return running_session_for_thread(records, thread_id, harness.kind);
+    }
+    ready_queued_session_for_thread(records, thread_id, harness, ready_cache)
+}
+
 fn resolve_or_create_thread_id_for_send<F>(
     thread_state: &RefCell<Vec<ChatThreadRecord>>,
     selected_thread: &RefCell<Option<i64>>,
@@ -9666,8 +9679,15 @@ fn flush_pending_archcar_inputs(
     let thread_ids = pending_inputs.borrow().keys().copied().collect::<Vec<_>>();
     let mut flushed_any = false;
     for thread_id in thread_ids {
-        let records = WorkspaceStore::open_app(database_path)
-            .and_then(|store| store.list_thread_processes(thread_id))
+        let (records, thread_has_visible_history) = WorkspaceStore::open_app(database_path)
+            .map(|store| {
+                let records = store.list_thread_processes(thread_id).unwrap_or_default();
+                let thread_has_visible_history = store
+                    .list_chat_messages(thread_id)
+                    .map(|messages| !messages.is_empty())
+                    .unwrap_or(false);
+                (records, thread_has_visible_history)
+            })
             .unwrap_or_default();
         let session_kind = pending_inputs
             .borrow()
@@ -9678,11 +9698,29 @@ fn flush_pending_archcar_inputs(
         let Some(harness) = managed_harness_for_kind(session_kind) else {
             continue;
         };
-        let Some(session_id) =
-            ready_queued_session_for_thread(&records, thread_id, harness.descriptor(), ready_cache)
-        else {
+        let Some(session_id) = pending_input_session_for_thread(
+            &records,
+            thread_id,
+            harness.descriptor(),
+            ready_cache,
+            thread_has_visible_history,
+        ) else {
             continue;
         };
+        if harness.descriptor().kind == SessionKind::Claude
+            && !thread_has_visible_history
+            && !ready_cache
+                .borrow()
+                .get(&session_id)
+                .copied()
+                .unwrap_or(false)
+        {
+            info!(
+                thread_id,
+                process_id = session_id,
+                "bootstrapping Claude first input before readiness"
+            );
+        }
 
         let pending_controls = flush_pending_commands_for_send(pending_commands, thread_id);
         for (index, control) in pending_controls.iter().enumerate() {
@@ -11750,6 +11788,62 @@ fix it
         );
         assert_eq!(
             ready_queued_session_for_thread(&records, 10, claude.descriptor(), &ready_cache),
+            None
+        );
+    }
+
+    #[test]
+    fn claude_first_pending_input_uses_running_session_before_ready() {
+        let records = vec![process_record_with_thread(
+            13,
+            ProcessStatus::Running,
+            Some(9),
+            "claude",
+        )];
+        let ready_cache = RefCell::new(HashMap::from([(13, false)]));
+        let claude =
+            archductor_core::archcar::harness::managed_harness_for_kind(SessionKind::Claude)
+                .unwrap();
+
+        assert_eq!(
+            pending_input_session_for_thread(&records, 9, claude.descriptor(), &ready_cache, false),
+            Some(13)
+        );
+    }
+
+    #[test]
+    fn claude_followup_pending_input_waits_for_ready() {
+        let records = vec![process_record_with_thread(
+            13,
+            ProcessStatus::Running,
+            Some(9),
+            "claude",
+        )];
+        let ready_cache = RefCell::new(HashMap::from([(13, false)]));
+        let claude =
+            archductor_core::archcar::harness::managed_harness_for_kind(SessionKind::Claude)
+                .unwrap();
+
+        assert_eq!(
+            pending_input_session_for_thread(&records, 9, claude.descriptor(), &ready_cache, true),
+            None
+        );
+    }
+
+    #[test]
+    fn codex_pending_input_always_waits_for_ready() {
+        let records = vec![process_record_with_thread(
+            11,
+            ProcessStatus::Running,
+            Some(7),
+            "codex",
+        )];
+        let ready_cache = RefCell::new(HashMap::from([(11, false)]));
+        let codex = archductor_core::archcar::harness::managed_harness_for_kind(SessionKind::Codex)
+            .unwrap();
+
+        assert_eq!(
+            pending_input_session_for_thread(&records, 7, codex.descriptor(), &ready_cache, false),
             None
         );
     }

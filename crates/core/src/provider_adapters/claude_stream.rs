@@ -16,6 +16,7 @@ use crate::workspace::SessionKind;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tracing::{debug, info};
 
 pub const CLAUDE_PROVIDER_NAME: &str = "claude";
 
@@ -268,6 +269,7 @@ impl ManagedHarnessAdapter for ClaudeManagedAdapter {
             };
             let event_kind = event.kind;
             let lifecycle_signal = event.lifecycle_signal();
+            log_claude_stream_event(&event, lifecycle_signal.as_ref());
             let terminal_result_id = matches!(event_kind, ClaudeProviderEventKind::Result)
                 .then(|| claude_terminal_result_id(&event));
             if terminal_result_id
@@ -413,6 +415,86 @@ fn claude_terminal_result_id(event: &ClaudeProviderEventDraft) -> String {
         .unwrap_or_else(|| claude_fallback_event_id(&event.raw_json))
 }
 
+fn log_claude_stream_event(
+    event: &ClaudeProviderEventDraft,
+    lifecycle_signal: Option<&ClaudeLifecycleSignal>,
+) {
+    match lifecycle_signal {
+        Some(ClaudeLifecycleSignal::Initialized(init)) => {
+            info!(
+                native_session_id = %init.session_id,
+                model = init.model.as_deref().unwrap_or("unknown"),
+                capabilities = ?init.capabilities,
+                "claude stream initialized"
+            );
+        }
+        Some(ClaudeLifecycleSignal::UserInputReplayed { text }) => {
+            info!(
+                provider_event_id = event.provider_event_id.as_deref().unwrap_or("unknown"),
+                chars = text.chars().count(),
+                "claude stream replayed user input"
+            );
+        }
+        Some(ClaudeLifecycleSignal::TurnFinished {
+            status,
+            stop_reason,
+        }) => {
+            info!(
+                provider_event_id = event.provider_event_id.as_deref().unwrap_or("unknown"),
+                status = ?status,
+                stop_reason = stop_reason.as_deref().unwrap_or("none"),
+                result_chars = event
+                    .content_delta
+                    .as_ref()
+                    .map(|text| text.chars().count())
+                    .unwrap_or(0),
+                "claude stream turn finished"
+            );
+        }
+        Some(ClaudeLifecycleSignal::DeferredTool { .. }) => {
+            info!(
+                provider_event_id = event.provider_event_id.as_deref().unwrap_or("unknown"),
+                "claude stream deferred tool result"
+            );
+        }
+        None => {}
+    }
+
+    if event.kind == ClaudeProviderEventKind::Reasoning {
+        info!(
+            provider_event_id = event.provider_event_id.as_deref().unwrap_or("unknown"),
+            provider_message_id = event.provider_message_id.as_deref().unwrap_or("unknown"),
+            content_block_index = ?event.content_block_index,
+            subtype = event.subtype.as_deref().unwrap_or("unknown"),
+            chars = event
+                .content_delta
+                .as_ref()
+                .map(|text| text.chars().count())
+                .unwrap_or(0),
+            "claude stream thinking trace observed"
+        );
+    } else if let Some(thinking_tokens) = event.usage.thinking_tokens {
+        info!(
+            provider_event_id = event.provider_event_id.as_deref().unwrap_or("unknown"),
+            kind = ?event.kind,
+            thinking_tokens,
+            "claude stream thinking token usage"
+        );
+    } else if event.kind != ClaudeProviderEventKind::Hook {
+        debug!(
+            provider_event_id = event.provider_event_id.as_deref().unwrap_or("unknown"),
+            kind = ?event.kind,
+            subtype = event.subtype.as_deref().unwrap_or("unknown"),
+            content_chars = event
+                .content_delta
+                .as_ref()
+                .map(|text| text.chars().count())
+                .unwrap_or(0),
+            "claude stream event"
+        );
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ClaudeStreamLaunchConfig {
     pub persistent_input: bool,
@@ -550,6 +632,8 @@ pub struct ClaudeUsageDraft {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_creation_input_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_read_input_tokens: Option<u64>,
@@ -559,6 +643,7 @@ impl ClaudeUsageDraft {
     fn is_empty(&self) -> bool {
         self.input_tokens.is_none()
             && self.output_tokens.is_none()
+            && self.thinking_tokens.is_none()
             && self.cache_creation_input_tokens.is_none()
             && self.cache_read_input_tokens.is_none()
     }
@@ -1036,6 +1121,8 @@ fn usage_from(value: &Value) -> ClaudeUsageDraft {
     ClaudeUsageDraft {
         input_tokens: number_at(usage, &["input_tokens"]),
         output_tokens: number_at(usage, &["output_tokens"]),
+        thinking_tokens: number_at(usage, &["output_tokens_details", "thinking_tokens"])
+            .or_else(|| number_at(usage, &["thinking_tokens"])),
         cache_creation_input_tokens: number_at(usage, &["cache_creation_input_tokens"]),
         cache_read_input_tokens: number_at(usage, &["cache_read_input_tokens"]),
     }
@@ -2625,6 +2712,31 @@ mod tests {
         assert_eq!(events[8].usage.output_tokens, Some(3));
         assert_eq!(events[8].cost_usd, Some(0.01));
         assert_eq!(events[9].raw_json["value"], 42);
+    }
+
+    #[test]
+    fn parses_claude_message_delta_thinking_token_usage() {
+        let events = parse_claude_stream_json_lines(
+            r#"{"type":"stream_event","uuid":"u1","session_id":"s1","event":{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":4,"output_tokens_details":{"thinking_tokens":17}}}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, ClaudeProviderEventKind::MessageDelta);
+        assert_eq!(events[0].usage.output_tokens, Some(4));
+        assert_eq!(events[0].usage.thinking_tokens, Some(17));
+
+        let canonical = events[0].clone().into_provider_event_draft(
+            crate::provider_events::ProviderEventContext {
+                workspace_id: None,
+                chat_thread_id: Some(7),
+                process_id: Some(9),
+                occurred_at_ms: 42,
+                schema_version: 1,
+                adapter_version: "claude-stream-json-test".to_owned(),
+            },
+        );
+        assert_eq!(canonical.normalized_payload["usage"]["thinking_tokens"], 17);
     }
 
     #[test]
