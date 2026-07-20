@@ -7438,7 +7438,7 @@ fn queued_chat_input_visible_text(input: &QueuedChatInputDraft) -> String {
 
 fn submitted_user_input_texts_for_thread(
     thread_id: i64,
-    _pending_archcar_inputs: &RefCell<HashMap<i64, Vec<QueuedArchcarInput>>>,
+    pending_archcar_inputs: &RefCell<HashMap<i64, Vec<QueuedArchcarInput>>>,
     inflight_actions: &RefCell<HashMap<u64, PendingArchcarAction>>,
     persisted_messages: &[ChatMessageRecord],
 ) -> Vec<String> {
@@ -7448,6 +7448,17 @@ fn submitted_user_input_texts_for_thread(
         .map(|message| message.content.trim().to_owned())
         .collect::<HashSet<_>>();
     let mut inputs = Vec::new();
+
+    if let Some(pending_inputs) = pending_archcar_inputs.borrow().get(&thread_id) {
+        inputs.extend(pending_inputs.iter().map(|input| {
+            input
+                .visible_input
+                .as_deref()
+                .unwrap_or(&input.input)
+                .trim()
+                .to_owned()
+        }));
+    }
 
     for action in inflight_actions.borrow().values() {
         if let PendingArchcarAction::UserSend {
@@ -13536,7 +13547,7 @@ fix it
     }
 
     #[test]
-    fn submitted_user_input_texts_exclude_startup_queue_until_sent() {
+    fn submitted_user_input_texts_include_startup_queue_until_sent() {
         let app_state = AppState::new(
             archductor_core::paths::AppPaths::from_env(),
             Some("berlin".to_owned()),
@@ -13578,8 +13589,35 @@ fix it
 
         let submitted = submitted_user_input_texts_for_thread(7, &starting_queue, &inflight, &[]);
 
-        assert_eq!(submitted, vec!["real inflight".to_owned()]);
+        assert_eq!(
+            submitted,
+            vec![
+                "queued while starting".to_owned(),
+                "real inflight".to_owned()
+            ]
+        );
         assert_eq!(app_state.queued_chat_inputs_count(7), 1);
+    }
+
+    #[test]
+    fn submitted_user_input_texts_include_pending_archcar_input_before_ack() {
+        let pending_archcar_inputs = RefCell::new(HashMap::<i64, Vec<QueuedArchcarInput>>::new());
+        queue_pending_archcar_input(
+            &pending_archcar_inputs,
+            7,
+            QueuedArchcarInput {
+                input: "[metadata]\nfirst claude input".to_owned(),
+                visible_input: Some("first claude input".to_owned()),
+                kind: ArchcarInputKind::User,
+                session_kind: SessionKind::Claude,
+            },
+        );
+        let inflight = RefCell::new(HashMap::<u64, PendingArchcarAction>::new());
+
+        let submitted =
+            submitted_user_input_texts_for_thread(7, &pending_archcar_inputs, &inflight, &[]);
+
+        assert_eq!(submitted, vec!["first claude input".to_owned()]);
     }
 
     #[test]
