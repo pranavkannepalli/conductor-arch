@@ -173,7 +173,6 @@ struct ChatScrollSnapshot {
 enum ChatStatusBannerKind {
     None,
     Startup,
-    Working,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -624,6 +623,21 @@ pub fn agent_session_panel(
     chat_overlay.set_hexpand(true);
     chat_overlay.set_child(Some(&scroll));
     root.append(&chat_overlay);
+
+    let working_status_row = GBox::new(Orientation::Horizontal, 8);
+    working_status_row.add_css_class("chat-working-status-row");
+    working_status_row.set_halign(Align::Fill);
+    working_status_row.set_hexpand(true);
+    working_status_row.set_visible(false);
+    let working_status_spinner = Spinner::new();
+    working_status_spinner.start();
+    working_status_row.append(&working_status_spinner);
+    let working_status_label = Label::new(None);
+    working_status_label.add_css_class("card-meta");
+    working_status_label.set_xalign(0.0);
+    working_status_label.set_hexpand(true);
+    working_status_row.append(&working_status_label);
+    root.append(&working_status_row);
 
     // ── Composer ─────────────────────────────────────────────────────
     let composer_wrap = GBox::new(Orientation::Vertical, 0);
@@ -1178,6 +1192,7 @@ pub fn agent_session_panel(
     let last_timeline_render_state = Rc::new(RefCell::new(None::<ChatTimelineRenderState>));
     let buffer_for_update = buffer.clone();
     let update_composer_state = {
+        let database_path = database_path.clone();
         let placeholder = placeholder.clone();
         let send_btn = send_btn.clone();
         let input_view = input_view.clone();
@@ -1196,12 +1211,17 @@ pub fn agent_session_panel(
             let thread_id = *selected_thread.borrow();
             let chat_target = selected_chat_target_for_submit(&app_state, thread_id);
             let action_thread_id = composer_thread_for_target(chat_target.as_ref(), thread_id);
+            let current_harness = *selected_harness.borrow();
             let has_active_generation = action_thread_id.is_some_and(|thread_id| {
-                active_generation_for_thread(
+                let has_visible_history =
+                    thread_has_visible_chat_history(&database_path, thread_id);
+                managed_active_generation_for_thread(
                     &record_state.borrow(),
                     &working_threads,
+                    archcar_ready_cache.as_ref(),
                     thread_id,
-                    *selected_harness.borrow(),
+                    current_harness,
+                    has_visible_history,
                 )
             });
             let latest_status = action_thread_id.and_then(|thread_id| {
@@ -1214,7 +1234,6 @@ pub fn agent_session_panel(
             let queued_count = action_thread_id
                 .map(|thread_id| queued_chat_inputs_count(&app_state, thread_id))
                 .unwrap_or_default();
-            let current_harness = *selected_harness.borrow();
             let managed_harness_waits = managed_harness_for_kind(current_harness).is_some();
             let managed_thread_ready = if managed_harness_waits {
                 action_thread_id.is_none_or(|thread_id| {
@@ -1365,6 +1384,8 @@ pub fn agent_session_panel(
         let refresh_queue_overlay = refresh_queue_overlay.clone();
         let eager_start_chat_agent = eager_start_chat_agent.clone();
         let refresh_for_metadata = refresh_for_metadata.clone();
+        let working_status_row = working_status_row.clone();
+        let working_status_label = working_status_label.clone();
         Rc::new(move || {
             let mut outcome = ChatRefreshOutcome::default();
             let workspace = current_workspace_name.borrow().clone();
@@ -1373,6 +1394,7 @@ pub fn agent_session_panel(
             if chat_refresh_workspace_decision(&workspace, &app_state.snapshot(), true)
                 == ChatRefreshWorkspaceDecision::SkipStaleSurface
             {
+                update_working_status_row(&working_status_row, &working_status_label, None);
                 return;
             }
             match WorkspaceStore::open_app(database_path.clone())
@@ -1397,6 +1419,7 @@ pub fn agent_session_panel(
                             &messages,
                             &context_usage,
                         );
+                        update_working_status_row(&working_status_row, &working_status_label, None);
                         restore_chat_scroll_after_refresh(&scroll, chat_scroll);
                         return;
                     }
@@ -1435,6 +1458,11 @@ pub fn agent_session_panel(
                             error!(workspace = %workspace, error = %err, "chat refresh_view failed to load workspace state");
                             clear_box(&thread_row);
                             clear_box(&messages);
+                            update_working_status_row(
+                                &working_status_row,
+                                &working_status_label,
+                                None,
+                            );
                             apply_context_usage_state(&context_usage, None);
                             let message = session_refresh_error_text("load sessions", &err);
                             toast_manager.error(message.clone());
@@ -1452,6 +1480,7 @@ pub fn agent_session_panel(
                         clear_box(&thread_row);
                         clear_box(&messages);
                         *last_timeline_render_state.borrow_mut() = None;
+                        update_working_status_row(&working_status_row, &working_status_label, None);
                         apply_context_usage_state(&context_usage, None);
                         let message = session_refresh_error_text("load sessions", &err);
                         toast_manager.error(message.clone());
@@ -1814,9 +1843,15 @@ pub fn agent_session_panel(
                             None,
                         );
                         if chat_render_is_unchanged(last_render_signature.as_ref(), signature) {
+                            update_working_status_row(
+                                &working_status_row,
+                                &working_status_label,
+                                None,
+                            );
                             return;
                         }
                         clear_box(&messages);
+                        update_working_status_row(&working_status_row, &working_status_label, None);
                         apply_context_usage_state(&context_usage, None);
                         let label = Label::new(Some("No chat selected."));
                         label.add_css_class("chat-agent-text");
@@ -1851,7 +1886,32 @@ pub fn agent_session_panel(
                     } else {
                         CodexStartupState::Idle
                     };
-                    let working_elapsed = working_elapsed_for_thread(&working_threads, thread_id);
+                    let has_visible_history =
+                        thread_has_visible_chat_history(&database_path, thread_id);
+                    if managed_active_generation_for_thread(
+                        &current,
+                        &working_threads,
+                        archcar_ready_cache.as_ref(),
+                        thread_id,
+                        current_kind,
+                        has_visible_history,
+                    ) && working_elapsed_for_thread(&working_threads, thread_id).is_none()
+                    {
+                        mark_thread_working(&working_threads, thread_id);
+                    }
+                    let working_elapsed = managed_generation_elapsed_for_thread(
+                        &current,
+                        &working_threads,
+                        archcar_ready_cache.as_ref(),
+                        thread_id,
+                        current_kind,
+                        has_visible_history,
+                    );
+                    update_working_status_row(
+                        &working_status_row,
+                        &working_status_label,
+                        working_elapsed,
+                    );
                     if let Some(harness) = managed_harness_for_kind(current_kind) {
                         let descriptor = harness.descriptor();
                         if thread_has_live_managed_session(&current, thread_id, descriptor)
@@ -1928,6 +1988,11 @@ pub fn agent_session_panel(
                                         clear_box(&messages);
                                         *last_timeline_render_state.borrow_mut() = None;
                                         *last_render_signature.borrow_mut() = None;
+                                        update_working_status_row(
+                                            &working_status_row,
+                                            &working_status_label,
+                                            None,
+                                        );
                                         apply_context_usage_state(&context_usage, None);
                                         append_chat_refresh_row(&messages, &label);
                                         restore_chat_scroll_after_refresh(&scroll, chat_scroll);
@@ -2008,10 +2073,7 @@ pub fn agent_session_panel(
                                     Some(thread_id),
                                     active_record,
                                     startup_state.clone(),
-                                    working_elapsed_seconds_for_status_banner(
-                                        status_banner,
-                                        working_elapsed,
-                                    ),
+                                    working_elapsed_seconds_for_signature(working_elapsed),
                                     &current,
                                     &thread_state.borrow(),
                                     &thread_messages,
@@ -2130,7 +2192,7 @@ pub fn agent_session_panel(
                         Some(thread_id),
                         active_record,
                         startup_state.clone(),
-                        working_elapsed_seconds_for_status_banner(status_banner, working_elapsed),
+                        working_elapsed_seconds_for_signature(working_elapsed),
                         &current,
                         &thread_state.borrow(),
                         &[],
@@ -2197,10 +2259,12 @@ pub fn agent_session_panel(
                         None,
                     );
                     if chat_render_is_unchanged(last_render_signature.as_ref(), signature) {
+                        update_working_status_row(&working_status_row, &working_status_label, None);
                         return;
                     }
                     clear_box(&messages);
                     *last_timeline_render_state.borrow_mut() = None;
+                    update_working_status_row(&working_status_row, &working_status_label, None);
                     apply_context_usage_state(&context_usage, None);
                     let prompt =
                         pending_chat_placeholder_text(pending_chat_phase.as_ref(), current_kind);
@@ -3226,6 +3290,7 @@ pub fn agent_session_panel(
         }
     });
     let submit_composer_action = Rc::new({
+        let database_path = database_path.clone();
         let buffer = buffer.clone();
         let selected_thread = selected_thread.clone();
         let selected_harness = selected_harness.clone();
@@ -3265,12 +3330,17 @@ pub fn agent_session_panel(
                     return;
                 }
             }
+            let current_harness = *selected_harness.borrow();
             let has_active_generation = thread_id.is_some_and(|thread_id| {
-                active_generation_for_thread(
+                let has_visible_history =
+                    thread_has_visible_chat_history(&database_path, thread_id);
+                managed_active_generation_for_thread(
                     &record_state.borrow(),
                     &working_threads,
+                    archcar_ready_cache.as_ref(),
                     thread_id,
-                    *selected_harness.borrow(),
+                    current_harness,
+                    has_visible_history,
                 )
             });
             let latest_status = action_thread_id.and_then(|thread_id| {
@@ -3283,7 +3353,6 @@ pub fn agent_session_panel(
             let queued_count = action_thread_id
                 .map(|thread_id| queued_chat_inputs_count(&app_state, thread_id))
                 .unwrap_or_default();
-            let current_harness = *selected_harness.borrow();
             let managed_harness_waits = managed_harness_for_kind(current_harness).is_some();
             let managed_thread_ready = if managed_harness_waits {
                 thread_id.is_none_or(|thread_id| {
@@ -7875,6 +7944,53 @@ fn active_generation_for_thread(
     working_threads.borrow().contains_key(&thread_id)
 }
 
+fn managed_active_generation_for_thread(
+    records: &[ProcessRecord],
+    working_threads: &RefCell<HashMap<i64, Instant>>,
+    ready_cache: &RefCell<HashMap<i64, bool>>,
+    thread_id: i64,
+    kind: SessionKind,
+    has_visible_history: bool,
+) -> bool {
+    managed_generation_elapsed_for_thread(
+        records,
+        working_threads,
+        ready_cache,
+        thread_id,
+        kind,
+        has_visible_history,
+    )
+    .is_some()
+}
+
+fn managed_generation_elapsed_for_thread(
+    records: &[ProcessRecord],
+    working_threads: &RefCell<HashMap<i64, Instant>>,
+    ready_cache: &RefCell<HashMap<i64, bool>>,
+    thread_id: i64,
+    kind: SessionKind,
+    has_visible_history: bool,
+) -> Option<Duration> {
+    running_session_for_thread(records, thread_id, kind)?;
+    if let Some(elapsed) = working_elapsed_for_thread(working_threads, thread_id) {
+        return Some(elapsed);
+    }
+    if managed_harness_for_kind(kind).is_some()
+        && has_visible_history
+        && !thread_has_ready_managed_session(records, thread_id, kind, ready_cache)
+    {
+        return Some(Duration::ZERO);
+    }
+    None
+}
+
+fn thread_has_visible_chat_history(database_path: &Path, thread_id: i64) -> bool {
+    WorkspaceStore::open_app(database_path)
+        .and_then(|store| store.list_chat_messages(thread_id))
+        .map(|messages| messages.iter().any(chat_message_is_renderable))
+        .unwrap_or(false)
+}
+
 fn running_session_for_thread(
     records: &[ProcessRecord],
     thread_id: i64,
@@ -9273,30 +9389,13 @@ fn working_elapsed_seconds_for_signature(elapsed: Option<Duration>) -> Option<u6
     elapsed.map(|elapsed| elapsed.as_secs())
 }
 
-fn working_elapsed_seconds_for_status_banner(
-    banner: ChatStatusBannerKind,
-    elapsed: Option<Duration>,
-) -> Option<u64> {
-    if banner == ChatStatusBannerKind::Working {
-        working_elapsed_seconds_for_signature(elapsed)
-    } else {
-        None
-    }
-}
-
 fn chat_status_banner_kind(
     startup_state: &CodexStartupState,
-    working_elapsed: Option<Duration>,
-    has_chat_rows: bool,
+    _working_elapsed: Option<Duration>,
+    _has_chat_rows: bool,
 ) -> ChatStatusBannerKind {
     if codex_startup_state_has_banner(startup_state) {
         return ChatStatusBannerKind::Startup;
-    }
-    if has_chat_rows {
-        return ChatStatusBannerKind::None;
-    }
-    if working_elapsed.is_some() {
-        return ChatStatusBannerKind::Working;
     }
     ChatStatusBannerKind::None
 }
@@ -9312,18 +9411,13 @@ fn append_chat_status_banner(
     messages: &GBox,
     banner: ChatStatusBannerKind,
     startup_state: &CodexStartupState,
-    working_elapsed: Option<Duration>,
+    _working_elapsed: Option<Duration>,
 ) {
     match banner {
         ChatStatusBannerKind::None => {}
         ChatStatusBannerKind::Startup => {
             if let Some(widget) = codex_startup_state_widget(startup_state) {
                 append_chat_refresh_row(messages, &widget);
-            }
-        }
-        ChatStatusBannerKind::Working => {
-            if let Some(elapsed) = working_elapsed {
-                append_chat_refresh_row(messages, &codex_working_indicator_widget(elapsed));
             }
         }
     }
@@ -9341,27 +9435,17 @@ fn format_working_elapsed(elapsed: Duration) -> String {
     }
 }
 
-fn codex_working_indicator_widget(elapsed: Duration) -> Widget {
-    let row = GBox::new(Orientation::Horizontal, 8);
-    row.set_hexpand(true);
-    row.set_halign(Align::Fill);
-    row.set_margin_bottom(10);
-    row.add_css_class("chat-working-indicator");
+fn working_indicator_label_text(elapsed: Duration) -> String {
+    format!("Working... ({})", format_working_elapsed(elapsed))
+}
 
-    let spinner = Spinner::new();
-    spinner.start();
-    row.append(&spinner);
-
-    let label = Label::new(Some(&format!(
-        "Working {}",
-        format_working_elapsed(elapsed)
-    )));
-    label.add_css_class("card-meta");
-    label.set_xalign(0.0);
-    label.set_hexpand(true);
-    row.append(&label);
-
-    row.upcast()
+fn update_working_status_row(row: &GBox, label: &Label, elapsed: Option<Duration>) {
+    if let Some(elapsed) = elapsed {
+        label.set_text(&working_indicator_label_text(elapsed));
+        row.set_visible(true);
+    } else {
+        row.set_visible(false);
+    }
 }
 
 fn chat_interrupted_notice_widget() -> Widget {
@@ -12188,6 +12272,81 @@ fix it
             8,
             SessionKind::Codex
         ));
+    }
+
+    #[test]
+    fn managed_active_generation_infers_not_ready_claude_with_history() {
+        let records = vec![process_record_with_thread(
+            13,
+            ProcessStatus::Running,
+            Some(9),
+            "claude",
+        )];
+        let ready_cache = RefCell::new(HashMap::from([(13, false)]));
+        let working_threads = RefCell::new(HashMap::new());
+
+        assert!(managed_active_generation_for_thread(
+            &records,
+            &working_threads,
+            &ready_cache,
+            9,
+            SessionKind::Claude,
+            true,
+        ));
+    }
+
+    #[test]
+    fn managed_active_generation_does_not_block_first_claude_input() {
+        let records = vec![process_record_with_thread(
+            13,
+            ProcessStatus::Running,
+            Some(9),
+            "claude",
+        )];
+        let ready_cache = RefCell::new(HashMap::from([(13, false)]));
+        let working_threads = RefCell::new(HashMap::new());
+
+        assert!(!managed_active_generation_for_thread(
+            &records,
+            &working_threads,
+            &ready_cache,
+            9,
+            SessionKind::Claude,
+            false,
+        ));
+    }
+
+    #[test]
+    fn default_enter_queues_when_claude_generation_is_inferred() {
+        let records = vec![process_record_with_thread(
+            13,
+            ProcessStatus::Running,
+            Some(9),
+            "claude",
+        )];
+        let ready_cache = RefCell::new(HashMap::from([(13, false)]));
+        let working_threads = RefCell::new(HashMap::new());
+        let has_active_generation = managed_active_generation_for_thread(
+            &records,
+            &working_threads,
+            &ready_cache,
+            9,
+            SessionKind::Claude,
+            true,
+        );
+        let action =
+            composer_action_for_startup_state(true, has_active_generation, false, 0, false);
+
+        assert_eq!(
+            composer_action_for_submit_intent(
+                action,
+                ComposerSubmitIntent::Default,
+                true,
+                SessionKind::Claude,
+                false,
+            ),
+            ComposerAction::Queue,
+        );
     }
 
     #[test]
@@ -16447,6 +16606,14 @@ Schema confirms the app moved CRM around businesses.";
         assert_eq!(format_working_elapsed(Duration::from_secs(4)), "0:04");
         assert_eq!(format_working_elapsed(Duration::from_secs(65)), "1:05");
         assert_eq!(format_working_elapsed(Duration::from_secs(3661)), "1:01:01");
+    }
+
+    #[test]
+    fn working_indicator_label_shows_state_and_timer() {
+        assert_eq!(
+            working_indicator_label_text(Duration::from_secs(12)),
+            "Working... (0:12)"
+        );
     }
 
     #[test]
