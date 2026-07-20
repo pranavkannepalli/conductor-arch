@@ -30,6 +30,7 @@ pub enum RefreshEvent {
     WorkspaceMetadataChanged {
         old_workspace: String,
         workspace: String,
+        branch: Option<String>,
     },
     WorkspaceRuntimeChanged {
         workspace: String,
@@ -553,6 +554,7 @@ mod tests {
         hub.refresh_event(RefreshEvent::WorkspaceMetadataChanged {
             old_workspace: "old-name".to_owned(),
             workspace: "new-name".to_owned(),
+            branch: None,
         });
 
         assert_eq!(counts.values(), (0, 0, 0, 0, 0, 0, 0, 0, 0, 1));

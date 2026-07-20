@@ -3259,6 +3259,7 @@ fn lifecycle_panel(
                 refresh_after_rename.refresh_event(RefreshEvent::WorkspaceMetadataChanged {
                     old_workspace: current_name.clone(),
                     workspace: workspace.name,
+                    branch: None,
                 });
             }
             Err(err) => apply_runtime_action_feedback(
@@ -3631,23 +3632,46 @@ fn workspace_branch_panel(
             }
             let result =
                 WorkspaceStore::open_app(db_for_action.clone()).and_then(|store| match action {
+                    "checkout" => {
+                        store
+                            .checkout_branch(&workspace_for_action, &branch)
+                            .map(|workspace| {
+                                (
+                                    format!("Checked out {}.", workspace.branch),
+                                    Some(workspace),
+                                )
+                            })
+                    }
+                    "rename" => {
+                        store
+                            .rename_branch(&workspace_for_action, &branch)
+                            .map(|workspace| {
+                                (
+                                    format!("Renamed branch to {}.", workspace.branch),
+                                    Some(workspace),
+                                )
+                            })
+                    }
                     "create" => store
                         .create_branch(&workspace_for_action, &branch)
-                        .map(|_| format!("Created branch {branch}.")),
-                    "checkout" => store
-                        .checkout_branch(&workspace_for_action, &branch)
-                        .map(|workspace| format!("Checked out {}.", workspace.branch)),
-                    "rename" => store
-                        .rename_branch(&workspace_for_action, &branch)
-                        .map(|workspace| format!("Renamed branch to {}.", workspace.branch)),
+                        .map(|_| (format!("Created branch {branch}."), None)),
                     "delete" => store
                         .delete_branch(&workspace_for_action, &branch)
-                        .map(|_| format!("Deleted branch {branch}.")),
+                        .map(|_| (format!("Deleted branch {branch}."), None)),
                     _ => unreachable!(),
                 });
             match result {
-                Ok(message) => {
+                Ok((message, updated_workspace)) => {
                     apply_action_feedback(&feedback_for_action, &toast_for_action, &message, true);
+                    if let Some(workspace) = updated_workspace {
+                        refresh_after_action.refresh_event(
+                            RefreshEvent::WorkspaceMetadataChanged {
+                                old_workspace: workspace.name.clone(),
+                                workspace: workspace.name.clone(),
+                                branch: Some(workspace.branch.clone()),
+                            },
+                        );
+                    }
                     refresh_after_action.refresh(RefreshScope::Workspace);
                 }
                 Err(err) => apply_action_feedback(
@@ -10073,6 +10097,23 @@ mod tests {
         assert!(!production_source.contains(
             "state_after_rename.set_selected_workspace(Some(workspace.name.clone()));\n                progress_rename.set_text(&format!(\"Renamed to {}\", workspace.name));\n            }\n            Err(err) => apply_runtime_action_feedback(\n                &progress_rename,\n                &toast_rename,\n                lifecycle_action_failure_feedback(\"Rename\", &err),\n            ),\n        }\n        refresh_after_rename.refresh_event(RefreshEvent::WorkspaceInventoryChanged);"
         ));
+    }
+
+    #[test]
+    fn branch_checkout_and_rename_publish_metadata_refresh_with_branch() {
+        let source = include_str!("workspace_command_center.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("workspace command center source should contain production code");
+        let branch_panel = production_source
+            .split("fn workspace_branch_panel")
+            .nth(1)
+            .and_then(|source| source.split("fn workspace_branch_state_text").next())
+            .expect("workspace branch panel should exist");
+
+        assert!(branch_panel.contains("RefreshEvent::WorkspaceMetadataChanged"));
+        assert!(branch_panel.contains("branch: Some(workspace.branch.clone())"));
     }
 
     #[test]

@@ -22664,6 +22664,15 @@ spotlight_testing = true
         store.rename_branch("berlin", "lc/feature-renamed").unwrap();
         let renamed = store.get_by_name("berlin").unwrap();
         assert_eq!(renamed.branch, "lc/feature-renamed");
+        assert_eq!(
+            git_output(&renamed.path, ["branch", "--show-current"]).trim(),
+            "lc/feature-renamed"
+        );
+        let old_branch = git_output(&renamed.path, ["branch", "--list", "lc/feature"]);
+        assert!(
+            old_branch.trim().is_empty(),
+            "renaming the current workspace branch must remove the old local branch ref"
+        );
 
         let err = store
             .delete_branch("berlin", "lc/feature-renamed")
