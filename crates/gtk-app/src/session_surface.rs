@@ -1263,6 +1263,7 @@ pub fn agent_session_panel(
                 true
             };
             let managed_waiting_for_startup = managed_harness_waits
+                && managed_startup_blocks_composer(current_harness)
                 && action_thread_id.is_some_and(|thread_id| {
                     chat_thread_waiting_for_starting_agent(&app_state, thread_id)
                 })
@@ -3333,6 +3334,7 @@ pub fn agent_session_panel(
                 true
             };
             let managed_waiting_for_startup = managed_harness_waits
+                && managed_startup_blocks_composer(current_harness)
                 && action_thread_id.is_some_and(|thread_id| {
                     chat_thread_waiting_for_starting_agent(&app_state, thread_id)
                 })
@@ -7713,6 +7715,10 @@ fn composer_action_for_startup_state(
     }
 }
 
+fn managed_startup_blocks_composer(kind: SessionKind) -> bool {
+    matches!(kind, SessionKind::Codex)
+}
+
 fn composer_submit_intent_for_modifiers(modifiers: gtk::gdk::ModifierType) -> ComposerSubmitIntent {
     if modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK) {
         ComposerSubmitIntent::Immediate
@@ -11043,6 +11049,11 @@ where
         return EagerChatAgentStartOutcome::AlreadyActive;
     }
 
+    if kind == SessionKind::Claude && running_session_for_thread(records, thread_id, kind).is_some()
+    {
+        return EagerChatAgentStartOutcome::AlreadyActive;
+    }
+
     app_state.mark_chat_phase(
         ChatUiTarget::Thread(thread_id),
         ChatUiPhase::StartingAgent { provider: kind },
@@ -12116,6 +12127,32 @@ fix it
         assert_eq!(
             composer_action_for_startup_state(false, false, false, 1, true),
             ComposerAction::Disabled
+        );
+    }
+
+    #[test]
+    fn claude_startup_does_not_block_first_typed_input() {
+        assert!(managed_startup_blocks_composer(SessionKind::Codex));
+        assert!(!managed_startup_blocks_composer(SessionKind::Claude));
+        assert_eq!(
+            composer_action_for_startup_state(
+                true,
+                false,
+                false,
+                0,
+                managed_startup_blocks_composer(SessionKind::Claude)
+            ),
+            ComposerAction::Send
+        );
+        assert_eq!(
+            composer_action_for_startup_state(
+                false,
+                false,
+                false,
+                1,
+                managed_startup_blocks_composer(SessionKind::Claude)
+            ),
+            ComposerAction::SendQueued
         );
     }
 
@@ -14125,6 +14162,45 @@ fix it
 
         assert_eq!(outcome, EagerChatAgentStartOutcome::AlreadyActive);
         assert_eq!(app_state.chat_phase(&ChatUiTarget::Thread(7)), None);
+    }
+
+    #[test]
+    fn eager_chat_agent_start_does_not_reensure_running_claude_before_first_input() {
+        let app_state = AppState::new(
+            archductor_core::paths::AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            crate::state::WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+        let records = vec![process_record_with_thread(
+            13,
+            ProcessStatus::Running,
+            Some(9),
+            "claude",
+        )];
+        let ready_cache = RefCell::new(HashMap::from([(13, false)]));
+        let inflight = RefCell::new(HashMap::new());
+        let startup_states = RefCell::new(HashMap::new());
+        let working_threads = RefCell::new(HashMap::new());
+        let codex_ready = RefCell::new(false);
+
+        let outcome = eager_chat_agent_start(
+            &app_state,
+            &records,
+            &ready_cache,
+            &inflight,
+            &startup_states,
+            &working_threads,
+            &codex_ready,
+            &|| {},
+            "berlin".to_owned(),
+            9,
+            SessionKind::Claude,
+            |_, _, _| panic!("running Claude thread must not request ensure"),
+        );
+
+        assert_eq!(outcome, EagerChatAgentStartOutcome::AlreadyActive);
+        assert_eq!(app_state.chat_phase(&ChatUiTarget::Thread(9)), None);
     }
 
     #[test]
