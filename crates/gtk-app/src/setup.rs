@@ -1,7 +1,8 @@
-use adw::ApplicationWindow;
-use archductor_core::doctor::{setup_blockers, SetupBlocker, SetupCheck, SetupReadiness};
+use archductor_core::doctor::{
+    refresh_process_environment, setup_blockers, SetupBlocker, SetupCheck, SetupReadiness,
+};
 use gtk::prelude::*;
-use gtk::{Box as GBox, Label, LinkButton, Orientation};
+use gtk::{ApplicationWindow, Box as GBox, Label, LinkButton, Orientation};
 
 use crate::buttons::text_button;
 
@@ -79,11 +80,17 @@ pub(crate) fn show_blocking_setup_if_needed(parent: &ApplicationWindow) {
         let status_list = status_list.clone();
         let feedback = feedback.clone();
         recheck.connect_clicked(move |_| {
+            let refresh_error = refresh_process_environment().err();
             let readiness = SetupReadiness::from_host();
             render_setup_status(&status_list, &readiness);
             let blockers = setup_blockers(&readiness);
             if blockers.is_empty() {
                 dialog.close();
+            } else if let Some(error) = refresh_error {
+                feedback.set_text(&format!(
+                    "{error} Restart Archductor if the tool was just installed.\n{}",
+                    setup_feedback(&readiness)
+                ));
             } else {
                 feedback.set_text(&setup_feedback(&readiness));
             }
@@ -216,6 +223,26 @@ fn selected_provider_detail(readiness: &SetupReadiness) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn setup_recheck_refreshes_the_host_environment_before_probing() {
+        let source = include_str!("setup.rs");
+        let handler = source
+            .split("recheck.connect_clicked")
+            .nth(1)
+            .expect("recheck handler exists");
+        let refresh = handler
+            .find("refresh_process_environment")
+            .expect("recheck refreshes the process environment");
+        let probe = handler
+            .find("SetupReadiness::from_host")
+            .expect("recheck probes setup readiness");
+
+        assert!(
+            refresh < probe,
+            "environment refresh must happen before probes"
+        );
+    }
 
     #[test]
     fn setup_feedback_summarizes_missing_github_cli() {

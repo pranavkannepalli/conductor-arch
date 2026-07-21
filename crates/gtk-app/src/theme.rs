@@ -239,7 +239,6 @@ textview,
     padding: 0 10px 8px 10px;
 }
 
-.sidebar-chrome-button,
 .sidebar-icon-button,
 .sidebar-reopen-button,
 .sidebar-arrow-button {
@@ -254,7 +253,6 @@ textview,
     color: #8a8a8a;
 }
 
-.sidebar-chrome-button:hover,
 .sidebar-icon-button:hover,
 .sidebar-reopen-button:hover,
 .sidebar-arrow-button:hover {
@@ -1590,18 +1588,6 @@ separator {
     min-height: 24px;
 }
 
-.sidebar-window-button {
-    min-width: 12px;
-    min-height: 12px;
-    padding: 0;
-    border-radius: 999px;
-    color: #7a7a7a;
-}
-
-.sidebar-window-button:hover {
-    color: #7a7a7a;
-}
-
 .sidebar-arrow-button {
     min-width: 24px;
     min-height: 24px;
@@ -1611,18 +1597,6 @@ separator {
 .sidebar-arrow-button:hover {
     background-color: #2c2c2c;
     color: #e4e4e4;
-}
-
-.sidebar-chrome .sidebar-window-button:nth-child(1):hover {
-    background-color: #ff5f57;
-}
-
-.sidebar-chrome .sidebar-window-button:nth-child(2):hover {
-    background-color: #febc2e;
-}
-
-.sidebar-chrome .sidebar-window-button:nth-child(3):hover {
-    background-color: #28c840;
 }
 
 /* ── Workspace empty state ── */
@@ -2867,7 +2841,6 @@ window,
     font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
 }
 
-.sidebar-chrome-button,
 .sidebar-icon-button,
 .sidebar-reopen-button,
 .sidebar-arrow-button,
@@ -2886,7 +2859,6 @@ window,
     border-color: transparent;
 }
 
-.sidebar-chrome-button:hover,
 .sidebar-icon-button:hover,
 .sidebar-reopen-button:hover,
 .sidebar-arrow-button:hover,

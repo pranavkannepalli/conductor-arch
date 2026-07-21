@@ -1,6 +1,11 @@
 VERSION ?= 0.1.0
 DEV_ENV := scripts/dev-instance-env.sh
 
+ifeq ($(OS),Windows_NT)
+SHELL := C:/msys64/usr/bin/bash.exe
+DEV_ENV := C:/msys64/usr/bin/bash.exe scripts/dev-instance-env.sh
+endif
+
 .PHONY: help dev dev-env archcar gtk cli run build build-release check release tag publish-tag
 
 help:
@@ -9,7 +14,7 @@ help:
 		'make archcar                  Run archcar sidecar in branch-scoped dev mode' \
 		'make cli                      Run CLI in branch-scoped dev mode' \
 		'make run                      Alias for make gtk' \
-		'make dev                      Build workspace, then run watched GTK app for this branch' \
+		'make dev                      Run Archcar + GTK (r Reload GTK, q Quit)' \
 		'make dev-env                  Print branch-scoped dev environment' \
 		'make build                    Build workspace in dev mode' \
 		'make build-release            Build workspace in release mode' \
@@ -19,21 +24,8 @@ help:
 		'make publish-tag VERSION=x.y.z Push git tag vVERSION'
 
 dev:
-	@cargo build --workspace
-	@cleanup_dev() { \
-		status=$$?; \
-		trap - INT TERM EXIT; \
-		if [ -n "$$archcar_pid" ]; then kill "$$archcar_pid" 2>/dev/null || true; fi; \
-		if [ -n "$$gtk_pid" ]; then kill "$$gtk_pid" 2>/dev/null || true; fi; \
-		wait "$$archcar_pid" "$$gtk_pid" 2>/dev/null || true; \
-		exit "$$status"; \
-	}; \
-	trap cleanup_dev INT TERM EXIT; \
-	$(DEV_ENV) cargo run --bin archcar & \
-	archcar_pid=$$!; \
-	$(DEV_ENV) cargo watch -w crates -w Cargo.toml -w Cargo.lock -x "run --bin archductor-gtk" & \
-	gtk_pid=$$!; \
-	wait "$$archcar_pid" "$$gtk_pid"
+	@$(DEV_ENV) cargo build --workspace
+	@$(DEV_ENV) --run-dev
 
 dev-env:
 	@$(DEV_ENV) --print

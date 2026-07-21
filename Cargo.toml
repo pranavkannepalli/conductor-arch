@@ -4,6 +4,7 @@ members = [
   "crates/cli",
   "crates/gtk-app",
   "crates/archcar",
+  "crates/dev-runner",
 ]
 resolver = "2"
 

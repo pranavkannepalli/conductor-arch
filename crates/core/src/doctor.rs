@@ -153,6 +153,84 @@ impl SetupReadiness {
     }
 }
 
+pub fn refresh_process_environment() -> Result<bool, String> {
+    #[cfg(windows)]
+    {
+        refresh_windows_process_environment()
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(false)
+    }
+}
+
+#[cfg(windows)]
+fn refresh_windows_process_environment() -> Result<bool, String> {
+    use std::ffi::{OsStr, OsString};
+
+    let system_root =
+        std::env::var_os("SystemRoot").unwrap_or_else(|| OsString::from(r"C:\Windows"));
+    let powershell = Path::new(&system_root)
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+    let output = Command::new(powershell)
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "$OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); @([Environment]::GetEnvironmentVariable('Path','Machine'), [Environment]::GetEnvironmentVariable('Path','User')) | ConvertTo-Json -Compress",
+        ])
+        .output()
+        .map_err(|error| format!("could not read the current Windows environment: {error}"))?;
+    if !output.status.success() {
+        return Err(
+            "Windows environment query failed; restart Archductor to reload PATH.".to_owned(),
+        );
+    }
+
+    let encoded = String::from_utf8(output.stdout)
+        .map_err(|_| "Windows environment query returned invalid UTF-8.".to_owned())?;
+    let paths: Vec<Option<String>> = serde_json::from_str(encoded.trim())
+        .map_err(|error| format!("could not parse the current Windows PATH: {error}"))?;
+    let current = std::env::var_os("PATH").unwrap_or_default();
+    let machine = paths
+        .first()
+        .and_then(|value| value.as_deref())
+        .unwrap_or("");
+    let user = paths
+        .get(1)
+        .and_then(|value| value.as_deref())
+        .unwrap_or("");
+    let refreshed =
+        merge_search_path_sources([current.as_os_str(), OsStr::new(machine), OsStr::new(user)])?;
+    let changed = refreshed != current;
+    std::env::set_var("PATH", refreshed);
+    Ok(changed)
+}
+
+#[cfg(windows)]
+fn merge_search_path_sources<'a>(
+    sources: impl IntoIterator<Item = &'a std::ffi::OsStr>,
+) -> Result<std::ffi::OsString, String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut entries = Vec::new();
+    for source in sources {
+        for path in std::env::split_paths(source) {
+            if path.as_os_str().is_empty() {
+                continue;
+            }
+            let key = path.to_string_lossy().to_ascii_lowercase();
+            if seen.insert(key) {
+                entries.push(path);
+            }
+        }
+    }
+    std::env::join_paths(entries)
+        .map_err(|error| format!("could not rebuild the current Windows PATH: {error}"))
+}
+
 pub fn setup_blockers(readiness: &SetupReadiness) -> Vec<SetupBlocker> {
     let mut blockers = Vec::new();
     if !readiness.gh.ready {
@@ -575,6 +653,30 @@ fn is_executable(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn refreshed_search_path_preserves_process_entries_and_adds_installed_tools() {
+        let current = std::ffi::OsStr::new(r"C:\msys64\ucrt64\bin;C:\Windows\System32");
+        let machine = std::ffi::OsStr::new(r"C:\Windows\System32;C:\Program Files\GitHub CLI");
+        let user = std::ffi::OsStr::new(r"C:\Users\dev\bin");
+
+        let refreshed = merge_search_path_sources([current, machine, user]).unwrap();
+        let entries = std::env::split_paths(&refreshed).collect::<Vec<_>>();
+
+        assert_eq!(entries[0], Path::new(r"C:\msys64\ucrt64\bin"));
+        assert!(entries.contains(&Path::new(r"C:\Program Files\GitHub CLI").to_path_buf()));
+        assert!(entries.contains(&Path::new(r"C:\Users\dev\bin").to_path_buf()));
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|path| path
+                    .as_os_str()
+                    .eq_ignore_ascii_case(r"C:\Windows\System32"))
+                .count(),
+            1
+        );
+    }
 
     #[test]
     fn selects_apt_guidance_for_ubuntu() {

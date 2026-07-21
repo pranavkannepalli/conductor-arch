@@ -1,12 +1,11 @@
-use adw::ApplicationWindow;
 use archductor_core::archcar::protocol::ArchcarRequest;
 use archductor_core::repository::RepositoryStore;
 use archductor_core::workspace::{CreateWorkspace, SessionKind, WorkspaceStore};
 use gtk::prelude::*;
 use gtk::{
-    Align, Box as GBox, Button, Entry, EventControllerKey, EventControllerMotion, GestureClick,
-    Image, Label, ListBox, ListBoxRow, Orientation, PolicyType, Popover, Revealer,
-    RevealerTransitionType, ScrolledWindow, Spinner, Stack,
+    Align, ApplicationWindow, Box as GBox, Button, Entry, EventControllerKey,
+    EventControllerMotion, GestureClick, Image, Label, ListBox, ListBoxRow, Orientation,
+    PolicyType, Popover, Revealer, RevealerTransitionType, ScrolledWindow, Spinner, Stack,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -78,39 +77,9 @@ pub(crate) fn build_app_sidebar(
     let chrome_row = GBox::new(Orientation::Horizontal, 4);
     chrome_row.add_css_class("sidebar-chrome");
 
-    let chrome_left = GBox::new(Orientation::Horizontal, 4);
-    chrome_left.set_hexpand(true);
+    let chrome_spacer = GBox::new(Orientation::Horizontal, 0);
+    chrome_spacer.set_hexpand(true);
     let chrome_right = GBox::new(Orientation::Horizontal, 4);
-
-    let close_btn = sidebar_window_button("window-close-symbolic", "Close window");
-    {
-        let window = window.clone();
-        close_btn.connect_clicked(move |_| window.close());
-    }
-    chrome_left.append(&close_btn);
-
-    let minimize_btn = sidebar_window_button("window-minimize-symbolic", "Minimize window");
-    {
-        let window = window.clone();
-        minimize_btn.connect_clicked(move |_| {
-            window.minimize();
-        });
-    }
-    chrome_left.append(&minimize_btn);
-
-    let expand_btn =
-        sidebar_window_button("window-maximize-symbolic", "Maximize or restore window");
-    {
-        let window = window.clone();
-        expand_btn.connect_clicked(move |_| {
-            if window.is_maximized() {
-                window.unmaximize();
-            } else {
-                window.maximize();
-            }
-        });
-    }
-    chrome_left.append(&expand_btn);
 
     let sidebar_toggle_btn = sidebar_icon_button("sidebar-show-symbolic", "Hide sidebar");
     {
@@ -125,7 +94,7 @@ pub(crate) fn build_app_sidebar(
     let forward_btn = sidebar_arrow_button("go-next-symbolic", "Forward");
     chrome_right.append(&back_btn);
     chrome_right.append(&forward_btn);
-    chrome_row.append(&chrome_left);
+    chrome_row.append(&chrome_spacer);
     chrome_row.append(&chrome_right);
     sidebar_box.append(&chrome_row);
 
@@ -720,10 +689,6 @@ fn sidebar_icon_button(icon: &str, tooltip: &str) -> Button {
 
 fn sidebar_arrow_button(icon: &str, tooltip: &str) -> Button {
     sidebar_button(icon, tooltip, "sidebar-arrow-button")
-}
-
-fn sidebar_window_button(icon: &str, tooltip: &str) -> Button {
-    sidebar_button(icon, tooltip, "sidebar-window-button")
 }
 
 fn sidebar_button(icon: &str, tooltip: &str, class_name: &str) -> Button {
@@ -1680,6 +1645,20 @@ mod tests {
         SidebarWorkspaceLookup, SidebarWorkspaceSelection,
     };
     use crate::state::{AppPage, AppState, WorkspaceTab};
+
+    #[test]
+    fn sidebar_does_not_duplicate_operating_system_window_controls() {
+        let source = include_str!("sidebar.rs");
+        let chrome = source
+            .split("let chrome_row")
+            .nth(1)
+            .and_then(|source| source.split("sidebar_box.append(&chrome_row)").next())
+            .expect("sidebar chrome construction exists");
+
+        assert!(!chrome.contains("window-close-symbolic"));
+        assert!(!chrome.contains("window-minimize-symbolic"));
+        assert!(!chrome.contains("window-maximize-symbolic"));
+    }
 
     #[test]
     fn primary_sidebar_nav_labels_gate_session_logs_under_history() {
