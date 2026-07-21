@@ -2,7 +2,10 @@
 set -euo pipefail
 
 case "${OSTYPE:-}" in
-    msys*|cygwin*) export PATH="/usr/bin:/ucrt64/bin:$PATH" ;;
+    msys*|cygwin*)
+        windows_host=1
+        export PATH="/usr/bin:/ucrt64/bin:$PATH"
+        ;;
 esac
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
@@ -19,7 +22,23 @@ case "$(uname -s)" in
             exit 1
         fi
 
-        export PATH="$ucrt_root/bin:$PATH"
+        registered_path="${ARCHDUCTOR_WINDOWS_REGISTERED_PATH:-}"
+        if [[ -z "$registered_path" ]]; then
+            powershell_exe="/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+            registered_path="$("$powershell_exe" -NoProfile -NonInteractive -Command "[Console]::Out.Write(([Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')))" 2>/dev/null || true)"
+        fi
+        registered_msys_path=""
+        old_ifs="$IFS"
+        IFS=';'
+        for entry in $registered_path; do
+            [[ -n "$entry" ]] || continue
+            converted="$(cygpath -u "$entry" 2>/dev/null || true)"
+            [[ -n "$converted" ]] || continue
+            registered_msys_path="${registered_msys_path:+$registered_msys_path:}$converted"
+        done
+        IFS="$old_ifs"
+
+        export PATH="$ucrt_root/bin${registered_msys_path:+:$registered_msys_path}:$PATH"
         export CARGO_BUILD_TARGET="${CARGO_BUILD_TARGET:-x86_64-pc-windows-gnu}"
         export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER:-gcc}"
         export CC_x86_64_pc_windows_gnu="${CC_x86_64_pc_windows_gnu:-gcc}"
@@ -53,6 +72,11 @@ base="${ARCHDUCTOR_DEV_HOME:-$repo_root/.archductor/dev-instances/$slug}"
 mkdir -p "$base/config" "$base/data" "$base/state" "$base/cache"
 
 user_config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+if [[ "${windows_host:-0}" == "1" && -n "${APPDATA:-}" ]]; then
+    default_gh_config_dir="$APPDATA/GitHub CLI"
+else
+    default_gh_config_dir="$user_config_home/gh"
+fi
 
 export ARCHDUCTOR_DEV_INSTANCE="$slug"
 if [[ "${CARGO_BUILD_TARGET:-}" == "x86_64-pc-windows-gnu" ]]; then
@@ -61,7 +85,7 @@ else
     default_archcar_bin="$repo_root/target/debug/archcar"
 fi
 export ARCHDUCTOR_ARCHCAR_BIN="${ARCHDUCTOR_ARCHCAR_BIN:-$default_archcar_bin}"
-export GH_CONFIG_DIR="${GH_CONFIG_DIR:-$user_config_home/gh}"
+export GH_CONFIG_DIR="${GH_CONFIG_DIR:-$default_gh_config_dir}"
 export XDG_CONFIG_HOME="$base/config"
 export XDG_DATA_HOME="$base/data"
 export XDG_STATE_HOME="$base/state"

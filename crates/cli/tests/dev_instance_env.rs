@@ -24,6 +24,7 @@ fn dev_instance_env_preserves_github_cli_config() {
     let output = dev_env_command(&repo_root.join("scripts/dev-instance-env.sh"))
         .env("HOME", temp.path().join("home"))
         .env("XDG_CONFIG_HOME", &original_config)
+        .env("GH_CONFIG_DIR", original_config.join("gh"))
         .env("ARCHDUCTOR_DEV_HOME", &dev_home)
         .arg("sh")
         .arg("-c")
@@ -46,6 +47,65 @@ fn dev_instance_env_preserves_github_cli_config() {
     assert_eq!(
         lines.get(1).map(std::path::PathBuf::from),
         Some(dev_home.join("config"))
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn dev_instance_env_uses_the_native_github_cli_config_on_windows() {
+    let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let temp = tempfile::tempdir().unwrap();
+    let app_data = temp.path().join("AppData").join("Roaming");
+
+    let output = dev_env_command(&repo_root.join("scripts/dev-instance-env.sh"))
+        .env("HOME", temp.path().join("msys-home"))
+        .env("APPDATA", &app_data)
+        .env_remove("GH_CONFIG_DIR")
+        .env("ARCHDUCTOR_DEV_HOME", temp.path().join("dev-home"))
+        .arg("sh")
+        .arg("-c")
+        .arg("printf '%s' \"$GH_CONFIG_DIR\"")
+        .output()
+        .expect("run dev instance env through bash");
+
+    assert!(
+        output.status.success(),
+        "dev instance env failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::path::PathBuf::from(String::from_utf8(output.stdout).unwrap()),
+        app_data.join("GitHub CLI")
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn dev_instance_env_imports_the_registered_windows_path() {
+    let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let temp = tempfile::tempdir().unwrap();
+    let tool_dir = temp.path().join("newly-installed-tool");
+    std::fs::create_dir_all(&tool_dir).unwrap();
+    std::fs::copy(
+        std::path::Path::new(r"C:\Windows\System32\cmd.exe"),
+        tool_dir.join("fresh-tool.exe"),
+    )
+    .unwrap();
+
+    let output = dev_env_command(&repo_root.join("scripts/dev-instance-env.sh"))
+        .env("HOME", temp.path().join("msys-home"))
+        .env("APPDATA", temp.path().join("AppData").join("Roaming"))
+        .env("ARCHDUCTOR_WINDOWS_REGISTERED_PATH", tool_dir.as_os_str())
+        .env("ARCHDUCTOR_DEV_HOME", temp.path().join("dev-home"))
+        .arg("fresh-tool")
+        .args(["/D", "/C", "exit", "0"])
+        .output()
+        .expect("run a tool from the registered Windows PATH");
+
+    assert!(
+        output.status.success(),
+        "dev instance env should import registered Windows PATH entries: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
