@@ -23,6 +23,10 @@ help:
 		'make tag VERSION=x.y.z        Create git tag vVERSION' \
 		'make publish-tag VERSION=x.y.z Push git tag vVERSION'
 
+ifeq ($(OS),Windows_NT)
+dev:
+	@powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/dev-windows.ps1
+else
 dev:
 	@$(DEV_ENV) cargo build --workspace
 	@cleanup_dev() { \
@@ -39,6 +43,7 @@ dev:
 	$(DEV_ENV) cargo watch -w crates -w Cargo.toml -w Cargo.lock -x "run --bin archductor-gtk" & \
 	gtk_pid=$$!; \
 	wait "$$archcar_pid" "$$gtk_pid"
+endif
 
 dev-env:
 	@$(DEV_ENV) --print
