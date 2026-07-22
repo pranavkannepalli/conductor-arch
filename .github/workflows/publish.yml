@@ -73,8 +73,21 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
+          BUNDLE="dist/archductor-${VERSION}-linux-x86_64"
+          install -Dm755 target/release/archductor "$BUNDLE/bin/archductor"
+          install -Dm755 target/release/archductor-gtk "$BUNDLE/bin/archductor-gtk"
+          install -Dm755 target/release/archcar "$BUNDLE/bin/archcar"
+          install -Dm644 packaging/archductor-gtk.desktop \
+            "$BUNDLE/share/applications/archductor-gtk.desktop"
+          install -Dm644 packaging/assets/archductor.png \
+            "$BUNDLE/share/icons/hicolor/256x256/apps/archductor.png"
+          install -d "$BUNDLE/share/fonts/archductor"
+          install -m644 packaging/assets/fonts/*.ttf packaging/assets/fonts/*.otf \
+            packaging/assets/fonts/*.txt \
+            "$BUNDLE/share/fonts/archductor/"
           tar -czf "dist/archductor-${VERSION}-linux-x86_64.tar.gz" \
-            -C target/release archductor archductor-gtk
+            -C dist "archductor-${VERSION}-linux-x86_64"
+          rm -rf "$BUNDLE"
 
       # .deb and .rpm via nfpm
       - name: Install nfpm
@@ -112,7 +125,7 @@ jobs:
           APPDIR="packaging/appimage/archductor.AppDir"
           install -Dm755 target/release/archductor "$APPDIR/usr/bin/archductor"
           install -Dm755 target/release/archductor-gtk "$APPDIR/usr/bin/archductor-gtk"
-          # SVG icon is committed at $APPDIR/archductor.svg
+          # PNG icon and font pack are committed in the AppDir.
 
       - name: Build AppImage
         env:
@@ -265,6 +278,8 @@ jobs:
           Copy-Item target\x86_64-pc-windows-gnu\release\archductor.exe $bundle
           Copy-Item target\x86_64-pc-windows-gnu\release\archductor-gtk.exe $bundle
           Copy-Item target\x86_64-pc-windows-gnu\release\archcar.exe $bundle
+          Copy-Item packaging\assets\archductor.png $bundle
+          Copy-Item packaging\assets\fonts "$bundle\fonts" -Recurse
           Copy-Item "$env:UCRT64_ROOT\bin\*.dll" $bundle
           New-Item -ItemType Directory -Force -Path "$bundle\lib" | Out-Null
           Copy-Item "$env:UCRT64_ROOT\lib\gdk-pixbuf-2.0" "$bundle\lib" -Recurse

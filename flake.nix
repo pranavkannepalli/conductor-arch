@@ -47,8 +47,12 @@
               install -Dm755 target/release/archcar "$out/bin/archcar"
               install -Dm644 packaging/archductor-gtk.desktop \
                 "$out/share/applications/archductor-gtk.desktop"
-              install -Dm644 packaging/archductor.svg \
-                "$out/share/icons/hicolor/scalable/apps/archductor.svg"
+              install -Dm644 packaging/assets/archductor.png \
+                "$out/share/icons/hicolor/256x256/apps/archductor.png"
+              install -d "$out/share/fonts/archductor"
+              install -m644 packaging/assets/fonts/*.ttf packaging/assets/fonts/*.otf \
+                packaging/assets/fonts/*.txt \
+                "$out/share/fonts/archductor/"
               install -Dm644 README.md "$out/share/doc/archductor/README.md"
 
               runHook postInstall

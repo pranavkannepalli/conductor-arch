@@ -6,7 +6,9 @@ fn publish_build_uses_ci_verified_release_packaging() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let publish = fs::read_to_string(repo_root.join(".github/workflows/publish.yml")).unwrap();
     let ci = fs::read_to_string(repo_root.join(".github/workflows/ci.yml")).unwrap();
-    let nfpm = fs::read_to_string(repo_root.join("nfpm.yaml")).unwrap();
+    let nfpm = fs::read_to_string(repo_root.join("nfpm.yaml"))
+        .unwrap()
+        .replace("\r\n", "\n");
     let app_run =
         fs::read_to_string(repo_root.join("packaging/appimage/archductor.AppDir/AppRun")).unwrap();
     let flatpak =
@@ -15,6 +17,35 @@ fn publish_build_uses_ci_verified_release_packaging() {
     let nix = fs::read_to_string(repo_root.join("flake.nix")).unwrap();
     let homebrew =
         fs::read_to_string(repo_root.join("packaging/homebrew/Formula/archductor.rb")).unwrap();
+
+    let png = fs::read(repo_root.join("packaging/assets/archductor.png")).unwrap();
+    assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+    assert_eq!(u32::from_be_bytes(png[16..20].try_into().unwrap()), 256);
+    assert_eq!(u32::from_be_bytes(png[20..24].try_into().unwrap()), 256);
+    let ico = fs::read(repo_root.join("packaging/assets/archductor.ico")).unwrap();
+    assert_eq!(&ico[..6], &[0, 0, 1, 0, 1, 0]);
+    for font in [
+        "MonaSansVF.ttf",
+        "CommitMono-400-Regular.otf",
+        "CommitMono-400-Italic.otf",
+        "CommitMono-700-Regular.otf",
+        "CommitMono-700-Italic.otf",
+    ] {
+        assert!(repo_root
+            .join("packaging/assets/fonts")
+            .join(font)
+            .is_file());
+    }
+    for manifest in [&nfpm, &flatpak, &aur, &nix, &homebrew, &publish, &ci] {
+        assert!(
+            manifest.contains("archductor.png"),
+            "every install surface should package the application icon"
+        );
+        assert!(
+            manifest.contains("fonts"),
+            "every install surface should package the font pack"
+        );
+    }
 
     assert!(
         publish.contains("Verify Windows GTK pkg-config"),
@@ -133,7 +164,7 @@ fn publish_build_uses_ci_verified_release_packaging() {
             "publish",
             &publish,
             vec![
-                "-C target/release archductor archductor-gtk",
+                "target/release/archductor \"$BUNDLE/bin/archductor\"",
                 "install -Dm755 target/release/archductor \"$APPDIR/usr/bin/archductor\"",
                 "Copy-Item target\\x86_64-pc-windows-gnu\\release\\archductor.exe $bundle",
             ],
@@ -147,7 +178,7 @@ fn publish_build_uses_ci_verified_release_packaging() {
             &ci,
             vec![
                 "cp target/debug/archductor ci-artifacts/bin/",
-                "-C target/release archductor archductor-gtk",
+                "target/release/archductor \"$BUNDLE/bin/archductor\"",
                 "install -Dm755 target/release/archductor \"$APPDIR/usr/bin/archductor\"",
                 "Copy-Item target\\x86_64-pc-windows-gnu\\release\\archductor.exe $bundle",
             ],

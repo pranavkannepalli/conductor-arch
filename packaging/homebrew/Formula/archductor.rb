@@ -21,7 +21,8 @@ class Archductor < Formula
     system "cargo", "install", *std_cargo_args(path: "crates/archcar")
     pkgshare.install "README.md"
     share.install "packaging/archductor-gtk.desktop"
-    share.install "packaging/archductor.svg"
+    (share/"icons/hicolor/256x256/apps").install "packaging/assets/archductor.png"
+    (share/"fonts/archductor").install Dir["packaging/assets/fonts/*.{ttf,otf,txt}"]
   end
 
   test do

@@ -30,8 +30,13 @@ contents:
     file_info:
       mode: 0644
 
-  - src: packaging/archductor.svg
-    dst: /usr/share/icons/hicolor/scalable/apps/archductor.svg
+  - src: packaging/assets/archductor.png
+    dst: /usr/share/icons/hicolor/256x256/apps/archductor.png
+    file_info:
+      mode: 0644
+
+  - src: packaging/assets/fonts/*
+    dst: /usr/share/fonts/archductor/
     file_info:
       mode: 0644
 

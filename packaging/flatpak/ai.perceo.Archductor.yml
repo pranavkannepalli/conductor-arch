@@ -37,8 +37,12 @@ modules:
           /app/share/metainfo/ai.perceo.Archductor.metainfo.xml
       - install -Dm644 packaging/flatpak/ai.perceo.Archductor.desktop
           /app/share/applications/ai.perceo.Archductor.desktop
-      - install -Dm644 packaging/archductor.svg
-          /app/share/icons/hicolor/scalable/apps/ai.perceo.Archductor.svg
+      - install -Dm644 packaging/assets/archductor.png
+          /app/share/icons/hicolor/256x256/apps/ai.perceo.Archductor.png
+      - install -d /app/share/fonts/archductor
+      - cp packaging/assets/fonts/*.ttf packaging/assets/fonts/*.otf
+          packaging/assets/fonts/*.txt
+          /app/share/fonts/archductor/
     sources:
       - type: dir
         path: ../..

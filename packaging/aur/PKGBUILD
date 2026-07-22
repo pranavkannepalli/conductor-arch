@@ -24,8 +24,11 @@ package() {
     install -Dm755 target/release/archcar "$pkgdir/usr/bin/archcar"
     install -Dm644 packaging/archductor-gtk.desktop \
         "$pkgdir/usr/share/applications/archductor-gtk.desktop"
-    install -Dm644 packaging/archductor.svg \
-        "$pkgdir/usr/share/icons/hicolor/scalable/apps/archductor.svg"
+    install -Dm644 packaging/assets/archductor.png \
+        "$pkgdir/usr/share/icons/hicolor/256x256/apps/archductor.png"
+    install -d "$pkgdir/usr/share/fonts/archductor"
+    install -m644 packaging/assets/fonts/*.{ttf,otf,txt} \
+        "$pkgdir/usr/share/fonts/archductor/"
     install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
     install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

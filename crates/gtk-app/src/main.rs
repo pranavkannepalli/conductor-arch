@@ -6,6 +6,7 @@ mod background_sync;
 mod buttons;
 mod command_palette;
 mod dashboard;
+mod font_assets;
 mod history;
 mod history_data;
 mod logger;
@@ -196,6 +197,7 @@ impl Default for LaunchTarget {
 }
 
 fn main() {
+    font_assets::register_bundled_fonts();
     let paths = AppPaths::from_env();
     if std::env::args().any(|arg| arg == "--archcar-serve") {
         if let Err(err) = reconcile_managed_sessions_on_startup(&paths)

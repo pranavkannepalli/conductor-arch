@@ -16,11 +16,10 @@ until its real Windows checklist passes. macOS is not a release target.
 
 ## Typography assets
 
-The GTK theme prefers `Mona Sans` for UI text and `Commit Mono` for code-like
-surfaces, then falls back to the platform UI and mono stacks. Native packages do
-not vendor those font files yet, so release builds should either bundle the
-licensed font files into the package target or document them as recommended
-desktop fonts for the distribution channel.
+The GTK theme uses the bundled `Mona Sans` variable font for UI text and
+`Commit Mono` for code-like surfaces. Native packages install these fonts into
+their platform font-data location; the Windows portable bundle loads its font
+directory privately when the app starts.
 
 Do not replace the app CSS with `Inter`, `Geist`, or other generic SaaS font
 defaults when packaging. The runtime CSS already includes the fallback stacks
