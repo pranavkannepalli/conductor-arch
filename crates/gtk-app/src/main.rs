@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 #![allow(clippy::ptr_arg, clippy::too_many_arguments)]
 
-mod app_bar;
 mod archcar_async;
 mod background_sync;
 mod buttons;
@@ -28,7 +27,6 @@ mod workspace_command_center;
 use crate::buttons::{icon_button, text_button};
 use adw::prelude::*;
 use adw::Application;
-use app_bar::{AppBar, PageSurface};
 use archductor_core::archcar::client::ArchcarClient;
 use archductor_core::archcar::protocol::ArchcarRequest;
 use archductor_core::archcar::server::{reconcile_managed_sessions_on_startup, ArchcarServer};
@@ -734,6 +732,11 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         .default_width(1280)
         .default_height(800)
         .build();
+    configure_window_chrome(&window);
+    tracing::info!(
+        elapsed_ms = startup.elapsed().as_millis(),
+        "gtk startup: window built"
+    );
     let initial_view_preferences = resolve_view_preferences(
         paths.database_path.clone(),
         launch_target.workspace.as_deref(),
@@ -775,16 +778,6 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         let split = split.clone();
         Rc::new(move || split.set_collapsed(true))
     };
-    let app_bar = Rc::new(AppBar::new(
-        &app_state,
-        paths.database_path.clone(),
-        collapse_sidebar.clone(),
-    ));
-    let app_bar_in_content = configure_window_chrome(&window, &app_bar);
-    tracing::info!(
-        elapsed_ms = startup.elapsed().as_millis(),
-        "gtk startup: window built"
-    );
 
     let toast_overlay = adw::ToastOverlay::new();
     let toast_manager = ToastManager::new(&toast_overlay);
@@ -804,14 +797,6 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
             refresh_hub.clone(),
             toast_overlay.clone(),
             collapse_sidebar.clone(),
-            {
-                let app_bar = Rc::clone(&app_bar);
-                Rc::new(move || app_bar.refresh_workspace())
-            },
-            {
-                let app_bar = Rc::clone(&app_bar);
-                Rc::new(move |visible| app_bar.set_review_visible(visible))
-            },
         );
     let workspace_preference_scope = GBox::new(Orientation::Vertical, 0);
     workspace_preference_scope.set_hexpand(true);
@@ -863,12 +848,8 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: building dashboard"
     );
-    let PageSurface {
-        body: dashboard,
-        header: dashboard_header,
-        refresh: refresh_dashboard,
-    } = dashboard::build_dashboard_panel(&app_state.paths, navigate_workspace.clone());
-    app_bar.set_page_header("dashboard", dashboard_header.upcast_ref());
+    let (dashboard, refresh_dashboard) =
+        dashboard::build_dashboard_panel(&app_state.paths, navigate_workspace.clone());
     dashboard.set_hexpand(true);
     dashboard.set_vexpand(true);
     tracing::info!(
@@ -879,11 +860,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: building projects page"
     );
-    let PageSurface {
-        body: projects_page,
-        header: projects_header,
-        refresh: refresh_projects,
-    } = projects::build_projects_page(
+    let (projects_page, refresh_projects) = projects::build_projects_page(
         &app_state.paths,
         app_state.clone(),
         refresh_dashboard.clone(),
@@ -898,7 +875,6 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         navigate_workspace.clone(),
         toast_manager.clone(),
     );
-    app_bar.set_page_header("projects", projects_header.upcast_ref());
     tracing::info!(
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: projects page built"
@@ -907,12 +883,8 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: building settings page"
     );
-    let PageSurface {
-        body: settings_page,
-        header: settings_header,
-        refresh: refresh_settings,
-    } = settings::build_settings_page(&app_state.paths, toast_manager.clone());
-    app_bar.set_page_header("settings", settings_header.upcast_ref());
+    let (settings_page, refresh_settings) =
+        settings::build_settings_page(&app_state.paths, toast_manager.clone());
     tracing::info!(
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: settings page built"
@@ -921,12 +893,8 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: building history page"
     );
-    let PageSurface {
-        body: history_page,
-        header: history_header,
-        refresh: refresh_history,
-    } = history::build_history_page(&app_state.paths, navigate_workspace, toast_manager.clone());
-    app_bar.set_page_header("history", history_header.upcast_ref());
+    let (history_page, refresh_history) =
+        history::build_history_page(&app_state.paths, navigate_workspace, toast_manager.clone());
     tracing::info!(
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: history page built"
@@ -955,36 +923,12 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         refresh_view_preferences.clone(),
         toast_manager.clone(),
     );
-    app_bar.bind_sidebar(&split, sidebar.upcast_ref());
-    app_bar.set_navigation_changed({
-        let state = app_state.clone();
-        let stack = main_stack.clone();
-        let refresh_workspace = refresh_workspace_detail.clone();
-        let refresh_hub = refresh_hub.clone();
-        Rc::new(move || {
-            match state.snapshot().active_page {
-                AppPage::Dashboard => stack.set_visible_child_name("dashboard"),
-                AppPage::Projects => stack.set_visible_child_name("projects"),
-                AppPage::Workspace | AppPage::Review => {
-                    stack.set_visible_child_name("workspace");
-                    refresh_workspace();
-                }
-                AppPage::History => stack.set_visible_child_name("history"),
-                AppPage::Settings => stack.set_visible_child_name("settings"),
-            }
-            refresh_hub.refresh(RefreshScope::Sidebar);
-        })
-    });
     tracing::info!(
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: sidebar built"
     );
 
     refresh_hub.set_dashboard(refresh_dashboard.clone());
-    refresh_hub.set_workspace_app_bar({
-        let app_bar = Rc::clone(&app_bar);
-        move || app_bar.refresh_workspace()
-    });
     refresh_hub.set_workspace(refresh_workspace_detail.clone());
     refresh_hub.set_projects({
         let refresh_projects = refresh_projects.clone();
@@ -1078,20 +1022,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
             );
         })
     };
-    if app_bar_in_content {
-        let window_content = GBox::new(Orientation::Vertical, 0);
-        window_content.append(&app_bar.content_widget());
-        window_content.append(&split);
-        window.set_child(Some(&window_content));
-    } else {
-        window.set_child(Some(&split));
-    }
-    {
-        let app_bar_lifetime = Rc::clone(&app_bar);
-        window.connect_destroy(move |_| {
-            let _ = &app_bar_lifetime;
-        });
-    }
+    window.set_child(Some(&split));
     window.present();
     setup::show_blocking_setup_if_needed(&window);
     tracing::info!(
@@ -1957,19 +1888,18 @@ fn windows_cmd_terminal_fallback_args(full_cmd: &str) -> Vec<String> {
 
 // ── STYLES ────────────────────────────────────────────────────────────────
 
-fn configure_window_chrome(window: &ApplicationWindow, app_bar: &AppBar) -> bool {
+fn configure_window_chrome(window: &ApplicationWindow) {
     #[cfg(windows)]
     {
-        window.set_decorated(false);
-        app_bar.enable_window_drag();
-        true
+        window.set_titlebar(None::<&gtk::Widget>);
+        window.set_decorated(true);
     }
 
     #[cfg(not(windows))]
     {
-        window.set_decorated(true);
-        window.set_titlebar(Some(&app_bar.widget()));
-        false
+        let header_bar = gtk::HeaderBar::builder().show_title_buttons(true).build();
+        header_bar.add_css_class("app-titlebar");
+        window.set_titlebar(Some(&header_bar));
     }
 }
 
@@ -1984,47 +1914,6 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
 
     #[test]
-    fn page_headers_are_registered_with_the_app_bar_not_appended_to_pages() {
-        for source in [
-            include_str!("dashboard.rs"),
-            include_str!("projects.rs"),
-            include_str!("settings.rs"),
-            include_str!("history.rs"),
-        ] {
-            assert!(!source.contains("root.append(&header);"));
-        }
-        let main = include_str!("main.rs");
-        for key in ["dashboard", "projects", "settings", "history"] {
-            assert!(main.contains(&format!("set_page_header(\"{key}\"")));
-            assert!(main.contains(&format!("main_stack.add_named(&{key}")));
-        }
-        assert!(main.contains("let PageSurface {"));
-        assert!(main.contains("body: dashboard,"));
-        assert!(main.contains("header: dashboard_header,"));
-        assert!(main.contains("body: projects_page,"));
-        assert!(main.contains("header: projects_header,"));
-        assert!(main.contains("body: settings_page,"));
-        assert!(main.contains("header: settings_header,"));
-        assert!(main.contains("body: history_page,"));
-        assert!(main.contains("header: history_header,"));
-    }
-
-    #[test]
-    fn page_headers_use_compact_single_row_app_bar_layout() {
-        for source in [
-            include_str!("dashboard.rs"),
-            include_str!("projects.rs"),
-            include_str!("settings.rs"),
-            include_str!("history.rs"),
-        ] {
-            assert!(source.contains("header.add_css_class(\"app-bar-page-header\");"));
-            assert!(source.contains("GBox::new(Orientation::Horizontal"));
-            assert!(!source.contains("header.add_css_class(\"dashboard-header\");"));
-            assert!(!source.contains("header.add_css_class(\"page-header\");"));
-        }
-    }
-
-    #[test]
     fn app_window_chrome_is_platform_appropriate() {
         let source = include_str!("main.rs");
         let production = source
@@ -2033,7 +1922,7 @@ mod tests {
             .expect("production source exists");
 
         assert!(
-            production.contains("configure_window_chrome(&window, &app_bar);"),
+            production.contains("configure_window_chrome(&window);"),
             "the main window should explicitly configure platform chrome"
         );
         assert!(
@@ -2043,39 +1932,15 @@ mod tests {
             "custom title bars require GTK ApplicationWindow rather than AdwApplicationWindow"
         );
         assert!(
-            production.contains("window.set_decorated(false)")
-                && production.contains("app_bar.enable_window_drag()"),
-            "Windows should use the in-content draggable app bar without a duplicate caption"
+            production.contains("window.set_titlebar(None::<&gtk::Widget>)")
+                && production.contains("window.set_decorated(true)"),
+            "Windows should retain native draggable window chrome"
         );
         assert!(
-            production.contains("window.set_titlebar(Some(&app_bar.widget()))"),
-            "Linux should install the persistent app bar as its draggable titlebar"
+            production.contains("gtk::HeaderBar::builder()")
+                && production.contains(".show_title_buttons(true)"),
+            "Linux should use a draggable GTK header bar with title buttons"
         );
-    }
-
-    #[test]
-    fn app_bar_is_the_only_caption_on_every_platform() {
-        let source = include_str!("main.rs");
-        let production = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production source exists");
-
-        assert!(production.contains("window.set_titlebar(Some(&app_bar.widget()))"));
-        assert!(production.contains("window.set_decorated(false)"));
-        assert!(production.contains("window_content.append(&app_bar.content_widget())"));
-        assert!(!production.contains("window.set_titlebar(None::<&gtk::Widget>)"));
-    }
-
-    #[test]
-    fn sidebar_does_not_duplicate_app_bar_navigation_chrome() {
-        let sidebar = include_str!("sidebar.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production source exists");
-
-        assert!(!sidebar.contains("sidebar_box.append(&chrome_row)"));
-        assert!(!sidebar.contains("sidebar_arrow_button("));
     }
 
     fn env_lock() -> &'static Mutex<()> {

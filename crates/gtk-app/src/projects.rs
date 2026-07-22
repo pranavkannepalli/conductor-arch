@@ -14,7 +14,6 @@ use std::process::Command;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-use crate::app_bar::PageSurface;
 use crate::archcar_async::{spawn_background_job, spawn_background_job_with_progress};
 use crate::buttons::{resolve_icon_name, text_button};
 use crate::motion::{append_revealed, append_revealed_row, clear_box, clear_list};
@@ -29,28 +28,22 @@ pub(crate) fn build_projects_page(
     refresh_workspace: impl Fn() + Clone + 'static,
     navigate_created_workspace: Rc<dyn Fn(String)>,
     toast_manager: ToastManager,
-) -> PageSurface<impl Fn() + Clone + 'static> {
+) -> (GBox, impl Fn() + Clone + 'static) {
     let root = GBox::new(Orientation::Vertical, 0);
     root.add_css_class("dashboard");
     root.add_css_class("page-shell");
-    let header = GBox::new(Orientation::Horizontal, 10);
-    header.add_css_class("app-bar-page-header");
-    header.set_hexpand(true);
+    let header = GBox::new(Orientation::Vertical, 8);
+    header.add_css_class("dashboard-header");
+    header.add_css_class("page-header");
     let title = Label::new(Some("Projects"));
     title.add_css_class("dashboard-title");
-    title.add_css_class("app-bar-page-title");
     title.set_xalign(0.0);
-    title.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    title.set_vexpand(false);
     let subtitle = Label::new(Some("Create workspaces and inspect imported repositories."));
     subtitle.add_css_class("card-meta");
-    subtitle.add_css_class("app-bar-page-subtitle");
     subtitle.set_xalign(0.0);
-    subtitle.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    subtitle.set_hexpand(true);
-    subtitle.set_vexpand(false);
     header.append(&title);
     header.append(&subtitle);
+    root.append(&header);
 
     let scroll = ScrolledWindow::new();
     scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
@@ -495,11 +488,7 @@ pub(crate) fn build_projects_page(
     });
 
     refresh();
-    PageSurface {
-        body: root,
-        header,
-        refresh,
-    }
+    (root, refresh)
 }
 
 pub(crate) fn show_create_workspace_dialog(

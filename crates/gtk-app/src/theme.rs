@@ -3124,71 +3124,6 @@ textview:focus,
     background-color: @lc-hover-soft;
 }
 
-.app-bar {
-    min-height: 56px;
-    padding: 0;
-    background-color: @lc-surface;
-    border-bottom: 1px solid @lc-border;
-}
-
-.app-bar-context {
-    min-height: 56px;
-    margin-top: 0;
-    margin-bottom: 0;
-    padding: 0;
-}
-
-.app-bar-sidebar-segment {
-    min-height: 56px;
-    padding: 0 12px;
-    border-right: 1px solid @lc-border;
-}
-
-.app-bar-center-segment {
-    min-height: 56px;
-    padding: 0 12px;
-}
-
-.app-bar-review-segment {
-    min-height: 56px;
-    padding: 0 8px 0 12px;
-    border-left: 1px solid @lc-border;
-}
-
-.app-bar-page-header {
-    min-height: 0;
-    padding: 0;
-    border: none;
-    background: transparent;
-}
-
-.app-bar-page-title {
-    min-width: 0;
-    margin: 0;
-    font-size: 16px;
-    font-weight: 700;
-}
-
-.app-bar-page-subtitle {
-    min-width: 0;
-    margin: 0;
-    font-size: 12px;
-}
-
-.app-bar-title {
-    min-width: 0;
-    margin-top: 0;
-    margin-bottom: 0;
-    font-weight: 700;
-}
-
-.app-bar-subtitle,
-.app-bar-pr-status {
-    min-width: 0;
-    margin-top: 0;
-    margin-bottom: 0;
-}
-
 .history-list .history-row {
     background-color: transparent;
     padding: 10px 12px;
@@ -3218,38 +3153,6 @@ mod tests {
         let rest = &css[start..];
         let end = rest.find("\n}").expect("selector block closes");
         &rest[..end]
-    }
-
-    #[test]
-    fn app_bar_has_one_height_contract() {
-        let css = app_css();
-        let app_bar = selector_block(css, ".app-bar");
-        let context = selector_block(css, ".app-bar-context");
-        let title = selector_block(css, ".app-bar-title");
-
-        assert!(app_bar.contains("min-height: 56px;"));
-        assert!(app_bar.contains("padding: 0;"));
-        assert!(context.contains("min-height: 56px;"));
-        assert!(context.contains("margin-top: 0;"));
-        assert!(context.contains("margin-bottom: 0;"));
-        assert!(title.contains("min-width: 0;"));
-        assert!(title.contains("margin-top: 0;"));
-        assert!(title.contains("margin-bottom: 0;"));
-        assert!(selector_block(css, ".app-bar-sidebar-segment")
-            .contains("border-right: 1px solid @lc-border;"));
-        assert!(selector_block(css, ".app-bar-review-segment")
-            .contains("border-left: 1px solid @lc-border;"));
-    }
-
-    #[test]
-    fn app_bar_page_headers_remove_body_header_spacing() {
-        let css = app_css();
-        let page_header = selector_block(css, ".app-bar-page-header");
-
-        assert!(page_header.contains("min-height: 0;"));
-        assert!(page_header.contains("padding: 0;"));
-        assert!(page_header.contains("border: none;"));
-        assert!(page_header.contains("background: transparent;"));
     }
 
     #[test]

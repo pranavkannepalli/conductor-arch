@@ -8,7 +8,6 @@ use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
 
-use crate::app_bar::PageSurface;
 use crate::history_data::workspace_has_open_pull_request;
 use crate::motion::{append_revealed, clear_box};
 use crate::tabs::{set_standard_tab_active, standard_tab, standard_tab_strip};
@@ -38,39 +37,32 @@ fn dashboard_bucket(line: &WorkspaceStatusLine) -> DashboardBucket {
 pub(crate) fn build_dashboard_panel(
     paths: &AppPaths,
     open_workspace: Rc<dyn Fn(String)>,
-) -> PageSurface<impl Fn() + Clone + 'static> {
+) -> (GBox, impl Fn() + Clone + 'static) {
     let root = GBox::new(Orientation::Vertical, 0);
     root.add_css_class("dashboard");
     root.add_css_class("page-shell");
 
-    let header = GBox::new(Orientation::Horizontal, 10);
-    header.add_css_class("app-bar-page-header");
-    header.set_hexpand(true);
+    let header = GBox::new(Orientation::Vertical, 10);
+    header.add_css_class("dashboard-header");
+    header.add_css_class("page-header");
 
     let title = Label::new(Some("Dashboard"));
     title.add_css_class("dashboard-title");
-    title.add_css_class("app-bar-page-title");
     title.set_xalign(0.0);
-    title.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    title.set_vexpand(false);
     header.append(&title);
 
     let subtitle = Label::new(Some(
         "See what is ready, running, under review, or archived across your projects.",
     ));
     subtitle.add_css_class("dashboard-subtitle");
-    subtitle.add_css_class("app-bar-page-subtitle");
     subtitle.set_xalign(0.0);
-    subtitle.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    subtitle.set_hexpand(true);
-    subtitle.set_vexpand(false);
+    subtitle.set_wrap(true);
     header.append(&subtitle);
 
     let (project_tabs_scroll, project_tabs) = standard_tab_strip();
     project_tabs_scroll.add_css_class("project-tabs");
-    project_tabs_scroll.set_halign(gtk::Align::End);
-    project_tabs_scroll.set_vexpand(false);
     header.append(&project_tabs_scroll);
+    root.append(&header);
 
     let scroll = ScrolledWindow::new();
     scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
@@ -95,11 +87,7 @@ pub(crate) fn build_dashboard_panel(
     };
 
     refresh();
-    PageSurface {
-        body: root,
-        header,
-        refresh,
-    }
+    (root, refresh)
 }
 
 fn render_dashboard(

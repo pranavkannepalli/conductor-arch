@@ -87,7 +87,7 @@ use crate::{
     terminal, title_case_workspace,
 };
 
-pub(crate) fn workspace_repository_name(store: &WorkspaceStore, workspace_name: &str) -> String {
+fn workspace_repository_name(store: &WorkspaceStore, workspace_name: &str) -> String {
     store
         .list_status()
         .ok()
@@ -127,8 +127,6 @@ pub(crate) fn build_workspace_command_center(
     refresh_hub: RefreshHub,
     toast_overlay: ToastOverlay,
     collapse_sidebar: Rc<dyn Fn()>,
-    refresh_workspace_app_bar: Rc<dyn Fn()>,
-    review_visibility_changed: Rc<dyn Fn(bool)>,
 ) -> (GBox, impl Fn() + Clone + 'static) {
     let root = GBox::new(Orientation::Vertical, 0);
     root.set_vexpand(true);
@@ -145,13 +143,11 @@ pub(crate) fn build_workspace_command_center(
     let run_console_states: RunConsoleStateStore = Rc::new(RefCell::new(HashMap::new()));
     let run_console_terminals: RunConsoleTerminalStore = Rc::new(RefCell::new(HashMap::new()));
     let refresh = move || {
-        refresh_workspace_app_bar();
         while let Some(child) = body.first_child() {
             body.remove(&child);
         }
 
         let Some(name) = state.selected_workspace() else {
-            review_visibility_changed(false);
             let empty = Label::new(Some("Select a workspace from the sidebar."));
             empty.add_css_class("workspace-empty-label");
             empty.set_valign(Align::Center);
@@ -171,7 +167,6 @@ pub(crate) fn build_workspace_command_center(
         };
 
         if matches!(line.workspace.status.as_str(), "creating" | "failed") {
-            review_visibility_changed(false);
             body.append(&workspace_creation_status_shell(
                 &db_path,
                 &line.workspace,
@@ -192,8 +187,6 @@ pub(crate) fn build_workspace_command_center(
             refresh_hub.clone(),
             toast_overlay.clone(),
             collapse_sidebar.clone(),
-            refresh_workspace_app_bar.clone(),
-            review_visibility_changed.clone(),
         ));
     };
     refresh();
@@ -212,6 +205,32 @@ fn workspace_creation_status_shell(
     shell.set_hexpand(true);
     shell.add_css_class("chat-surface");
 
+    let header = GBox::new(Orientation::Horizontal, 8);
+    header.add_css_class("session-header-row");
+    header.set_margin_top(14);
+    header.set_margin_bottom(14);
+    header.set_margin_start(14);
+    header.set_margin_end(14);
+
+    if ws.status == "creating" {
+        let spinner = Spinner::new();
+        spinner.start();
+        header.append(&spinner);
+    }
+
+    let title_box = GBox::new(Orientation::Vertical, 2);
+    title_box.set_hexpand(true);
+    let title = Label::new(Some(&title_case_workspace(&ws.name)));
+    title.add_css_class("session-title");
+    title.set_xalign(0.0);
+    title_box.append(&title);
+    let meta = Label::new(Some(&format!("{} · {}", ws.branch, ws.status)));
+    meta.add_css_class("workspace-meta");
+    meta.set_xalign(0.0);
+    title_box.append(&meta);
+    header.append(&title_box);
+    shell.append(&header);
+
     let body = GBox::new(Orientation::Vertical, 8);
     body.set_vexpand(true);
     body.set_valign(Align::Center);
@@ -228,11 +247,6 @@ fn workspace_creation_status_shell(
         "workspace-empty-label"
     });
     body.append(&label);
-    if ws.status == "creating" {
-        let spinner = Spinner::new();
-        spinner.start();
-        body.prepend(&spinner);
-    }
     if workspace_creation_status_allows_delete(&ws.status) {
         let confirm = CheckButton::with_label("Confirm delete");
         let delete_btn = destructive_button("Delete");
@@ -323,8 +337,6 @@ fn simple_workspace_shell(
     refresh_hub: RefreshHub,
     toast_overlay: ToastOverlay,
     collapse_sidebar: Rc<dyn Fn()>,
-    refresh_workspace_app_bar: Rc<dyn Fn()>,
-    review_visibility_changed: Rc<dyn Fn(bool)>,
 ) -> GBox {
     let shell = GBox::new(Orientation::Vertical, 0);
     shell.set_vexpand(true);
@@ -346,12 +358,9 @@ fn simple_workspace_shell(
     let right_panel_handle = Rc::new(RefCell::new(None::<GBox>));
     let collapse_right_panel: Rc<dyn Fn()> = {
         let right_panel_handle = right_panel_handle.clone();
-        let review_visibility_changed = review_visibility_changed.clone();
         Rc::new(move || {
             if let Some(panel) = right_panel_handle.borrow().as_ref() {
-                let visible = !panel.is_visible();
-                panel.set_visible(visible);
-                review_visibility_changed(visible);
+                panel.set_visible(!panel.is_visible());
             }
         })
     };
@@ -365,7 +374,6 @@ fn simple_workspace_shell(
         refresh_hub.clone(),
         collapse_right_panel,
         ToastManager::new(&toast_overlay),
-        refresh_workspace_app_bar,
     );
     main_split.set_start_child(Some(&center));
 
@@ -383,7 +391,6 @@ fn simple_workspace_shell(
         collapse_sidebar,
     );
     *right_panel_handle.borrow_mut() = Some(right.clone());
-    review_visibility_changed(true);
     main_split.set_end_child(Some(&right));
 
     shell.append(&main_split);
@@ -624,13 +631,18 @@ fn ws_center_panel(
     refresh_hub: RefreshHub,
     collapse_sidebar: Rc<dyn Fn()>,
     toast_manager: ToastManager,
-    refresh_workspace_app_bar: Rc<dyn Fn()>,
 ) -> (GBox, WorkspaceTabSelector) {
     let panel = GBox::new(Orientation::Vertical, 0);
     panel.add_css_class("ws-center");
     panel.set_hexpand(true);
     panel.set_vexpand(true);
 
+    let (session_header, branch_label) = session_surface::session_header_row_with_branch_label(
+        &workspace_repository_name(store, &ws.name),
+        &ws.branch,
+        collapse_sidebar.clone(),
+    );
+    panel.append(&session_header);
     let workspace_phase_label = Label::new(None);
     workspace_phase_label.add_css_class("surface-note");
     workspace_phase_label.set_xalign(0.0);
@@ -965,7 +977,7 @@ fn ws_center_panel(
                 let current_workspace_name = current_workspace_name.clone();
                 Rc::new(move |update| {
                     *current_workspace_name.borrow_mut() = update.workspace_name.clone();
-                    refresh_workspace_app_bar();
+                    branch_label.set_text(&update.branch_name);
                 })
             },
             on_chat_surface_refresh_ready: {
@@ -10102,28 +10114,6 @@ mod tests {
 
         assert!(branch_panel.contains("RefreshEvent::WorkspaceMetadataChanged"));
         assert!(branch_panel.contains("branch: Some(workspace.branch.clone())"));
-    }
-
-    #[test]
-    fn workspace_app_bar_replaces_workspace_identity_headers() {
-        let source = include_str!("workspace_command_center.rs");
-        let production = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production source exists");
-        let center_panel = production
-            .split("fn ws_center_panel")
-            .nth(1)
-            .and_then(|source| source.split("fn ").next())
-            .expect("workspace center panel exists");
-        let creation_shell = production
-            .split("fn workspace_creation_status_shell")
-            .nth(1)
-            .and_then(|source| source.split("fn ").next())
-            .expect("workspace creation shell exists");
-
-        assert!(!center_panel.contains("session_header_row_with_branch_label"));
-        assert!(!creation_shell.contains("session-header-row"));
     }
 
     #[test]

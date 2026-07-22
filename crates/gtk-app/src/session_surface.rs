@@ -8389,7 +8389,7 @@ fn mode_menu_popover(
     popover
 }
 
-pub(crate) fn editor_picker_button() -> Button {
+fn editor_picker_button() -> Button {
     let choices = Rc::new(RefCell::new(detected_editor_choices()));
     let initial = choices
         .borrow()
