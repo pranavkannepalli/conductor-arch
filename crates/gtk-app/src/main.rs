@@ -1026,9 +1026,9 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     };
     let window_content = gtk::Overlay::new();
     window_content.set_child(Some(&split));
-    let window_controls = gtk::WindowControls::new(gtk::PackType::End);
+    let window_controls = gtk::WindowControls::new(gtk::PackType::Start);
     window_controls.add_css_class("integrated-window-controls");
-    window_controls.set_halign(gtk::Align::End);
+    window_controls.set_halign(gtk::Align::Start);
     window_controls.set_valign(gtk::Align::Start);
     window_controls.set_height_request(COLUMN_HEADER_HEIGHT);
     window_content.add_overlay(&window_controls);
@@ -1952,7 +1952,7 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .unwrap();
-        assert!(production.contains("gtk::WindowControls::new(gtk::PackType::End)"));
+        assert!(production.contains("gtk::WindowControls::new(gtk::PackType::Start)"));
     }
 
     fn env_lock() -> &'static Mutex<()> {

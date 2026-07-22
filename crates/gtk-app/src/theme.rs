@@ -1776,12 +1776,17 @@ button.ws-tab-shell {
     background-color: #232323;
     color: #e8e8e8;
 }
-.chat-header-row,
 .ws-pr-nav,
 .ws-changes-header,
 .ws-run-header {
-    min-height: 31px;
+    min-height: 42px;
     padding: 10px 12px;
+    background-color: #181818;
+    border-bottom: 1px solid #232323;
+}
+.chat-header-row {
+    min-height: 39px;
+    padding: 6px 12px;
     background-color: #181818;
     border-bottom: 1px solid #232323;
 }
@@ -1829,8 +1834,8 @@ button.ws-tab-shell {
     color: #a8a8a8;
 }
 .ws-pr-compact-panel {
-    min-height: 31px;
-    padding: 10px 12px;
+    min-height: 39px;
+    padding: 6px 12px;
     border-bottom: 1px solid #232323;
     background-color: #181818;
 }
