@@ -4076,14 +4076,29 @@ fn shell_command_tokens(command: &str) -> Vec<String> {
     let mut quote = None::<char>;
     let mut escaped = false;
 
-    for ch in command.chars() {
+    let mut chars = command.chars().peekable();
+    while let Some(ch) = chars.next() {
         if escaped {
             current.push(ch);
             escaped = false;
             continue;
         }
         if ch == '\\' {
-            escaped = true;
+            let escapes_next = match quote {
+                Some('\'') => false,
+                Some('"') => chars
+                    .peek()
+                    .is_some_and(|next| matches!(next, '"' | '\\' | '$' | '`')),
+                None => chars
+                    .peek()
+                    .is_some_and(|next| next.is_whitespace() || matches!(next, '"' | '\'' | '\\')),
+                Some(_) => false,
+            };
+            if escapes_next {
+                escaped = true;
+            } else {
+                current.push(ch);
+            }
             continue;
         }
         if let Some(active_quote) = quote {
@@ -12597,12 +12612,13 @@ fix it
 
     #[test]
     fn new_chat_button_does_not_create_thread_sync_in_click_handler() {
-        let source = include_str!("session_surface.rs");
+        let normalized_source = include_str!("session_surface.rs").replace("\r\n", "\n");
+        let source = normalized_source.as_str();
         let start = source
             .find("new_chat_btn.connect_clicked")
             .expect("new chat button handler exists");
         let end = source[start..]
-            .find("root\n}")
+            .find("\n    root\n}\n\npub(crate) fn session_header_row")
             .map(|offset| start + offset)
             .expect("new chat handler end exists");
         let handler = &source[start..end];

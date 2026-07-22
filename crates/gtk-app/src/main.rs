@@ -2043,9 +2043,9 @@ mod tests {
             "custom title bars require GTK ApplicationWindow rather than AdwApplicationWindow"
         );
         assert!(
-            production.contains("window.set_titlebar(None::<&gtk::Widget>)")
-                && production.contains("window.set_decorated(true)"),
-            "Windows should use native decorated window chrome"
+            production.contains("window.set_decorated(false)")
+                && production.contains("app_bar.enable_window_drag()"),
+            "Windows should use the in-content draggable app bar without a duplicate caption"
         );
         assert!(
             production.contains("window.set_titlebar(Some(&app_bar.widget()))"),
@@ -2197,19 +2197,25 @@ mod tests {
             .unwrap();
         fs::remove_file(repo_path.join(".archductor/settings.toml")).unwrap();
 
-        let config_home = temp.path().join("xdg/config");
-        let settings_path = config_home.join("archductor/settings.toml");
+        let config_home = temp.path().join("app-config");
+        #[cfg(windows)]
+        let (config_env, settings_path) = ("APPDATA", config_home.join("Archductor/settings.toml"));
+        #[cfg(not(windows))]
+        let (config_env, settings_path) = (
+            "XDG_CONFIG_HOME",
+            config_home.join("archductor/settings.toml"),
+        );
         fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
         fs::write(settings_path, "[customization.view]\ntheme = \"light\"\n").unwrap();
-        let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
-        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        let previous_config_home = std::env::var_os(config_env);
+        std::env::set_var(config_env, &config_home);
 
         let preferences = resolve_view_preferences(db_path, Some("berlin"));
 
         if let Some(previous) = previous_config_home {
-            std::env::set_var("XDG_CONFIG_HOME", previous);
+            std::env::set_var(config_env, previous);
         } else {
-            std::env::remove_var("XDG_CONFIG_HOME");
+            std::env::remove_var(config_env);
         }
         assert_eq!(preferences.theme, Some(ViewTheme::Light));
     }
