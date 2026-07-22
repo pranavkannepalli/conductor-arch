@@ -1,0 +1,157 @@
+crates/gtk-app/src/session_surface.rs
+  s_cda1d2ea4bfc6e::t_e190a7d993b53e 3126-3165,3196
+  s_afc5db1cb5ae1f::t_1a5454bccd52a6 13762-13795,15389-15403
+  s_cda1d2ea4bfc6e::t_aecc8e204db8c5 18064-18081
+  s_4e65afd17e8b6a::t_94611e3387c05e 218,243
+  s_afc5db1cb5ae1f::t_9364399e91b737 263-266
+  s_cda1d2ea4bfc6e::t_c49240f9846e15 2280,2302,2337-2338,2340,2342-2345,2347-2355
+  s_cda1d2ea4bfc6e::t_7f4fdb032a17b7 13704,13728,13736
+  s_afc5db1cb5ae1f::t_5c7d50e9ee372a 6538-6539
+  s_afc5db1cb5ae1f::t_8379dea7356592 16368-16377,16379-16398
+  s_4e65afd17e8b6a::t_61b34998377fd3 4647,4686-4703,4737-4744
+  s_cda1d2ea4bfc6e::t_d05b7c617be677 18046-18063
+  s_cda1d2ea4bfc6e::t_91bf03e316a29d 15404,15406,15445,16367,16399,17924,17955,18021,18082-18099,18119
+  s_afc5db1cb5ae1f::t_ba4ac6de73ddef 6625,6740-6742
+  s_4e65afd17e8b6a::t_858df0a33103fc 17925-17937
+  s_4e65afd17e8b6a::t_7118428b05a8e4 2058,2111-2125,2191
+  s_afc5db1cb5ae1f::t_bf3787e234d910 6598-6601,6782-6786
+  s_cda1d2ea4bfc6e::t_a24ffde2596f91 17854
+  s_cda1d2ea4bfc6e::t_f68aed56dde9a1 18033-18038,18040-18041
+  s_afc5db1cb5ae1f::t_5039d6f26f3fc7 267,358,3955,4745,5894,6647,6702,6725-6726,6736-6739,6743-6781,6787-6800
+  s_cda1d2ea4bfc6e::t_978f6e933ad217 2375-2380,4098-4099,4108-4110
+  s_afc5db1cb5ae1f::t_d4c6f490ef97be 15407-15444
+  s_c700f886e136f6::t_be2ee9b01b3ac1 519,1203-1205,1217,1224-1228
+  s_cda1d2ea4bfc6e::t_281df93186d97d 2281,2285-2290,2314
+  s_afc5db1cb5ae1f::t_ee315c8b3c10cc 6631,6633-6646
+  s_cda1d2ea4bfc6e::t_18be06c7033300 129-130
+  s_cda1d2ea4bfc6e::t_9f1d15356b90a0 345-357
+  s_cda1d2ea4bfc6e::t_a188227c99b0a7 609
+  s_cda1d2ea4bfc6e::t_59d2ae20872cd3 3194-3195,3197-3202
+  s_cda1d2ea4bfc6e::t_4468681c0e3e3d 3747-3849
+  s_afc5db1cb5ae1f::t_80be0a3a325fbf 5715-5814,5819-5830,5832-5833,5835-5841,5843-5844,5851-5893
+  s_4e65afd17e8b6a::t_52de65e827903c 3850-3884,3897-3954
+  s_afc5db1cb5ae1f::t_7c887a1be149e6 6514-6517,6521,6532-6533,6542,6547,6558-6597,6602-6624,6626-6630,6632,6649-6701
+  s_afc5db1cb5ae1f::t_c1c669de2b1dac 16378
+  s_afc5db1cb5ae1f::t_c89ce448a9d8f5 41-42
+  s_4e65afd17e8b6a::t_bc54025599a83a 2279,2301
+  s_4e65afd17e8b6a::t_ccc826dbca129f 17938-17953
+  s_cda1d2ea4bfc6e::t_913c264c77acc1 17997-17999
+  s_cda1d2ea4bfc6e::t_b84f480acbc38a 2313
+  s_cda1d2ea4bfc6e::t_2a28bda2fde09e 17954,18022-18032,18039,18042-18045,18100-18118
+  s_cda1d2ea4bfc6e::t_fb6c72e8c6eaec 229,237
+  s_cda1d2ea4bfc6e::t_dcc4e046694ba1 238
+  s_afc5db1cb5ae1f::t_f9048ae9f2cf60 262
+  s_afc5db1cb5ae1f::t_a45d63f2db5686 268
+  s_afc5db1cb5ae1f::t_570970cff2d742 359
+  s_afc5db1cb5ae1f::t_cad1c556a7fd17 3956
+  s_afc5db1cb5ae1f::t_3cf1a2c2c049e1 4746
+  s_afc5db1cb5ae1f::t_77bd99c2cf907d 5714
+  s_afc5db1cb5ae1f::t_acc396d812c76c 5895
+  s_afc5db1cb5ae1f::t_41956b3e27e831 6648
+  s_afc5db1cb5ae1f::t_29714ac3e7802e 6703
+  s_afc5db1cb5ae1f::t_cc33a15e2ed4e0 6801
+  s_cda1d2ea4bfc6e::t_11e1ee3d60f4d0 15405
+  s_cda1d2ea4bfc6e::t_dee5fec08a95f5 15446
+  s_cda1d2ea4bfc6e::t_bdd651e637bf75 16400
+  s_cda1d2ea4bfc6e::t_eb73ad704d67ef 17956
+  s_cda1d2ea4bfc6e::t_2ba67ad69f3c21 18120
+crates/gtk-app/src/theme.rs
+  s_c700f886e136f6::t_8ae447b5df219e 1727-1742,1772-1778,1780
+  s_c700f886e136f6::t_69c6a2c72ddd88 3285-3293
+  s_c700f886e136f6::t_1c274b3a28cf42 1779
+  s_c700f886e136f6::t_bc9e11c0395b48 3284
+crates/gtk-app/src/refresh.rs
+  s_cda1d2ea4bfc6e::t_9207a57192d36c 306-310
+  s_cda1d2ea4bfc6e::t_cf99e1dac09f9b 539,550,569,580,582
+crates/gtk-app/src/main.rs
+  s_cda1d2ea4bfc6e::t_4df65f45576efc 1083-1088,1090-1098
+  s_cda1d2ea4bfc6e::t_38606f9cfba74e 2542
+  s_cda1d2ea4bfc6e::t_884426515feb90 1594-1603,1608-1659
+  s_cda1d2ea4bfc6e::t_f74bf6201eff62 1155-1160,1162-1163,1177-1182,1184-1192
+  s_cda1d2ea4bfc6e::t_573955912eb5aa 2521-2541,2543-2563
+  s_cda1d2ea4bfc6e::t_7d681acafc8686 1374-1379,1381-1382
+  s_cda1d2ea4bfc6e::t_ec7e42a6ba0279 1660
+crates/gtk-app/src/workspace_command_center.rs
+  s_c700f886e136f6::t_842e903f82b0aa 50-85
+  s_cda1d2ea4bfc6e::t_ef7ccd10a36340 1148,1150,1163-1169,1171-1172,1180-1194,1197-1198,1205-1208
+  s_cda1d2ea4bfc6e::t_7f482d662e46f0 9393-9414
+  s_c700f886e136f6::t_1182a78b8c3e24 826-827,863-864,869,942,949-951,956,960-966,987-989,1002-1003,1026-1032,1053-1059,1081-1103,1149,1170,1199-1204
+  s_cda1d2ea4bfc6e::t_434dec31e859df 9254,9390,9416,9445-9446,9451-9454,9456-9462,9465-9467,9469-9484
+  s_c700f886e136f6::t_8f49bdd88d6f68 1308-1310,1393-1395,1398-1404,1418-1420,1430-1436,1458-1464
+  s_cda1d2ea4bfc6e::t_2197edffe4b4c0 9447-9450,9463-9464,9468
+  s_cda1d2ea4bfc6e::t_e579c85d239bc5 9455
+  s_c700f886e136f6::t_729e9e6a3f05d1 198,1479-1507,1510-1517,1554-1574,1578-1580,1582-1607,1609-1610,1614,1617-1618,1625,1629-1645
+  s_cda1d2ea4bfc6e::t_bacfffbefeb12d 19,37-43,157-180
+  s_cda1d2ea4bfc6e::t_c29e09b42075ca 9256,9389,9392,9415,9418-9440,9444
+  s_cda1d2ea4bfc6e::t_f3ec5574183c88 1153-1157,1160
+  s_cda1d2ea4bfc6e::t_18e4b022d9ae2e 2906-2942,2969-2989,2992-2998
+  s_cda1d2ea4bfc6e::t_2d5e9e775e0951 862
+  s_cda1d2ea4bfc6e::t_ab0e72775c99a3 90,94,1121-1122
+  s_cda1d2ea4bfc6e::t_99e43a98e3f174 932
+  s_cda1d2ea4bfc6e::t_a10fa00bd9fdcf 1297,1299-1300,1330,1340,1350,1360-1380
+  s_cda1d2ea4bfc6e::t_b599cbcdebd032 2990-2991
+  s_cda1d2ea4bfc6e::t_7d378b6bc7968d 8533-8534,8538,8541
+  s_c700f886e136f6::t_a908087a4dcf50 1743-1744
+  s_cda1d2ea4bfc6e::t_28039af34a3927 822-825
+  s_c700f886e136f6::t_72e18257530785 1173-1179,1195-1196,1508-1509,1626-1628
+  s_c700f886e136f6::t_d73c07592b10de 9235,9249,9253,9387-9388
+  s_cda1d2ea4bfc6e::t_336e97dd26be7d 44-49,181-197
+  s_c700f886e136f6::t_4220dc35d7458a 9257-9314
+  s_c700f886e136f6::t_7089d40bb492a6 9315-9350
+  s_cda1d2ea4bfc6e::t_b84f480acbc38a 8539
+  s_cda1d2ea4bfc6e::t_4306e9a77e33f5 199,1381,1646,9255,9391,9417
+crates/gtk-app/src/dashboard.rs
+  s_cda1d2ea4bfc6e::t_d3554cd4c78e7e 654-675
+  s_cda1d2ea4bfc6e::t_939478efa3db65 7-8,11,16-29
+  s_cda1d2ea4bfc6e::t_b599cbcdebd032 143-144,378
+  s_cda1d2ea4bfc6e::t_efe26fde3889c9 93-94,96-132,140-142,145-179,184,189-192,200,207-216,220,227,234-243,249-250,252,260-265
+  s_cda1d2ea4bfc6e::t_3969e7cb9cd945 352,365,371,377,394,397,415-416,421,440,446-447
+crates/gtk-app/src/sidebar.rs
+  s_cda1d2ea4bfc6e::t_37067167dd737d 2-5,15,812-829
+  s_cda1d2ea4bfc6e::t_73d6c9337d5947 226,244
+  s_cda1d2ea4bfc6e::t_f1a84761b0dfd6 267,270,274
+  s_cda1d2ea4bfc6e::t_0b1e66dcd04e9b 254-266,268-269,271-273,275-282,284-292,295-301,531-532
+  s_cda1d2ea4bfc6e::t_b599cbcdebd032 293-294,302,304-311,314-350,352-353,357-452,455-470,472-501,505-511,513-529
+  s_cda1d2ea4bfc6e::t_640cb0a8eaa4e4 1752-1774
+  s_cda1d2ea4bfc6e::t_7b144b145bb40d 830,1751
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "38655e8e90cc1e3a446b93439f41004b72c9d796",
+  "prompts": {},
+  "sessions": {
+    "s_4e65afd17e8b6a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8881-5072-74d1-86fc-e7edf5daf922",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    },
+    "s_afc5db1cb5ae1f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8883-3db8-75c1-b707-8f1bccdf1eac",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    },
+    "s_c700f886e136f6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f88a1-585e-7030-8a99-72b0d78ee241",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    },
+    "s_cda1d2ea4bfc6e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8885-b633-73d1-bd92-f1657047724f",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
