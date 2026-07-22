@@ -64,6 +64,31 @@ impl AppBarContext {
     }
 }
 
+const PR_STATUS_CLASSES: [&str; 5] = [
+    "ws-pr-status-muted",
+    "ws-pr-status-pending",
+    "ws-pr-status-ready",
+    "ws-pr-status-failed",
+    "ws-pr-status-merged",
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PrPresentation<'a> {
+    label: &'a str,
+    css_class: Option<&'static str>,
+    visible: bool,
+}
+
+impl<'a> PrPresentation<'a> {
+    fn from_context(context: &'a AppBarContext) -> Self {
+        Self {
+            label: context.pr_label.as_deref().unwrap_or_default(),
+            css_class: context.pr_css_class,
+            visible: context.pr_label.is_some(),
+        }
+    }
+}
+
 pub(crate) struct AppBar {
     header_bar: HeaderBar,
     stack: Stack,
@@ -223,28 +248,14 @@ impl AppBar {
     }
 
     fn apply_context(&self, context: AppBarContext) {
-        self.stack.set_visible_child_name(context.stack_key);
-        self.workspace_name
-            .set_label(context.workspace_name.as_deref().unwrap_or_default());
-        self.repository_name
-            .set_label(context.repository_name.as_deref().unwrap_or_default());
-        self.branch_name
-            .set_label(context.branch_name.as_deref().unwrap_or_default());
-        self.pr_label
-            .set_label(context.pr_label.as_deref().unwrap_or_default());
-        for class in [
-            "ws-pr-status-muted",
-            "ws-pr-status-pending",
-            "ws-pr-status-ready",
-            "ws-pr-status-failed",
-            "ws-pr-status-merged",
-        ] {
-            self.pr_label.remove_css_class(class);
-        }
-        if let Some(class) = context.pr_css_class {
-            self.pr_label.add_css_class(class);
-        }
-        self.pr_label.set_visible(context.pr_label.is_some());
+        apply_context_widgets(
+            &self.stack,
+            &self.workspace_name,
+            &self.repository_name,
+            &self.branch_name,
+            &self.pr_label,
+            &context,
+        );
     }
 
     fn refresh_widgets(&self) -> AppBarRefreshWidgets {
@@ -276,19 +287,41 @@ impl AppBarRefreshWidgets {
     fn refresh(&self, snapshot: &AppStateSnapshot, can_back: bool, can_forward: bool) {
         let workspace = workspace_context(&self.database_path, snapshot);
         let context = AppBarContext::for_page(&snapshot.active_page, workspace);
-        self.stack.set_visible_child_name(context.stack_key);
-        self.workspace_name
-            .set_label(context.workspace_name.as_deref().unwrap_or_default());
-        self.repository_name
-            .set_label(context.repository_name.as_deref().unwrap_or_default());
-        self.branch_name
-            .set_label(context.branch_name.as_deref().unwrap_or_default());
-        self.pr_label
-            .set_label(context.pr_label.as_deref().unwrap_or_default());
-        self.pr_label.set_visible(context.pr_label.is_some());
+        apply_context_widgets(
+            &self.stack,
+            &self.workspace_name,
+            &self.repository_name,
+            &self.branch_name,
+            &self.pr_label,
+            &context,
+        );
         self.back_button.set_sensitive(can_back);
         self.forward_button.set_sensitive(can_forward);
     }
+}
+
+fn apply_context_widgets(
+    stack: &Stack,
+    workspace_name: &Label,
+    repository_name: &Label,
+    branch_name: &Label,
+    pr_label: &Label,
+    context: &AppBarContext,
+) {
+    stack.set_visible_child_name(context.stack_key);
+    workspace_name.set_label(context.workspace_name.as_deref().unwrap_or_default());
+    repository_name.set_label(context.repository_name.as_deref().unwrap_or_default());
+    branch_name.set_label(context.branch_name.as_deref().unwrap_or_default());
+
+    let pr = PrPresentation::from_context(context);
+    pr_label.set_label(pr.label);
+    for class in PR_STATUS_CLASSES {
+        pr_label.remove_css_class(class);
+    }
+    if let Some(class) = pr.css_class {
+        pr_label.add_css_class(class);
+    }
+    pr_label.set_visible(pr.visible);
 }
 
 fn workspace_context(
@@ -375,5 +408,48 @@ mod tests {
         assert_eq!(context.repository_name.as_deref(), Some("archductor"));
         assert_eq!(context.branch_name.as_deref(), Some("feature/equal-height"));
         assert_eq!(context.pr_label.as_deref(), Some("PR #42 ready"));
+    }
+
+    #[test]
+    fn pr_presentation_replaces_status_class_and_clears_without_pr() {
+        let ready_context = AppBarContext::workspace(
+            "equal-height",
+            "archductor",
+            "feature/equal-height",
+            Some(("PR #42 ready", "ws-pr-status-ready")),
+        );
+        let ready = PrPresentation::from_context(&ready_context);
+        assert_eq!(ready.css_class, Some("ws-pr-status-ready"));
+        assert!(ready.visible);
+
+        let failed_context = AppBarContext::workspace(
+            "equal-height",
+            "archductor",
+            "feature/equal-height",
+            Some(("PR #42 failed", "ws-pr-status-failed")),
+        );
+        let failed = PrPresentation::from_context(&failed_context);
+        assert_eq!(failed.css_class, Some("ws-pr-status-failed"));
+        assert_ne!(failed.css_class, ready.css_class);
+
+        let no_pr_context =
+            AppBarContext::workspace("equal-height", "archductor", "feature/equal-height", None);
+        let no_pr = PrPresentation::from_context(&no_pr_context);
+        assert_eq!(no_pr.css_class, None);
+        assert!(!no_pr.visible);
+        assert_eq!(no_pr.label, "");
+    }
+
+    #[test]
+    fn build_ui_retains_app_bar_for_window_lifetime() {
+        let source = include_str!("main.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source exists");
+
+        assert!(production.contains("Rc::new(AppBar::new("));
+        assert!(production.contains("window.connect_destroy(move |_|"));
+        assert!(production.contains("app_bar_lifetime"));
     }
 }

@@ -734,7 +734,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         .default_width(1280)
         .default_height(800)
         .build();
-    let app_bar = AppBar::new(&app_state, paths.database_path.clone());
+    let app_bar = Rc::new(AppBar::new(&app_state, paths.database_path.clone()));
     let app_bar_in_content = configure_window_chrome(&window, &app_bar);
     tracing::info!(
         elapsed_ms = startup.elapsed().as_millis(),
@@ -1032,6 +1032,12 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         window.set_child(Some(&window_content));
     } else {
         window.set_child(Some(&split));
+    }
+    {
+        let app_bar_lifetime = Rc::clone(&app_bar);
+        window.connect_destroy(move |_| {
+            let _ = &app_bar_lifetime;
+        });
     }
     window.present();
     setup::show_blocking_setup_if_needed(&window);
