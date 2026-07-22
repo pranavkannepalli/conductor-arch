@@ -10238,19 +10238,9 @@ fn update_working_indicator_for_archcar_event(
         | ArchcarEvent::SessionScreenUpdated { .. }
         | ArchcarEvent::ProviderInteractionRequested { .. }
         | ArchcarEvent::ProviderInteractionResolved { .. } => false,
-        ArchcarEvent::SessionMessagesUpdated { thread_id } => {
-            let has_live_managed_session = [SessionKind::Codex, SessionKind::Claude]
-                .into_iter()
-                .filter_map(managed_harness_for_kind)
-                .any(|harness| {
-                    thread_has_live_managed_session(records, *thread_id, harness.descriptor())
-                });
-            if !has_live_managed_session || working_threads.borrow().contains_key(thread_id) {
-                return false;
-            }
-            mark_thread_working(working_threads, *thread_id);
-            true
-        }
+        // Input acceptance arms the working timer. Message refreshes can arrive after
+        // TurnCompleted, so they must never infer a new active turn from session liveness.
+        ArchcarEvent::SessionMessagesUpdated { .. } => false,
     }
 }
 
@@ -16509,7 +16499,7 @@ Schema confirms the app moved CRM around businesses.";
     }
 
     #[test]
-    fn live_session_messages_mark_thread_working() {
+    fn late_session_messages_do_not_rearm_completed_thread() {
         let records = vec![process_record_with_thread(
             11,
             ProcessStatus::Running,
@@ -16530,8 +16520,8 @@ Schema confirms the app moved CRM around businesses.";
             &working_threads,
         );
 
-        assert!(changed);
-        assert!(working_threads.borrow().contains_key(&7));
+        assert!(!changed);
+        assert!(!working_threads.borrow().contains_key(&7));
     }
 
     #[test]

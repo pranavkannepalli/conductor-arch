@@ -2342,6 +2342,9 @@ popover.context-menu-popover arrow {
     padding: 6px 0;
     color: #b8c7de;
 }
+.chat-working-indicator .card-meta {
+    color: #b8c7de;
+}
 .chat-user-row {
     margin-top: 12px;
     margin-bottom: 10px;
@@ -2953,10 +2956,6 @@ combobox box,
     color: #f8fafc;
 }
 
-.chat-composer {
-    background-color: #151515;
-}
-
 .chat-composer-box .chat-input-scroll,
 .chat-composer-box .chat-input-view,
 .chat-composer-box .chat-input-view text {
@@ -3294,6 +3293,10 @@ mod tests {
 
         let composer = selector_block(css, ".chat-composer");
         assert!(composer.contains("background-color: #151515;"));
+        assert_eq!(css.matches(".chat-composer {").count(), 1);
+
+        let working_meta = selector_block(css, ".chat-working-indicator .card-meta");
+        assert!(working_meta.contains("color: #b8c7de;"));
 
         let messages = selector_block(css, ".chat-messages");
         assert!(messages.contains("padding: 22px 24px 24px;"));

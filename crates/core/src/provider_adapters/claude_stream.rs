@@ -2864,6 +2864,12 @@ mod tests {
             },
         );
         assert_eq!(canonical.normalized_payload["usage"]["thinking_tokens"], 17);
+
+        let direct = parse_claude_stream_json_lines(
+            r#"{"type":"stream_event","event":{"type":"message_delta","usage":{"thinking_tokens":18}}}"#,
+        )
+        .unwrap();
+        assert_eq!(direct[0].usage.thinking_tokens, Some(18));
     }
 
     #[test]

@@ -701,12 +701,13 @@ fn apply_harness_effect(
             );
         }
         HarnessEffect::Retry { message, delay_ms } => {
+            let provider_message = bounded_redacted_provider_message(&message);
             info!(
                 session_id = started.session_id,
                 thread_id = started.thread_id,
                 kind = ?started.kind,
                 delay_ms = ?delay_ms,
-                provider_message = %message,
+                provider_message = %provider_message,
                 "managed harness retry"
             );
         }
@@ -724,6 +725,24 @@ fn apply_harness_effect(
             );
         }
         HarnessEffect::InteractionResolved { .. } | HarnessEffect::ResumeRequired => {}
+    }
+}
+
+fn bounded_redacted_provider_message(message: &str) -> String {
+    crate::local_chat::truncate_chars(&crate::redaction::redact_sensitive_text(message), 512)
+}
+
+#[cfg(test)]
+mod provider_log_tests {
+    use super::bounded_redacted_provider_message;
+
+    #[test]
+    fn retry_provider_messages_are_redacted_and_bounded() {
+        let message = format!("Authorization: Bearer secret-token {}", "x".repeat(600));
+        let logged = bounded_redacted_provider_message(&message);
+        assert!(!logged.contains("secret-token"));
+        assert!(logged.chars().count() <= 515);
+        assert!(logged.ends_with("..."));
     }
 }
 

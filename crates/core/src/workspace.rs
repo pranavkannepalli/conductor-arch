@@ -9153,6 +9153,11 @@ struct ArchductorMetadataDirective {
 fn extract_archductor_metadata_directive(
     content: &str,
 ) -> (String, Option<ArchductorMetadataDirective>) {
+    if content.contains(ARCHDUCTOR_HIDDEN_INSTRUCTION_OPEN)
+        && !content.contains(ARCHDUCTOR_HIDDEN_INSTRUCTION_CLOSE)
+    {
+        return (content.to_owned(), None);
+    }
     let hidden_stripped = strip_archductor_hidden_instruction_blocks(content);
     let content = hidden_stripped.as_str();
     let Some(start) = content.find(ARCHDUCTOR_METADATA_OPEN) else {
@@ -9190,8 +9195,7 @@ fn strip_archductor_hidden_instruction_blocks(content: &str) -> String {
         let Some(relative_end) =
             remaining[block_body_start..].find(ARCHDUCTOR_HIDDEN_INSTRUCTION_CLOSE)
         else {
-            remaining = "";
-            break;
+            return content.to_owned();
         };
         let end = block_body_start + relative_end + ARCHDUCTOR_HIDDEN_INSTRUCTION_CLOSE.len();
         remaining = &remaining[end..];
@@ -21278,6 +21282,12 @@ spotlight_testing = true
         let content = "what's up?\n\n<archductor_hidden_instruction>\nsecret metadata prompt\n<archductor_metadata>{\"workspace_name\":\"secret\"}</archductor_metadata>\n</archductor_hidden_instruction>";
 
         assert_eq!(strip_archductor_metadata_block(content), "what's up?");
+    }
+
+    #[test]
+    fn unclosed_archductor_hidden_instruction_is_preserved() {
+        let content = "visible\n<archductor_hidden_instruction>unfinished";
+        assert_eq!(strip_archductor_metadata_block(content), content);
     }
 
     #[test]

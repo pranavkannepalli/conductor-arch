@@ -1593,25 +1593,43 @@ fn interrupt_running_managed_chats_on_shutdown(paths: &AppPaths) {
         return;
     }
 
-    let client = ArchcarClient::from_paths(paths);
-    for session_id in session_ids {
-        match client.send_without_spawning(ArchcarRequest::InterruptTurn { session_id }) {
-            Ok(response) => {
-                tracing::info!(
-                    session_id,
-                    ?response,
-                    "gtk shutdown interrupted managed chat session"
-                );
-            }
-            Err(err) => {
-                tracing::warn!(
-                    session_id,
-                    error = %err,
-                    "gtk shutdown could not interrupt managed chat session"
-                );
+    std::thread::scope(|scope| {
+        let requests = session_ids
+            .into_iter()
+            .map(|session_id| {
+                scope.spawn(move || {
+                    let client = ArchcarClient::from_paths(paths);
+                    (
+                        session_id,
+                        client.send_without_spawning(ArchcarRequest::InterruptTurn { session_id }),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for request in requests {
+            let Ok((session_id, result)) = request.join() else {
+                tracing::warn!("gtk shutdown interrupt worker panicked");
+                continue;
+            };
+            match result {
+                Ok(response) => {
+                    tracing::info!(
+                        session_id,
+                        ?response,
+                        "gtk shutdown interrupted managed chat session"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        session_id,
+                        error = %err,
+                        "gtk shutdown could not interrupt managed chat session"
+                    );
+                }
             }
         }
-    }
+    });
 }
 
 fn shutdown_managed_chat_session_ids_from_store(db_path: &Path) -> anyhow::Result<Vec<i64>> {
