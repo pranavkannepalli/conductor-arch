@@ -1723,13 +1723,12 @@ button.ws-tab-shell {
     font-weight: 500;
 }
 .ws-tab-shell.ws-tab-unread {
-    background-color: #242424;
-    border-bottom-color: #f0c36a;
+    border-bottom-color: #5a5a5a;
 }
 .ws-tab-shell.ws-tab-unread .ws-tab-label,
 .ws-tab-shell.ws-tab-unread .ws-tab-close-icon {
-    color: #f2f2f2;
-    font-weight: 600;
+    color: #d7d7d7;
+    font-weight: 500;
 }
 .ws-tab-shell.ws-tab-active {
     background-color: #242424;
@@ -3165,6 +3164,16 @@ mod tests {
         &rest[..end]
     }
 
+    fn property_value<'a>(block: &'a str, property: &str) -> Option<&'a str> {
+        block
+            .lines()
+            .map(str::trim)
+            .find_map(|line| line.strip_prefix(property))
+            .and_then(|value| value.strip_prefix(':'))
+            .map(str::trim)
+            .and_then(|value| value.strip_suffix(';'))
+    }
+
     #[test]
     fn refreshed_theme_exposes_graphite_palette_fonts_and_neutral_focus_color() {
         let css = app_css();
@@ -3218,6 +3227,19 @@ mod tests {
         assert!(!css.contains("#0f172a"));
         assert!(!css.contains("#1e293b"));
         assert!(!css.contains("#334155"));
+    }
+
+    #[test]
+    fn unread_chat_tabs_do_not_reuse_active_selection_treatment() {
+        let css = app_css();
+        let unread_block = selector_block(css, ".ws-tab-shell.ws-tab-unread");
+        let active_block = selector_block(css, ".ws-tab-shell.ws-tab-active");
+
+        assert!(!unread_block.contains("background-color"));
+        assert_ne!(
+            property_value(unread_block, "border-bottom-color"),
+            property_value(active_block, "border-bottom-color")
+        );
     }
 
     #[test]
