@@ -2487,6 +2487,29 @@ button.chat-inline-event-chip:checked {
     min-height: 0;
     padding: 0;
 }
+.workspace-file-link {
+    background-color: transparent;
+    border: none;
+    border-radius: 4px;
+    box-shadow: none;
+    color: #e7e7e7;
+    font-family: "Mona Sans", "Inter", "Segoe UI", system-ui, sans-serif;
+    font-size: 13px;
+    font-weight: 600;
+    min-height: 22px;
+    min-width: 0;
+    padding: 2px 4px;
+}
+.workspace-file-link:hover {
+    background-color: rgba(134, 239, 172, 0.12);
+    box-shadow: none;
+}
+.workspace-file-link label {
+    color: #d8f8e0;
+    margin: 0;
+    min-height: 0;
+    padding: 0;
+}
 .chat-inline-event-meta {
     color: #8f8f8f;
     font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;

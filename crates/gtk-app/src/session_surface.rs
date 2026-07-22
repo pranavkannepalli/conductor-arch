@@ -64,6 +64,9 @@ use crate::archcar_async::{
 use crate::buttons::{
     icon_button, resolve_icon_name, style_icon_button, style_text_button, text_button,
 };
+use crate::file_component::{
+    markdown_file_link_target, workspace_file_link_component, OpenWorkspaceFile,
+};
 use crate::motion::{append_revealed, clear_box};
 use crate::refresh::RefreshEvent;
 use crate::state::{
@@ -577,6 +580,7 @@ pub fn agent_session_panel(
     include_header: bool,
     setup_readiness: Option<Rc<RefCell<SetupReadiness>>>,
     external_chat_tabs: Option<ExternalChatTabs>,
+    open_file: Option<OpenWorkspaceFile>,
     toast_manager: ToastManager,
 ) -> GBox {
     let root = GBox::new(Orientation::Vertical, 0);
@@ -1397,6 +1401,7 @@ pub fn agent_session_panel(
         let refresh_queue_overlay = refresh_queue_overlay.clone();
         let eager_start_chat_agent = eager_start_chat_agent.clone();
         let refresh_for_metadata = refresh_for_metadata.clone();
+        let open_file = open_file.clone();
         Rc::new(move || {
             let mut outcome = ChatRefreshOutcome::default();
             let workspace = current_workspace_name.borrow().clone();
@@ -2106,6 +2111,7 @@ pub fn agent_session_panel(
                                             &timeline[start..],
                                             &transcript_display,
                                             render_legacy_inline_events,
+                                            open_file.clone(),
                                         );
                                     }
                                     ChatTimelineRefreshPlan::ReplaceBeforeTrailingWorkingIndicator {
@@ -2117,6 +2123,7 @@ pub fn agent_session_panel(
                                             &timeline[start..timeline.len().saturating_sub(1)],
                                             &transcript_display,
                                             render_legacy_inline_events,
+                                            open_file.clone(),
                                         );
                                         update_existing_working_indicator(
                                             &messages,
@@ -2133,6 +2140,7 @@ pub fn agent_session_panel(
                                             &timeline[start..],
                                             &transcript_display,
                                             render_legacy_inline_events,
+                                            open_file.clone(),
                                         );
                                     }
                                     ChatTimelineRefreshPlan::RebuildMessages => {
@@ -2148,6 +2156,7 @@ pub fn agent_session_panel(
                                             &timeline,
                                             &transcript_display,
                                             render_legacy_inline_events,
+                                            open_file.clone(),
                                         );
                                     }
                                 }
@@ -2273,6 +2282,7 @@ pub fn agent_session_panel(
                 let toast_manager = toast_manager.clone();
                 let working_threads = working_threads.clone();
                 let chat_timeline_cache = chat_timeline_cache.clone();
+                let open_file = open_file.clone();
                 let message_refresh_generation = Rc::new(RefCell::new(HashMap::<i64, u64>::new()));
                 Rc::new(move |thread_id| {
                     let workspace = current_workspace_name.borrow().clone();
@@ -2296,6 +2306,7 @@ pub fn agent_session_panel(
                     let working_threads = working_threads.clone();
                     let chat_timeline_cache = chat_timeline_cache.clone();
                     let message_refresh_generation = message_refresh_generation.clone();
+                    let open_file_for_result = open_file.clone();
                     spawn_background_job(
                         move || {
                             load_chat_timeline_snapshot(
@@ -2348,6 +2359,7 @@ pub fn agent_session_panel(
                                 working_threads.as_ref(),
                                 &scroll,
                                 chat_scroll,
+                                open_file_for_result.clone(),
                             );
                         },
                     );
@@ -3127,6 +3139,7 @@ pub fn agent_session_panel(
             let last_timeline_render_state = last_timeline_render_state.clone();
             let working_threads = working_threads.clone();
             let chat_timeline_cache = chat_timeline_cache.clone();
+            let open_file = open_file.clone();
             move |thread_id| {
                 if let Some(snapshot) =
                     cached_chat_timeline_snapshot(chat_timeline_cache.as_ref(), thread_id)
@@ -3142,6 +3155,7 @@ pub fn agent_session_panel(
                         working_threads.as_ref(),
                         &scroll,
                         capture_chat_scroll(&scroll),
+                        open_file.clone(),
                     );
                     true
                 } else {
@@ -3727,12 +3741,14 @@ fn append_chat_timeline_items(
     items: &[ChatTimelineItem],
     transcript_display: &str,
     render_legacy_inline_events: bool,
+    open_file: Option<OpenWorkspaceFile>,
 ) {
     for item in items {
         if let Some(widget) = chat_timeline_item_widget(
             item,
             render_raw_message_content(transcript_display),
             render_legacy_inline_events,
+            open_file.clone(),
         ) {
             append_chat_refresh_row(container, &widget);
         }
@@ -3759,6 +3775,7 @@ fn render_chat_timeline_snapshot(
     working_threads: &RefCell<HashMap<i64, Instant>>,
     scroll: &ScrolledWindow,
     chat_scroll: ChatScrollSnapshot,
+    open_file: Option<OpenWorkspaceFile>,
 ) {
     let thread_messages = snapshot.thread_messages;
     let thread_events = snapshot.thread_events;
@@ -3804,6 +3821,7 @@ fn render_chat_timeline_snapshot(
                 &timeline[start..],
                 &transcript_display,
                 render_legacy_inline_events,
+                open_file.clone(),
             );
         }
         ChatTimelineRefreshPlan::ReplaceBeforeTrailingWorkingIndicator { start } => {
@@ -3817,6 +3835,7 @@ fn render_chat_timeline_snapshot(
                 &timeline[start..timeline.len().saturating_sub(1)],
                 &transcript_display,
                 render_legacy_inline_events,
+                open_file.clone(),
             );
             update_existing_working_indicator(messages, working_elapsed);
         }
@@ -3831,6 +3850,7 @@ fn render_chat_timeline_snapshot(
                 &timeline[start..],
                 &transcript_display,
                 render_legacy_inline_events,
+                open_file.clone(),
             );
         }
         ChatTimelineRefreshPlan::RebuildMessages => {
@@ -3844,6 +3864,7 @@ fn render_chat_timeline_snapshot(
                 &timeline,
                 &transcript_display,
                 render_legacy_inline_events,
+                open_file.clone(),
             );
             if timeline.is_empty() {
                 append_empty_chat_placeholder(messages);
@@ -3860,6 +3881,7 @@ fn replace_chat_timeline_items_before_trailing_working_indicator(
     items: &[ChatTimelineItem],
     transcript_display: &str,
     render_legacy_inline_events: bool,
+    open_file: Option<OpenWorkspaceFile>,
 ) {
     let Some(trailing_indicator) = trailing_working_indicator_row(container) else {
         remove_box_children_from(container, start);
@@ -3868,6 +3890,7 @@ fn replace_chat_timeline_items_before_trailing_working_indicator(
             items,
             transcript_display,
             render_legacy_inline_events,
+            open_file,
         );
         return;
     };
@@ -3881,6 +3904,7 @@ fn replace_chat_timeline_items_before_trailing_working_indicator(
             item,
             render_raw_message_content(transcript_display),
             render_legacy_inline_events,
+            open_file.clone(),
         ) else {
             continue;
         };
@@ -4128,7 +4152,7 @@ fn session_transcript_event_widget(event: &SessionTranscriptEvent) -> Widget {
         SessionTranscriptRole::Tool | SessionTranscriptRole::Skill => {
             let inline_events = session_transcript_inline_events(event);
             if !inline_events.is_empty() {
-                return inline_events_widget(&inline_events);
+                return inline_events_widget(&inline_events, None);
             }
             session_transcript_label_widget(event)
         }
@@ -4861,6 +4885,7 @@ fn chat_message_widget(
     message: &ChatMessageRecord,
     render_raw_message_content: bool,
     render_legacy_inline_events: bool,
+    open_file: Option<OpenWorkspaceFile>,
 ) -> Option<Widget> {
     if !chat_message_is_renderable(message) {
         return None;
@@ -4880,13 +4905,13 @@ fn chat_message_widget(
             let inline_events =
                 legacy_inline_events_for_message(message, render_legacy_inline_events);
             if !inline_events.is_empty() {
-                return Some(inline_events_widget(&inline_events));
+                return Some(inline_events_widget(&inline_events, open_file));
             }
             let content = chat_agent_message_display_content(message, render_raw_message_content);
             if content.trim().is_empty() {
                 return None;
             }
-            Some(chat_text_label(&content).upcast())
+            Some(chat_text_widget(&content, open_file))
         }
     }
 }
@@ -4895,15 +4920,19 @@ fn chat_timeline_item_widget(
     item: &ChatTimelineItem,
     render_raw_message_content: bool,
     render_legacy_inline_events: bool,
+    open_file: Option<OpenWorkspaceFile>,
 ) -> Option<Widget> {
     match item {
         ChatTimelineItem::Message(message) => chat_message_widget(
             message,
             render_raw_message_content,
             render_legacy_inline_events,
+            open_file,
         ),
-        ChatTimelineItem::Event(event) => Some(chat_event_widget(event)),
-        ChatTimelineItem::ProviderProjection(item) => Some(provider_projection_item_widget(item)),
+        ChatTimelineItem::Event(event) => Some(chat_event_widget(event, open_file)),
+        ChatTimelineItem::ProviderProjection(item) => {
+            Some(provider_projection_item_widget(item, open_file))
+        }
         ChatTimelineItem::InterruptedNotice { .. } => Some(chat_interrupted_notice_widget()),
         ChatTimelineItem::OptimisticUserInput(input) => Some(chat_user_bubble(input).upcast()),
         ChatTimelineItem::WorkingIndicator(elapsed) => Some(working_indicator_widget(*elapsed)),
@@ -4974,10 +5003,10 @@ fn legacy_inline_events_for_message(
     }
 }
 
-fn chat_event_widget(event: &ChatEventRecord) -> Widget {
+fn chat_event_widget(event: &ChatEventRecord, open_file: Option<OpenWorkspaceFile>) -> Widget {
     stored_chat_event_inline_event(event)
-        .map(|inline| inline_event_widget(&inline))
-        .unwrap_or_else(|| chat_text_label(&event.body).upcast())
+        .map(|inline| inline_event_widget(&inline, open_file.clone()))
+        .unwrap_or_else(|| chat_text_widget(&event.body, open_file))
 }
 
 fn provider_projection_items_for_render(
@@ -5138,18 +5167,22 @@ fn apply_agent_metadata_ui_update(
     }
 }
 
-fn provider_projection_item_widget(item: &ProviderProjectionItem) -> Widget {
+fn provider_projection_item_widget(
+    item: &ProviderProjectionItem,
+    open_file: Option<OpenWorkspaceFile>,
+) -> Widget {
     if let Some(inline_event) = provider_projection_inline_event(item) {
-        return inline_event_widget(&inline_event);
+        return inline_event_widget(&inline_event, open_file);
     }
 
     match item.render_class {
         ProjectionRenderClass::UserChat => {
             chat_user_bubble(&provider_projection_user_body_for_render(item)).upcast()
         }
-        ProjectionRenderClass::AssistantChat => {
-            provider_projection_text_widget(&provider_projection_assistant_body_for_render(item))
-        }
+        ProjectionRenderClass::AssistantChat => provider_projection_text_widget(
+            &provider_projection_assistant_body_for_render(item),
+            open_file,
+        ),
         ProjectionRenderClass::ReasoningCard => provider_projection_reasoning_widget(item),
         _ => {
             let container = GBox::new(Orientation::Vertical, 4);
@@ -5164,6 +5197,7 @@ fn provider_projection_item_widget(item: &ProviderProjectionItem) -> Widget {
             }
             container.append(&provider_projection_text_widget(
                 &provider_projection_card_text(item),
+                open_file,
             ));
             container.upcast()
         }
@@ -5701,9 +5735,8 @@ fn provider_projection_status_css_class(status: ProviderProjectionStatus) -> &'s
     }
 }
 
-fn provider_projection_text_widget(text: &str) -> Widget {
-    let label = chat_text_label(text);
-    label.upcast()
+fn provider_projection_text_widget(text: &str, open_file: Option<OpenWorkspaceFile>) -> Widget {
+    chat_text_widget(text, open_file)
 }
 
 fn chat_text_label(text: &str) -> Label {
@@ -5715,6 +5748,163 @@ fn chat_text_label(text: &str) -> Label {
     label.set_xalign(0.0);
     label.set_hexpand(true);
     label
+}
+
+fn chat_text_widget(text: &str, open_file: Option<OpenWorkspaceFile>) -> Widget {
+    match open_file {
+        Some(open_file) if chat_text_contains_workspace_file_link(text) => {
+            chat_markdown_file_link_widget(text, open_file).upcast()
+        }
+        _ => chat_text_label(text).upcast(),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChatMarkdownFileLink {
+    label: String,
+    path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ChatMarkdownSegment {
+    Text(String),
+    File(ChatMarkdownFileLink),
+}
+
+fn chat_text_contains_workspace_file_link(text: &str) -> bool {
+    text.lines().any(|line| {
+        chat_markdown_file_segments(line)
+            .iter()
+            .any(|segment| matches!(segment, ChatMarkdownSegment::File(_)))
+    })
+}
+
+fn chat_markdown_file_link_widget(text: &str, open_file: OpenWorkspaceFile) -> GBox {
+    let root = GBox::new(Orientation::Vertical, 2);
+    root.add_css_class("chat-agent-text");
+    root.set_hexpand(true);
+    for line in text.lines() {
+        root.append(&chat_markdown_file_link_line_widget(
+            line,
+            open_file.clone(),
+        ));
+    }
+    root
+}
+
+fn chat_markdown_file_link_line_widget(line: &str, open_file: OpenWorkspaceFile) -> Widget {
+    let segments = chat_markdown_file_segments(line);
+    if !segments
+        .iter()
+        .any(|segment| matches!(segment, ChatMarkdownSegment::File(_)))
+    {
+        let label = Label::new(None);
+        label.set_markup(&chat_markdown_line_markup(line));
+        label.add_css_class("chat-agent-text");
+        label.set_selectable(true);
+        label.set_wrap(true);
+        label.set_xalign(0.0);
+        label.set_hexpand(true);
+        return label.upcast();
+    }
+
+    let row = GBox::new(Orientation::Horizontal, 4);
+    row.set_hexpand(true);
+    row.set_halign(Align::Fill);
+    let (prefix, inline_text) = chat_markdown_file_line_prefix(line);
+    if !prefix.is_empty() {
+        let label = Label::new(None);
+        label.set_markup(&pango_escape_text(&prefix));
+        label.add_css_class("chat-agent-text");
+        label.set_xalign(0.0);
+        row.append(&label);
+    }
+    for segment in chat_markdown_file_segments(&inline_text) {
+        match segment {
+            ChatMarkdownSegment::Text(text) if !text.is_empty() => {
+                let label = Label::new(None);
+                label.set_markup(&chat_inline_markdown_markup(&text));
+                label.add_css_class("chat-agent-text");
+                label.set_selectable(true);
+                label.set_wrap(true);
+                label.set_xalign(0.0);
+                row.append(&label);
+            }
+            ChatMarkdownSegment::Text(_) => {}
+            ChatMarkdownSegment::File(link) => {
+                row.append(&workspace_file_link_component(
+                    &link.label,
+                    &link.path,
+                    open_file.clone(),
+                ));
+            }
+        }
+    }
+    row.upcast()
+}
+
+fn chat_markdown_file_line_prefix(line: &str) -> (String, String) {
+    let trimmed = line.trim_start();
+    let indent = &line[..line.len() - trimmed.len()];
+    if let Some(item) = chat_markdown_bullet(trimmed) {
+        return (format!("{indent}• "), item.to_owned());
+    }
+    if let Some(quote) = trimmed.strip_prefix("> ") {
+        return (format!("{indent}| "), quote.to_owned());
+    }
+    (String::new(), line.to_owned())
+}
+
+fn chat_markdown_file_segments(text: &str) -> Vec<ChatMarkdownSegment> {
+    let mut segments = Vec::new();
+    let mut pending = String::new();
+    let mut rest = text;
+
+    while let Some(start) = rest.find('[') {
+        pending.push_str(&rest[..start]);
+        let after_open = &rest[start + 1..];
+        let Some((label, after_label)) = after_open.split_once("](") else {
+            pending.push('[');
+            rest = after_open;
+            continue;
+        };
+        let Some(close) = after_label.find(')') else {
+            pending.push('[');
+            rest = after_open;
+            continue;
+        };
+        let target = &after_label[..close];
+        let consumed = start + 1 + label.len() + 2 + target.len() + 1;
+        if let Some(path) = markdown_file_link_target(target) {
+            if !pending.is_empty() {
+                segments.push(ChatMarkdownSegment::Text(std::mem::take(&mut pending)));
+            }
+            let path = path.to_string_lossy().to_string();
+            segments.push(ChatMarkdownSegment::File(ChatMarkdownFileLink {
+                label: markdown_file_link_label(label, &path),
+                path,
+            }));
+            rest = &rest[consumed..];
+        } else {
+            pending.push('[');
+            rest = after_open;
+        }
+    }
+
+    pending.push_str(rest);
+    if !pending.is_empty() || segments.is_empty() {
+        segments.push(ChatMarkdownSegment::Text(pending));
+    }
+    segments
+}
+
+fn markdown_file_link_label(label: &str, path: &str) -> String {
+    let label = label.trim();
+    if label.is_empty() {
+        read_value_display_name(path)
+    } else {
+        label.to_owned()
+    }
 }
 
 fn chat_text_markup(text: &str) -> String {
@@ -6478,18 +6668,21 @@ fn extract_local_path(line: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn inline_events_widget(events: &[CodexInlineEvent]) -> Widget {
+fn inline_events_widget(
+    events: &[CodexInlineEvent],
+    open_file: Option<OpenWorkspaceFile>,
+) -> Widget {
     let group = GBox::new(Orientation::Vertical, 3);
     group.set_hexpand(true);
     group.set_margin_top(0);
     group.set_margin_bottom(0);
     for event in events {
-        group.append(&inline_event_widget(event));
+        group.append(&inline_event_widget(event, open_file.clone()));
     }
     group.upcast()
 }
 
-fn inline_event_widget(event: &CodexInlineEvent) -> Widget {
+fn inline_event_widget(event: &CodexInlineEvent, open_file: Option<OpenWorkspaceFile>) -> Widget {
     let root = GBox::new(Orientation::Vertical, 2);
     root.add_css_class("chat-inline-event");
     root.add_css_class(inline_event_type_css_class(event));
@@ -6501,6 +6694,9 @@ fn inline_event_widget(event: &CodexInlineEvent) -> Widget {
     root.set_margin_bottom(0);
 
     let expand_by_default = inline_event_expands_body_by_default(event);
+    let header = GBox::new(Orientation::Horizontal, 4);
+    header.set_hexpand(true);
+    header.set_halign(Align::Fill);
     let toggle = ToggleButton::new();
     toggle.add_css_class("chat-inline-event-chip");
     toggle.set_halign(Align::Start);
@@ -6508,20 +6704,36 @@ fn inline_event_widget(event: &CodexInlineEvent) -> Widget {
     toggle.set_margin_bottom(1);
     toggle.set_tooltip_text(Some(&inline_event_tooltip(event)));
     let toggle_label = Label::new(None);
-    toggle_label.set_markup(&inline_event_chip_markup(event, expand_by_default));
-    configure_inline_event_chip_label(
-        &toggle_label,
-        &inline_event_chip_label(event, expand_by_default),
-    );
+    if let (Some(path), Some(open_file)) = (event.path.as_ref(), open_file.clone()) {
+        let path = path.to_string_lossy().to_string();
+        let file_link =
+            workspace_file_link_component(&inline_event_chip_label(event, false), &path, open_file);
+        file_link.add_css_class(inline_event_type_css_class(event));
+        header.append(&file_link);
+        toggle_label.set_markup(&pango_escape_text("Details"));
+        configure_inline_event_chip_label(&toggle_label, "Details");
+    } else {
+        toggle_label.set_markup(&inline_event_chip_markup(event, expand_by_default));
+        configure_inline_event_chip_label(
+            &toggle_label,
+            &inline_event_chip_label(event, expand_by_default),
+        );
+    }
     toggle.set_child(Some(&toggle_label));
-    root.append(&toggle);
+    header.append(&toggle);
+    root.append(&header);
 
     let body_text = inline_event_body_text(event);
     let body_preview = inline_event_body_preview(event, &body_text);
     let body_container = GBox::new(Orientation::Vertical, 0);
     body_container.set_hexpand(true);
     body_container.set_margin_top(2);
-    set_inline_event_body_widget(&body_container, event, &body_preview.preview);
+    set_inline_event_body_widget(
+        &body_container,
+        event,
+        &body_preview.preview,
+        open_file.clone(),
+    );
     let body_scroll = ScrolledWindow::new();
     body_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
     body_scroll.set_max_content_height(INLINE_EVENT_BODY_MAX_HEIGHT);
@@ -6544,17 +6756,22 @@ fn inline_event_widget(event: &CodexInlineEvent) -> Widget {
         let toggle_label = toggle_label.clone();
         let collapsed_label = inline_event_chip_markup(&event, false);
         let expanded_label = inline_event_chip_markup(&event, true);
+        let open_file = open_file.clone();
         move |button| {
             if button.is_active() {
-                set_inline_event_body_widget(&body_container, &event, &full);
+                set_inline_event_body_widget(&body_container, &event, &full, open_file.clone());
                 body_revealer.set_visible(true);
                 body_revealer.set_reveal_child(true);
-                toggle_label.set_markup(&expanded_label);
+                if event.path.is_none() {
+                    toggle_label.set_markup(&expanded_label);
+                }
             } else {
-                set_inline_event_body_widget(&body_container, &event, &preview);
+                set_inline_event_body_widget(&body_container, &event, &preview, open_file.clone());
                 body_revealer.set_reveal_child(false);
                 body_revealer.set_visible(false);
-                toggle_label.set_markup(&collapsed_label);
+                if event.path.is_none() {
+                    toggle_label.set_markup(&collapsed_label);
+                }
             }
         }
     });
@@ -6562,22 +6779,23 @@ fn inline_event_widget(event: &CodexInlineEvent) -> Widget {
     root.upcast()
 }
 
-fn set_inline_event_body_widget(container: &GBox, event: &CodexInlineEvent, text: &str) {
+fn set_inline_event_body_widget(
+    container: &GBox,
+    event: &CodexInlineEvent,
+    text: &str,
+    open_file: Option<OpenWorkspaceFile>,
+) {
     clear_box(container);
-    container.append(&inline_event_body_widget(event, text));
+    container.append(&inline_event_body_widget(event, text, open_file));
 }
 
-fn inline_event_body_widget(event: &CodexInlineEvent, text: &str) -> Widget {
+fn inline_event_body_widget(
+    event: &CodexInlineEvent,
+    text: &str,
+    open_file: Option<OpenWorkspaceFile>,
+) -> Widget {
     match inline_event_body_render_kind(event, text) {
-        InlineEventBodyRenderKind::Markdown => {
-            let body = Label::new(None);
-            body.set_markup(&chat_text_markup(text));
-            body.add_css_class("chat-inline-event-body");
-            body.set_selectable(true);
-            body.set_wrap(true);
-            body.set_xalign(0.0);
-            body.upcast()
-        }
+        InlineEventBodyRenderKind::Markdown => chat_text_widget(text, open_file),
         InlineEventBodyRenderKind::Monospace => {
             let view = inline_event_text_view(text);
             view.upcast()
@@ -16403,6 +16621,25 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
         assert!(markup.contains("snake_case"));
         assert!(markup.contains("**unfinished"));
         assert!(!markup.contains("<b>unfinished</b>"));
+    }
+
+    #[test]
+    fn chat_markdown_file_segments_extract_workspace_file_links_only() {
+        let segments = chat_markdown_file_segments(
+            "See [session surface](crates/gtk-app/src/session_surface.rs:42) and [docs](https://example.com).",
+        );
+
+        assert_eq!(
+            segments,
+            vec![
+                ChatMarkdownSegment::Text("See ".to_owned()),
+                ChatMarkdownSegment::File(ChatMarkdownFileLink {
+                    label: "session surface".to_owned(),
+                    path: "crates/gtk-app/src/session_surface.rs".to_owned(),
+                }),
+                ChatMarkdownSegment::Text(" and [docs](https://example.com).".to_owned()),
+            ]
+        );
     }
 
     #[test]

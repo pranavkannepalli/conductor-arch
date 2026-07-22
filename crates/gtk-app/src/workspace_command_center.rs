@@ -1,3 +1,4 @@
+use crate::file_component::OpenWorkspaceFile;
 use adw::ToastOverlay;
 use archductor_core::agent_tools::launchable_provider_key;
 use archductor_core::archcar::protocol::{ArchcarInputKind, ArchcarRequest};
@@ -112,8 +113,6 @@ fn apply_workspace_phase_status(label: &Label, phase: Option<WorkspaceUiPhase>) 
         label.set_visible(false);
     }
 }
-
-type OpenWorkspaceFile = Rc<dyn Fn(&str)>;
 
 fn clone_external_thread_selection_controller(
     controller: &session_surface::ExternalThreadSelectionController,
@@ -1058,6 +1057,16 @@ fn ws_center_panel(
             chat_tabs.append(&add_tab_btn);
         })
     };
+    let open_file_proxy_target: Rc<RefCell<Option<OpenWorkspaceFile>>> =
+        Rc::new(RefCell::new(None));
+    let open_file_proxy: OpenWorkspaceFile = Rc::new({
+        let open_file_proxy_target = open_file_proxy_target.clone();
+        move |rel_path: &str| {
+            if let Some(open_file) = open_file_proxy_target.borrow().as_ref().cloned() {
+                open_file(rel_path);
+            }
+        }
+    });
     let chat_widget = session_surface::agent_session_panel(
         db_path.to_path_buf(),
         &ws.name,
@@ -1134,6 +1143,7 @@ fn ws_center_panel(
                 }))
             },
         }),
+        Some(open_file_proxy),
         toast_manager.clone(),
     );
     content.add_named(&chat_widget, Some("chat"));
@@ -1461,6 +1471,7 @@ fn ws_center_panel(
         );
         sync_workspace_file_tabs(file_tab_buttons_ref.as_ref(), Some(&tab_key));
     });
+    *open_file_proxy_target.borrow_mut() = Some(open_file.clone());
 
     let initial_threads = known_threads.borrow().clone();
     let initial_selected_thread = *selected_thread.borrow();
@@ -3226,6 +3237,7 @@ fn agents_panel(
         false,
         None,
         None,
+        None,
         toast_manager.clone(),
     ));
     panel.append(&session_box);
@@ -4384,6 +4396,7 @@ fn chat_terminal_split(
         false,
         None,
         None,
+        None,
         toast_manager.clone(),
     ));
     for chat in history::sessions_for_workspace_path(db_path, &ws.path)
@@ -4454,6 +4467,7 @@ fn parallel_agents_panel(
             refresh_chat.refresh(RefreshScope::History);
         },
         false,
+        None,
         None,
         None,
         toast_manager.clone(),
