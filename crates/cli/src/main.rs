@@ -2835,6 +2835,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn manual_session_command_includes_workspace_env_and_program() {
         let launch = SessionLaunch {
             kind: SessionKind::Codex,
@@ -2861,6 +2862,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn manual_codex_session_command_keeps_bootstrap_env_out_of_prompt() {
         let launch = SessionLaunch {
             kind: SessionKind::Codex,

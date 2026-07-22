@@ -113,6 +113,27 @@ mod runtime_tests {
 
         assert_eq!(*events.borrow(), ["stop", "build", "start"]);
     }
+
+    #[test]
+    fn reload_reports_build_and_restart_failures_together() {
+        struct FailingRestart;
+        impl GtkReloadControl for FailingRestart {
+            fn stop_gtk(&mut self) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn start_gtk(&mut self) -> anyhow::Result<()> {
+                anyhow::bail!("restart exploded")
+            }
+        }
+
+        let error = reload_gtk_after_build(&mut FailingRestart, || anyhow::bail!("build exploded"))
+            .unwrap_err();
+
+        assert_eq!(
+            format!("{error:#}"),
+            "GTK build failed (build exploded) and GTK restart failed (restart exploded)"
+        );
+    }
 }
 
 pub trait GtkReloadControl {
@@ -137,8 +158,12 @@ where
 {
     session.stop_gtk()?;
     if let Err(error) = build() {
-        let _ = session.start_gtk();
-        return Err(error);
+        return match session.start_gtk() {
+            Ok(()) => Err(error),
+            Err(restart_error) => Err(anyhow::anyhow!(
+                "GTK build failed ({error:#}) and GTK restart failed ({restart_error:#})"
+            )),
+        };
     }
     session.start_gtk()
 }

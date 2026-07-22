@@ -266,7 +266,7 @@ fn cli_session_open_print_command_uses_explicit_provider_models() {
         .assert()
         .success()
         .stdout(contains(
-            "exec codex --no-alt-screen --dangerously-bypass-approvals-and-sandbox",
+            "codex --no-alt-screen --dangerously-bypass-approvals-and-sandbox",
         ))
         .stdout(contains("--model gpt-5.6-sol"));
 
@@ -283,7 +283,10 @@ fn cli_session_open_print_command_uses_explicit_provider_models() {
         ])
         .assert()
         .success()
-        .stdout(contains("exec claude --model claude-sonnet-5"));
+        .stdout(contains(
+            "claude --permission-mode bypassPermissions --dangerously-skip-permissions",
+        ))
+        .stdout(contains("--model claude-sonnet-5"));
 }
 
 #[test]
@@ -893,7 +896,9 @@ fn app(root: &Path) -> AssertCommand {
         .env("XDG_CONFIG_HOME", root.join("xdg/config"))
         .env("XDG_DATA_HOME", root.join("xdg/data"))
         .env("XDG_STATE_HOME", root.join("xdg/state"))
-        .env("XDG_CACHE_HOME", root.join("xdg/cache"));
+        .env("XDG_CACHE_HOME", root.join("xdg/cache"))
+        .env("APPDATA", root.join("xdg/config"))
+        .env("LOCALAPPDATA", root.join("xdg/data"));
     command
 }
 

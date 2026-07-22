@@ -36,14 +36,95 @@ fn publish_build_uses_ci_verified_release_packaging() {
             .join(font)
             .is_file());
     }
-    for manifest in [&nfpm, &flatpak, &aur, &nix, &homebrew, &publish, &ci] {
+    for (name, manifest, icon_tokens, font_tokens) in [
+        (
+            "nfpm",
+            &nfpm,
+            vec![
+                "src: packaging/assets/archductor.png",
+                "dst: /usr/share/icons/hicolor/256x256/apps/archductor.png",
+            ],
+            vec![
+                "src: packaging/assets/fonts",
+                "dst: /usr/share/fonts/archductor",
+            ],
+        ),
+        (
+            "flatpak",
+            &flatpak,
+            vec![
+                "packaging/assets/archductor.png",
+                "/app/share/icons/hicolor/256x256/apps/ai.perceo.Archductor.png",
+            ],
+            vec![
+                "packaging/assets/fonts/*.ttf",
+                "/app/share/fonts/archductor/",
+            ],
+        ),
+        (
+            "aur",
+            &aur,
+            vec![
+                "packaging/assets/archductor.png",
+                "usr/share/icons/hicolor/256x256/apps/archductor.png",
+            ],
+            vec!["packaging/assets/fonts", "usr/share/fonts/archductor"],
+        ),
+        (
+            "nix",
+            &nix,
+            vec![
+                "packaging/assets/archductor.png",
+                "$out/share/icons/hicolor/256x256/apps/archductor.png",
+            ],
+            vec!["packaging/assets/fonts", "$out/share/fonts/archductor"],
+        ),
+        (
+            "homebrew",
+            &homebrew,
+            vec![
+                "(share/\"icons/hicolor/256x256/apps\").install \"packaging/assets/archductor.png\"",
+            ],
+            vec![
+                "(share/\"fonts/archductor\").install Dir[\"packaging/assets/fonts/*.{ttf,otf,txt}\"]",
+            ],
+        ),
+        (
+            "publish",
+            &publish,
+            vec![
+                "packaging/assets/archductor.png",
+                "$BUNDLE/share/icons/hicolor/256x256/apps/archductor.png",
+                "Copy-Item packaging\\assets\\archductor.png $bundle",
+            ],
+            vec![
+                "packaging/assets/fonts/*.ttf",
+                "$BUNDLE/share/fonts/archductor/",
+                "Copy-Item packaging\\assets\\fonts \"$bundle\\fonts\" -Recurse",
+            ],
+        ),
+        (
+            "ci",
+            &ci,
+            vec![
+                "packaging/assets/archductor.png",
+                "$BUNDLE/share/icons/hicolor/256x256/apps/archductor.png",
+                "Copy-Item packaging\\assets\\archductor.png $bundle",
+            ],
+            vec![
+                "packaging/assets/fonts/*.ttf",
+                "$BUNDLE/share/fonts/archductor/",
+                "Copy-Item packaging\\assets\\fonts \"$bundle\\fonts\" -Recurse",
+            ],
+        ),
+    ] {
         assert!(
-            manifest.contains("archductor.png"),
-            "every install surface should package the application icon"
+            icon_tokens.iter().all(|token| manifest.contains(token)),
+            "{name} should install the application icon from the expected source to the expected destination"
         );
         assert!(
-            manifest.contains("fonts"),
-            "every install surface should package the font pack"
+            font_tokens.iter().all(|token| manifest.contains(token)),
+            "{name} should install the font pack from the expected source to the expected destination"
         );
     }
 
