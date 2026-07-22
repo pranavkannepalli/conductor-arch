@@ -19,13 +19,21 @@ they will no longer construct their existing top-level page headers.
 
 ## Layout
 
-The app bar has three stable regions:
+The app bar has three stable regions whose widths track the three visible app
+columns:
 
-1. A leading navigation region containing Back and Forward buttons. Button
-   sensitivity follows the existing navigation history.
-2. A flexible page-context region.
-3. A trailing action region, followed by native GTK title buttons on platforms
-   where the app bar is the window title bar.
+1. A sidebar region containing Back and Forward plus sidebar controls. Its
+   width and collapsed state track the application sidebar.
+2. A workspace-center region containing page/workspace identity, repository,
+   and branch context. Its width tracks the start pane of the workspace split.
+3. A review region containing PR/status and trailing actions. Its width and
+   visibility track the workspace review pane, followed by GTK title buttons.
+
+The region separators align exactly with the sidebar and workspace pane
+dividers below them. The bar therefore reads as the natural upward extension
+of the application's columns, not as an independent toolbar floating above
+them. On non-workspace pages, the page header spans the center and review
+regions while the sidebar region remains aligned.
 
 For a workspace, the context region shows the workspace name and the existing
 repository/branch identity. The trailing region contains the controls currently
@@ -60,19 +68,19 @@ bar must not introduce its own independent source of workspace truth.
 
 ## Platform Behavior
 
-On Linux and other non-Windows GTK targets, the shared app bar is installed as
-the GTK window title bar, retaining draggable window movement and GTK title
-buttons.
+The shared app bar is the sole title bar on Linux and Windows. It provides GTK
+title buttons and draggable window movement on both platforms. Archductor must
+not render a second native or GTK caption above it, and no separate top bar may
+show only the text “Archductor.”
 
-Windows retains native decorated window chrome, as required by the current
-platform implementation. The same shared app bar is rendered as the first row
-inside the application content there. It has identical content and sizing but
-does not replace the native Windows caption.
+The window title remains available to the operating system for task switchers
+and accessibility metadata, but it is not rendered as an additional caption
+inside the window.
 
 ## Page Changes
 
 - Dashboard removes its in-page dashboard header and contributes its title,
-  subtitle, and project filter context to the shared bar.
+  subtitle, and project filter context across the center/review bar regions.
 - Projects removes its in-page page header and contributes its title and
   subtitle.
 - Settings removes its in-page page header and contributes its title,
@@ -80,8 +88,8 @@ does not replace the native Windows caption.
 - History removes its in-page page header and contributes its title, subtitle,
   and Workspaces/Chats tabs.
 - Workspace removes the repository/branch header row from the center panel and
-  contributes workspace identity, repository/branch context, PR/status, and
-  existing header actions to the shared bar.
+  contributes workspace identity and repository/branch context to the center
+  region, with PR/status and existing header actions in the review region.
 - Workspace creation and failure states use the same workspace app-bar context;
   their body retains only progress, error, and recovery controls.
 
@@ -102,7 +110,8 @@ Written GTK tests will cover:
 - workspace identity, branch, status, and PR variants;
 - equal-height/single-row styling contracts and ellipsizing;
 - removal of legacy in-page header construction; and
-- Linux titlebar versus Windows native-decoration placement.
+- aligned sidebar/center/review region widths and collapsed states; and
+- one custom titlebar on both Linux and Windows, with no duplicate caption.
 
 Verification will run focused GTK tests first, then the complete GTK package
 tests and build. A GTK runtime smoke will navigate Dashboard, Projects,
