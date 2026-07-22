@@ -480,15 +480,18 @@ impl WorkspaceRunConsoleTerminalState {
 
     fn display_text(&self) -> &str {
         if self.transcript.is_empty() {
-            "Enter a command above."
+            "$ "
         } else {
             &self.transcript
         }
     }
 
     fn append_command(&mut self, command: &str) {
-        self.transcript
-            .push_str(&format!("\n$ {command}\n[running]\n"));
+        self.append_submitted_input(command);
+    }
+
+    fn append_submitted_input(&mut self, input: &str) {
+        self.transcript.push_str(&format!("$ {input}\n"));
     }
 
     fn append_result(&mut self, result: &str) {
@@ -515,10 +518,9 @@ impl WorkspaceRunConsoleTerminalConnection {
     }
 
     fn write(&mut self, input: &str) -> anyhow::Result<()> {
-        let input = input.trim_end_matches(['\r', '\n']).trim();
-        if input.is_empty() {
+        let Some(input) = normalize_terminal_input_for_send(input) else {
             return Ok(());
-        }
+        };
         let Some(record) = latest_running_runtime_shell(&self.database_path, &self.workspace_name)
         else {
             return Err(anyhow::anyhow!(
@@ -529,7 +531,7 @@ impl WorkspaceRunConsoleTerminalConnection {
             archductor_core::paths::AppPaths::from_env(),
             ArchcarRequest::SendInput {
                 session_id: record.id,
-                input: input.to_owned(),
+                input,
                 visible_input: None,
                 kind: ArchcarInputKind::ControlCommand,
                 delivery: archductor_core::archcar::protocol::ArchcarInputDelivery::Auto,
@@ -537,6 +539,11 @@ impl WorkspaceRunConsoleTerminalConnection {
         );
         Ok(())
     }
+}
+
+fn normalize_terminal_input_for_send(input: &str) -> Option<String> {
+    let input = input.trim_end_matches(['\r', '\n']);
+    (!input.trim().is_empty()).then(|| input.to_owned())
 }
 
 fn runtime_record_is_shell(record: &ProcessRecord) -> bool {
@@ -2323,13 +2330,18 @@ fn workspace_terminal_tab_view(
     panel.append(&heading);
 
     let command_row = make_action_row();
+    let prompt_label = Label::new(Some("$"));
+    prompt_label.add_css_class("ws-terminal-prompt");
+    prompt_label.set_xalign(0.0);
     let command_entry = Entry::new();
-    command_entry.set_placeholder_text(Some("Run terminal command"));
+    command_entry.set_placeholder_text(Some("type shell command"));
     command_entry.set_hexpand(true);
-    let run_btn = text_button("Run");
+    command_entry.add_css_class("ws-terminal-entry");
+    let run_btn = text_button("Send");
     run_btn.add_css_class("suggested-action");
     let clear_btn = text_button("Clear");
     clear_btn.add_css_class("secondary-action");
+    command_row.append(&prompt_label);
     command_row.append(&command_entry);
     command_row.append(&run_btn);
     command_row.append(&clear_btn);
@@ -2374,10 +2386,10 @@ fn workspace_terminal_tab_view(
     let terminals_for_run = run_console_terminals.clone();
     let command_entry_for_run = command_entry.clone();
     let run_command = Rc::new(move || {
-        let command = command_entry_for_run.text().trim().to_owned();
-        if command.is_empty() {
+        let command = command_entry_for_run.text().to_string();
+        let Some(send_input) = normalize_terminal_input_for_send(&command) else {
             return;
-        }
+        };
         let transcript = {
             let mut states = state_for_run.borrow_mut();
             let Some(state) = states.get_mut(&workspace_for_run) else {
@@ -2404,12 +2416,13 @@ fn workspace_terminal_tab_view(
         let Some(connection) = terminals.get_mut(&key) else {
             return;
         };
-        let write_result = connection.write(&(command + "\n"));
+        let write_result = connection.write(&(send_input.clone() + "\n"));
         let updated_transcript =
             if let Some(state) = state_for_run.borrow_mut().get_mut(&workspace_for_run) {
                 if let Some(terminal) = state.terminal_by_name_mut(&tab_for_run) {
+                    terminal.append_submitted_input(&send_input);
                     match write_result {
-                        Ok(()) => terminal.append_result("[sent to runtime shell]\n"),
+                        Ok(()) => {}
                         Err(err) => {
                             terminal.append_result(&format!("[terminal send paused]\n{err:#}\n"))
                         }
@@ -2442,7 +2455,7 @@ fn workspace_terminal_tab_view(
                 terminal.clear_transcript();
             }
         }
-        buffer_for_clear.set_text("Enter a command above.");
+        buffer_for_clear.set_text("$ ");
     });
 
     panel
@@ -2456,7 +2469,7 @@ fn ensure_workspace_terminal_session(
     db_path: &Path,
     workspace_name: &str,
     tab_name: &str,
-    run_console_states: &RunConsoleStateStore,
+    _run_console_states: &RunConsoleStateStore,
     run_console_terminals: &RunConsoleTerminalStore,
 ) {
     let key = run_console_terminal_key(workspace_name, tab_name);
@@ -2468,15 +2481,6 @@ fn ensure_workspace_terminal_session(
         return;
     };
     run_console_terminals.borrow_mut().insert(key, connection);
-    if let Some(state) = run_console_states.borrow_mut().get_mut(workspace_name) {
-        if let Some(terminal) = state.terminal_by_name_mut(tab_name) {
-            if terminal.transcript.is_empty() {
-                terminal
-                    .transcript
-                    .push_str("[terminal start requested through archcar]\n");
-            }
-        }
-    }
 }
 
 fn spawn_workspace_terminal_session(
@@ -9406,8 +9410,32 @@ mod tests {
         terminal.append_result("[exit 0]\n");
 
         assert!(terminal.transcript.contains("$ cargo test"));
-        assert!(terminal.transcript.contains("[running]"));
+        assert!(!terminal.transcript.contains("[running]"));
         assert!(terminal.transcript.contains("[exit 0]"));
+    }
+
+    #[test]
+    fn run_console_terminal_empty_state_renders_shell_prompt() {
+        let terminal = WorkspaceRunConsoleTerminalState::new(1);
+
+        assert_eq!(terminal.display_text(), "$ ");
+    }
+
+    #[test]
+    fn run_console_terminal_appends_submitted_command_as_prompt_line() {
+        let mut terminal = WorkspaceRunConsoleTerminalState::new(1);
+        terminal.append_submitted_input("cargo test");
+
+        assert_eq!(terminal.transcript, "$ cargo test\n");
+    }
+
+    #[test]
+    fn run_console_terminal_input_preserves_user_spacing_except_newlines() {
+        assert_eq!(
+            normalize_terminal_input_for_send("  printf 'ok'  \n"),
+            Some("  printf 'ok'  ".to_owned())
+        );
+        assert_eq!(normalize_terminal_input_for_send("   \n"), None);
     }
 
     #[test]

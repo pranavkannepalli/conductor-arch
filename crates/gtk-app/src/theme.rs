@@ -2140,6 +2140,19 @@ row:hover .ws-folder-name {
 .ws-run-output-scroll {
     background-color: #111111;
 }
+.ws-terminal-prompt {
+    color: #d8d8d8;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-size: 13px;
+    padding: 0 2px 0 4px;
+}
+.ws-terminal-entry {
+    background-color: #111111;
+    border: 1px solid #303030;
+    color: #e4e4e4;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-size: 13px;
+}
 
 /* ── Minimal sidebar search ── */
 .sidebar-search-minimal {
