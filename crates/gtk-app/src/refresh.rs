@@ -206,6 +206,7 @@ pub struct RefreshHub {
     workspace_runtime: Rc<RefCell<Option<RefreshEventHandler>>>,
     workspace_review: Rc<RefCell<Option<RefreshEventHandler>>>,
     workspace_nav_row: Rc<RefCell<Option<RefreshEventHandler>>>,
+    workspace_app_bar: Rc<RefCell<Option<RefreshHandler>>>,
     metrics: Rc<RefreshMetrics>,
 }
 
@@ -254,6 +255,10 @@ impl RefreshHub {
         *self.workspace_nav_row.borrow_mut() = Some(Rc::new(handler));
     }
 
+    pub fn set_workspace_app_bar(&self, handler: impl Fn() + 'static) {
+        *self.workspace_app_bar.borrow_mut() = Some(Rc::new(handler));
+    }
+
     pub fn refresh_event(&self, event: RefreshEvent) {
         match event {
             RefreshEvent::Manual => self.refresh(RefreshScope::All),
@@ -269,12 +274,14 @@ impl RefreshHub {
             RefreshEvent::WorkspaceSelectionChanged => {
                 self.refresh(RefreshScope::Sidebar);
                 self.refresh_workspace(WorkspaceRefreshTarget::Shell);
+                self.refresh_workspace_app_bar();
             }
             RefreshEvent::WorkspaceInventoryChanged => {
                 self.refresh(RefreshScope::Sidebar);
                 self.refresh(RefreshScope::Dashboard);
                 self.refresh(RefreshScope::History);
                 self.refresh_workspace(WorkspaceRefreshTarget::Shell);
+                self.refresh_workspace_app_bar();
             }
             RefreshEvent::WorkspaceMetadataChanged { .. } => {
                 self.run_event(
@@ -282,6 +289,7 @@ impl RefreshHub {
                     &self.workspace_nav_row,
                     &event,
                 );
+                self.refresh_workspace_app_bar();
             }
             RefreshEvent::WorkspaceRuntimeChanged { .. } | RefreshEvent::TerminalChanged { .. } => {
                 self.refresh(RefreshScope::Sidebar);
@@ -300,6 +308,7 @@ impl RefreshHub {
                 self.refresh(RefreshScope::Dashboard);
                 self.refresh(RefreshScope::History);
                 self.refresh_workspace_event(WorkspaceRefreshTarget::Review, &event);
+                self.refresh_workspace_app_bar();
             }
             RefreshEvent::WorkspaceChatMessagesChanged { .. } => {
                 self.refresh_workspace_event(WorkspaceRefreshTarget::ChatSurface, &event);
@@ -420,6 +429,13 @@ impl RefreshHub {
         if let Some(handler) = handler {
             self.metrics.record(target);
             handler(event);
+        }
+    }
+
+    fn refresh_workspace_app_bar(&self) {
+        let handler = self.workspace_app_bar.borrow().as_ref().cloned();
+        if let Some(handler) = handler {
+            handler();
         }
     }
 
@@ -655,6 +671,28 @@ mod tests {
         });
 
         assert_eq!(counts.values(), (0, 1, 0, 1, 0, 0, 0, 0, 1, 0));
+    }
+
+    #[test]
+    fn workspace_app_bar_refreshes_for_review_metadata_and_inventory_events() {
+        let hub = RefreshHub::default();
+        let refresh_count = Rc::new(Cell::new(0));
+        let refresh_count_for_handler = Rc::clone(&refresh_count);
+        hub.set_workspace_app_bar(move || {
+            refresh_count_for_handler.set(refresh_count_for_handler.get() + 1)
+        });
+
+        hub.refresh_event(RefreshEvent::WorkspaceReviewChanged {
+            workspace: "demo".to_owned(),
+        });
+        hub.refresh_event(RefreshEvent::WorkspaceMetadataChanged {
+            old_workspace: "demo".to_owned(),
+            workspace: "renamed-demo".to_owned(),
+            branch: Some("feature/renamed".to_owned()),
+        });
+        hub.refresh_event(RefreshEvent::WorkspaceInventoryChanged);
+
+        assert_eq!(refresh_count.get(), 3);
     }
 
     #[test]

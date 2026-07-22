@@ -142,6 +142,8 @@ impl AppBar {
         let pr_label = compact_label("app-bar-pr-status");
         let workspace_context = GBox::new(Orientation::Horizontal, 8);
         workspace_context.add_css_class("app-bar-context");
+        workspace_context.add_css_class("app-bar-workspace-context");
+        workspace_context.set_vexpand(false);
         workspace_context.append(&workspace_name);
         workspace_context.append(&repository_name);
         workspace_context.append(&branch_name);
@@ -356,6 +358,8 @@ pub(crate) fn build_workspace_app_bar_context(
 
 fn workspace_header_actions(collapse_sidebar: Rc<dyn Fn()>) -> GBox {
     let actions = GBox::new(Orientation::Horizontal, 6);
+    actions.add_css_class("app-bar-workspace-actions");
+    actions.set_vexpand(false);
     actions.set_halign(Align::End);
     actions.append(&crate::session_surface::editor_picker_button());
     let sidebar = icon_button("sidebar-hide-symbolic", "Collapse right sidebar");
@@ -463,6 +467,17 @@ mod tests {
         assert_eq!(context.branch_name.as_deref(), Some("feature/equal-height"));
         assert_eq!(context.pr_label.as_deref(), Some("PR #42 open"));
         assert_eq!(context.pr_css_class, Some("ws-pr-status-muted"));
+
+        rusqlite::Connection::open(&database_path)
+            .unwrap()
+            .execute(
+                "UPDATE pull_requests SET state = 'merged', updated_at = 'later' WHERE workspace_id = ?1",
+                [workspace.id],
+            )
+            .unwrap();
+        let merged = build_workspace_app_bar_context(&store, &workspace);
+        assert_eq!(merged.pr_label.as_deref(), Some("PR #42 merged"));
+        assert_eq!(merged.pr_css_class, Some("ws-pr-status-merged"));
     }
 
     #[test]
@@ -541,5 +556,25 @@ mod tests {
         assert!(production.contains("Rc::new(AppBar::new("));
         assert!(production.contains("window.connect_destroy(move |_|"));
         assert!(production.contains("app_bar_lifetime"));
+    }
+
+    #[test]
+    fn workspace_app_bar_keeps_one_compact_horizontal_identity_row() {
+        let source = include_str!("app_bar.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source exists");
+        let constructor = production
+            .split("impl AppBar {")
+            .nth(1)
+            .and_then(|source| source.split("pub(crate) fn widget").next())
+            .expect("app bar constructor exists");
+
+        assert!(constructor.contains("GBox::new(Orientation::Horizontal, 8)"));
+        assert!(constructor.contains("app-bar-workspace-context"));
+        assert!(constructor.contains("workspace_context.set_vexpand(false)"));
+        assert!(production.contains("app-bar-workspace-actions"));
+        assert!(production.contains("actions.set_vexpand(false)"));
     }
 }

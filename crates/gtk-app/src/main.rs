@@ -957,6 +957,10 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     );
 
     refresh_hub.set_dashboard(refresh_dashboard.clone());
+    refresh_hub.set_workspace_app_bar({
+        let app_bar = Rc::clone(&app_bar);
+        move || app_bar.refresh_workspace()
+    });
     refresh_hub.set_workspace(refresh_workspace_detail.clone());
     refresh_hub.set_projects({
         let refresh_projects = refresh_projects.clone();
