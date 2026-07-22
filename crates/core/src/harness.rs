@@ -216,7 +216,7 @@ pub fn build_bootstrap_payload(
     }
 }
 
-fn codex_trust_level_config(cwd: &Path) -> String {
+pub(crate) fn codex_trust_level_config(cwd: &Path) -> String {
     let escaped = cwd
         .to_string_lossy()
         .replace('\\', "\\\\")

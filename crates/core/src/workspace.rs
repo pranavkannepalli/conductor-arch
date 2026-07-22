@@ -16744,7 +16744,7 @@ working_directory = "apps/worker"
             .unwrap();
 
         let codex_cwd = launch.cwd.to_str().unwrap().to_owned();
-        let codex_trust_arg = format!(r#"projects."{codex_cwd}".trust_level="trusted""#);
+        let codex_trust_arg = harness::codex_trust_level_config(&launch.cwd);
         assert_eq!(&launch.program, &PathBuf::from("codex"));
         assert_eq!(
             &launch.args,
@@ -16765,8 +16765,6 @@ working_directory = "apps/worker"
                 r#"personality="pragmatic""#,
                 "-c",
                 r#"service_tier="fast""#,
-                "--ask-for-approval",
-                "on-request",
                 "--enable",
                 "goals",
                 "ship the fix",
@@ -16775,7 +16773,7 @@ working_directory = "apps/worker"
         assert_eq!(
             launch.harness_metadata.as_deref(),
             Some(
-                "harness=codex;plan=true;fast=true;model=gpt-5.6-sol;approval=ask;reasoning=high;effort=medium;personality=pragmatic;goals=ship the fix;skills=tests"
+                "harness=codex;plan=true;fast=true;model=gpt-5.6-sol;approval=never;reasoning=high;effort=medium;personality=pragmatic;goals=ship the fix;skills=tests"
             )
         );
         assert!(launch.session_resume_id.is_none());
@@ -16836,7 +16834,8 @@ working_directory = "apps/worker"
             &launch.args,
             &vec![
                 "--permission-mode",
-                "plan",
+                "bypassPermissions",
+                "--dangerously-skip-permissions",
                 "--model",
                 "claude-fable-5",
                 "--effort",
@@ -16895,8 +16894,13 @@ working_directory = "apps/worker"
         assert_eq!(
             launch.args,
             vec![
+                "--permission-mode".to_owned(),
+                "bypassPermissions".to_owned(),
+                "--dangerously-skip-permissions".to_owned(),
                 "--resume".to_owned(),
                 "019ef6b1-8a1b-78f0-ae17-0db46572decf".to_owned(),
+                "--append-system-prompt".to_owned(),
+                "[archductor bootstrap for claude]\napproval mode: never".to_owned(),
             ]
         );
         assert_eq!(
@@ -16956,10 +16960,7 @@ working_directory = "apps/worker"
                 "-c".to_owned(),
                 "check_for_update_on_startup=false".to_owned(),
                 "-c".to_owned(),
-                format!(
-                    r#"projects."{}".trust_level="trusted""#,
-                    launch.cwd.to_string_lossy()
-                ),
+                harness::codex_trust_level_config(&launch.cwd),
                 "-C".to_owned(),
                 launch.cwd.to_string_lossy().to_string(),
                 "-c".to_owned(),
@@ -16968,8 +16969,6 @@ working_directory = "apps/worker"
                 r#"personality="pragmatic""#.to_owned(),
                 "-c".to_owned(),
                 r#"service_tier="fast""#.to_owned(),
-                "--ask-for-approval".to_owned(),
-                "on-request".to_owned(),
                 "--enable".to_owned(),
                 "goals".to_owned(),
                 "ship the fix".to_owned(),
@@ -16980,7 +16979,7 @@ working_directory = "apps/worker"
         assert_eq!(
             launch.harness_metadata.as_deref(),
             Some(
-                "harness=codex;fast=true;approval=ask;reasoning=high;personality=pragmatic;goals=ship the fix"
+                "harness=codex;fast=true;approval=never;reasoning=high;personality=pragmatic;goals=ship the fix"
             )
         );
         assert!(launch.session_resume_id.is_none());
