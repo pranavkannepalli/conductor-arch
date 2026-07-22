@@ -56,6 +56,7 @@ use toast::{ToastManager, ToastMessage};
 
 const APP_ID: &str = "io.github.pranavkannepalli.archductor";
 const APP_SIDEBAR_DEFAULT_WIDTH_PX: f64 = 320.0;
+pub(crate) const COLUMN_HEADER_HEIGHT: i32 = 52;
 static NEXT_COLOR_SCOPE_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -76,6 +76,8 @@ pub(crate) fn build_app_sidebar(
 
     let chrome_row = GBox::new(Orientation::Horizontal, 4);
     chrome_row.add_css_class("sidebar-chrome");
+    chrome_row.set_height_request(crate::COLUMN_HEADER_HEIGHT);
+    chrome_row.set_vexpand(false);
 
     let chrome_spacer = GBox::new(Orientation::Horizontal, 0);
     chrome_spacer.set_hexpand(true);

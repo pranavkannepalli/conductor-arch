@@ -3545,6 +3545,8 @@ pub(crate) fn session_header_row_with_branch_label(
     let header = GBox::new(Orientation::Horizontal, 10);
     header.add_css_class("chat-header-row");
     header.set_hexpand(true);
+    header.set_height_request(crate::COLUMN_HEADER_HEIGHT);
+    header.set_vexpand(false);
 
     let breadcrumb = GBox::new(Orientation::Horizontal, 8);
     breadcrumb.set_hexpand(true);
