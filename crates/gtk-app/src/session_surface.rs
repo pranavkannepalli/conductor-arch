@@ -4351,7 +4351,15 @@ fn interrupted_notice_sequence(
 }
 
 fn chat_message_is_renderable(message: &ChatMessageRecord) -> bool {
-    message.role != "user" || !message.content.trim().is_empty()
+    if message.role == "user" && message.content.trim().is_empty() {
+        return false;
+    }
+    !provider_event_message_is_owned_by_projection(message)
+}
+
+fn provider_event_message_is_owned_by_projection(message: &ChatMessageRecord) -> bool {
+    message.source == "provider_event"
+        && !matches!(message.role.as_str(), "user" | "agent" | "assistant")
 }
 
 fn chat_event_is_renderable(event: &ChatEventRecord) -> bool {
@@ -14970,6 +14978,50 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
         assert!(matches!(timeline[0], ChatTimelineItem::Message(_)));
         assert!(matches!(
             timeline[1],
+            ChatTimelineItem::ProviderProjection(_)
+        ));
+    }
+
+    #[test]
+    fn chat_render_ignores_provider_event_action_messages_owned_by_projection() {
+        let messages = vec![ChatMessageRecord {
+            id: -1,
+            thread_id: 7,
+            role: "tool".to_owned(),
+            content: "Bash\ncargo test passed".to_owned(),
+            source: "provider_event".to_owned(),
+            timeline_seq: None,
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+        }];
+        let provider_item = ProviderProjectionItem {
+            id: "codex:thread-7:tool-1".to_owned(),
+            sequence: 2,
+            timeline_seq: None,
+            category: ProviderProjectionCategory::NativeTool,
+            render_class: ProjectionRenderClass::ToolCard,
+            title: "Bash".to_owned(),
+            body: "cargo test passed".to_owned(),
+            status: ProviderProjectionStatus::Complete,
+            stream_state: ProviderProjectionStreamState::Complete,
+            parent_id: None,
+            nested_thread_id: None,
+            raw_payload: None,
+            inspectable: false,
+        };
+
+        let timeline = chat_structured_items_for_render(
+            messages,
+            Vec::new(),
+            vec![provider_item],
+            Vec::new(),
+            Vec::new(),
+            None,
+        );
+
+        assert_eq!(timeline.len(), 1);
+        assert!(matches!(
+            timeline[0],
             ChatTimelineItem::ProviderProjection(_)
         ));
     }
