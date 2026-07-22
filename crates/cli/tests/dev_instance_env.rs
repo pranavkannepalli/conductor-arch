@@ -95,6 +95,7 @@ fn dev_instance_env_imports_the_registered_windows_path() {
     let output = dev_env_command(&repo_root.join("scripts/dev-instance-env.sh"))
         .env("HOME", temp.path().join("msys-home"))
         .env("APPDATA", temp.path().join("AppData").join("Roaming"))
+        .env("UCRT64_ROOT", temp.path().join("missing-ucrt64"))
         .env("ARCHDUCTOR_WINDOWS_REGISTERED_PATH", tool_dir.as_os_str())
         .env("ARCHDUCTOR_DEV_HOME", temp.path().join("dev-home"))
         .arg("fresh-tool")
@@ -107,6 +108,51 @@ fn dev_instance_env_imports_the_registered_windows_path() {
         "dev instance env should import registered Windows PATH entries: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[cfg(windows)]
+#[test]
+fn dev_instance_env_print_continues_without_the_windows_gtk_toolchain() {
+    let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let temp = tempfile::tempdir().unwrap();
+
+    let output = dev_env_command(&repo_root.join("scripts/dev-instance-env.sh"))
+        .env("HOME", temp.path().join("msys-home"))
+        .env("APPDATA", temp.path().join("AppData").join("Roaming"))
+        .env("UCRT64_ROOT", temp.path().join("missing-ucrt64"))
+        .env("ARCHDUCTOR_DEV_HOME", temp.path().join("dev-home"))
+        .env_remove("CARGO_BUILD_TARGET")
+        .arg("--print")
+        .output()
+        .expect("print dev instance env without GTK toolchain");
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("ARCHDUCTOR_DEV_INSTANCE="));
+    assert!(!stdout.contains("x86_64-pc-windows-gnu"));
+}
+
+#[cfg(windows)]
+#[test]
+fn dev_instance_env_run_dev_requires_the_windows_gtk_toolchain() {
+    let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let temp = tempfile::tempdir().unwrap();
+
+    let output = dev_env_command(&repo_root.join("scripts/dev-instance-env.sh"))
+        .env("HOME", temp.path().join("msys-home"))
+        .env("APPDATA", temp.path().join("AppData").join("Roaming"))
+        .env("UCRT64_ROOT", temp.path().join("missing-ucrt64"))
+        .env("ARCHDUCTOR_DEV_HOME", temp.path().join("dev-home"))
+        .arg("--run-dev")
+        .output()
+        .expect("run dev instance env without GTK toolchain");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Windows GTK toolchain not found"));
 }
 
 #[cfg(windows)]

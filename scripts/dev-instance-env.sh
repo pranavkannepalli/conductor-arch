@@ -4,7 +4,7 @@ set -euo pipefail
 case "${OSTYPE:-}" in
     msys*|cygwin*)
         windows_host=1
-        export PATH="/usr/bin:/ucrt64/bin:$PATH"
+        export PATH="/usr/bin:$PATH"
         ;;
 esac
 
@@ -18,8 +18,11 @@ case "$(uname -s)" in
         fi
         pkgconf="$ucrt_root/bin/pkgconf.exe"
         if [[ ! -x "$pkgconf" ]]; then
-            printf 'Windows GTK toolchain not found at %s. Install MSYS2 UCRT64 pkgconf, GTK4, and libadwaita first.\n' "$ucrt_root" >&2
-            exit 1
+            if [[ "${1:-}" == "--run-dev" ]]; then
+                printf 'Windows GTK toolchain not found at %s. Install MSYS2 UCRT64 pkgconf, GTK4, and libadwaita first.\n' "$ucrt_root" >&2
+                exit 1
+            fi
+            pkgconf=""
         fi
 
         registered_path="${ARCHDUCTOR_WINDOWS_REGISTERED_PATH:-}"
@@ -38,16 +41,18 @@ case "$(uname -s)" in
         done
         IFS="$old_ifs"
 
-        export PATH="$ucrt_root/bin${registered_msys_path:+:$registered_msys_path}:$PATH"
-        export CARGO_BUILD_TARGET="${CARGO_BUILD_TARGET:-x86_64-pc-windows-gnu}"
-        export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER:-gcc}"
-        export CC_x86_64_pc_windows_gnu="${CC_x86_64_pc_windows_gnu:-gcc}"
-        export AR_x86_64_pc_windows_gnu="${AR_x86_64_pc_windows_gnu:-ar}"
-        export PKG_CONFIG="${PKG_CONFIG:-$pkgconf}"
-        export PKG_CONFIG_x86_64_pc_windows_gnu="${PKG_CONFIG_x86_64_pc_windows_gnu:-$pkgconf}"
-        export PKG_CONFIG_PATH="${PKG_CONFIG_PATH:-$ucrt_root/lib/pkgconfig}"
-        export PKG_CONFIG_PATH_x86_64_pc_windows_gnu="${PKG_CONFIG_PATH_x86_64_pc_windows_gnu:-$ucrt_root/lib/pkgconfig}"
-        export PKG_CONFIG_ALLOW_CROSS="${PKG_CONFIG_ALLOW_CROSS:-1}"
+        export PATH="${pkgconf:+$ucrt_root/bin:}${registered_msys_path:+$registered_msys_path:}$PATH"
+        if [[ -n "$pkgconf" ]]; then
+            export CARGO_BUILD_TARGET="${CARGO_BUILD_TARGET:-x86_64-pc-windows-gnu}"
+            export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER:-gcc}"
+            export CC_x86_64_pc_windows_gnu="${CC_x86_64_pc_windows_gnu:-gcc}"
+            export AR_x86_64_pc_windows_gnu="${AR_x86_64_pc_windows_gnu:-ar}"
+            export PKG_CONFIG="${PKG_CONFIG:-$pkgconf}"
+            export PKG_CONFIG_x86_64_pc_windows_gnu="${PKG_CONFIG_x86_64_pc_windows_gnu:-$pkgconf}"
+            export PKG_CONFIG_PATH="${PKG_CONFIG_PATH:-$ucrt_root/lib/pkgconfig}"
+            export PKG_CONFIG_PATH_x86_64_pc_windows_gnu="${PKG_CONFIG_PATH_x86_64_pc_windows_gnu:-$ucrt_root/lib/pkgconfig}"
+            export PKG_CONFIG_ALLOW_CROSS="${PKG_CONFIG_ALLOW_CROSS:-1}"
+        fi
         ;;
 esac
 

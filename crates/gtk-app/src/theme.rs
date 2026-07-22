@@ -2331,11 +2331,19 @@ popover.context-menu-popover arrow {
     font-size: 11px;
     font-weight: 700;
 }
-.chat-content-overlay {
+.chat-timeline-scroll {
     background-color: #151515;
 }
 .chat-messages {
-    padding: 22px 24px 180px;
+    padding: 22px 24px 24px;
+}
+.chat-working-indicator {
+    margin: 2px 24px 12px;
+    padding: 6px 0;
+    color: #b8c7de;
+}
+.chat-working-indicator .card-meta {
+    color: #b8c7de;
 }
 .chat-user-row {
     margin-top: 12px;
@@ -2454,7 +2462,7 @@ button.chat-inline-event-chip:checked {
 }
 .chat-composer {
     padding: 0 16px 16px;
-    background-color: transparent;
+    background-color: #151515;
 }
 .chat-queue-overlay {
     margin: 0 8px 6px;
@@ -2948,10 +2956,6 @@ combobox box,
     color: #f8fafc;
 }
 
-.chat-composer {
-    background-color: transparent;
-}
-
 .chat-composer-box .chat-input-scroll,
 .chat-composer-box .chat-input-view,
 .chat-composer-box .chat-input-view text {
@@ -3284,6 +3288,20 @@ mod tests {
     #[test]
     fn queued_chat_overlay_floats_above_composer_with_hover_actions() {
         let css = app_css();
+        let timeline_scroll = selector_block(css, ".chat-timeline-scroll");
+        assert!(timeline_scroll.contains("background-color: #151515;"));
+
+        let composer = selector_block(css, ".chat-composer");
+        assert!(composer.contains("background-color: #151515;"));
+        assert_eq!(css.matches(".chat-composer {").count(), 1);
+
+        let working_meta = selector_block(css, ".chat-working-indicator .card-meta");
+        assert!(working_meta.contains("color: #b8c7de;"));
+
+        let messages = selector_block(css, ".chat-messages");
+        assert!(messages.contains("padding: 22px 24px 24px;"));
+        assert!(!messages.contains("180px"));
+
         let queue_overlay = selector_block(css, ".chat-queue-overlay");
         assert!(queue_overlay.contains("background-color: rgba(18, 18, 18, 0.96);"));
         assert!(queue_overlay.contains("margin: 0 8px 6px;"));

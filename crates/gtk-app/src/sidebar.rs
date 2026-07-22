@@ -414,6 +414,9 @@ pub(crate) fn build_app_sidebar(
                             SidebarWorkspaceRow {
                                 name: Rc::clone(&workspace_name),
                                 name_label: row.name_label.clone(),
+                                meta_label: row.meta_label.clone(),
+                                status: ws.status.clone(),
+                                updated_at: ws.updated_at.clone(),
                             },
                         );
                         if workspace_status_allows_sidebar_actions(&ws.status) {
@@ -473,6 +476,7 @@ pub(crate) fn build_app_sidebar(
             let RefreshEvent::WorkspaceMetadataChanged {
                 old_workspace,
                 workspace,
+                branch,
             } = event
             else {
                 return;
@@ -481,6 +485,13 @@ pub(crate) fn build_app_sidebar(
             let row = { workspace_rows.borrow_mut().remove(old_workspace) };
             if let Some(row) = row {
                 row.name_label.set_text(&title_case_workspace(workspace));
+                if let Some(branch) = branch {
+                    row.meta_label.set_text(&workspace_row_meta_text(
+                        branch,
+                        &row.status,
+                        &row.updated_at,
+                    ));
+                }
                 *row.name.borrow_mut() = workspace.clone();
                 workspace_rows.borrow_mut().insert(workspace.clone(), row);
             }
@@ -729,11 +740,15 @@ where
 struct SidebarWorkspaceRow {
     name: Rc<RefCell<String>>,
     name_label: Label,
+    meta_label: Label,
+    status: String,
+    updated_at: String,
 }
 
 struct BuiltWorkspaceRow {
     row: ListBoxRow,
     name_label: Label,
+    meta_label: Label,
 }
 
 fn build_workspace_row(
@@ -770,20 +785,7 @@ fn build_workspace_row(
     text_box.append(&top_row);
 
     // Second row: branch · time ago
-    let mut meta_parts: Vec<String> = Vec::new();
-    if !branch.is_empty() {
-        meta_parts.push(branch.to_string());
-    }
-    if status == "creating" {
-        meta_parts.push("Creating workspace...".to_owned());
-    } else if status == "failed" {
-        meta_parts.push("Creation failed".to_owned());
-    }
-    let ts = relative_time(updated_at);
-    if !ts.is_empty() {
-        meta_parts.push(ts);
-    }
-    let meta_text = meta_parts.join(" · ");
+    let meta_text = workspace_row_meta_text(branch, status, updated_at);
     let meta_label = Label::new(Some(&meta_text));
     meta_label.add_css_class("workspace-row-timestamp");
     meta_label.add_css_class("workspace-meta");
@@ -814,7 +816,28 @@ fn build_workspace_row(
         row.set_selectable(false);
         row.set_activatable(false);
     }
-    BuiltWorkspaceRow { row, name_label }
+    BuiltWorkspaceRow {
+        row,
+        name_label,
+        meta_label,
+    }
+}
+
+fn workspace_row_meta_text(branch: &str, status: &str, updated_at: &str) -> String {
+    let mut meta_parts: Vec<String> = Vec::new();
+    if !branch.is_empty() {
+        meta_parts.push(branch.to_string());
+    }
+    if status == "creating" {
+        meta_parts.push("Creating workspace...".to_owned());
+    } else if status == "failed" {
+        meta_parts.push("Creation failed".to_owned());
+    }
+    let ts = relative_time(updated_at);
+    if !ts.is_empty() {
+        meta_parts.push(ts);
+    }
+    meta_parts.join(" · ")
 }
 
 fn workspace_diff_stats(additions: usize, deletions: usize) -> GBox {
@@ -895,6 +918,7 @@ fn attach_workspace_row_context_menu(
                         refresh_hub.refresh_event(RefreshEvent::WorkspaceMetadataChanged {
                             old_workspace: old_name,
                             workspace: workspace.name,
+                            branch: None,
                         });
                         Ok(())
                     }
@@ -1616,7 +1640,7 @@ fn relative_time(ts: &str) -> String {
 mod tests {
     use super::{
         primary_sidebar_nav_labels, sidebar_should_restore_workspace_selection,
-        validate_sidebar_workspace_selection, workspace_context_actions,
+        validate_sidebar_workspace_selection, workspace_context_actions, workspace_row_meta_text,
         workspace_row_selection_should_open_workspace, workspace_status_allows_sidebar_actions,
         SidebarWorkspaceLookup, SidebarWorkspaceSelection,
     };
@@ -1677,6 +1701,14 @@ mod tests {
         assert_eq!(
             workspace_context_actions("active"),
             vec![("Archive", false, "archive"), ("Delete", true, "delete")]
+        );
+    }
+
+    #[test]
+    fn workspace_row_meta_text_starts_with_current_branch() {
+        assert!(
+            workspace_row_meta_text("lc/new-branch", "active", "2026-07-20T00:00:00Z")
+                .starts_with("lc/new-branch")
         );
     }
 

@@ -56,8 +56,21 @@ impl ArchcarClient {
         }
     }
 
+    pub fn send_without_spawning(&self, request: ArchcarRequest) -> Result<ArchcarResponse> {
+        let stream = self.connect_validated()?;
+        self.send_on_stream(stream, request)
+    }
+
     fn send_once(&self, request: ArchcarRequest) -> Result<ArchcarResponse> {
-        let mut stream = self.connect_or_spawn()?;
+        let stream = self.connect_or_spawn()?;
+        self.send_on_stream(stream, request)
+    }
+
+    fn send_on_stream(
+        &self,
+        mut stream: LocalStream,
+        request: ArchcarRequest,
+    ) -> Result<ArchcarResponse> {
         configure_rpc_timeouts(&stream, ARCHCAR_RPC_TIMEOUT)?;
         let request_summary = archcar_request_summary(&request);
         let envelope = RpcEnvelope {

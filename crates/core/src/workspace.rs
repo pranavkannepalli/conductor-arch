@@ -55,6 +55,8 @@ use walkdir::WalkDir;
 
 const ARCHDUCTOR_METADATA_OPEN: &str = "<archductor_metadata>";
 const ARCHDUCTOR_METADATA_CLOSE: &str = "</archductor_metadata>";
+const ARCHDUCTOR_HIDDEN_INSTRUCTION_OPEN: &str = "<archductor_hidden_instruction>";
+const ARCHDUCTOR_HIDDEN_INSTRUCTION_CLOSE: &str = "</archductor_hidden_instruction>";
 
 pub use crate::github_pr::{
     parse_github_numbered_stateful_choices, GitHubNumberedChoice, PullRequestCheckRun,
@@ -9151,6 +9153,13 @@ struct ArchductorMetadataDirective {
 fn extract_archductor_metadata_directive(
     content: &str,
 ) -> (String, Option<ArchductorMetadataDirective>) {
+    if content.contains(ARCHDUCTOR_HIDDEN_INSTRUCTION_OPEN)
+        && !content.contains(ARCHDUCTOR_HIDDEN_INSTRUCTION_CLOSE)
+    {
+        return (content.to_owned(), None);
+    }
+    let hidden_stripped = strip_archductor_hidden_instruction_blocks(content);
+    let content = hidden_stripped.as_str();
     let Some(start) = content.find(ARCHDUCTOR_METADATA_OPEN) else {
         return (strip_archductor_control_lines(content), None);
     };
@@ -9172,6 +9181,32 @@ fn extract_archductor_metadata_directive(
 
 pub fn strip_archductor_metadata_block(content: &str) -> String {
     extract_archductor_metadata_directive(content).0
+}
+
+fn strip_archductor_hidden_instruction_blocks(content: &str) -> String {
+    let mut remaining = content;
+    let mut cleaned = String::with_capacity(content.len());
+    let mut removed = false;
+
+    while let Some(start) = remaining.find(ARCHDUCTOR_HIDDEN_INSTRUCTION_OPEN) {
+        removed = true;
+        cleaned.push_str(&remaining[..start]);
+        let block_body_start = start + ARCHDUCTOR_HIDDEN_INSTRUCTION_OPEN.len();
+        let Some(relative_end) =
+            remaining[block_body_start..].find(ARCHDUCTOR_HIDDEN_INSTRUCTION_CLOSE)
+        else {
+            return content.to_owned();
+        };
+        let end = block_body_start + relative_end + ARCHDUCTOR_HIDDEN_INSTRUCTION_CLOSE.len();
+        remaining = &remaining[end..];
+    }
+
+    cleaned.push_str(remaining);
+    if removed {
+        trim_metadata_blank_edges(&cleaned)
+    } else {
+        content.to_owned()
+    }
 }
 
 fn strip_archductor_control_lines(content: &str) -> String {
@@ -21243,6 +21278,19 @@ spotlight_testing = true
     }
 
     #[test]
+    fn archductor_hidden_instruction_block_is_hidden() {
+        let content = "what's up?\n\n<archductor_hidden_instruction>\nsecret metadata prompt\n<archductor_metadata>{\"workspace_name\":\"secret\"}</archductor_metadata>\n</archductor_hidden_instruction>";
+
+        assert_eq!(strip_archductor_metadata_block(content), "what's up?");
+    }
+
+    #[test]
+    fn unclosed_archductor_hidden_instruction_is_preserved() {
+        let content = "visible\n<archductor_hidden_instruction>unfinished";
+        assert_eq!(strip_archductor_metadata_block(content), content);
+    }
+
+    #[test]
     fn workspace_metadata_directives_only_rename_workspace_and_branch_once() {
         let (_temp, store) = test_workspace_store();
         let thread = store
@@ -22664,6 +22712,15 @@ spotlight_testing = true
         store.rename_branch("berlin", "lc/feature-renamed").unwrap();
         let renamed = store.get_by_name("berlin").unwrap();
         assert_eq!(renamed.branch, "lc/feature-renamed");
+        assert_eq!(
+            git_output(&renamed.path, ["branch", "--show-current"]).trim(),
+            "lc/feature-renamed"
+        );
+        let old_branch = git_output(&renamed.path, ["branch", "--list", "lc/feature"]);
+        assert!(
+            old_branch.trim().is_empty(),
+            "renaming the current workspace branch must remove the old local branch ref"
+        );
 
         let err = store
             .delete_branch("berlin", "lc/feature-renamed")

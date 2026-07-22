@@ -717,13 +717,10 @@ fn ws_center_panel(
         store.list_chat_threads(&ws.name).unwrap_or_default(),
     ));
     let current_workspace_name = Rc::new(RefCell::new(ws.name.clone()));
-    let selected_thread = Rc::new(RefCell::new(state.selected_chat_thread().or_else(|| {
-        known_threads
-            .borrow()
-            .iter()
-            .find(|thread| workspace_chat_thread_is_visible(thread))
-            .map(|thread| thread.id)
-    })));
+    let selected_thread =
+        Rc::new(RefCell::new(state.selected_chat_thread().or_else(|| {
+            startup_chat_thread_selection(&known_threads.borrow())
+        })));
     if state.selected_chat_thread().is_none() {
         state.set_selected_chat_thread(*selected_thread.borrow());
     }
@@ -1439,6 +1436,13 @@ fn workspace_chat_nav_label(item: &crate::background_sync::WorkspaceChatNavItem)
 
 fn workspace_chat_thread_is_visible(thread: &ChatThreadRecord) -> bool {
     workspace_chat_thread_is_supported(thread) && thread.status == "active"
+}
+
+fn startup_chat_thread_selection(threads: &[ChatThreadRecord]) -> Option<i64> {
+    threads
+        .iter()
+        .find(|thread| workspace_chat_thread_is_visible(thread))
+        .map(|thread| thread.id)
 }
 
 fn workspace_chat_thread_is_reopenable(thread: &ChatThreadRecord) -> bool {
@@ -3255,6 +3259,7 @@ fn lifecycle_panel(
                 refresh_after_rename.refresh_event(RefreshEvent::WorkspaceMetadataChanged {
                     old_workspace: current_name.clone(),
                     workspace: workspace.name,
+                    branch: None,
                 });
             }
             Err(err) => apply_runtime_action_feedback(
@@ -3627,23 +3632,46 @@ fn workspace_branch_panel(
             }
             let result =
                 WorkspaceStore::open_app(db_for_action.clone()).and_then(|store| match action {
+                    "checkout" => {
+                        store
+                            .checkout_branch(&workspace_for_action, &branch)
+                            .map(|workspace| {
+                                (
+                                    format!("Checked out {}.", workspace.branch),
+                                    Some(workspace),
+                                )
+                            })
+                    }
+                    "rename" => {
+                        store
+                            .rename_branch(&workspace_for_action, &branch)
+                            .map(|workspace| {
+                                (
+                                    format!("Renamed branch to {}.", workspace.branch),
+                                    Some(workspace),
+                                )
+                            })
+                    }
                     "create" => store
                         .create_branch(&workspace_for_action, &branch)
-                        .map(|_| format!("Created branch {branch}.")),
-                    "checkout" => store
-                        .checkout_branch(&workspace_for_action, &branch)
-                        .map(|workspace| format!("Checked out {}.", workspace.branch)),
-                    "rename" => store
-                        .rename_branch(&workspace_for_action, &branch)
-                        .map(|workspace| format!("Renamed branch to {}.", workspace.branch)),
+                        .map(|_| (format!("Created branch {branch}."), None)),
                     "delete" => store
                         .delete_branch(&workspace_for_action, &branch)
-                        .map(|_| format!("Deleted branch {branch}.")),
+                        .map(|_| (format!("Deleted branch {branch}."), None)),
                     _ => unreachable!(),
                 });
             match result {
-                Ok(message) => {
+                Ok((message, updated_workspace)) => {
                     apply_action_feedback(&feedback_for_action, &toast_for_action, &message, true);
+                    if let Some(workspace) = updated_workspace {
+                        refresh_after_action.refresh_event(
+                            RefreshEvent::WorkspaceMetadataChanged {
+                                old_workspace: workspace.name.clone(),
+                                workspace: workspace.name.clone(),
+                                branch: Some(workspace.branch.clone()),
+                            },
+                        );
+                    }
                     refresh_after_action.refresh(RefreshScope::Workspace);
                 }
                 Err(err) => apply_action_feedback(
@@ -9003,6 +9031,51 @@ mod tests {
     }
 
     #[test]
+    fn startup_chat_selection_uses_leftmost_visible_thread() {
+        let closed = ChatThreadRecord {
+            id: 1,
+            workspace_id: 2,
+            provider: "codex".to_owned(),
+            title: "Closed".to_owned(),
+            status: "closed".to_owned(),
+            native_thread_id: None,
+            harness_metadata: None,
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+            archived_at: Some("now".to_owned()),
+        };
+        let leftmost = ChatThreadRecord {
+            id: 2,
+            workspace_id: 2,
+            provider: "claude".to_owned(),
+            title: "Claude".to_owned(),
+            status: "active".to_owned(),
+            native_thread_id: None,
+            harness_metadata: None,
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+            archived_at: None,
+        };
+        let next = ChatThreadRecord {
+            id: 3,
+            workspace_id: 2,
+            provider: "codex".to_owned(),
+            title: "Codex".to_owned(),
+            status: "active".to_owned(),
+            native_thread_id: None,
+            harness_metadata: None,
+            created_at: "now".to_owned(),
+            updated_at: "now".to_owned(),
+            archived_at: None,
+        };
+
+        assert_eq!(
+            startup_chat_thread_selection(&[closed, leftmost, next]),
+            Some(2)
+        );
+    }
+
+    #[test]
     fn workspace_chat_add_is_disabled_at_limit() {
         let threads = (0..WS_CHAT_TAB_LIMIT)
             .map(|index| ChatThreadRecord {
@@ -10024,6 +10097,23 @@ mod tests {
         assert!(!production_source.contains(
             "state_after_rename.set_selected_workspace(Some(workspace.name.clone()));\n                progress_rename.set_text(&format!(\"Renamed to {}\", workspace.name));\n            }\n            Err(err) => apply_runtime_action_feedback(\n                &progress_rename,\n                &toast_rename,\n                lifecycle_action_failure_feedback(\"Rename\", &err),\n            ),\n        }\n        refresh_after_rename.refresh_event(RefreshEvent::WorkspaceInventoryChanged);"
         ));
+    }
+
+    #[test]
+    fn branch_checkout_and_rename_publish_metadata_refresh_with_branch() {
+        let source = include_str!("workspace_command_center.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("workspace command center source should contain production code");
+        let branch_panel = production_source
+            .split("fn workspace_branch_panel")
+            .nth(1)
+            .and_then(|source| source.split("fn workspace_branch_state_text").next())
+            .expect("workspace branch panel should exist");
+
+        assert!(branch_panel.contains("RefreshEvent::WorkspaceMetadataChanged"));
+        assert!(branch_panel.contains("branch: Some(workspace.branch.clone())"));
     }
 
     #[test]

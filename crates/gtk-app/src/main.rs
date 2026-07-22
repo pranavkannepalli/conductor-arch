@@ -27,9 +27,13 @@ mod workspace_command_center;
 use crate::buttons::{icon_button, text_button};
 use adw::prelude::*;
 use adw::Application;
+use archductor_core::archcar::client::ArchcarClient;
+use archductor_core::archcar::protocol::ArchcarRequest;
 use archductor_core::archcar::server::{reconcile_managed_sessions_on_startup, ArchcarServer};
 use archductor_core::paths::AppPaths;
-use archductor_core::workspace::{ProcessStatus, WorkspaceStore, WorkspaceViewDefaults};
+use archductor_core::workspace::{
+    ProcessKind, ProcessRecord, ProcessStatus, WorkspaceStore, WorkspaceViewDefaults,
+};
 use command_palette::{
     filter_palette_commands, palette_commands, Keybindings, PaletteCommand, PaletteTarget,
     ShortcutAction,
@@ -190,8 +194,8 @@ impl Default for LaunchTarget {
 }
 
 fn main() {
+    let paths = AppPaths::from_env();
     if std::env::args().any(|arg| arg == "--archcar-serve") {
-        let paths = AppPaths::from_env();
         if let Err(err) = reconcile_managed_sessions_on_startup(&paths)
             .and_then(|_| ArchcarServer::bind(paths))
             .and_then(|server| server.serve())
@@ -208,6 +212,7 @@ fn main() {
 
     let app_id = application_id();
     let app = Application::builder().application_id(&app_id).build();
+    app.connect_shutdown(move |_| interrupt_running_managed_chats_on_shutdown(&paths));
     app.connect_activate(move |app| build_ui(app, launch_target.clone(), debug_mode));
     app.run_with_args(&["archductor-gtk"]);
 }
@@ -1576,6 +1581,96 @@ fn reconcile_runtime_state(db_path: &Path) -> anyhow::Result<RuntimeReconciliati
     })
 }
 
+fn interrupt_running_managed_chats_on_shutdown(paths: &AppPaths) {
+    let session_ids = match shutdown_managed_chat_session_ids_from_store(&paths.database_path) {
+        Ok(session_ids) => session_ids,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to list managed chat sessions for gtk shutdown");
+            return;
+        }
+    };
+    if session_ids.is_empty() {
+        return;
+    }
+
+    std::thread::scope(|scope| {
+        let requests = session_ids
+            .into_iter()
+            .map(|session_id| {
+                scope.spawn(move || {
+                    let client = ArchcarClient::from_paths(paths);
+                    (
+                        session_id,
+                        client.send_without_spawning(ArchcarRequest::InterruptTurn { session_id }),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for request in requests {
+            let Ok((session_id, result)) = request.join() else {
+                tracing::warn!("gtk shutdown interrupt worker panicked");
+                continue;
+            };
+            match result {
+                Ok(response) => {
+                    tracing::info!(
+                        session_id,
+                        ?response,
+                        "gtk shutdown interrupted managed chat session"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        session_id,
+                        error = %err,
+                        "gtk shutdown could not interrupt managed chat session"
+                    );
+                }
+            }
+        }
+    });
+}
+
+fn shutdown_managed_chat_session_ids_from_store(db_path: &Path) -> anyhow::Result<Vec<i64>> {
+    let records = WorkspaceStore::open_app(db_path)?.list_running_sessions()?;
+    Ok(shutdown_managed_chat_session_ids(&records))
+}
+
+fn shutdown_managed_chat_session_ids(records: &[ProcessRecord]) -> Vec<i64> {
+    records
+        .iter()
+        .filter(|record| shutdown_managed_chat_session(record))
+        .map(|record| record.id)
+        .collect()
+}
+
+fn shutdown_managed_chat_session(record: &ProcessRecord) -> bool {
+    record.kind == ProcessKind::Session
+        && record.status == ProcessStatus::Running
+        && record.chat_thread_id.is_some()
+        && (shutdown_session_metadata_is_managed(record.session_harness_metadata.as_deref())
+            || matches!(
+                shutdown_session_executable_name(&record.command).as_deref(),
+                Some("codex" | "claude")
+            ))
+}
+
+fn shutdown_session_executable_name(command: &str) -> Option<String> {
+    let executable = command.split_whitespace().next()?.trim();
+    PathBuf::from(executable)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_owned)
+}
+
+fn shutdown_session_metadata_is_managed(metadata: Option<&str>) -> bool {
+    metadata.is_some_and(|metadata| {
+        metadata.contains("harness=codex-app-server")
+            || metadata.contains("harness=claude-stream-json")
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SpotlightWatchTargetKey {
     session_id: i64,
@@ -1812,7 +1907,7 @@ fn configure_window_chrome(window: &ApplicationWindow) {
 mod tests {
     use super::*;
     use archductor_core::repository::{AddRepository, RepositoryStore};
-    use archductor_core::workspace::{CreateWorkspace, ProcessStatus};
+    use archductor_core::workspace::{CreateWorkspace, ProcessKind, ProcessRecord, ProcessStatus};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -1851,6 +1946,29 @@ mod tests {
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn process_record_for_shutdown(
+        id: i64,
+        command: &str,
+        status: ProcessStatus,
+        chat_thread_id: Option<i64>,
+    ) -> ProcessRecord {
+        ProcessRecord {
+            id,
+            workspace_id: 1,
+            chat_thread_id,
+            kind: ProcessKind::Session,
+            command: command.to_owned(),
+            pid: 1234,
+            log_path: PathBuf::from("/tmp/session.log"),
+            status,
+            started_at: "2026-07-20T00:00:00Z".to_owned(),
+            exit_code: None,
+            ended_at: None,
+            session_harness_metadata: None,
+            session_resume_id: None,
+        }
     }
 
     #[test]
@@ -1893,6 +2011,28 @@ mod tests {
                 .status,
             ProcessStatus::Exited
         );
+    }
+
+    #[test]
+    fn shutdown_interrupt_targets_only_running_managed_chat_sessions() {
+        let records = vec![
+            process_record_for_shutdown(1, "claude", ProcessStatus::Running, Some(10)),
+            process_record_for_shutdown(2, "codex", ProcessStatus::Running, Some(11)),
+            process_record_for_shutdown(3, "bash", ProcessStatus::Running, Some(12)),
+            process_record_for_shutdown(4, "claude", ProcessStatus::Stopped, Some(13)),
+            process_record_for_shutdown(5, "codex", ProcessStatus::Running, None),
+        ];
+
+        assert_eq!(shutdown_managed_chat_session_ids(&records), vec![1, 2]);
+    }
+
+    #[test]
+    fn shutdown_interrupt_recognizes_managed_harness_metadata() {
+        let mut record =
+            process_record_for_shutdown(7, "archcar", ProcessStatus::Running, Some(20));
+        record.session_harness_metadata = Some("harness=claude-stream-json".to_owned());
+
+        assert_eq!(shutdown_managed_chat_session_ids(&[record]), vec![7]);
     }
 
     #[test]

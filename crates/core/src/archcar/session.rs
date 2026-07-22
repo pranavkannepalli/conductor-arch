@@ -567,20 +567,42 @@ fn apply_harness_effect(
 ) {
     match effect {
         HarnessEffect::Initialized {
-            native_session_id, ..
+            native_session_id,
+            model,
         } => {
             *native_thread_id = Some(native_session_id.clone());
             let _ =
                 runtime_store.update_chat_thread_native_id(started.thread_id, &native_session_id);
+            info!(
+                session_id = started.session_id,
+                thread_id = started.thread_id,
+                kind = ?started.kind,
+                native_session_id = %native_session_id,
+                model = model.as_deref().unwrap_or("unknown"),
+                "managed harness initialized"
+            );
         }
         HarnessEffect::Ready => {
             mark_snapshot_ready(snapshot);
+            info!(
+                session_id = started.session_id,
+                thread_id = started.thread_id,
+                kind = ?started.kind,
+                "managed harness ready"
+            );
             let _ = event_tx.send(ArchcarEvent::SessionReady {
                 session_id: started.session_id,
                 thread_id: started.thread_id,
             });
         }
         HarnessEffect::InputAcknowledged { local_input_id } => {
+            info!(
+                session_id = started.session_id,
+                thread_id = started.thread_id,
+                kind = ?started.kind,
+                local_input_id = %local_input_id,
+                "managed harness input acknowledged"
+            );
             if let Err(err) = runtime_store.mark_provider_input_acknowledged(&local_input_id, None)
             {
                 let _ = event_tx.send(ArchcarEvent::SessionError {
@@ -594,6 +616,14 @@ fn apply_harness_effect(
             local_input_id,
             status,
         } => {
+            info!(
+                session_id = started.session_id,
+                thread_id = started.thread_id,
+                kind = ?started.kind,
+                local_input_id = %local_input_id,
+                status = harness_turn_status_label(status),
+                "managed harness turn completed"
+            );
             if let Err(err) = runtime_store.mark_provider_input_terminal(&local_input_id) {
                 let _ = event_tx.send(ArchcarEvent::SessionError {
                     session_id: Some(started.session_id),
@@ -645,6 +675,15 @@ fn apply_harness_effect(
                 if let Ok(mut guard) = snapshot.lock() {
                     guard.capabilities = Some(capabilities.clone());
                 }
+                info!(
+                    session_id = started.session_id,
+                    thread_id = started.thread_id,
+                    kind = ?started.kind,
+                    required_count = capabilities.required.len(),
+                    optional_count = capabilities.optional.len(),
+                    observed_native = ?capabilities.observed_native,
+                    "managed harness capabilities observed"
+                );
                 let _ = event_tx.send(ArchcarEvent::SessionCapabilitiesChanged {
                     session_id: started.session_id,
                     thread_id: started.thread_id,
@@ -652,11 +691,58 @@ fn apply_harness_effect(
                 });
             }
         }
-        HarnessEffect::TurnStarted { .. }
-        | HarnessEffect::InteractionResolved { .. }
-        | HarnessEffect::Retry { .. }
-        | HarnessEffect::RateLimited { .. }
-        | HarnessEffect::ResumeRequired => {}
+        HarnessEffect::TurnStarted { local_input_id } => {
+            info!(
+                session_id = started.session_id,
+                thread_id = started.thread_id,
+                kind = ?started.kind,
+                local_input_id = %local_input_id,
+                "managed harness turn started"
+            );
+        }
+        HarnessEffect::Retry { message, delay_ms } => {
+            let provider_message = bounded_redacted_provider_message(&message);
+            info!(
+                session_id = started.session_id,
+                thread_id = started.thread_id,
+                kind = ?started.kind,
+                delay_ms = ?delay_ms,
+                provider_message = %provider_message,
+                "managed harness retry"
+            );
+        }
+        HarnessEffect::RateLimited {
+            message,
+            retry_after_ms,
+        } => {
+            info!(
+                session_id = started.session_id,
+                thread_id = started.thread_id,
+                kind = ?started.kind,
+                retry_after_ms = ?retry_after_ms,
+                provider_message = %message,
+                "managed harness rate limited"
+            );
+        }
+        HarnessEffect::InteractionResolved { .. } | HarnessEffect::ResumeRequired => {}
+    }
+}
+
+fn bounded_redacted_provider_message(message: &str) -> String {
+    crate::local_chat::truncate_chars(&crate::redaction::redact_sensitive_text(message), 512)
+}
+
+#[cfg(test)]
+mod provider_log_tests {
+    use super::bounded_redacted_provider_message;
+
+    #[test]
+    fn retry_provider_messages_are_redacted_and_bounded() {
+        let message = format!("Authorization: Bearer secret-token {}", "x".repeat(600));
+        let logged = bounded_redacted_provider_message(&message);
+        assert!(!logged.contains("secret-token"));
+        assert!(logged.chars().count() <= 515);
+        assert!(logged.ends_with("..."));
     }
 }
 
