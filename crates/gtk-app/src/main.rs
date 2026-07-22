@@ -255,6 +255,32 @@ fn sanitize_dev_application_id_suffix(value: &str) -> String {
     out.trim_matches('-').to_owned()
 }
 
+fn dev_instance_banner_text() -> Option<String> {
+    let instance = std::env::var("ARCHDUCTOR_DEV_INSTANCE").ok()?;
+    let instance = instance.trim();
+    if instance.is_empty() {
+        None
+    } else {
+        Some(format!("Dev worktree: {instance}"))
+    }
+}
+
+fn build_dev_instance_banner(text: &str) -> GBox {
+    let banner = GBox::new(Orientation::Horizontal, 0);
+    banner.add_css_class("dev-instance-banner");
+    banner.set_hexpand(true);
+
+    let label = Label::new(Some(text));
+    label.add_css_class("dev-instance-banner-label");
+    label.set_hexpand(true);
+    label.set_xalign(0.5);
+    label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    label.set_tooltip_text(Some(text));
+    banner.append(&label);
+
+    banner
+}
+
 fn parse_launch_target<I, S>(args: I) -> Result<LaunchTarget, String>
 where
     I: IntoIterator<Item = S>,
@@ -1027,6 +1053,8 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         })
     };
     let window_content = gtk::Overlay::new();
+    window_content.set_hexpand(true);
+    window_content.set_vexpand(true);
     window_content.set_child(Some(&split));
     let window_controls = gtk::WindowControls::new(gtk::PackType::Start);
     window_controls.set_decoration_layout(Some("close,minimize,maximize:"));
@@ -1036,7 +1064,15 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     window_controls.set_height_request(COLUMN_HEADER_HEIGHT);
     window_controls.set_overflow(gtk::Overflow::Hidden);
     window_content.add_overlay(&window_controls);
-    window.set_child(Some(&window_content));
+    let window_shell = GBox::new(Orientation::Vertical, 0);
+    window_shell.set_hexpand(true);
+    window_shell.set_vexpand(true);
+    if let Some(banner_text) = dev_instance_banner_text() {
+        let banner = build_dev_instance_banner(&banner_text);
+        window_shell.prepend(&banner);
+    }
+    window_shell.append(&window_content);
+    window.set_child(Some(&window_shell));
     window.present();
     setup::show_blocking_setup_if_needed(&window);
     tracing::info!(
@@ -2142,6 +2178,20 @@ mod tests {
         );
         assert_eq!(dev_application_id_from_suffix(Some("...")), APP_ID);
         assert_eq!(dev_application_id_from_suffix(None), APP_ID);
+    }
+
+    #[test]
+    fn dev_instance_banner_is_inserted_above_app_content() {
+        let source = include_str!("main.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source exists");
+
+        assert!(production.contains("dev_instance_banner_text()"));
+        assert!(production.contains("build_dev_instance_banner(&banner_text)"));
+        assert!(production.contains("window_shell.prepend(&banner)"));
+        assert!(production.contains("window.set_child(Some(&window_shell))"));
     }
 
     #[test]

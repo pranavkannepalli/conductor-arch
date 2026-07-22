@@ -102,6 +102,20 @@ window {
     font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", "Cantarell", "Noto Sans", sans-serif;
 }
 
+.dev-instance-banner {
+    background-color: #6d28d9;
+    border-bottom: 1px solid #8b5cf6;
+    min-height: 30px;
+    padding: 5px 16px;
+}
+
+.dev-instance-banner-label {
+    color: #ffffff;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0;
+}
+
 button,
 entry,
 combobox,
@@ -3426,5 +3440,20 @@ mod tests {
         assert!(css.contains(".toast-success"));
         assert!(css.contains(".toast-warning"));
         assert!(css.contains(".toast-error"));
+    }
+
+    #[test]
+    fn dev_instance_banner_is_full_width_purple() {
+        let css = app_css();
+        let banner = selector_block(css, ".dev-instance-banner");
+
+        assert!(banner.contains("background-color: #6d28d9;"));
+        assert!(banner.contains("min-height: 30px;"));
+        assert!(banner.contains("padding: 5px 16px;"));
+        assert!(banner.contains("border-bottom: 1px solid"));
+
+        let label = selector_block(css, ".dev-instance-banner-label");
+        assert!(label.contains("color: #ffffff;"));
+        assert!(label.contains("font-weight: 700;"));
     }
 }
