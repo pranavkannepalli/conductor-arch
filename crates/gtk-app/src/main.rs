@@ -1950,6 +1950,8 @@ mod tests {
         for source in [sidebar, session, workspace] {
             assert!(source.contains("configure_column_header("));
         }
+        let drag_source = include_str!("window_chrome.rs");
+        assert!(drag_source.contains("compute_point"));
         let production = include_str!("main.rs")
             .split("#[cfg(test)]")
             .next()

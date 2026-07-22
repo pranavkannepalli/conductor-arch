@@ -15,17 +15,25 @@ pub(crate) fn configure_column_header<W: IsA<gtk::Widget>>(header: &W) {
         let Some(device) = event.device() else {
             return;
         };
-        let Some(surface) = gesture
-            .widget()
-            .and_then(|widget| widget.native())
-            .and_then(|native| native.surface())
-        else {
+        let Some(widget) = gesture.widget() else {
+            return;
+        };
+        let Some(root) = widget.root() else {
+            return;
+        };
+        let Some(point) = widget.compute_point(
+            root.upcast_ref::<gtk::Widget>(),
+            &gtk::graphene::Point::new(x as f32, y as f32),
+        ) else {
+            return;
+        };
+        let Some(surface) = widget.native().and_then(|native| native.surface()) else {
             return;
         };
         let Ok(toplevel) = surface.downcast::<gtk::gdk::Toplevel>() else {
             return;
         };
-        toplevel.begin_move(&device, 1, x, y, event.time());
+        toplevel.begin_move(&device, 1, point.x() as f64, point.y() as f64, event.time());
     });
     header.add_controller(gesture);
 }
