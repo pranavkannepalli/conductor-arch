@@ -2203,12 +2203,7 @@ pub fn agent_session_panel(
                         working_elapsed,
                     );
                     if submitted_user_inputs.is_empty() {
-                        let empty = Label::new(Some("No messages yet."));
-                        empty.add_css_class("chat-agent-text");
-                        empty.set_selectable(true);
-                        empty.set_wrap(true);
-                        empty.set_xalign(0.0);
-                        append_chat_refresh_row(&messages, &empty);
+                        append_empty_chat_placeholder(&messages);
                     } else {
                         for input in submitted_user_inputs {
                             append_chat_refresh_row(&messages, &chat_user_bubble(&input));
@@ -3744,6 +3739,15 @@ fn append_chat_timeline_items(
     }
 }
 
+fn append_empty_chat_placeholder(messages: &GBox) {
+    let empty = Label::new(Some("No messages yet."));
+    empty.add_css_class("chat-agent-text");
+    empty.set_selectable(true);
+    empty.set_wrap(true);
+    empty.set_xalign(0.0);
+    append_chat_refresh_row(messages, &empty);
+}
+
 fn render_chat_timeline_snapshot(
     thread_id: i64,
     snapshot: ChatTimelineSnapshot,
@@ -3841,6 +3845,9 @@ fn render_chat_timeline_snapshot(
                 &transcript_display,
                 render_legacy_inline_events,
             );
+            if timeline.is_empty() {
+                append_empty_chat_placeholder(messages);
+            }
         }
     }
     *last_timeline_render_state.borrow_mut() = Some(next_state);
@@ -17980,6 +17987,22 @@ Schema confirms the app moved CRM around businesses.";
             chat_timeline_refresh_plan(Some(&old), &new),
             ChatTimelineRefreshPlan::RebuildMessages
         );
+    }
+
+    #[test]
+    fn render_chat_timeline_snapshot_restores_empty_thread_placeholder_on_rebuild() {
+        let source = include_str!("session_surface.rs");
+        let start = source
+            .find("fn render_chat_timeline_snapshot(")
+            .expect("timeline snapshot renderer exists");
+        let end = source[start..]
+            .find("fn replace_chat_timeline_items_before_trailing_working_indicator")
+            .map(|offset| start + offset)
+            .expect("replace helper follows snapshot renderer");
+        let region = &source[start..end];
+
+        assert!(region.contains("append_empty_chat_placeholder(messages);"));
+        assert!(region.contains("timeline.is_empty()"));
     }
 
     #[test]

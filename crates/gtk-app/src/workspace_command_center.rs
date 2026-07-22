@@ -159,17 +159,14 @@ fn load_workspace_chat_tab_snapshot(
     workspace_name: String,
     selected: Option<i64>,
 ) -> Result<WorkspaceChatTabSnapshot, String> {
-    WorkspaceStore::open_app(db_path.clone())
+    WorkspaceStore::open_app(db_path)
         .and_then(|store| {
             let threads = store.list_chat_threads(&workspace_name)?;
-            let nav_items_by_thread = crate::background_sync::load_workspace_chat_nav(
-                &db_path,
-                &workspace_name,
-                selected,
-            )?
-            .into_iter()
-            .map(|item| (item.thread_id, item))
-            .collect::<HashMap<_, _>>();
+            let nav_items_by_thread =
+                crate::background_sync::load_workspace_chat_nav(&store, &workspace_name, selected)?
+                    .into_iter()
+                    .map(|item| (item.thread_id, item))
+                    .collect::<HashMap<_, _>>();
             Ok(WorkspaceChatTabSnapshot {
                 workspace_name,
                 selected,
@@ -9439,6 +9436,27 @@ mod tests {
             !handler_region.contains("list_chat_threads"),
             "chat tab refresh must not list chat threads on the GTK thread"
         );
+    }
+
+    #[test]
+    fn chat_tab_snapshot_reuses_open_workspace_store_for_nav() {
+        let source = include_str!("workspace_command_center.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source exists");
+        let start = production
+            .find("fn load_workspace_chat_tab_snapshot(")
+            .expect("chat tab snapshot loader exists");
+        let end = production[start..]
+            .find("fn load_workspace_file_snapshot(")
+            .map(|offset| start + offset)
+            .expect("file snapshot loader follows chat tab snapshot loader");
+        let region = &production[start..end];
+
+        assert_eq!(region.matches("WorkspaceStore::open_app(").count(), 1);
+        assert!(region.contains("load_workspace_chat_nav(&store"));
+        assert!(!region.contains("load_workspace_chat_nav(\n                &db_path"));
     }
 
     #[test]

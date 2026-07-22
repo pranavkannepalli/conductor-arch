@@ -6,6 +6,7 @@ mod background_sync;
 mod buttons;
 mod command_palette;
 mod dashboard;
+mod file_component;
 mod font_assets;
 mod history;
 mod history_data;
@@ -1013,6 +1014,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         let main_stack_for_palette = main_stack.clone();
         let split_for_palette = split.clone();
         let hub_for_palette = refresh_hub.clone();
+        let toast_for_palette = toast_manager.clone();
         let refresh_workspace_for_palette = refresh_workspace_detail.clone();
         let keybindings_for_palette = Rc::clone(&current_keybindings);
         Rc::new(move || {
@@ -1035,6 +1037,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
             let stack_for_action = main_stack_for_palette.clone();
             let split_for_action = split_for_palette.clone();
             let hub_for_action = hub_for_palette.clone();
+            let toast_for_action = toast_for_palette.clone();
             let refresh_workspace_for_action = refresh_workspace_for_palette.clone();
             show_command_palette(
                 &window_for_palette,
@@ -1046,6 +1049,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
                         &stack_for_action,
                         &split_for_action,
                         &hub_for_action,
+                        &toast_for_action,
                         &refresh_workspace_for_action,
                     );
                 }),
@@ -1245,6 +1249,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     let keybindings_kb = Rc::clone(&current_keybindings);
     let state_kb = app_state.clone();
     let stack_kb = main_stack.clone();
+    let toast_kb = toast_manager.clone();
     let refresh_workspace_kb = refresh_workspace_detail.clone();
     evk.connect_key_pressed(move |_, keyval, _, modifiers| {
         if let Some(key) = keyval.to_unicode() {
@@ -1258,6 +1263,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
                     &stack_kb,
                     &split_kb,
                     &hub_kb,
+                    &toast_kb,
                     &refresh_workspace_kb,
                 );
                 return gtk::glib::Propagation::Stop;
@@ -1290,6 +1296,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
                         &stack_kb,
                         &split_kb,
                         &hub_kb,
+                        &toast_kb,
                         &refresh_workspace_kb,
                     );
                     return gtk::glib::Propagation::Stop;
@@ -1302,45 +1309,60 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     window.add_controller(evk);
 
     // Notification tracker: fires toasts when sessions stop or checks fail.
-    // State is (workspace_name, prev_active_sessions, prev_session_was_running).
-    let notification_prev: Rc<RefCell<Option<(String, usize, bool)>>> = Rc::new(RefCell::new(None));
+    // State tracks the previously sampled workspace notification status.
+    let notification_prev: Rc<RefCell<Option<NotificationPrevious>>> = Rc::new(RefCell::new(None));
     {
         let db_path_notif = app_state.workspace_database_path();
         let state_notif = app_state.clone();
         let toast_notif = toast_manager.clone();
         let prev_notif = notification_prev.clone();
+        let notification_in_flight = Rc::new(Cell::new(false));
         // PER-190: Notification rules intentionally sample persisted workspace
         // status every five seconds; remove when process-exit events drive rules.
         glib::timeout_add_seconds_local(5, move || {
+            if notification_in_flight.get() {
+                return glib::ControlFlow::Continue;
+            }
             let Some(workspace) = state_notif.selected_workspace() else {
                 *prev_notif.borrow_mut() = None;
                 return glib::ControlFlow::Continue;
             };
+            notification_in_flight.set(true);
             let db_path = db_path_notif.clone();
             let toast_notif = toast_notif.clone();
             let prev_notif = prev_notif.clone();
+            let in_flight = Rc::clone(&notification_in_flight);
             archcar_async::spawn_background_job(
                 move || load_notification_snapshot(db_path, workspace),
                 move |result| {
+                    in_flight.set(false);
                     let Ok(Some(snapshot)) = result else {
                         return;
                     };
                     let mut prev = prev_notif.borrow_mut();
-                    if let Some((ref prev_ws, _prev_active, prev_running)) = *prev {
-                        if prev_ws == &snapshot.workspace
+                    if let Some(previous) = prev.as_ref() {
+                        let prev_check_fail = previous.checks_failed;
+                        if previous.workspace == snapshot.workspace
                             && snapshot.notify_session_stop
-                            && prev_running
+                            && previous.session_running
                             && !snapshot.session_running
                         {
                             toast_notif.show(ToastMessage::success("Agent session stopped."));
                         }
+                        if previous.workspace == snapshot.workspace
+                            && snapshot.notify_check_fail
+                            && !prev_check_fail
+                            && snapshot.checks_failed
+                        {
+                            toast_notif.show(ToastMessage::warning("Checks failed."));
+                        }
                     }
-                    let _ = snapshot.notify_check_fail;
-                    *prev = Some((
-                        snapshot.workspace,
-                        snapshot.active_sessions,
-                        snapshot.session_running,
-                    ));
+                    *prev = Some(NotificationPrevious {
+                        workspace: snapshot.workspace,
+                        active_sessions: snapshot.active_sessions,
+                        session_running: snapshot.session_running,
+                        checks_failed: snapshot.checks_failed,
+                    });
                 },
             );
             glib::ControlFlow::Continue
@@ -1482,6 +1504,7 @@ fn apply_palette_target(
     main_stack: &Stack,
     split: &adw::OverlaySplitView,
     refresh_hub: &RefreshHub,
+    toast_manager: &ToastManager,
     refresh_workspace: &impl Fn(),
 ) {
     match target {
@@ -1505,13 +1528,21 @@ fn apply_palette_target(
             if let Some(workspace) = state.selected_workspace() {
                 let db_path = state.workspace_database_path();
                 let refresh_hub = refresh_hub.clone();
+                let toast_manager = toast_manager.clone();
                 archcar_async::spawn_background_job(
                     move || {
                         WorkspaceStore::open_app(db_path)
                             .and_then(|store| store.terminal_command(&workspace, &cmd))
                             .map_err(|err| format!("{err:#}"))
                     },
-                    move |_| refresh_hub.refresh(RefreshScope::Workspace),
+                    move |result| {
+                        if let Err(err) = result {
+                            toast_manager.show(ToastMessage::warning(format!(
+                                "Terminal command failed: {err}"
+                            )));
+                        }
+                        refresh_hub.refresh(RefreshScope::Workspace);
+                    },
                 );
             }
         }
@@ -1600,6 +1631,14 @@ struct NotificationSnapshot {
     notify_check_fail: bool,
     active_sessions: usize,
     session_running: bool,
+    checks_failed: bool,
+}
+
+struct NotificationPrevious {
+    workspace: String,
+    active_sessions: usize,
+    session_running: bool,
+    checks_failed: bool,
 }
 
 fn notification_rule_enabled(rules: &[String], aliases: &[&str]) -> bool {
@@ -1632,12 +1671,21 @@ fn load_notification_snapshot(
     let summary = store
         .checks_summary(&workspace)
         .map_err(|err| format!("{err:#}"))?;
+    let checks_failed = store
+        .list_checks(&workspace)
+        .map_err(|err| format!("{err:#}"))?
+        .into_iter()
+        .next()
+        .is_some_and(|check| {
+            check.status == ProcessStatus::Exited && check.exit_code.is_some_and(|code| code != 0)
+        });
     Ok(Some(NotificationSnapshot {
         workspace,
         notify_session_stop,
         notify_check_fail,
         active_sessions: summary.active_sessions,
         session_running: summary.session_status == Some(ProcessStatus::Running),
+        checks_failed,
     }))
 }
 
@@ -2657,6 +2705,51 @@ mod tests {
     }
 
     #[test]
+    fn notification_timer_coalesces_background_loads() {
+        let source = include_str!("main.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("main source should contain production code");
+        let start = production_source
+            .find("Notification tracker:")
+            .expect("notification tracker exists");
+        let end = production_source[start..]
+            .find("let db_path_runtime_auto")
+            .map(|offset| start + offset)
+            .expect("runtime auto timer follows notification tracker");
+        let region = &production_source[start..end];
+
+        assert!(region.contains("notification_in_flight.get()"));
+        assert!(region.contains("notification_in_flight.set(true);"));
+        assert!(region.contains("in_flight.set(false);"));
+    }
+
+    #[test]
+    fn notification_timer_toasts_on_check_failure_transition() {
+        let source = include_str!("main.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("main source should contain production code");
+        let start = production_source
+            .find("Notification tracker:")
+            .expect("notification tracker exists");
+        let end = production_source[start..]
+            .find("let db_path_runtime_auto")
+            .map(|offset| start + offset)
+            .expect("runtime auto timer follows notification tracker");
+        let region = &production_source[start..end];
+
+        assert!(region.contains("prev_check_fail"));
+        assert!(region.contains("snapshot.notify_check_fail"));
+        assert!(region.contains("!prev_check_fail"));
+        assert!(region.contains("snapshot.checks_failed"));
+        assert!(region.contains("Checks failed."));
+        assert!(!region.contains("let _ = snapshot.notify_check_fail"));
+    }
+
+    #[test]
     fn spotlight_sources_spawn_background_jobs() {
         let source = include_str!("main.rs");
         let production_source = source
@@ -2740,6 +2833,29 @@ mod tests {
             !region.contains("WorkspaceStore::open_app(state.workspace_database_path())"),
             "palette run commands must not open workspace storage on the GTK thread"
         );
+    }
+
+    #[test]
+    fn palette_run_command_surfaces_terminal_command_errors() {
+        let source = include_str!("main.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("main source should contain production code");
+        let start = production_source
+            .find("PaletteTarget::RunCommand(cmd) => {")
+            .expect("palette run command handler exists");
+        let end = production_source[start..]
+            .find("fn page_stack_name")
+            .map(|offset| start + offset)
+            .expect("page_stack_name follows palette handling");
+        let region = &production_source[start..end];
+
+        assert!(region.contains("toast_manager.clone()"));
+        assert!(region.contains("if let Err(err) = result"));
+        assert!(region.contains("ToastMessage::warning"));
+        assert!(region.contains("Terminal command failed"));
+        assert!(region.contains("refresh_hub.refresh(RefreshScope::Workspace)"));
     }
 
     fn init_repo(path: PathBuf) -> PathBuf {

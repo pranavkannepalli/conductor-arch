@@ -3275,19 +3275,31 @@ mod tests {
         let active_block = selector_block(css, ".ws-tab-shell.ws-tab-active");
 
         assert!(!unread_block.contains("background-color"));
-        assert_ne!(
+        assert_eq!(
             property_value(unread_block, "border-bottom-color"),
-            property_value(active_block, "border-bottom-color")
+            Some("#5a5a5a")
+        );
+        assert_eq!(
+            property_value(active_block, "border-bottom-color"),
+            Some("#f0c36a")
         );
     }
 
     #[test]
     fn chat_tab_state_indicators_have_stable_styling() {
         let css = app_css();
+        let indicator_block = selector_block(css, ".ws-chat-tab-indicator");
+        let spinner_block = selector_block(css, ".ws-chat-tab-spinner");
+        let dot_block = selector_block(css, ".ws-chat-tab-dot");
 
-        assert!(css.contains(".ws-chat-tab-indicator"));
-        assert!(css.contains(".ws-chat-tab-spinner"));
-        assert!(css.contains(".ws-chat-tab-dot"));
+        assert_eq!(property_value(indicator_block, "min-width"), Some("14px"));
+        assert_eq!(property_value(indicator_block, "min-height"), Some("14px"));
+        assert_eq!(property_value(spinner_block, "min-width"), Some("12px"));
+        assert_eq!(property_value(spinner_block, "min-height"), Some("12px"));
+        assert_eq!(property_value(spinner_block, "color"), Some("#8fb5ff"));
+        assert_eq!(property_value(dot_block, "min-width"), Some("12px"));
+        assert_eq!(property_value(dot_block, "min-height"), Some("12px"));
+        assert_eq!(property_value(dot_block, "color"), Some("#f0c36a"));
         assert!(css.contains(".ws-tab-shell.ws-tab-editing"));
     }
 
