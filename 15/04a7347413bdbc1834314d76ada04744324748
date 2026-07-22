@@ -1,0 +1,46 @@
+crates/gtk-app/src/session_surface.rs
+  s_e902838eb41cbf::t_fe8cfea0f64e1d 4155
+  s_e902838eb41cbf::t_6ed69f2586be01 5889-5890
+  s_e902838eb41cbf::t_9edb70daa55adb 5182-5185,5775-5779,5787-5790,6671-6674,6731-6736,16640
+  s_e902838eb41cbf::t_5c05106b4dcc2c 2285
+  s_e902838eb41cbf::t_7432e62aca958c 3142,3158
+  s_e902838eb41cbf::t_557e353f3b0f2b 3884,3893,3907
+  s_e902838eb41cbf::t_ea76ddf8725a20 3744,3751,3778,3824,3838,3853,3867
+  s_e902838eb41cbf::t_d9927a178b09d0 1404,2114,2126,2143,2159
+  s_e902838eb41cbf::t_15aabfd4bcffa5 2309,2362
+  s_e902838eb41cbf::t_9b3cf10815c8ac 5738-5739,5753-5759
+  s_e902838eb41cbf::t_e52f4d0d8d2989 5760,5762-5774,5780-5786,5791-5888,5891-5909
+  s_e902838eb41cbf::t_6f522d42ff2771 6680,6685,6697-6699,6707-6721,6723-6724,6759,6762,6765-6767,6769,6772-6774,6782-6787,6789,6792-6796,6798
+  s_e902838eb41cbf::t_2d64d4fd75ec62 67-69,583
+  s_e902838eb41cbf::t_9251b21808424e 4888,4908,4914,4923,4930,4932-4935,5006,5008-5009,5170-5173,5175,5200
+  s_e902838eb41cbf::t_438e540526deb8 16627-16639,16641-16644
+  s_e902838eb41cbf::t_8757789291ccc3 5761,16626
+crates/gtk-app/src/theme.rs
+  s_e902838eb41cbf::t_c2b3ce6a1c52f5 2490-2512
+crates/gtk-app/src/workspace_command_center.rs
+  s_e902838eb41cbf::t_b8158b939859ad 1
+  s_e902838eb41cbf::t_6162893201d541 3240,4399,4472
+  s_e902838eb41cbf::t_9edb70daa55adb 1060-1061
+  s_e902838eb41cbf::t_66a9d22dc69cbb 1062-1069,1146,1474
+crates/gtk-app/src/file_component.rs
+  s_e902838eb41cbf::t_7a62966bbd4e29 1-7,73-94,99-103,109-110
+  s_e902838eb41cbf::t_b654fef4137644 8-14,16-25,30-72
+  s_e902838eb41cbf::t_9edb70daa55adb 95-98,105-108
+  s_e902838eb41cbf::t_71c8d393fa7e5c 15,26-29,104
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "1504a7347413bdbc1834314d76ada04744324748",
+  "prompts": {},
+  "sessions": {
+    "s_e902838eb41cbf": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f88c1-b237-71d1-a4f2-bdf11334e75f",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
