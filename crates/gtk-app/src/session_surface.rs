@@ -38,7 +38,8 @@ use gtk::prelude::*;
 use gtk::{
     Adjustment, Align, Box as GBox, Button, CheckButton, ComboBoxText, DrawingArea, Entry,
     EventControllerKey, GestureClick, Image, Label, Orientation, Overlay, Popover, Revealer,
-    RevealerTransitionType, ScrolledWindow, Spinner, TextBuffer, TextView, ToggleButton, Widget,
+    RevealerTransitionType, ScrolledWindow, Spinner, TextBuffer, TextTag, TextView, ToggleButton,
+    Widget,
 };
 use std::any::Any;
 use std::backtrace::Backtrace;
@@ -125,9 +126,8 @@ fn dispatch_chat_surface_refresh_kind(
     match kind {
         ChatRefreshKind::Full => refresh_full(),
         ChatRefreshKind::Messages { thread_id } => {
-            if selected_thread == Some(thread_id) {
-                refresh_messages(thread_id);
-            }
+            let _ = selected_thread;
+            refresh_messages(thread_id);
         }
         ChatRefreshKind::ThreadNav => refresh_thread_nav(),
     }
@@ -215,7 +215,7 @@ enum ChatTimelineItemKey {
     Provider(ChatRenderProviderEventSignature),
     InterruptedNotice(i64),
     OptimisticUserInput(String),
-    WorkingIndicator(u64),
+    WorkingIndicator,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -226,6 +226,7 @@ struct ChatTimelineRenderState {
     keys: Vec<ChatTimelineItemKey>,
 }
 
+#[derive(Clone)]
 struct ChatTimelineSnapshot {
     thread_messages: Vec<ChatMessageRecord>,
     thread_events: Vec<ChatEventRecord>,
@@ -233,10 +234,13 @@ struct ChatTimelineSnapshot {
     transcript_display: String,
 }
 
+type ChatTimelineSnapshotCache = Rc<RefCell<HashMap<i64, ChatTimelineSnapshot>>>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ChatTimelineRefreshPlan {
     Skip,
     Append { start: usize },
+    ReplaceBeforeTrailingWorkingIndicator { start: usize },
     RebuildFrom { start: usize },
     RebuildMessages,
 }
@@ -253,6 +257,13 @@ struct InlineEventBodyPreview {
     preview: String,
     full: String,
     truncated: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InlineEventBodyRenderKind {
+    Markdown,
+    Monospace,
+    Diff,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -329,6 +340,21 @@ fn load_chat_timeline_snapshot(
             })
         })
         .map_err(|err| format!("{err:#}"))
+}
+
+fn cache_chat_timeline_snapshot(
+    cache: &RefCell<HashMap<i64, ChatTimelineSnapshot>>,
+    thread_id: i64,
+    snapshot: ChatTimelineSnapshot,
+) {
+    cache.borrow_mut().insert(thread_id, snapshot);
+}
+
+fn cached_chat_timeline_snapshot(
+    cache: &RefCell<HashMap<i64, ChatTimelineSnapshot>>,
+    thread_id: i64,
+) -> Option<ChatTimelineSnapshot> {
+    cache.borrow().get(&thread_id).cloned()
 }
 
 struct SessionChatCreateUi {
@@ -490,6 +516,7 @@ fn chat_thread_nav_signature(threads: &[ChatThreadRecord]) -> Vec<ChatThreadNavS
 pub(crate) struct ExternalChatTabs {
     pub on_threads_changed: Rc<dyn Fn(Vec<ChatThreadRecord>, Option<i64>)>,
     pub selection_controller: ExternalThreadSelectionController,
+    pub on_composer_draft_changed: Rc<dyn Fn(i64, bool)>,
     pub on_workspace_metadata_changed: Rc<dyn Fn(&AgentMetadataUiUpdate)>,
     pub on_chat_surface_refresh_ready: Option<RegisterChatSurfaceRefresh>,
 }
@@ -579,6 +606,7 @@ pub fn agent_session_panel(
     let thread_state = Rc::new(RefCell::new(Vec::<ChatThreadRecord>::new()));
     let selected_thread: Rc<RefCell<Option<i64>>> =
         Rc::new(RefCell::new(app_state.selected_chat_thread()));
+    let chat_timeline_cache: ChatTimelineSnapshotCache = Rc::new(RefCell::new(HashMap::new()));
     let composer_drafts = Rc::new(RefCell::new(HashMap::<i64, String>::new()));
     let restoring_composer_draft = Rc::new(Cell::new(false));
     let pending_commands = Rc::new(RefCell::new(HashMap::<i64, Vec<String>>::new()));
@@ -1172,6 +1200,9 @@ pub fn agent_session_panel(
     let last_render_signature = Rc::new(RefCell::new(None::<ChatRenderSignature>));
     let last_timeline_render_state = Rc::new(RefCell::new(None::<ChatTimelineRenderState>));
     let buffer_for_update = buffer.clone();
+    let external_composer_draft_changed = external_chat_tabs
+        .as_ref()
+        .map(|tabs| tabs.on_composer_draft_changed.clone());
     let update_composer_state = {
         let placeholder = placeholder.clone();
         let send_btn = send_btn.clone();
@@ -1183,12 +1214,18 @@ pub fn agent_session_panel(
         let codex_startup_states = codex_startup_states.clone();
         let app_state = app_state.clone();
         let working_threads = working_threads.clone();
+        let external_composer_draft_changed = external_composer_draft_changed.clone();
         Rc::new(move || {
             let start = buffer_for_update.start_iter();
             let end = buffer_for_update.end_iter();
             let text = buffer_for_update.text(&start, &end, true);
             let has_text = !text.as_str().trim().is_empty();
             let thread_id = *selected_thread.borrow();
+            if let (Some(thread_id), Some(on_changed)) =
+                (thread_id, external_composer_draft_changed.as_ref())
+            {
+                on_changed(thread_id, has_text);
+            }
             let chat_target = selected_chat_target_for_submit(&app_state, thread_id);
             let action_thread_id = composer_thread_for_target(chat_target.as_ref(), thread_id);
             let current_harness = *selected_harness.borrow();
@@ -2018,6 +2055,7 @@ pub fn agent_session_panel(
                                     last_render_signature.as_ref(),
                                     signature,
                                 ) {
+                                    update_existing_working_indicator(&messages, working_elapsed);
                                     debug!(?outcome, "chat refresh_view outcome");
                                     return;
                                 }
@@ -2068,6 +2106,21 @@ pub fn agent_session_panel(
                                             &timeline[start..],
                                             &transcript_display,
                                             render_legacy_inline_events,
+                                        );
+                                    }
+                                    ChatTimelineRefreshPlan::ReplaceBeforeTrailingWorkingIndicator {
+                                        start,
+                                    } => {
+                                        replace_chat_timeline_items_before_trailing_working_indicator(
+                                            &messages,
+                                            previous_timeline_leading_rows + start,
+                                            &timeline[start..timeline.len().saturating_sub(1)],
+                                            &transcript_display,
+                                            render_legacy_inline_events,
+                                        );
+                                        update_existing_working_indicator(
+                                            &messages,
+                                            working_elapsed,
                                         );
                                     }
                                     ChatTimelineRefreshPlan::RebuildFrom { start } => {
@@ -2135,6 +2188,7 @@ pub fn agent_session_panel(
                         runtime_summary.clone(),
                     );
                     if chat_render_is_unchanged(last_render_signature.as_ref(), signature) {
+                        update_existing_working_indicator(&messages, working_elapsed);
                         return;
                     }
                     outcome.messages_changed = true;
@@ -2222,15 +2276,18 @@ pub fn agent_session_panel(
                 let inflight_archcar_actions = inflight_archcar_actions.clone();
                 let last_timeline_render_state = last_timeline_render_state.clone();
                 let toast_manager = toast_manager.clone();
-                let message_refresh_generation = Rc::new(Cell::new(0_u64));
+                let working_threads = working_threads.clone();
+                let chat_timeline_cache = chat_timeline_cache.clone();
+                let message_refresh_generation = Rc::new(RefCell::new(HashMap::<i64, u64>::new()));
                 Rc::new(move |thread_id| {
-                    if *selected_thread.borrow() != Some(thread_id) {
-                        return;
-                    }
                     let workspace = current_workspace_name.borrow().clone();
                     let chat_scroll = capture_chat_scroll(&scroll);
-                    let generation = message_refresh_generation.get() + 1;
-                    message_refresh_generation.set(generation);
+                    let generation = {
+                        let mut generations = message_refresh_generation.borrow_mut();
+                        let generation = generations.get(&thread_id).copied().unwrap_or(0) + 1;
+                        generations.insert(thread_id, generation);
+                        generation
+                    };
                     let database_path_for_job = database_path.clone();
                     let workspace_for_job = workspace.clone();
                     let selected_thread = selected_thread.clone();
@@ -2241,6 +2298,8 @@ pub fn agent_session_panel(
                     let inflight_archcar_actions = inflight_archcar_actions.clone();
                     let last_timeline_render_state = last_timeline_render_state.clone();
                     let toast_manager = toast_manager.clone();
+                    let working_threads = working_threads.clone();
+                    let chat_timeline_cache = chat_timeline_cache.clone();
                     let message_refresh_generation = message_refresh_generation.clone();
                     spawn_background_job(
                         move || {
@@ -2251,8 +2310,8 @@ pub fn agent_session_panel(
                             )
                         },
                         move |result| {
-                            if message_refresh_generation.get() != generation
-                                || *selected_thread.borrow() != Some(thread_id)
+                            if message_refresh_generation.borrow().get(&thread_id).copied()
+                                != Some(generation)
                             {
                                 return;
                             }
@@ -2275,91 +2334,26 @@ pub fn agent_session_panel(
                                     return;
                                 }
                             };
-                            let thread_messages = snapshot.thread_messages;
-                            let thread_events = snapshot.thread_events;
-                            let provider_events = snapshot.provider_events;
-                            let transcript_display = snapshot.transcript_display;
-                            let submitted_user_inputs = submitted_user_input_texts_for_thread(
+                            cache_chat_timeline_snapshot(
+                                chat_timeline_cache.as_ref(),
                                 thread_id,
+                                snapshot.clone(),
+                            );
+                            if *selected_thread.borrow() != Some(thread_id) {
+                                return;
+                            }
+                            render_chat_timeline_snapshot(
+                                thread_id,
+                                snapshot,
+                                &messages,
+                                &context_usage,
                                 pending_archcar_inputs.as_ref(),
                                 inflight_archcar_actions.as_ref(),
-                                &thread_messages,
+                                last_timeline_render_state.as_ref(),
+                                working_threads.as_ref(),
+                                &scroll,
+                                chat_scroll,
                             );
-                            let render_legacy_inline_events =
-                                render_legacy_inline_events_for_thread(
-                                    &thread_events,
-                                    &transcript_display,
-                                );
-                            let provider_projection =
-                                provider_projection_from_records(&provider_events);
-                            let timeline = chat_structured_items_for_render(
-                                thread_messages.clone(),
-                                thread_events,
-                                provider_projection.items,
-                                Vec::new(),
-                                submitted_user_inputs,
-                                None,
-                            );
-                            let next_state = chat_timeline_render_state(
-                                thread_id,
-                                &transcript_display,
-                                &timeline,
-                            );
-                            let previous_timeline_state =
-                                last_timeline_render_state.borrow().clone();
-                            let previous_timeline_leading_rows = previous_timeline_state
-                                .as_ref()
-                                .map_or(0, |state| state.leading_rows);
-                            let plan = chat_timeline_refresh_plan(
-                                previous_timeline_state.as_ref(),
-                                &next_state,
-                            );
-                            match plan {
-                                ChatTimelineRefreshPlan::Skip => return,
-                                ChatTimelineRefreshPlan::Append { start } => {
-                                    apply_context_usage_state(
-                                        &context_usage,
-                                        latest_context_usage_from_messages(&thread_messages),
-                                    );
-                                    append_chat_timeline_items(
-                                        &messages,
-                                        &timeline[start..],
-                                        &transcript_display,
-                                        render_legacy_inline_events,
-                                    );
-                                }
-                                ChatTimelineRefreshPlan::RebuildFrom { start } => {
-                                    remove_box_children_from(
-                                        &messages,
-                                        previous_timeline_leading_rows + start,
-                                    );
-                                    apply_context_usage_state(
-                                        &context_usage,
-                                        latest_context_usage_from_messages(&thread_messages),
-                                    );
-                                    append_chat_timeline_items(
-                                        &messages,
-                                        &timeline[start..],
-                                        &transcript_display,
-                                        render_legacy_inline_events,
-                                    );
-                                }
-                                ChatTimelineRefreshPlan::RebuildMessages => {
-                                    clear_box(&messages);
-                                    apply_context_usage_state(
-                                        &context_usage,
-                                        latest_context_usage_from_messages(&thread_messages),
-                                    );
-                                    append_chat_timeline_items(
-                                        &messages,
-                                        &timeline,
-                                        &transcript_display,
-                                        render_legacy_inline_events,
-                                    );
-                                }
-                            }
-                            *last_timeline_render_state.borrow_mut() = Some(next_state);
-                            restore_chat_scroll_after_refresh(&scroll, chat_scroll);
                         },
                     );
                 })
@@ -2378,7 +2372,12 @@ pub fn agent_session_panel(
         }
     }
     install_archcar_wake(&root, &archcar_bridge, refresh_view.clone());
-    install_working_indicator_tick(&root, working_threads.clone(), refresh_view.clone());
+    install_working_indicator_tick(
+        &root,
+        working_threads.clone(),
+        selected_thread.clone(),
+        messages.clone(),
+    );
 
     seed_chat_running_sessions(
         &database_path,
@@ -3124,6 +3123,46 @@ pub fn agent_session_panel(
         let eager_start_chat_agent = eager_start_chat_agent.clone();
         let thread_state = thread_state.clone();
         let current_workspace_name = current_workspace_name.clone();
+        let render_cached_chat_timeline: Rc<dyn Fn(i64) -> bool> = Rc::new({
+            let messages = messages.clone();
+            let scroll = scroll.clone();
+            let context_usage = context_usage.clone();
+            let pending_archcar_inputs = pending_archcar_inputs.clone();
+            let inflight_archcar_actions = inflight_archcar_actions.clone();
+            let last_timeline_render_state = last_timeline_render_state.clone();
+            let working_threads = working_threads.clone();
+            let chat_timeline_cache = chat_timeline_cache.clone();
+            move |thread_id| {
+                if let Some(snapshot) =
+                    cached_chat_timeline_snapshot(chat_timeline_cache.as_ref(), thread_id)
+                {
+                    render_chat_timeline_snapshot(
+                        thread_id,
+                        snapshot,
+                        &messages,
+                        &context_usage,
+                        pending_archcar_inputs.as_ref(),
+                        inflight_archcar_actions.as_ref(),
+                        last_timeline_render_state.as_ref(),
+                        working_threads.as_ref(),
+                        &scroll,
+                        capture_chat_scroll(&scroll),
+                    );
+                    true
+                } else {
+                    clear_box(&messages);
+                    *last_timeline_render_state.borrow_mut() = None;
+                    apply_context_usage_state(&context_usage, None);
+                    let loading = Label::new(Some("Loading chat..."));
+                    loading.add_css_class("chat-agent-text");
+                    loading.set_selectable(true);
+                    loading.set_wrap(true);
+                    loading.set_xalign(0.0);
+                    append_chat_refresh_row(&messages, &loading);
+                    false
+                }
+            }
+        });
         *external_chat_tabs.selection_controller.borrow_mut() = Some(Rc::new(move |thread_id| {
             apply_thread_selection(
                 selected_thread.as_ref(),
@@ -3152,7 +3191,15 @@ pub fn agent_session_panel(
                     );
                 }
             }
-            if let Some(refresh_view) = clone_refresh_chat_surface_controller(&refresh_chat_surface)
+            if let Some(thread_id) = thread_id {
+                let workspace = current_workspace_name.borrow().clone();
+                render_cached_chat_timeline(thread_id);
+                app_state.request_refresh(RefreshEvent::WorkspaceChatMessagesChanged {
+                    workspace,
+                    thread_id,
+                });
+            } else if let Some(refresh_view) =
+                clone_refresh_chat_surface_controller(&refresh_chat_surface)
             {
                 refresh_view();
             }
@@ -3697,6 +3744,144 @@ fn append_chat_timeline_items(
     }
 }
 
+fn render_chat_timeline_snapshot(
+    thread_id: i64,
+    snapshot: ChatTimelineSnapshot,
+    messages: &GBox,
+    context_usage: &ContextUsageWidget,
+    pending_archcar_inputs: &RefCell<HashMap<i64, Vec<QueuedArchcarInput>>>,
+    inflight_archcar_actions: &RefCell<HashMap<u64, PendingArchcarAction>>,
+    last_timeline_render_state: &RefCell<Option<ChatTimelineRenderState>>,
+    working_threads: &RefCell<HashMap<i64, Instant>>,
+    scroll: &ScrolledWindow,
+    chat_scroll: ChatScrollSnapshot,
+) {
+    let thread_messages = snapshot.thread_messages;
+    let thread_events = snapshot.thread_events;
+    let provider_events = snapshot.provider_events;
+    let transcript_display = snapshot.transcript_display;
+    let submitted_user_inputs = submitted_user_input_texts_for_thread(
+        thread_id,
+        pending_archcar_inputs,
+        inflight_archcar_actions,
+        &thread_messages,
+    );
+    let render_legacy_inline_events =
+        render_legacy_inline_events_for_thread(&thread_events, &transcript_display);
+    let provider_projection = provider_projection_from_records(&provider_events);
+    let working_elapsed = working_elapsed_for_thread(working_threads, thread_id);
+    let timeline = chat_structured_items_for_render(
+        thread_messages.clone(),
+        thread_events,
+        provider_projection.items,
+        Vec::new(),
+        submitted_user_inputs,
+        working_elapsed,
+    );
+    let next_state = chat_timeline_render_state(thread_id, &transcript_display, &timeline);
+    let previous_timeline_state = last_timeline_render_state.borrow().clone();
+    let previous_timeline_leading_rows = previous_timeline_state
+        .as_ref()
+        .map_or(0, |state| state.leading_rows);
+    let plan = chat_timeline_refresh_plan(previous_timeline_state.as_ref(), &next_state);
+    match plan {
+        ChatTimelineRefreshPlan::Skip => {
+            update_existing_working_indicator(messages, working_elapsed);
+            restore_chat_scroll_after_refresh(scroll, chat_scroll);
+            return;
+        }
+        ChatTimelineRefreshPlan::Append { start } => {
+            apply_context_usage_state(
+                context_usage,
+                latest_context_usage_from_messages(&thread_messages),
+            );
+            append_chat_timeline_items(
+                messages,
+                &timeline[start..],
+                &transcript_display,
+                render_legacy_inline_events,
+            );
+        }
+        ChatTimelineRefreshPlan::ReplaceBeforeTrailingWorkingIndicator { start } => {
+            apply_context_usage_state(
+                context_usage,
+                latest_context_usage_from_messages(&thread_messages),
+            );
+            replace_chat_timeline_items_before_trailing_working_indicator(
+                messages,
+                previous_timeline_leading_rows + start,
+                &timeline[start..timeline.len().saturating_sub(1)],
+                &transcript_display,
+                render_legacy_inline_events,
+            );
+            update_existing_working_indicator(messages, working_elapsed);
+        }
+        ChatTimelineRefreshPlan::RebuildFrom { start } => {
+            remove_box_children_from(messages, previous_timeline_leading_rows + start);
+            apply_context_usage_state(
+                context_usage,
+                latest_context_usage_from_messages(&thread_messages),
+            );
+            append_chat_timeline_items(
+                messages,
+                &timeline[start..],
+                &transcript_display,
+                render_legacy_inline_events,
+            );
+        }
+        ChatTimelineRefreshPlan::RebuildMessages => {
+            clear_box(messages);
+            apply_context_usage_state(
+                context_usage,
+                latest_context_usage_from_messages(&thread_messages),
+            );
+            append_chat_timeline_items(
+                messages,
+                &timeline,
+                &transcript_display,
+                render_legacy_inline_events,
+            );
+        }
+    }
+    *last_timeline_render_state.borrow_mut() = Some(next_state);
+    restore_chat_scroll_after_refresh(scroll, chat_scroll);
+}
+
+fn replace_chat_timeline_items_before_trailing_working_indicator(
+    container: &GBox,
+    start: usize,
+    items: &[ChatTimelineItem],
+    transcript_display: &str,
+    render_legacy_inline_events: bool,
+) {
+    let Some(trailing_indicator) = trailing_working_indicator_row(container) else {
+        remove_box_children_from(container, start);
+        append_chat_timeline_items(
+            container,
+            items,
+            transcript_display,
+            render_legacy_inline_events,
+        );
+        return;
+    };
+
+    remove_box_children_range_before(container, start, &trailing_indicator);
+    let mut previous = start
+        .checked_sub(1)
+        .and_then(|index| box_child_at(container, index));
+    for item in items {
+        let Some(widget) = chat_timeline_item_widget(
+            item,
+            render_raw_message_content(transcript_display),
+            render_legacy_inline_events,
+        ) else {
+            continue;
+        };
+        container.insert_child_after(&widget, previous.as_ref());
+        previous = Some(widget);
+    }
+}
+
 fn remove_box_children_from(container: &GBox, start: usize) {
     let mut index = 0;
     let mut child = container.first_child();
@@ -3707,6 +3892,66 @@ fn remove_box_children_from(container: &GBox, start: usize) {
         }
         index += 1;
     }
+}
+
+fn remove_box_children_range_before(container: &GBox, start: usize, before: &Widget) {
+    let mut index = 0;
+    let mut child = container.first_child();
+    while let Some(widget) = child {
+        child = widget.next_sibling();
+        if widget == *before {
+            break;
+        }
+        if index >= start {
+            container.remove(&widget);
+        }
+        index += 1;
+    }
+}
+
+fn box_child_at(container: &GBox, target: usize) -> Option<Widget> {
+    let mut index = 0;
+    let mut child = container.first_child();
+    while let Some(widget) = child {
+        if index == target {
+            return Some(widget);
+        }
+        child = widget.next_sibling();
+        index += 1;
+    }
+    None
+}
+
+fn update_existing_working_indicator(container: &GBox, elapsed: Option<Duration>) {
+    let Some(elapsed) = elapsed else {
+        return;
+    };
+    let Some(row) = trailing_working_indicator_row(container) else {
+        return;
+    };
+    if let Some(label) = first_descendant_label(&row) {
+        label.set_text(&working_indicator_label_text(elapsed));
+    }
+}
+
+fn trailing_working_indicator_row(container: &GBox) -> Option<Widget> {
+    container
+        .last_child()
+        .filter(|child| child.has_css_class("chat-working-indicator"))
+}
+
+fn first_descendant_label(widget: &Widget) -> Option<Label> {
+    if let Ok(label) = widget.clone().downcast::<Label>() {
+        return Some(label);
+    }
+    let mut child = widget.first_child();
+    while let Some(widget) = child {
+        if let Some(label) = first_descendant_label(&widget) {
+            return Some(label);
+        }
+        child = widget.next_sibling();
+    }
+    None
 }
 
 fn capture_chat_scroll(scroll: &ScrolledWindow) -> ChatScrollSnapshot {
@@ -3850,7 +4095,8 @@ fn clear_chat_refresh_wake_pending(pending: &AtomicBool) {
 fn install_working_indicator_tick(
     root: &GBox,
     working_threads: Rc<RefCell<HashMap<i64, Instant>>>,
-    refresh_view: Rc<dyn Fn()>,
+    selected_thread: Rc<RefCell<Option<i64>>>,
+    messages: GBox,
 ) {
     let root_ref = root.downgrade();
     // PER-190: User-visible elapsed-time UI for active Codex generation.
@@ -3859,8 +4105,9 @@ fn install_working_indicator_tick(
         if root_ref.upgrade().is_none() {
             return gtk::glib::ControlFlow::Break;
         }
-        if !working_threads.borrow().is_empty() {
-            refresh_view();
+        if let Some(thread_id) = *selected_thread.borrow() {
+            let elapsed = working_elapsed_for_thread(&working_threads, thread_id);
+            update_existing_working_indicator(&messages, elapsed);
         }
         gtk::glib::ControlFlow::Continue
     });
@@ -4397,9 +4644,7 @@ fn chat_timeline_item_key(item: &ChatTimelineItem) -> ChatTimelineItemKey {
         ChatTimelineItem::OptimisticUserInput(input) => {
             ChatTimelineItemKey::OptimisticUserInput(input.clone())
         }
-        ChatTimelineItem::WorkingIndicator(elapsed) => {
-            ChatTimelineItemKey::WorkingIndicator(elapsed.as_secs())
-        }
+        ChatTimelineItem::WorkingIndicator(_) => ChatTimelineItemKey::WorkingIndicator,
     }
 }
 
@@ -4438,6 +4683,24 @@ fn chat_timeline_refresh_plan(
     {
         return ChatTimelineRefreshPlan::RebuildMessages;
     }
+
+    if previous.keys.last() == Some(&ChatTimelineItemKey::WorkingIndicator)
+        && next.keys.last() == Some(&ChatTimelineItemKey::WorkingIndicator)
+    {
+        let previous_content = &previous.keys[..previous.keys.len().saturating_sub(1)];
+        let next_content = &next.keys[..next.keys.len().saturating_sub(1)];
+        let first_changed = first_timeline_key_difference(previous_content, next_content);
+        if let Some(start) = first_changed {
+            return ChatTimelineRefreshPlan::ReplaceBeforeTrailingWorkingIndicator { start };
+        }
+        if previous_content.len() != next_content.len() {
+            return ChatTimelineRefreshPlan::ReplaceBeforeTrailingWorkingIndicator {
+                start: previous_content.len().min(next_content.len()),
+            };
+        }
+        return ChatTimelineRefreshPlan::Skip;
+    }
+
     let first_changed = previous
         .keys
         .iter()
@@ -4469,6 +4732,16 @@ fn chat_timeline_refresh_plan(
     ChatTimelineRefreshPlan::RebuildFrom {
         start: first_changed,
     }
+}
+
+fn first_timeline_key_difference(
+    previous: &[ChatTimelineItemKey],
+    next: &[ChatTimelineItemKey],
+) -> Option<usize> {
+    previous
+        .iter()
+        .zip(next.iter())
+        .position(|(left, right)| left != right)
 }
 
 fn chat_render_is_unchanged(
@@ -5439,39 +5712,185 @@ fn chat_text_label(text: &str) -> Label {
 
 fn chat_text_markup(text: &str) -> String {
     let mut markup = String::new();
-    let mut rest = text;
+    let mut in_fence = false;
+    let mut fence_body = String::new();
 
-    while !rest.is_empty() {
-        if let Some(start) = rest.find('`') {
-            markup.push_str(&pango_escape_text(&rest[..start]));
-            let after_start = &rest[start..];
-            if let Some(stripped) = after_start.strip_prefix("```") {
-                if let Some(end) = stripped.find("```") {
-                    let code = &stripped[..end];
-                    markup.push_str(&chat_code_span_markup(code.trim_matches('\n')));
-                    rest = &stripped[end + 3..];
-                } else {
-                    markup.push_str(&pango_escape_text(after_start));
-                    break;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") {
+            if in_fence {
+                if !markup.is_empty() {
+                    markup.push('\n');
                 }
+                markup.push_str(&chat_code_span_markup(fence_body.trim_matches('\n')));
+                fence_body.clear();
+                in_fence = false;
             } else {
-                let stripped = &after_start[1..];
-                if let Some(end) = stripped.find('`') {
-                    let code = &stripped[..end];
-                    markup.push_str(&chat_code_span_markup(code));
-                    rest = &stripped[end + 1..];
-                } else {
-                    markup.push_str(&pango_escape_text(after_start));
-                    break;
-                }
+                in_fence = true;
             }
-        } else {
-            markup.push_str(&pango_escape_text(rest));
-            break;
+            continue;
+        }
+
+        if in_fence {
+            fence_body.push_str(line);
+            fence_body.push('\n');
+            continue;
+        }
+
+        if !markup.is_empty() {
+            markup.push('\n');
+        }
+        markup.push_str(&chat_markdown_line_markup(line));
+    }
+
+    if in_fence {
+        if !markup.is_empty() {
+            markup.push('\n');
+        }
+        markup.push_str(&pango_escape_text("```"));
+        if !fence_body.is_empty() {
+            markup.push('\n');
+            markup.push_str(&pango_escape_text(fence_body.trim_end()));
         }
     }
 
     markup
+}
+
+fn chat_markdown_line_markup(line: &str) -> String {
+    let trimmed = line.trim_start();
+    let indent = &line[..line.len() - trimmed.len()];
+
+    if let Some((level, heading)) = chat_markdown_heading(trimmed) {
+        let size = match level {
+            1 => "large",
+            2 => "medium",
+            _ => "small",
+        };
+        return format!(
+            "{}<span weight=\"bold\" size=\"{}\">{}</span>",
+            pango_escape_text(indent),
+            size,
+            chat_inline_markdown_markup(heading)
+        );
+    }
+
+    if let Some(item) = chat_markdown_bullet(trimmed) {
+        return format!(
+            "{}• {}",
+            pango_escape_text(indent),
+            chat_inline_markdown_markup(item)
+        );
+    }
+
+    if let Some(quote) = trimmed.strip_prefix("> ") {
+        return format!(
+            "{}<span foreground=\"#9aa4ad\">| {}</span>",
+            pango_escape_text(indent),
+            chat_inline_markdown_markup(quote)
+        );
+    }
+
+    chat_inline_markdown_markup(line)
+}
+
+fn chat_markdown_heading(line: &str) -> Option<(usize, &str)> {
+    let marks = line.chars().take_while(|ch| *ch == '#').count();
+    if !(1..=3).contains(&marks) {
+        return None;
+    }
+    line.get(marks..)
+        .and_then(|rest| rest.strip_prefix(' '))
+        .map(|heading| (marks, heading))
+        .filter(|(_, heading)| !heading.trim().is_empty())
+}
+
+fn chat_markdown_bullet(line: &str) -> Option<&str> {
+    ["- ", "* ", "+ "]
+        .into_iter()
+        .find_map(|marker| line.strip_prefix(marker))
+}
+
+fn chat_inline_markdown_markup(text: &str) -> String {
+    let mut markup = String::new();
+    let mut rest = text;
+
+    while !rest.is_empty() {
+        let next = chat_next_inline_marker(rest);
+        let Some((start, marker)) = next else {
+            markup.push_str(&pango_escape_text(rest));
+            break;
+        };
+
+        markup.push_str(&pango_escape_text(&rest[..start]));
+        let after_marker = &rest[start + marker.len()..];
+        if marker == "[" {
+            if let Some((consumed, link_markup)) = chat_link_markup(after_marker) {
+                markup.push_str(&link_markup);
+                rest = &after_marker[consumed..];
+            } else {
+                markup.push_str(&pango_escape_text("["));
+                rest = after_marker;
+            }
+            continue;
+        }
+
+        if let Some(end) = after_marker.find(marker) {
+            let inner = &after_marker[..end];
+            markup.push_str(&chat_inline_marker_markup(marker, inner));
+            rest = &after_marker[end + marker.len()..];
+        } else {
+            markup.push_str(&pango_escape_text(&rest[start..start + marker.len()]));
+            rest = after_marker;
+        }
+    }
+
+    markup
+}
+
+fn chat_next_inline_marker(text: &str) -> Option<(usize, &'static str)> {
+    ["```", "`", "**", "__", "[", "*", "_"]
+        .into_iter()
+        .filter_map(|marker| {
+            text.find(marker).and_then(|index| {
+                if marker == "_" && chat_marker_is_inside_word(text, index, marker.len()) {
+                    None
+                } else {
+                    Some((index, marker))
+                }
+            })
+        })
+        .min_by_key(|(index, _)| *index)
+}
+
+fn chat_marker_is_inside_word(text: &str, index: usize, len: usize) -> bool {
+    let before = text[..index].chars().next_back();
+    let after = text[index + len..].chars().next();
+    before.is_some_and(|ch| ch.is_ascii_alphanumeric())
+        && after.is_some_and(|ch| ch.is_ascii_alphanumeric())
+}
+
+fn chat_inline_marker_markup(marker: &str, inner: &str) -> String {
+    match marker {
+        "`" | "```" => chat_code_span_markup(inner.trim_matches('\n')),
+        "**" | "__" => format!("<b>{}</b>", chat_inline_markdown_markup(inner)),
+        "*" | "_" => format!("<i>{}</i>", chat_inline_markdown_markup(inner)),
+        _ => pango_escape_text(inner),
+    }
+}
+
+fn chat_link_markup(after_open_bracket: &str) -> Option<(usize, String)> {
+    let (label, after_label) = after_open_bracket.split_once("](")?;
+    let (url, _) = after_label.split_once(')')?;
+    let consumed = label.len() + 2 + url.len() + 1;
+    Some((
+        consumed,
+        format!(
+            "<u>{}</u> ({})",
+            chat_inline_markdown_markup(label),
+            pango_escape_text(url)
+        ),
+    ))
 }
 
 fn chat_code_span_markup(code: &str) -> String {
@@ -6092,17 +6511,14 @@ fn inline_event_widget(event: &CodexInlineEvent) -> Widget {
 
     let body_text = inline_event_body_text(event);
     let body_preview = inline_event_body_preview(event, &body_text);
-    let body = Label::new(None);
-    body.set_markup(&chat_text_markup(&body_preview.preview));
-    body.add_css_class("chat-inline-event-body");
-    body.set_selectable(true);
-    body.set_wrap(true);
-    body.set_xalign(0.0);
-    body.set_margin_top(2);
+    let body_container = GBox::new(Orientation::Vertical, 0);
+    body_container.set_hexpand(true);
+    body_container.set_margin_top(2);
+    set_inline_event_body_widget(&body_container, event, &body_preview.preview);
     let body_scroll = ScrolledWindow::new();
     body_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
     body_scroll.set_max_content_height(INLINE_EVENT_BODY_MAX_HEIGHT);
-    body_scroll.set_child(Some(&body));
+    body_scroll.set_child(Some(&body_container));
     let body_revealer = Revealer::new();
     body_revealer.set_transition_type(RevealerTransitionType::None);
     body_revealer.set_transition_duration(0);
@@ -6113,21 +6529,22 @@ fn inline_event_widget(event: &CodexInlineEvent) -> Widget {
     toggle.set_active(expand_by_default);
 
     toggle.connect_toggled({
-        let body = body.clone();
+        let body_container = body_container.clone();
+        let event = event.clone();
         let body_revealer = body_revealer.clone();
         let full = body_preview.full.clone();
         let preview = body_preview.preview.clone();
         let toggle_label = toggle_label.clone();
-        let collapsed_label = inline_event_chip_markup(event, false);
-        let expanded_label = inline_event_chip_markup(event, true);
+        let collapsed_label = inline_event_chip_markup(&event, false);
+        let expanded_label = inline_event_chip_markup(&event, true);
         move |button| {
             if button.is_active() {
-                body.set_markup(&chat_text_markup(&full));
+                set_inline_event_body_widget(&body_container, &event, &full);
                 body_revealer.set_visible(true);
                 body_revealer.set_reveal_child(true);
                 toggle_label.set_markup(&expanded_label);
             } else {
-                body.set_markup(&chat_text_markup(&preview));
+                set_inline_event_body_widget(&body_container, &event, &preview);
                 body_revealer.set_reveal_child(false);
                 body_revealer.set_visible(false);
                 toggle_label.set_markup(&collapsed_label);
@@ -6136,6 +6553,152 @@ fn inline_event_widget(event: &CodexInlineEvent) -> Widget {
     });
 
     root.upcast()
+}
+
+fn set_inline_event_body_widget(container: &GBox, event: &CodexInlineEvent, text: &str) {
+    clear_box(container);
+    container.append(&inline_event_body_widget(event, text));
+}
+
+fn inline_event_body_widget(event: &CodexInlineEvent, text: &str) -> Widget {
+    match inline_event_body_render_kind(event, text) {
+        InlineEventBodyRenderKind::Markdown => {
+            let body = Label::new(None);
+            body.set_markup(&chat_text_markup(text));
+            body.add_css_class("chat-inline-event-body");
+            body.set_selectable(true);
+            body.set_wrap(true);
+            body.set_xalign(0.0);
+            body.upcast()
+        }
+        InlineEventBodyRenderKind::Monospace => {
+            let view = inline_event_text_view(text);
+            view.upcast()
+        }
+        InlineEventBodyRenderKind::Diff => {
+            let view = inline_event_text_view(text);
+            apply_inline_event_diff_tags(&view.buffer());
+            view.upcast()
+        }
+    }
+}
+
+fn inline_event_text_view(text: &str) -> TextView {
+    let view = TextView::new();
+    view.add_css_class("chat-inline-event-body");
+    view.set_editable(false);
+    view.set_cursor_visible(false);
+    view.set_monospace(true);
+    view.set_wrap_mode(gtk::WrapMode::None);
+    view.set_hexpand(true);
+    view.buffer().set_text(text);
+    view
+}
+
+fn inline_event_body_render_kind(
+    event: &CodexInlineEvent,
+    text: &str,
+) -> InlineEventBodyRenderKind {
+    if inline_event_body_looks_like_diff(event, text) {
+        InlineEventBodyRenderKind::Diff
+    } else if inline_event_body_should_use_monospace(event) {
+        InlineEventBodyRenderKind::Monospace
+    } else {
+        InlineEventBodyRenderKind::Markdown
+    }
+}
+
+fn inline_event_body_should_use_monospace(event: &CodexInlineEvent) -> bool {
+    matches!(
+        event.subtitle.as_deref(),
+        Some("Command")
+            | Some("Command result")
+            | Some("File")
+            | Some("File preview")
+            | Some("Skill")
+            | Some("Process")
+    ) || event.path.is_some()
+}
+
+fn inline_event_body_looks_like_diff(event: &CodexInlineEvent, text: &str) -> bool {
+    event.subtitle.as_deref() == Some("Diff")
+        || codex_file_change_counts_from_subtitle(event.subtitle.as_deref()).is_some()
+        || text
+            .lines()
+            .any(|line| line.starts_with("diff --git") || line.starts_with("@@ "))
+        || text.lines().any(|line| {
+            let trimmed = line.trim_start();
+            inline_event_diff_line_starts_with_change_marker(trimmed)
+        })
+}
+
+fn inline_event_diff_line_starts_with_change_marker(line: &str) -> bool {
+    let mut chars = line.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !matches!(first, '+' | '-') {
+        return false;
+    }
+    let Some(second) = chars.next() else {
+        return true;
+    };
+    !second.is_whitespace()
+}
+
+fn apply_inline_event_diff_tags(buffer: &TextBuffer) {
+    let text = {
+        let start = buffer.start_iter();
+        let end = buffer.end_iter();
+        buffer.text(&start, &end, false).to_string()
+    };
+    let table = buffer.tag_table();
+    let add_tag = inline_event_diff_tag(&table, "inline-diff-add", "#0d2612", "#8fcf9f");
+    let del_tag = inline_event_diff_tag(&table, "inline-diff-del", "#2d0d0d", "#cf8f8f");
+    let hunk_tag = inline_event_diff_tag(&table, "inline-diff-hunk", "#0f1a2d", "#7fa0bf");
+    let header_tag = inline_event_diff_tag(&table, "inline-diff-header", "#1a1a1a", "#909090");
+
+    let mut iter = buffer.start_iter();
+    for line in text.split('\n') {
+        let line_start = iter;
+        let mut line_end = iter;
+        line_end.forward_to_line_end();
+        let trimmed = line.trim_start();
+
+        if trimmed.starts_with('+') && !trimmed.starts_with("+++") {
+            buffer.apply_tag(&add_tag, &line_start, &line_end);
+        } else if trimmed.starts_with('-') && !trimmed.starts_with("---") {
+            buffer.apply_tag(&del_tag, &line_start, &line_end);
+        } else if trimmed.starts_with("@@") {
+            buffer.apply_tag(&hunk_tag, &line_start, &line_end);
+        } else if trimmed.starts_with("diff ")
+            || trimmed.starts_with("index ")
+            || trimmed.starts_with("--- ")
+            || trimmed.starts_with("+++ ")
+        {
+            buffer.apply_tag(&header_tag, &line_start, &line_end);
+        }
+
+        iter.forward_line();
+    }
+}
+
+fn inline_event_diff_tag(
+    table: &gtk::TextTagTable,
+    name: &str,
+    background: &str,
+    foreground: &str,
+) -> TextTag {
+    if let Some(tag) = table.lookup(name) {
+        return tag;
+    }
+    let tag = TextTag::new(Some(name));
+    tag.set_property("paragraph-background", background);
+    tag.set_property("paragraph-background-set", true);
+    tag.set_property("foreground", foreground);
+    tag.set_property("foreground-set", true);
+    table.add(&tag);
+    tag
 }
 
 fn inline_event_tooltip(event: &CodexInlineEvent) -> String {
@@ -6159,11 +6722,8 @@ fn inline_event_body_text(event: &CodexInlineEvent) -> String {
         .map(str::trim)
         .filter(|body| !body.is_empty())
     {
-        parts.push(body.to_owned());
-    }
-    if let Some(path) = event.path.as_ref().and_then(local_preview_eligibility) {
-        if let Ok(preview) = fs::read_to_string(path) {
-            parts.push(preview);
+        if let Some(body) = inline_event_body_without_chip_header(event, body) {
+            parts.push(body);
         }
     }
     if parts.is_empty() {
@@ -6171,6 +6731,72 @@ fn inline_event_body_text(event: &CodexInlineEvent) -> String {
     } else {
         parts.join("\n\n")
     }
+}
+
+fn inline_event_body_without_chip_header(event: &CodexInlineEvent, body: &str) -> Option<String> {
+    let mut lines = body.lines();
+    let first = lines.next()?;
+    if inline_event_body_line_is_chip_header(event, first) {
+        let remaining = lines.collect::<Vec<_>>().join("\n");
+        let remaining = remaining.trim_end().to_owned();
+        (!remaining.trim().is_empty()).then_some(remaining)
+    } else {
+        Some(body.to_owned())
+    }
+}
+
+fn inline_event_body_line_is_chip_header(event: &CodexInlineEvent, line: &str) -> bool {
+    let line = line.trim();
+    if line.is_empty() {
+        return false;
+    }
+    let title = event.title.trim();
+    line == title
+        || line == format!("Ran {title}")
+        || line == format!("Read {title}")
+        || line.starts_with(&format!("{title} "))
+        || (inline_event_body_should_strip_ran_header(event) && line.starts_with("Ran "))
+        || (inline_event_body_should_strip_read_header(event) && line.starts_with("Read "))
+        || (inline_event_body_should_strip_write_header(event) && line.starts_with("Write "))
+        || (inline_event_body_should_strip_change_header(event)
+            && ["Added ", "Edited ", "Deleted "]
+                .iter()
+                .any(|prefix| line.starts_with(prefix)))
+}
+
+fn inline_event_body_should_strip_ran_header(event: &CodexInlineEvent) -> bool {
+    matches!(
+        event.subtitle.as_deref(),
+        Some("Command") | Some("Command result") | Some("File preview") | Some("Skill")
+    )
+}
+
+fn inline_event_body_should_strip_read_header(event: &CodexInlineEvent) -> bool {
+    matches!(
+        event.subtitle.as_deref(),
+        Some("File preview") | Some("File") | Some("Skill")
+    )
+}
+
+fn inline_event_body_should_strip_write_header(event: &CodexInlineEvent) -> bool {
+    event.title.trim_start().starts_with("Write ")
+        || matches!(
+            event.subtitle.as_deref(),
+            Some("File") | Some("File preview")
+        )
+}
+
+fn inline_event_body_should_strip_change_header(event: &CodexInlineEvent) -> bool {
+    event.title.starts_with("Added ")
+        || event.title.starts_with("Edited ")
+        || event.title.starts_with("Deleted ")
+        || event.subtitle.as_deref() == Some("Diff")
+        || codex_file_change_counts_from_subtitle(event.subtitle.as_deref()).is_some()
+}
+
+fn codex_file_change_counts_from_subtitle(subtitle: Option<&str>) -> Option<&str> {
+    let subtitle = subtitle?;
+    (subtitle.contains('+') || subtitle.contains('-')).then_some(subtitle)
 }
 
 fn parse_codex_context_usage_local(content: &str) -> Option<CodexContextUsage> {
@@ -13075,7 +13701,7 @@ fix it
     }
 
     #[test]
-    fn codex_inline_event_body_loads_file_read_by_tool_or_skill() {
+    fn codex_inline_event_body_tracks_file_read_without_loading_file_on_render() {
         let temp = tempfile::tempdir().unwrap();
         let tool_path = temp.path().join("result.txt");
         fs::write(&tool_path, "tool file contents").unwrap();
@@ -13099,7 +13725,7 @@ fix it
         assert_eq!(tool.title, "Read result.txt");
         assert_eq!(tool.path.as_deref(), Some(tool_path.as_path()));
         assert_eq!(inline_event_chip_label(&tool, false), "Read result.txt");
-        assert!(inline_event_body_text(&tool).contains("tool file contents"));
+        assert!(!inline_event_body_text(&tool).contains("tool file contents"));
         assert_eq!(skill.kind, CodexInlineEventKind::Skill);
         assert_eq!(skill.title, "Read SKILL.md for graphify");
         assert_eq!(skill.path.as_deref(), Some(skill_path.as_path()));
@@ -13107,7 +13733,7 @@ fix it
             inline_event_chip_label(&skill, false),
             "Read SKILL.md for graphify"
         );
-        assert!(inline_event_body_text(&skill).contains("name: graphify"));
+        assert!(!inline_event_body_text(&skill).contains("name: graphify"));
     }
 
     #[test]
@@ -13130,6 +13756,40 @@ fix it
         assert_eq!(
             inline_event_chip_label(&read, false),
             "Read session_surface.rs"
+        );
+    }
+
+    #[test]
+    fn read_only_shell_command_body_omits_command_header() {
+        let read = parse_session_transcript_inline_event(
+            SessionTranscriptRole::Tool,
+            "Ran sed -n '1,220p' crates/gtk-app/src/session_surface.rs",
+            "Ran sed -n '1,220p' crates/gtk-app/src/session_surface.rs\nfn main() {}\n",
+        )
+        .unwrap();
+
+        assert_eq!(read.title, "Read session_surface.rs");
+        assert_eq!(
+            inline_event_body_text(&read),
+            "fn main() {}",
+            "expanded read preview should show file contents, not the command line"
+        );
+    }
+
+    #[test]
+    fn command_result_body_omits_ran_header() {
+        let command = parse_session_transcript_inline_event(
+            SessionTranscriptRole::Tool,
+            "Ran cargo test",
+            "Ran cargo test\nrunning 4 tests\ntest result: ok",
+        )
+        .unwrap();
+
+        assert_eq!(command.title, "cargo test");
+        assert_eq!(
+            inline_event_body_text(&command),
+            "running 4 tests\ntest result: ok",
+            "expanded command output should not repeat the command already in the chip"
         );
     }
 
@@ -14727,6 +15387,64 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
     }
 
     #[test]
+    fn file_change_expanded_body_omits_action_header() {
+        let change = CodexInlineEvent {
+            kind: CodexInlineEventKind::Tool,
+            title: "Edited src/main.rs".to_owned(),
+            subtitle: Some("+1 -1".to_owned()),
+            body: Some("Edited src/main.rs (+1 -1)\n    1 -old\n    1 +new".to_owned()),
+            path: Some(PathBuf::from("src/main.rs")),
+            status: CodexInlineEventStatus::Complete,
+        };
+
+        let body = inline_event_body_text(&change);
+
+        assert_eq!(body, "    1 -old\n    1 +new");
+        assert!(!body.contains("Edited src/main.rs"));
+    }
+
+    #[test]
+    fn inline_event_body_uses_specific_renderers_by_content_type() {
+        let file = CodexInlineEvent {
+            kind: CodexInlineEventKind::Tool,
+            title: "Read README.md".to_owned(),
+            subtitle: Some("File preview".to_owned()),
+            body: Some("# Project".to_owned()),
+            path: Some(PathBuf::from("README.md")),
+            status: CodexInlineEventStatus::Complete,
+        };
+        let diff = CodexInlineEvent {
+            kind: CodexInlineEventKind::Tool,
+            title: "Edited src/main.rs".to_owned(),
+            subtitle: Some("+1 -1".to_owned()),
+            body: Some("    1 -old\n    1 +new".to_owned()),
+            path: Some(PathBuf::from("src/main.rs")),
+            status: CodexInlineEventStatus::Complete,
+        };
+        let markdown = CodexInlineEvent {
+            kind: CodexInlineEventKind::Tool,
+            title: "Ran Review agent".to_owned(),
+            subtitle: Some("Subagent".to_owned()),
+            body: Some("## Findings\n- Fix **auth**".to_owned()),
+            path: None,
+            status: CodexInlineEventStatus::Complete,
+        };
+
+        assert_eq!(
+            inline_event_body_render_kind(&file, file.body.as_deref().unwrap()),
+            InlineEventBodyRenderKind::Monospace
+        );
+        assert_eq!(
+            inline_event_body_render_kind(&diff, diff.body.as_deref().unwrap()),
+            InlineEventBodyRenderKind::Diff
+        );
+        assert_eq!(
+            inline_event_body_render_kind(&markdown, markdown.body.as_deref().unwrap()),
+            InlineEventBodyRenderKind::Markdown
+        );
+    }
+
+    #[test]
     fn chat_timeline_keeps_messages_and_events_in_persisted_order() {
         let messages = vec![
             ChatMessageRecord {
@@ -15644,6 +16362,40 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
         assert!(markup.contains("cargo test"));
         assert!(markup.contains("&lt;merge&gt;"));
         assert!(!markup.contains("<merge>"));
+    }
+
+    #[test]
+    fn chat_text_markup_formats_common_markdown_blocks() {
+        let markup = chat_text_markup(
+            "# Summary\n\n- Run `cargo test`\n- Fix **auth** _state_\n> keep changes small",
+        );
+
+        assert!(markup.contains("<span weight=\"bold\" size=\"large\">Summary</span>"));
+        assert!(markup.contains("• Run "));
+        assert!(markup.contains("font_family=\"monospace\""));
+        assert!(markup.contains("<b>auth</b>"));
+        assert!(markup.contains("<i>state</i>"));
+        assert!(markup.contains("<span foreground=\"#9aa4ad\">| keep changes small</span>"));
+    }
+
+    #[test]
+    fn chat_text_markup_escapes_markdown_content_before_pango_markup() {
+        let markup = chat_text_markup("**<danger>** [docs](https://example.com?a=1&b=2)");
+
+        assert!(markup.contains("<b>&lt;danger&gt;</b>"));
+        assert!(markup.contains("<u>docs</u>"));
+        assert!(markup.contains("https://example.com?a=1&amp;b=2"));
+        assert!(!markup.contains("<danger>"));
+        assert!(!markup.contains("a=1&b=2"));
+    }
+
+    #[test]
+    fn chat_text_markup_keeps_plain_underscores_and_unclosed_markers_literal() {
+        let markup = chat_text_markup("Use snake_case and **unfinished");
+
+        assert!(markup.contains("snake_case"));
+        assert!(markup.contains("**unfinished"));
+        assert!(!markup.contains("<b>unfinished</b>"));
     }
 
     #[test]
@@ -17099,7 +17851,7 @@ Schema confirms the app moved CRM around businesses.";
             &|| thread_nav.set(thread_nav.get() + 1),
         );
 
-        assert_eq!(*messages.borrow(), vec![42]);
+        assert_eq!(*messages.borrow(), vec![42, 99]);
         assert_eq!(thread_nav.get(), 1);
         assert_eq!(full.get(), 1);
     }
@@ -17170,6 +17922,39 @@ Schema confirms the app moved CRM around businesses.";
     }
 
     #[test]
+    fn chat_timeline_refresh_plan_keeps_working_indicator_stable_across_timer_ticks() {
+        let old_items = vec![ChatTimelineItem::WorkingIndicator(Duration::from_secs(4))];
+        let new_items = vec![ChatTimelineItem::WorkingIndicator(Duration::from_secs(5))];
+        let old = chat_timeline_render_state(7, "structured", &old_items);
+        let new = chat_timeline_render_state(7, "structured", &new_items);
+
+        assert_eq!(
+            chat_timeline_refresh_plan(Some(&old), &new),
+            ChatTimelineRefreshPlan::Skip
+        );
+    }
+
+    #[test]
+    fn chat_timeline_refresh_plan_inserts_new_rows_before_existing_working_indicator() {
+        let old_items = vec![
+            ChatTimelineItem::Message(chat_message_record(1, "user", "request", "user_send")),
+            ChatTimelineItem::WorkingIndicator(Duration::from_secs(4)),
+        ];
+        let new_items = vec![
+            ChatTimelineItem::Message(chat_message_record(1, "user", "request", "user_send")),
+            ChatTimelineItem::Message(chat_message_record(2, "agent", "partial", "agent")),
+            ChatTimelineItem::WorkingIndicator(Duration::from_secs(5)),
+        ];
+        let old = chat_timeline_render_state(7, "structured", &old_items);
+        let new = chat_timeline_render_state(7, "structured", &new_items);
+
+        assert_eq!(
+            chat_timeline_refresh_plan(Some(&old), &new),
+            ChatTimelineRefreshPlan::ReplaceBeforeTrailingWorkingIndicator { start: 1 }
+        );
+    }
+
+    #[test]
     fn chat_timeline_refresh_plan_rebuilds_when_leading_rows_change() {
         let items = vec![ChatTimelineItem::Message(chat_message_record(
             1, "agent", "partial", "agent",
@@ -17209,8 +17994,9 @@ Schema confirms the app moved CRM around businesses.";
             .expect("thread nav refresh follows message refresh");
         let callback_region = &source[start..end];
 
-        assert!(callback_region.contains("ChatTimelineRefreshPlan::Append"));
-        assert!(callback_region.contains("ChatTimelineRefreshPlan::RebuildMessages"));
+        assert!(callback_region.contains("render_chat_timeline_snapshot("));
+        assert!(source.contains("ChatTimelineRefreshPlan::Append"));
+        assert!(source.contains("ChatTimelineRefreshPlan::RebuildMessages"));
         assert!(!callback_region.contains("refresh_view();"));
     }
 
@@ -17229,6 +18015,106 @@ Schema confirms the app moved CRM around businesses.";
         assert!(
             callback_region.contains("spawn_background_job("),
             "message timeline DB loads must not run synchronously in GTK refresh callbacks"
+        );
+    }
+
+    #[test]
+    fn external_chat_message_refresh_warms_cache_for_nonselected_threads() {
+        let source = include_str!("session_surface.rs");
+        let start = source
+            .find("let refresh_messages_for_external: Rc<dyn Fn(i64)>")
+            .expect("external message refresh closure exists");
+        let end = source[start..]
+            .find("let refresh_thread_nav_for_external")
+            .map(|offset| start + offset)
+            .expect("thread nav refresh follows message refresh");
+        let callback_region = &source[start..end];
+
+        let cache_write = callback_region
+            .find("cache_chat_timeline_snapshot")
+            .expect("background message refresh should cache the loaded timeline");
+        let selected_render_guard = callback_region
+            .find("if *selected_thread.borrow() != Some(thread_id)")
+            .expect("background message refresh should still skip rendering nonselected threads");
+        assert!(
+            cache_write < selected_render_guard,
+            "message refreshes should warm cached timelines before checking selected render state"
+        );
+    }
+
+    #[test]
+    fn external_chat_message_refresh_tracks_generations_per_thread() {
+        let source = include_str!("session_surface.rs");
+        let start = source
+            .find("let refresh_messages_for_external: Rc<dyn Fn(i64)>")
+            .expect("external message refresh closure exists");
+        let end = source[start..]
+            .find("let refresh_thread_nav_for_external")
+            .map(|offset| start + offset)
+            .expect("thread nav refresh follows message refresh");
+        let callback_region = &source[start..end];
+
+        assert!(
+            callback_region.contains("HashMap::<i64, u64>::new()"),
+            "message refresh generations should be tracked per thread so one chat update does not cancel another chat cache warm"
+        );
+    }
+
+    #[test]
+    fn inline_event_body_text_does_not_read_files_during_render() {
+        let source = include_str!("session_surface.rs");
+        let start = source
+            .find("fn inline_event_body_text")
+            .expect("inline event body renderer exists");
+        let end = source[start..]
+            .find("fn inline_event_body_without_chip_header")
+            .map(|offset| start + offset)
+            .expect("next inline body helper follows renderer");
+        let render_region = &source[start..end];
+
+        assert!(
+            !render_region.contains("fs::read_to_string"),
+            "inline event rendering must not read files on the GTK thread"
+        );
+    }
+
+    #[test]
+    fn working_indicator_tick_does_not_run_full_refresh_view() {
+        let source = include_str!("session_surface.rs");
+        let start = source
+            .find("fn install_working_indicator_tick")
+            .expect("working indicator tick installer exists");
+        let end = source[start..]
+            .find("fn session_transcript_event_widget")
+            .map(|offset| start + offset)
+            .expect("next function follows working tick installer");
+        let tick_region = &source[start..end];
+
+        assert!(
+            !tick_region.contains("refresh_view();"),
+            "working indicator timer must not run the full chat refresh path"
+        );
+    }
+
+    #[test]
+    fn external_chat_tab_selection_renders_cached_timeline_before_background_refresh() {
+        let source = include_str!("session_surface.rs");
+        let start = source
+            .find("*external_chat_tabs.selection_controller.borrow_mut()")
+            .expect("external tab selection controller exists");
+        let end = source[start..]
+            .find("if let Some(prompt) = app_state.take_pending_chat_prompt()")
+            .map(|offset| start + offset)
+            .expect("selection controller ends before pending prompt handling");
+        let selection_region = &source[start..end];
+
+        assert!(
+            selection_region.contains("render_cached_chat_timeline(thread_id)"),
+            "tab selection should render the cached timeline synchronously when available"
+        );
+        assert!(
+            selection_region.contains("WorkspaceChatMessagesChanged"),
+            "tab selection should schedule an async message refresh to update stale cached data"
         );
     }
 

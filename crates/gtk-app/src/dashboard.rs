@@ -4,15 +4,29 @@ use archductor_core::workspace::WorkspaceStatusLine;
 use archductor_core::workspace::WorkspaceStore;
 use gtk::prelude::*;
 use gtk::{Box as GBox, Button, Label, Orientation, PolicyType, ScrolledWindow};
-use std::cell::RefCell;
-use std::path::Path;
+use std::cell::{Cell, RefCell};
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+use crate::archcar_async::spawn_background_job;
 use crate::history_data::workspace_has_open_pull_request;
 use crate::motion::{append_revealed, clear_box};
 use crate::tabs::{set_standard_tab_active, standard_tab, standard_tab_strip};
 use crate::title_case_workspace;
-use crate::workspace_command_center::workspace_pull_request_status_summary;
+
+#[derive(Clone)]
+struct DashboardCardSnapshot {
+    line: WorkspaceStatusLine,
+    changed_files: usize,
+    pr_attention_label: Option<String>,
+    pr_attention_css_class: Option<&'static str>,
+}
+
+#[derive(Clone)]
+struct DashboardSnapshot {
+    repository_names: Vec<String>,
+    cards: Vec<DashboardCardSnapshot>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DashboardBucket {
@@ -76,13 +90,46 @@ pub(crate) fn build_dashboard_panel(
 
     let db_path = paths.database_path.clone();
     let selected_project = Rc::new(RefCell::new(None::<String>));
+    let snapshot_cache = Rc::new(RefCell::new(None::<DashboardSnapshot>));
+    let refresh_generation = Rc::new(Cell::new(0_u64));
     let refresh = move || {
-        render_dashboard(
-            &db_path,
-            &project_tabs,
-            &board,
-            selected_project.clone(),
-            open_workspace.clone(),
+        clear_box(&project_tabs);
+        clear_box(&board);
+        append_empty_dashboard(&project_tabs, &board, "Loading dashboard...");
+        let generation = refresh_generation.get() + 1;
+        refresh_generation.set(generation);
+        let db_path = db_path.clone();
+        let project_tabs = project_tabs.clone();
+        let board = board.clone();
+        let selected_project = selected_project.clone();
+        let open_workspace = open_workspace.clone();
+        let snapshot_cache = snapshot_cache.clone();
+        let refresh_generation = refresh_generation.clone();
+        spawn_background_job(
+            move || load_dashboard_snapshot(db_path),
+            move |result| {
+                if refresh_generation.get() != generation {
+                    return;
+                }
+                match result {
+                    Ok(snapshot) => {
+                        *snapshot_cache.borrow_mut() = Some(snapshot.clone());
+                        render_dashboard_snapshot(
+                            &snapshot,
+                            &project_tabs,
+                            &board,
+                            selected_project,
+                            open_workspace,
+                            snapshot_cache,
+                        );
+                    }
+                    Err(message) => {
+                        clear_box(&project_tabs);
+                        clear_box(&board);
+                        append_empty_dashboard(&project_tabs, &board, &message);
+                    }
+                }
+            },
         );
     };
 
@@ -90,84 +137,119 @@ pub(crate) fn build_dashboard_panel(
     (root, refresh)
 }
 
-fn render_dashboard(
-    db_path: &Path,
+fn load_dashboard_snapshot(db_path: PathBuf) -> Result<DashboardSnapshot, String> {
+    let store = WorkspaceStore::open_app(&db_path).map_err(|err| format!("{err:#}"))?;
+    let statuses = store.list_status().map_err(|err| format!("{err:#}"))?;
+    let repository_names =
+        dashboard_repository_names(&db_path).map_err(|err| format!("{err:#}"))?;
+    let cards = statuses
+        .into_iter()
+        .map(|line| {
+            let changed_files = store
+                .changed_files(&line.workspace.name)
+                .map(|files| files.len())
+                .unwrap_or(0);
+            let pr_attention = line.pull_request.as_ref().map(|pr| {
+                crate::workspace_command_center::workspace_pull_request_status_summary(
+                    &store,
+                    &line.workspace.name,
+                    pr,
+                )
+            });
+            DashboardCardSnapshot {
+                line,
+                changed_files,
+                pr_attention_label: pr_attention
+                    .as_ref()
+                    .and_then(|state| state.attention_label())
+                    .map(str::to_owned),
+                pr_attention_css_class: pr_attention
+                    .as_ref()
+                    .and_then(|state| state.attention_css_class()),
+            }
+        })
+        .collect();
+    Ok(DashboardSnapshot {
+        repository_names,
+        cards,
+    })
+}
+
+fn render_dashboard_snapshot(
+    snapshot: &DashboardSnapshot,
     project_tabs: &GBox,
     board: &GBox,
     selected_project: Rc<RefCell<Option<String>>>,
     open_workspace: Rc<dyn Fn(String)>,
+    snapshot_cache: Rc<RefCell<Option<DashboardSnapshot>>>,
 ) {
     clear_box(project_tabs);
     clear_box(board);
 
-    let Ok(store) = WorkspaceStore::open_app(db_path) else {
-        append_empty_dashboard(project_tabs, board, "No workspace database yet.");
-        return;
-    };
-    let Ok(statuses) = store.list_status() else {
-        append_empty_dashboard(project_tabs, board, "Could not read workspace state.");
-        return;
-    };
-
-    let Ok(repo_names) = dashboard_repository_names(db_path) else {
-        append_empty_dashboard(project_tabs, board, "Could not read project state.");
-        return;
-    };
-
-    let selected = dashboard_selected_project(selected_project.borrow().as_deref(), &repo_names);
+    let selected = dashboard_selected_project(
+        selected_project.borrow().as_deref(),
+        &snapshot.repository_names,
+    );
     *selected_project.borrow_mut() = selected.clone();
 
     let all_tab = dashboard_project_tab("All projects", selected.is_none(), {
-        let db_path = db_path.to_path_buf();
         let project_tabs = project_tabs.downgrade();
         let board = board.downgrade();
         let selected_project = selected_project.clone();
         let open_workspace = open_workspace.clone();
+        let snapshot_cache = snapshot_cache.clone();
         move || {
             *selected_project.borrow_mut() = None;
             let (Some(project_tabs), Some(board)) = (project_tabs.upgrade(), board.upgrade())
             else {
                 return;
             };
-            render_dashboard(
-                &db_path,
-                &project_tabs,
-                &board,
-                selected_project.clone(),
-                open_workspace.clone(),
-            );
+            if let Some(snapshot) = snapshot_cache.borrow().clone() {
+                render_dashboard_snapshot(
+                    &snapshot,
+                    &project_tabs,
+                    &board,
+                    selected_project.clone(),
+                    open_workspace.clone(),
+                    snapshot_cache.clone(),
+                );
+            }
         }
     });
     project_tabs.append(&all_tab);
-    for repo in &repo_names {
+    for repo in &snapshot.repository_names {
         let tab = dashboard_project_tab(repo, selected.as_deref() == Some(repo.as_str()), {
-            let db_path = db_path.to_path_buf();
             let project_tabs = project_tabs.downgrade();
             let board = board.downgrade();
             let selected_project = selected_project.clone();
             let open_workspace = open_workspace.clone();
             let repo = repo.clone();
+            let snapshot_cache = snapshot_cache.clone();
             move || {
                 *selected_project.borrow_mut() = Some(repo.clone());
                 let (Some(project_tabs), Some(board)) = (project_tabs.upgrade(), board.upgrade())
                 else {
                     return;
                 };
-                render_dashboard(
-                    &db_path,
-                    &project_tabs,
-                    &board,
-                    selected_project.clone(),
-                    open_workspace.clone(),
-                );
+                if let Some(snapshot) = snapshot_cache.borrow().clone() {
+                    render_dashboard_snapshot(
+                        &snapshot,
+                        &project_tabs,
+                        &board,
+                        selected_project.clone(),
+                        open_workspace.clone(),
+                        snapshot_cache.clone(),
+                    );
+                }
             }
         });
         project_tabs.append(&tab);
     }
 
-    let visible_statuses = statuses
+    let visible_cards = snapshot
+        .cards
         .iter()
-        .filter(|line| dashboard_project_matches(&line.repository_name, selected.as_deref()))
+        .filter(|card| dashboard_project_matches(&card.line.repository_name, selected.as_deref()))
         .collect::<Vec<_>>();
 
     let mut ready = Vec::new();
@@ -175,12 +257,12 @@ fn render_dashboard(
     let mut review = Vec::new();
     let mut archived = Vec::new();
 
-    for line in visible_statuses {
-        match dashboard_bucket(line) {
-            DashboardBucket::Ready => ready.push(line),
-            DashboardBucket::Running => running.push(line),
-            DashboardBucket::Review => review.push(line),
-            DashboardBucket::Archived => archived.push(line),
+    for card in visible_cards {
+        match dashboard_bucket(&card.line) {
+            DashboardBucket::Ready => ready.push(card),
+            DashboardBucket::Running => running.push(card),
+            DashboardBucket::Review => review.push(card),
+            DashboardBucket::Archived => archived.push(card),
         }
     }
 
@@ -189,7 +271,6 @@ fn render_dashboard(
         "Ready",
         "No ready workspaces",
         &ready,
-        &store,
         &open_workspace,
     );
     append_dashboard_column(
@@ -197,7 +278,6 @@ fn render_dashboard(
         "Running",
         "Nothing running",
         &running,
-        &store,
         &open_workspace,
     );
     append_dashboard_column(
@@ -205,7 +285,6 @@ fn render_dashboard(
         "Review",
         "Nothing in review",
         &review,
-        &store,
         &open_workspace,
     );
     append_dashboard_column(
@@ -213,7 +292,6 @@ fn render_dashboard(
         "Archived",
         "No archived workspaces",
         &archived,
-        &store,
         &open_workspace,
     );
 }
@@ -271,8 +349,7 @@ fn append_dashboard_column(
     board: &GBox,
     title: &str,
     empty_message: &str,
-    lines: &[&WorkspaceStatusLine],
-    store: &WorkspaceStore,
+    cards: &[&DashboardCardSnapshot],
     open_workspace: &Rc<dyn Fn(String)>,
 ) {
     let column = GBox::new(Orientation::Vertical, 8);
@@ -285,23 +362,20 @@ fn append_dashboard_column(
     title_label.add_css_class("column-title");
     title_label.set_xalign(0.0);
     title_label.set_hexpand(true);
-    let count = Label::new(Some(&lines.len().to_string()));
+    let count = Label::new(Some(&cards.len().to_string()));
     count.add_css_class("column-count");
     header.append(&title_label);
     header.append(&count);
     column.append(&header);
 
-    if lines.is_empty() {
+    if cards.is_empty() {
         let empty = Label::new(Some(empty_message));
         empty.add_css_class("column-empty");
         empty.set_xalign(0.0);
         append_revealed(&column, &empty);
     } else {
-        for line in lines {
-            append_revealed(
-                &column,
-                &build_dashboard_card(line, store, open_workspace.clone()),
-            );
+        for card in cards {
+            append_revealed(&column, &build_dashboard_card(card, open_workspace.clone()));
         }
     }
 
@@ -317,10 +391,10 @@ fn dashboard_pr_meta(repository_name: &str, pr_number: i64, pr_attention: Option
 }
 
 fn build_dashboard_card(
-    line: &WorkspaceStatusLine,
-    store: &WorkspaceStore,
+    card_snapshot: &DashboardCardSnapshot,
     open_workspace: Rc<dyn Fn(String)>,
 ) -> Button {
+    let line = &card_snapshot.line;
     let ws = &line.workspace;
     let button = Button::new();
     button.add_css_class("flat");
@@ -338,14 +412,13 @@ fn build_dashboard_card(
     branch.add_css_class("card-branch");
     branch.set_xalign(0.0);
     branch.set_hexpand(true);
-    let diff = store.changed_files(&ws.name).map(|f| f.len()).unwrap_or(0);
-    let diff_text = if diff > 0 {
-        format!("+{diff}")
+    let diff_text = if card_snapshot.changed_files > 0 {
+        format!("+{}", card_snapshot.changed_files)
     } else {
         "clean".to_owned()
     };
     let diff_label = Label::new(Some(&diff_text));
-    diff_label.add_css_class(if diff > 0 {
+    diff_label.add_css_class(if card_snapshot.changed_files > 0 {
         "card-diff-hot"
     } else {
         "card-diff"
@@ -360,26 +433,18 @@ fn build_dashboard_card(
     name.set_wrap(true);
     card.append(&name);
 
-    let pr_attention = line
-        .pull_request
-        .as_ref()
-        .map(|pr| workspace_pull_request_status_summary(store, &ws.name, pr));
     let meta = match &line.pull_request {
         Some(pr) => dashboard_pr_meta(
             &line.repository_name,
             pr.number,
-            pr_attention
-                .as_ref()
-                .and_then(|state| state.attention_label()),
+            card_snapshot.pr_attention_label.as_deref(),
         ),
         None => line.repository_name.clone(),
     };
     let meta_label = Label::new(Some(&meta));
     meta_label.add_css_class("card-meta");
-    if let Some(state) = pr_attention.as_ref() {
-        if let Some(css_class) = state.attention_css_class() {
-            meta_label.add_css_class(css_class);
-        }
+    if let Some(css_class) = card_snapshot.pr_attention_css_class {
+        meta_label.add_css_class(css_class);
     }
     meta_label.set_xalign(0.0);
     meta_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
@@ -585,5 +650,27 @@ mod tests {
         open_dashboard_workspace(&line("active", false, 0, None), &open_workspace);
 
         assert_eq!(opened.borrow().as_deref(), Some("berlin"));
+    }
+
+    #[test]
+    fn dashboard_refresh_loads_snapshot_in_background() {
+        let source = include_str!("dashboard.rs");
+        let start = source
+            .find("let refresh = move || {")
+            .expect("dashboard refresh closure exists");
+        let end = source[start..]
+            .find("refresh();")
+            .map(|offset| start + offset)
+            .expect("dashboard initial refresh follows closure");
+        let refresh_region = &source[start..end];
+
+        assert!(
+            refresh_region.contains("spawn_background_job("),
+            "dashboard refresh must load snapshots off the GTK thread"
+        );
+        assert!(
+            !refresh_region.contains("render_dashboard("),
+            "dashboard refresh must not render from the database on the GTK thread"
+        );
     }
 }

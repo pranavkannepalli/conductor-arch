@@ -1724,6 +1724,22 @@ button.ws-tab-shell {
     min-width: 14px;
     min-height: 14px;
 }
+.ws-chat-tab-indicator {
+    min-width: 14px;
+    min-height: 14px;
+}
+.ws-chat-tab-spinner {
+    min-width: 12px;
+    min-height: 12px;
+    color: #8fb5ff;
+}
+.ws-chat-tab-dot {
+    min-width: 12px;
+    min-height: 12px;
+    color: #f0c36a;
+    font-size: 18px;
+    font-weight: 700;
+}
 .ws-tab-shell:hover .ws-tab-label,
 .ws-tab-shell:hover .ws-tab-close-icon {
     color: #c6c6c6;
@@ -1751,6 +1767,15 @@ button.ws-tab-shell {
 .ws-tab-shell.ws-tab-active .ws-tab-label,
 .ws-tab-shell.ws-tab-active .ws-tab-close-icon {
     color: #e8e8e8;
+    font-weight: 600;
+}
+.ws-tab-shell.ws-tab-editing {
+    background-color: #222a24;
+    border-bottom-color: #62c073;
+}
+.ws-tab-shell.ws-tab-editing .ws-tab-label,
+.ws-tab-shell.ws-tab-editing .ws-tab-close-icon {
+    color: #d7f2dc;
     font-weight: 600;
 }
 .ws-mode-switcher button {
@@ -3254,6 +3279,16 @@ mod tests {
             property_value(unread_block, "border-bottom-color"),
             property_value(active_block, "border-bottom-color")
         );
+    }
+
+    #[test]
+    fn chat_tab_state_indicators_have_stable_styling() {
+        let css = app_css();
+
+        assert!(css.contains(".ws-chat-tab-indicator"));
+        assert!(css.contains(".ws-chat-tab-spinner"));
+        assert!(css.contains(".ws-chat-tab-dot"));
+        assert!(css.contains(".ws-tab-shell.ws-tab-editing"));
     }
 
     #[test]

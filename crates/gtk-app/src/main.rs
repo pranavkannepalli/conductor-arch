@@ -1080,28 +1080,22 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         "gtk startup: window presented"
     );
 
-    if reconcile_runtime_state_for_ui(
-        &app_state.workspace_database_path(),
-        &runtime_error_reporter,
-        &toast_manager,
+    spawn_runtime_reconciliation(
+        app_state.workspace_database_path(),
+        refresh_hub.clone(),
+        app_state.clone(),
+        runtime_error_reporter.clone(),
+        toast_manager.clone(),
         "startup",
-    ) {
-        refresh_hub.refresh(RefreshScope::All);
-    }
-    match WorkspaceStore::open_app(app_state.workspace_database_path())
-        .and_then(|store| store.recover_workspace_lifecycle_jobs())
-    {
-        Ok(recovered) if recovered > 0 => {
-            refresh_hub.refresh_event(RefreshEvent::WorkspaceInventoryChanged);
-        }
-        Ok(_) => {}
-        Err(err) => report_runtime_error(
-            &runtime_error_reporter,
-            &toast_manager,
-            "workspace lifecycle recovery",
-            err,
-        ),
-    }
+        true,
+    );
+    spawn_workspace_lifecycle_recovery(
+        app_state.workspace_database_path(),
+        refresh_hub.clone(),
+        runtime_error_reporter.clone(),
+        toast_manager.clone(),
+        "workspace lifecycle recovery",
+    );
 
     let spotlight_event_tx = {
         let (tx, rx) = mpsc::channel();
@@ -1158,14 +1152,15 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
             let _keep_refresh_subscription_alive = &app_state_refresh_subscription;
             navigation_coordinator_on_close.borrow_mut().take();
             *spotlight_watcher_on_close.borrow_mut() = None;
-            if reconcile_runtime_state_for_ui(
-                &db_path_on_close,
-                &runtime_reporter_on_close,
-                &toast_on_close,
+            spawn_runtime_reconciliation(
+                db_path_on_close.clone(),
+                hub_on_close.clone(),
+                state_on_close.clone(),
+                runtime_reporter_on_close.clone(),
+                toast_on_close.clone(),
                 "close",
-            ) {
-                refresh_runtime_reconciliation_event(&hub_on_close, &state_on_close);
-            }
+                false,
+            );
         });
     }
 
@@ -1179,28 +1174,22 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
             if !window.is_active() {
                 return;
             }
-            if reconcile_runtime_state_for_ui(
-                &db_path_on_focus,
-                &runtime_reporter_on_focus,
-                &toast_on_focus,
+            spawn_runtime_reconciliation(
+                db_path_on_focus.clone(),
+                hub_on_focus.clone(),
+                state_on_focus.clone(),
+                runtime_reporter_on_focus.clone(),
+                toast_on_focus.clone(),
                 "focus",
-            ) {
-                refresh_runtime_reconciliation_event(&hub_on_focus, &state_on_focus);
-            }
-            match WorkspaceStore::open_app(&db_path_on_focus)
-                .and_then(|store| store.recover_workspace_lifecycle_jobs())
-            {
-                Ok(recovered) if recovered > 0 => {
-                    hub_on_focus.refresh_event(RefreshEvent::WorkspaceInventoryChanged);
-                }
-                Ok(_) => {}
-                Err(err) => report_runtime_error(
-                    &runtime_reporter_on_focus,
-                    &toast_on_focus,
-                    "workspace lifecycle recovery",
-                    err,
-                ),
-            }
+                false,
+            );
+            spawn_workspace_lifecycle_recovery(
+                db_path_on_focus.clone(),
+                hub_on_focus.clone(),
+                runtime_reporter_on_focus.clone(),
+                toast_on_focus.clone(),
+                "workspace lifecycle recovery",
+            );
         });
     }
 
@@ -1382,14 +1371,15 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     // PER-190: This is the fallback runtime reconciler for missed focus/file
     // events; remove when all runtime producers emit reliable RefreshHub events.
     glib::timeout_add_seconds_local(5, move || {
-        if reconcile_runtime_state_for_ui(
-            &db_path_runtime_auto,
-            &runtime_reporter_auto,
-            &toast_auto,
+        spawn_runtime_reconciliation(
+            db_path_runtime_auto.clone(),
+            hub_runtime_auto.clone(),
+            state_runtime_auto.clone(),
+            runtime_reporter_auto.clone(),
+            toast_auto.clone(),
             "timer",
-        ) {
-            refresh_runtime_reconciliation_event(&hub_runtime_auto, &state_runtime_auto);
-        }
+            false,
+        );
         if let Err(err) = refresh_spotlight_file_watcher(
             &db_path_runtime_auto,
             &spotlight_event_tx_auto,
@@ -1601,9 +1591,71 @@ fn report_runtime_error(
     err: anyhow::Error,
 ) {
     tracing::error!(trigger, error = %err, "runtime refresh failed");
-    if let Some(message) = reporter.borrow_mut().record(trigger, &format!("{err:#}")) {
+    report_runtime_error_message(reporter, toast_manager, trigger, &format!("{err:#}"));
+}
+
+fn report_runtime_error_message(
+    reporter: &Rc<RefCell<RuntimeErrorReporter>>,
+    toast_manager: &ToastManager,
+    trigger: &str,
+    message: &str,
+) {
+    if let Some(message) = reporter.borrow_mut().record(trigger, message) {
         toast_manager.show(ToastMessage::warning(message));
     }
+}
+
+fn spawn_runtime_reconciliation(
+    db_path: PathBuf,
+    refresh_hub: RefreshHub,
+    state: AppState,
+    reporter: Rc<RefCell<RuntimeErrorReporter>>,
+    toast_manager: ToastManager,
+    trigger: &'static str,
+    refresh_all: bool,
+) {
+    archcar_async::spawn_background_job(
+        move || {
+            reconcile_runtime_state(&db_path)
+                .map(|report| report.changed())
+                .map_err(|err| format!("{err:#}"))
+        },
+        move |result| match result {
+            Ok(true) if refresh_all => refresh_hub.refresh(RefreshScope::All),
+            Ok(true) => refresh_runtime_reconciliation_event(&refresh_hub, &state),
+            Ok(false) => {}
+            Err(message) => {
+                tracing::error!(trigger, error = %message, "runtime refresh failed");
+                report_runtime_error_message(&reporter, &toast_manager, trigger, &message);
+            }
+        },
+    );
+}
+
+fn spawn_workspace_lifecycle_recovery(
+    db_path: PathBuf,
+    refresh_hub: RefreshHub,
+    reporter: Rc<RefCell<RuntimeErrorReporter>>,
+    toast_manager: ToastManager,
+    trigger: &'static str,
+) {
+    archcar_async::spawn_background_job(
+        move || {
+            WorkspaceStore::open_app(db_path)
+                .and_then(|store| store.recover_workspace_lifecycle_jobs())
+                .map_err(|err| format!("{err:#}"))
+        },
+        move |result| match result {
+            Ok(recovered) if recovered > 0 => {
+                refresh_hub.refresh_event(RefreshEvent::WorkspaceInventoryChanged);
+            }
+            Ok(_) => {}
+            Err(message) => {
+                tracing::error!(trigger, error = %message, "runtime refresh failed");
+                report_runtime_error_message(&reporter, &toast_manager, trigger, &message);
+            }
+        },
+    );
 }
 
 fn reconcile_runtime_state_for_ui(
@@ -2464,6 +2516,49 @@ mod tests {
             reporter.record("spotlight watcher", "watch permission denied"),
             Some("spotlight watcher runtime refresh failed: watch permission denied".to_owned())
         );
+    }
+
+    #[test]
+    fn runtime_reconciliation_sources_spawn_background_jobs() {
+        let source = include_str!("main.rs");
+        for (name, start_needle, end_needle) in [
+            (
+                "startup",
+                "\"gtk startup: window presented\"",
+                "let spotlight_event_tx = {",
+            ),
+            (
+                "close",
+                "window.connect_destroy(move |_| {",
+                "window.connect_is_active_notify(move |window| {",
+            ),
+            (
+                "focus",
+                "window.connect_is_active_notify(move |window| {",
+                "let db_path_background = app_state.workspace_database_path();",
+            ),
+            (
+                "timer",
+                concat!("glib::timeout", "_add_seconds_local(5, move || {"),
+                "glib::ControlFlow::Continue\n    });\n}",
+            ),
+        ] {
+            let start = source.find(start_needle).expect(name);
+            let end = source[start..]
+                .find(end_needle)
+                .map(|offset| start + offset)
+                .expect(name);
+            let region = &source[start..end];
+
+            assert!(
+                region.contains("spawn_runtime_reconciliation("),
+                "{name} runtime reconciliation must be scheduled off the GTK thread"
+            );
+            assert!(
+                !region.contains("reconcile_runtime_state_for_ui("),
+                "{name} must not reconcile runtime state on the GTK thread"
+            );
+        }
     }
 
     fn init_repo(path: PathBuf) -> PathBuf {

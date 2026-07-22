@@ -16,7 +16,7 @@ use gtk::{
     Paned, PolicyType, Popover, ScrolledWindow, Separator, Spinner, Stack, StackSwitcher, TextTag,
     TextView, Widget, WrapMode,
 };
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -34,17 +34,64 @@ const WORKSPACE_COMMIT_CHANGE_LIMIT: usize = 25;
 type WorkspaceTabSelector = Rc<dyn Fn(&str)>;
 type ContextMenuItem = (&'static str, Rc<dyn Fn()>);
 
+struct WorkspaceChatTabSnapshot {
+    workspace_name: String,
+    selected: Option<i64>,
+    threads: Vec<ChatThreadRecord>,
+    nav_items_by_thread: HashMap<i64, crate::background_sync::WorkspaceChatNavItem>,
+}
+
+struct WorkspaceFileSnapshot {
+    relative_path: String,
+    contents: String,
+    diff_text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WorkspaceChatTabStateInput {
+    selected: bool,
+    generating: bool,
+    finished_unread: bool,
+    composer_dirty: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkspaceChatTabVisualState {
+    Generating,
+    FinishedGenerating,
+    Read,
+    Selected,
+    SelectedGenerating,
+    Editing,
+}
+
+fn reduce_workspace_chat_tab_state(
+    input: WorkspaceChatTabStateInput,
+) -> WorkspaceChatTabVisualState {
+    if input.selected && input.generating {
+        WorkspaceChatTabVisualState::SelectedGenerating
+    } else if input.selected && input.composer_dirty {
+        WorkspaceChatTabVisualState::Editing
+    } else if input.selected {
+        WorkspaceChatTabVisualState::Selected
+    } else if input.generating {
+        WorkspaceChatTabVisualState::Generating
+    } else if input.finished_unread {
+        WorkspaceChatTabVisualState::FinishedGenerating
+    } else {
+        WorkspaceChatTabVisualState::Read
+    }
+}
+
 fn chat_outcome_requires_nav_refresh(outcome: &session_surface::ChatRefreshOutcome) -> bool {
     outcome.requires_nav_refresh()
 }
 
-fn chat_message_event_matches_selected_thread(
+fn chat_message_event_matches_selected_workspace(
     event_workspace: &str,
-    event_thread_id: i64,
     selected_workspace: Option<&str>,
-    selected_thread: Option<i64>,
 ) -> bool {
-    selected_workspace == Some(event_workspace) && selected_thread == Some(event_thread_id)
+    selected_workspace == Some(event_workspace)
 }
 
 fn workspace_phase_status_text(phase: Option<WorkspaceUiPhase>) -> Option<String> {
@@ -105,6 +152,49 @@ fn workspace_repository_name_from_db(db_path: &Path, workspace_name: &str) -> St
         .ok()
         .map(|store| workspace_repository_name(&store, workspace_name))
         .unwrap_or_else(|| workspace_name.to_owned())
+}
+
+fn load_workspace_chat_tab_snapshot(
+    db_path: PathBuf,
+    workspace_name: String,
+    selected: Option<i64>,
+) -> Result<WorkspaceChatTabSnapshot, String> {
+    WorkspaceStore::open_app(db_path.clone())
+        .and_then(|store| {
+            let threads = store.list_chat_threads(&workspace_name)?;
+            let nav_items_by_thread = crate::background_sync::load_workspace_chat_nav(
+                &db_path,
+                &workspace_name,
+                selected,
+            )?
+            .into_iter()
+            .map(|item| (item.thread_id, item))
+            .collect::<HashMap<_, _>>();
+            Ok(WorkspaceChatTabSnapshot {
+                workspace_name,
+                selected,
+                threads,
+                nav_items_by_thread,
+            })
+        })
+        .map_err(|err| format!("{err:#}"))
+}
+
+fn load_workspace_file_snapshot(
+    workspace_path: PathBuf,
+    db_path: PathBuf,
+    workspace_name: String,
+    relative_path: String,
+) -> WorkspaceFileSnapshot {
+    let file_path = workspace_path.join(&relative_path);
+    let contents =
+        fs::read_to_string(&file_path).unwrap_or_else(|_| "[binary or unreadable file]".to_owned());
+    let diff_text = workspace_diff_text_for_path(&db_path, &workspace_name, Some(&relative_path));
+    WorkspaceFileSnapshot {
+        relative_path,
+        contents,
+        diff_text,
+    }
 }
 
 #[derive(Clone)]
@@ -729,6 +819,12 @@ fn ws_center_panel(
     let closed_chat_tabs = Rc::new(RefCell::new(HashSet::<i64>::new()));
     let chat_tab_buttons = Rc::new(RefCell::new(HashMap::<i64, GBox>::new()));
     let file_tab_buttons = Rc::new(RefCell::new(HashMap::<String, GBox>::new()));
+    let chat_nav_items_by_thread = Rc::new(RefCell::new(HashMap::<
+        i64,
+        crate::background_sync::WorkspaceChatNavItem,
+    >::new()));
+    let finished_unread_threads = Rc::new(RefCell::new(HashSet::<i64>::new()));
+    let composer_dirty_threads = Rc::new(RefCell::new(HashSet::<i64>::new()));
 
     let setup_readiness = Rc::new(RefCell::new(SetupReadiness::from_host()));
 
@@ -763,10 +859,14 @@ fn ws_center_panel(
         let state = state.clone();
         let external_thread_selection = external_thread_selection.clone();
         let content = content.clone();
+        let chat_nav_items_by_thread = chat_nav_items_by_thread.clone();
+        let finished_unread_threads = finished_unread_threads.clone();
+        let composer_dirty_threads = composer_dirty_threads.clone();
         Rc::new(move |threads, selected| {
             *known_threads.borrow_mut() = threads.clone();
             if let Some(selected) = selected {
                 closed_chat_tabs.borrow_mut().remove(&selected);
+                finished_unread_threads.borrow_mut().remove(&selected);
             }
             let visible_threads = threads
                 .iter()
@@ -829,19 +929,7 @@ fn ws_center_panel(
                 .or_else(|| visible_threads.first().map(|thread| thread.id));
             *selected_thread.borrow_mut() = selected;
             state.set_selected_chat_thread(selected);
-            let workspace_name = current_workspace_name.borrow().clone();
-            let nav_items_by_thread = crate::background_sync::load_workspace_chat_nav(
-                &db_path,
-                &workspace_name,
-                selected,
-            )
-            .map(|items| {
-                items
-                    .into_iter()
-                    .map(|item| (item.thread_id, item))
-                    .collect::<HashMap<_, _>>()
-            })
-            .unwrap_or_default();
+            let nav_items_by_thread = chat_nav_items_by_thread.borrow().clone();
             while let Some(child) = chat_tabs.first_child() {
                 chat_tabs.remove(&child);
             }
@@ -851,29 +939,31 @@ fn ws_center_panel(
                     .get(&thread.id)
                     .map(workspace_chat_nav_label)
                     .unwrap_or_else(|| workspace_chat_tab_label(&thread));
-                let (tab_shell, close_button) = ws_tab_surface(&tab_label);
-                if let Some(nav_item) = nav_items_by_thread.get(&thread.id) {
-                    if nav_item.running {
-                        tab_shell.add_css_class("ws-tab-running");
-                    }
-                    if nav_item.unread {
-                        tab_shell.add_css_class("ws-tab-unread");
-                    }
-                }
+                let (tab_shell, close_button) = ws_chat_tab_surface(&tab_label);
                 let controller_for_click = external_thread_selection.clone();
                 let content_for_click = content.clone();
                 let selected_thread_for_click = selected_thread.clone();
                 let closed_chat_tabs_for_click = closed_chat_tabs.clone();
                 let chat_tab_buttons_for_click = chat_tab_buttons.clone();
                 let file_tab_buttons_for_click = file_tab_buttons.clone();
+                let chat_nav_items_for_click = chat_nav_items_by_thread.clone();
+                let finished_unread_for_click = finished_unread_threads.clone();
+                let composer_dirty_for_click = composer_dirty_threads.clone();
                 let state_for_click = state.clone();
                 let thread_id = thread.id;
                 let select_tab: Rc<dyn Fn()> = Rc::new(move || {
                     closed_chat_tabs_for_click.borrow_mut().remove(&thread_id);
+                    finished_unread_for_click.borrow_mut().remove(&thread_id);
                     *selected_thread_for_click.borrow_mut() = Some(thread_id);
                     state_for_click.set_selected_chat_thread(Some(thread_id));
                     content_for_click.set_visible_child_name("chat");
-                    sync_workspace_chat_tabs(chat_tab_buttons_for_click.as_ref(), Some(thread_id));
+                    sync_workspace_chat_tabs(
+                        chat_tab_buttons_for_click.as_ref(),
+                        Some(thread_id),
+                        chat_nav_items_for_click.as_ref(),
+                        finished_unread_for_click.as_ref(),
+                        composer_dirty_for_click.as_ref(),
+                    );
                     sync_workspace_file_tabs(file_tab_buttons_for_click.as_ref(), None);
                     if let Some(select_thread) =
                         clone_external_thread_selection_controller(&controller_for_click)
@@ -894,6 +984,9 @@ fn ws_center_panel(
                     let external_thread_selection = external_thread_selection.clone();
                     let chat_tab_buttons = chat_tab_buttons.clone();
                     let file_tab_buttons = file_tab_buttons.clone();
+                    let chat_nav_items_by_thread = chat_nav_items_by_thread.clone();
+                    let finished_unread_threads = finished_unread_threads.clone();
+                    let composer_dirty_threads = composer_dirty_threads.clone();
                     let content = content.clone();
                     let add_tab_btn = add_tab_btn.clone();
                     let setup_readiness = setup_readiness.clone();
@@ -906,6 +999,8 @@ fn ws_center_panel(
                             archcar_paths.clone(),
                         );
                         closed_chat_tabs.borrow_mut().insert(thread_id);
+                        finished_unread_threads.borrow_mut().remove(&thread_id);
+                        composer_dirty_threads.borrow_mut().remove(&thread_id);
                         chat_tabs.remove(&tab_shell);
                         let visible_threads = known_threads
                             .borrow()
@@ -928,7 +1023,13 @@ fn ws_center_panel(
                         *selected_thread.borrow_mut() = next;
                         state.set_selected_chat_thread(next);
                         content.set_visible_child_name("chat");
-                        sync_workspace_chat_tabs(chat_tab_buttons.as_ref(), next);
+                        sync_workspace_chat_tabs(
+                            chat_tab_buttons.as_ref(),
+                            next,
+                            chat_nav_items_by_thread.as_ref(),
+                            finished_unread_threads.as_ref(),
+                            composer_dirty_threads.as_ref(),
+                        );
                         sync_workspace_file_tabs(file_tab_buttons.as_ref(), None);
                         if let Some(select_thread) =
                             clone_external_thread_selection_controller(&external_thread_selection)
@@ -944,14 +1045,18 @@ fn ws_center_panel(
                     &tab_shell,
                     vec![("Select", select_tab), ("Close tab", close_tab)],
                 );
-                if Some(thread.id) == selected {
-                    tab_shell.add_css_class("ws-tab-active");
-                }
                 chat_tab_buttons
                     .borrow_mut()
                     .insert(thread.id, tab_shell.clone());
                 chat_tabs.append(&tab_shell);
             }
+            sync_workspace_chat_tabs(
+                chat_tab_buttons.as_ref(),
+                selected,
+                chat_nav_items_by_thread.as_ref(),
+                finished_unread_threads.as_ref(),
+                composer_dirty_threads.as_ref(),
+            );
             chat_tabs.append(&reopen_tab_btn);
             chat_tabs.append(&add_tab_btn);
         })
@@ -973,6 +1078,29 @@ fn ws_center_panel(
         Some(session_surface::ExternalChatTabs {
             on_threads_changed: on_threads_changed.clone(),
             selection_controller: external_thread_selection.clone(),
+            on_composer_draft_changed: {
+                let chat_tab_buttons = chat_tab_buttons.clone();
+                let selected_thread = selected_thread.clone();
+                let chat_nav_items_by_thread = chat_nav_items_by_thread.clone();
+                let finished_unread_threads = finished_unread_threads.clone();
+                let composer_dirty_threads = composer_dirty_threads.clone();
+                Rc::new(move |thread_id, dirty| {
+                    let changed = if dirty {
+                        composer_dirty_threads.borrow_mut().insert(thread_id)
+                    } else {
+                        composer_dirty_threads.borrow_mut().remove(&thread_id)
+                    };
+                    if changed {
+                        sync_workspace_chat_tabs(
+                            chat_tab_buttons.as_ref(),
+                            *selected_thread.borrow(),
+                            chat_nav_items_by_thread.as_ref(),
+                            finished_unread_threads.as_ref(),
+                            composer_dirty_threads.as_ref(),
+                        );
+                    }
+                })
+            },
             on_workspace_metadata_changed: {
                 let current_workspace_name = current_workspace_name.clone();
                 Rc::new(move |update| {
@@ -990,12 +1118,10 @@ fn ws_center_panel(
                         let should_refresh = match event {
                             RefreshEvent::WorkspaceChatMessagesChanged {
                                 workspace,
-                                thread_id,
-                            } => chat_message_event_matches_selected_thread(
+                                thread_id: _,
+                            } => chat_message_event_matches_selected_workspace(
                                 workspace,
-                                *thread_id,
                                 selected_workspace.as_deref(),
-                                state.selected_chat_thread(),
                             ),
                             RefreshEvent::WorkspaceChatLifecycleChanged { workspace } => {
                                 selected_workspace.as_deref() == Some(workspace.as_str())
@@ -1019,19 +1145,67 @@ fn ws_center_panel(
         let current_workspace_name = current_workspace_name.clone();
         let selected_thread = selected_thread.clone();
         let on_threads_changed = on_threads_changed.clone();
+        let chat_nav_items_by_thread = chat_nav_items_by_thread.clone();
+        let finished_unread_threads = finished_unread_threads.clone();
+        let chat_tab_snapshot_generation = Rc::new(Cell::new(0_u64));
         refresh_hub.set_workspace_chat_tabs(move |event| {
             let workspace_name = current_workspace_name.borrow().clone();
-            if let RefreshEvent::WorkspaceChatLifecycleChanged { workspace } = event {
-                if workspace != &workspace_name {
+            match event {
+                RefreshEvent::WorkspaceChatLifecycleChanged { workspace }
+                | RefreshEvent::WorkspaceChatMessagesChanged { workspace, .. }
+                    if workspace != &workspace_name =>
+                {
                     return;
                 }
+                _ => {}
             }
-            let Ok(store) = WorkspaceStore::open_app(db_path.clone()) else {
-                return;
-            };
-            let threads = store.list_chat_threads(&workspace_name).unwrap_or_default();
             let selected = *selected_thread.borrow();
-            (on_threads_changed)(threads, selected);
+            let generation = chat_tab_snapshot_generation.get() + 1;
+            chat_tab_snapshot_generation.set(generation);
+            let db_path_for_job = db_path.clone();
+            let workspace_name_for_job = workspace_name.clone();
+            let current_workspace_name = current_workspace_name.clone();
+            let on_threads_changed = on_threads_changed.clone();
+            let chat_nav_items_by_thread = chat_nav_items_by_thread.clone();
+            let finished_unread_threads = finished_unread_threads.clone();
+            let chat_tab_snapshot_generation = chat_tab_snapshot_generation.clone();
+            spawn_background_job(
+                move || {
+                    load_workspace_chat_tab_snapshot(
+                        db_path_for_job,
+                        workspace_name_for_job,
+                        selected,
+                    )
+                },
+                move |result| {
+                    if chat_tab_snapshot_generation.get() != generation {
+                        return;
+                    }
+                    let snapshot = match result {
+                        Ok(snapshot) => snapshot,
+                        Err(message) => {
+                            error!(
+                                workspace = %workspace_name,
+                                error = %message,
+                                "failed to load workspace chat tab snapshot"
+                            );
+                            return;
+                        }
+                    };
+                    if current_workspace_name.borrow().as_str() != snapshot.workspace_name.as_str()
+                    {
+                        return;
+                    }
+                    reconcile_finished_workspace_chat_tabs(
+                        chat_nav_items_by_thread.as_ref(),
+                        finished_unread_threads.as_ref(),
+                        &snapshot.nav_items_by_thread,
+                        snapshot.selected,
+                    );
+                    *chat_nav_items_by_thread.borrow_mut() = snapshot.nav_items_by_thread;
+                    (on_threads_changed)(snapshot.threads, snapshot.selected);
+                },
+            );
         });
     }
     {
@@ -1120,8 +1294,10 @@ fn ws_center_panel(
 
     panel.append(&content);
 
-    // Open-file closure: reads file from disk, opens as a new tab
+    // Open-file closure: opens the tab immediately and loads content off the GTK thread.
     let ws_path = ws.path.clone();
+    let db_path_for_files = db_path.to_path_buf();
+    let workspace_name_for_files = ws.name.clone();
     let content_ref = content.clone();
     let file_tabs_ref = file_tabs.clone();
     let chat_tab_buttons_for_files = chat_tab_buttons.clone();
@@ -1129,6 +1305,9 @@ fn ws_center_panel(
     let selected_thread_for_files = selected_thread.clone();
     let external_thread_selection_for_files = external_thread_selection.clone();
     let state_for_files = state.clone();
+    let chat_nav_items_for_files = chat_nav_items_by_thread.clone();
+    let finished_unread_for_files = finished_unread_threads.clone();
+    let composer_dirty_for_files = composer_dirty_threads.clone();
 
     let open_file: Rc<dyn Fn(&str)> = Rc::new(move |rel_path: &str| {
         let tab_key = format!("file:{rel_path}");
@@ -1145,14 +1324,10 @@ fn ws_center_panel(
             mode_sw.add_css_class("ws-mode-switcher");
             file_pane.append(&mode_sw);
 
-            let full_path = ws_path.join(rel_path);
-            let file_content = fs::read_to_string(&full_path)
-                .unwrap_or_else(|e| format!("# Error reading file\n{e}"));
-
             let edit_view = TextView::new();
             edit_view.set_monospace(true);
             edit_view.set_vexpand(true);
-            edit_view.buffer().set_text(&file_content);
+            edit_view.buffer().set_text("Loading file...");
             let edit_scroll = ScrolledWindow::new();
             edit_scroll.set_vexpand(true);
             edit_scroll.set_child(Some(&edit_view));
@@ -1162,6 +1337,7 @@ fn ws_center_panel(
             diff_view.set_editable(false);
             diff_view.set_monospace(true);
             diff_view.set_vexpand(true);
+            diff_view.buffer().set_text("Loading diff...");
             let diff_scroll = ScrolledWindow::new();
             diff_scroll.set_vexpand(true);
             diff_scroll.set_child(Some(&diff_view));
@@ -1171,7 +1347,7 @@ fn ws_center_panel(
             preview_view.set_editable(false);
             preview_view.set_wrap_mode(WrapMode::WordChar);
             preview_view.set_vexpand(true);
-            preview_view.buffer().set_text(&file_content);
+            preview_view.buffer().set_text("Loading file...");
             let preview_scroll = ScrolledWindow::new();
             preview_scroll.set_vexpand(true);
             preview_scroll.set_child(Some(&preview_view));
@@ -1180,6 +1356,28 @@ fn ws_center_panel(
             mode_tabs.set_visible_child_name("edit");
             file_pane.append(&mode_tabs);
             content_ref.add_named(&file_pane, Some(&tab_key));
+
+            let edit_buffer = edit_view.buffer();
+            let diff_buffer = diff_view.buffer();
+            let preview_buffer = preview_view.buffer();
+            let mode_tabs_apply = mode_tabs.clone();
+            let ws_path = ws_path.clone();
+            let db_path = db_path_for_files.clone();
+            let workspace_name = workspace_name_for_files.clone();
+            let rel_path_for_job = rel_path.to_owned();
+            spawn_background_job(
+                move || {
+                    load_workspace_file_snapshot(ws_path, db_path, workspace_name, rel_path_for_job)
+                },
+                move |snapshot| {
+                    edit_buffer.set_text(&snapshot.contents);
+                    diff_buffer.set_text(&snapshot.diff_text);
+                    preview_buffer.set_text(&snapshot.contents);
+                    if snapshot.relative_path.ends_with(".md") {
+                        mode_tabs_apply.set_visible_child_name("preview");
+                    }
+                },
+            );
 
             // Tab button for this file
             let short_name = std::path::Path::new(rel_path)
@@ -1192,9 +1390,18 @@ fn ws_center_panel(
                 let tab_key = tab_key.clone();
                 let chat_tab_buttons = chat_tab_buttons_for_files.clone();
                 let file_tab_buttons = file_tab_buttons_ref.clone();
+                let chat_nav_items = chat_nav_items_for_files.clone();
+                let finished_unread_threads = finished_unread_for_files.clone();
+                let composer_dirty_threads = composer_dirty_for_files.clone();
                 move || {
                     content_ref.set_visible_child_name(&tab_key);
-                    sync_workspace_chat_tabs(chat_tab_buttons.as_ref(), None);
+                    sync_workspace_chat_tabs(
+                        chat_tab_buttons.as_ref(),
+                        None,
+                        chat_nav_items.as_ref(),
+                        finished_unread_threads.as_ref(),
+                        composer_dirty_threads.as_ref(),
+                    );
                     sync_workspace_file_tabs(file_tab_buttons.as_ref(), Some(&tab_key));
                 }
             });
@@ -1208,6 +1415,9 @@ fn ws_center_panel(
                 let selected_thread = selected_thread_for_files.clone();
                 let external_thread_selection = external_thread_selection_for_files.clone();
                 let state = state_for_files.clone();
+                let chat_nav_items = chat_nav_items_for_files.clone();
+                let finished_unread_threads = finished_unread_for_files.clone();
+                let composer_dirty_threads = composer_dirty_for_files.clone();
                 move || {
                     if let Some(child) = content_ref.child_by_name(&tab_key) {
                         content_ref.remove(&child);
@@ -1217,7 +1427,13 @@ fn ws_center_panel(
                     content_ref.set_visible_child_name("chat");
                     let selected = *selected_thread.borrow();
                     state.set_selected_chat_thread(selected);
-                    sync_workspace_chat_tabs(chat_tab_buttons.as_ref(), selected);
+                    sync_workspace_chat_tabs(
+                        chat_tab_buttons.as_ref(),
+                        selected,
+                        chat_nav_items.as_ref(),
+                        finished_unread_threads.as_ref(),
+                        composer_dirty_threads.as_ref(),
+                    );
                     sync_workspace_file_tabs(file_tab_buttons.as_ref(), None);
                     if let Some(select_thread) =
                         clone_external_thread_selection_controller(&external_thread_selection)
@@ -1239,7 +1455,13 @@ fn ws_center_panel(
             file_tabs_ref.append(&tab_shell);
         }
         content_ref.set_visible_child_name(&tab_key);
-        sync_workspace_chat_tabs(chat_tab_buttons_for_files.as_ref(), None);
+        sync_workspace_chat_tabs(
+            chat_tab_buttons_for_files.as_ref(),
+            None,
+            chat_nav_items_for_files.as_ref(),
+            finished_unread_for_files.as_ref(),
+            composer_dirty_for_files.as_ref(),
+        );
         sync_workspace_file_tabs(file_tab_buttons_ref.as_ref(), Some(&tab_key));
     });
 
@@ -1252,6 +1474,45 @@ fn ws_center_panel(
 
 fn ws_tab_surface(label: &str) -> (GBox, Button) {
     crate::tabs::closable_tab_surface(label)
+}
+
+fn ws_chat_tab_surface(label: &str) -> (GBox, Button) {
+    let shell = GBox::new(Orientation::Horizontal, 6);
+    shell.add_css_class("ws-tab-shell");
+    shell.set_valign(Align::Center);
+
+    let indicator = Stack::new();
+    indicator.add_css_class("ws-chat-tab-indicator");
+    let empty = GBox::new(Orientation::Horizontal, 0);
+    indicator.add_named(&empty, Some("empty"));
+    let spinner = Spinner::new();
+    spinner.add_css_class("ws-chat-tab-spinner");
+    spinner.start();
+    indicator.add_named(&spinner, Some("spinner"));
+    let dot = Label::new(Some("•"));
+    dot.add_css_class("ws-chat-tab-dot");
+    indicator.add_named(&dot, Some("dot"));
+    indicator.set_visible_child_name("empty");
+    shell.append(&indicator);
+
+    let label = Label::new(Some(label));
+    label.add_css_class("ws-tab-label");
+    label.set_valign(Align::Center);
+    label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    shell.append(&label);
+
+    let close = Button::new();
+    close.add_css_class("ws-tab-close-button");
+    close.set_valign(Align::Center);
+    close.set_tooltip_text(Some("Close tab"));
+    let close_icon =
+        Image::from_icon_name(crate::buttons::resolve_icon_name("window-close-symbolic"));
+    close_icon.add_css_class("ws-tab-close-icon");
+    close_icon.set_valign(Align::Center);
+    close.set_child(Some(&close_icon));
+    shell.append(&close);
+
+    (shell, close)
 }
 
 fn install_horizontal_wheel_scroll(scroll: &ScrolledWindow) {
@@ -1290,42 +1551,97 @@ fn connect_ws_tab_surface_clicks(tab: &GBox, select: Rc<dyn Fn()>) {
     tab.add_controller(click);
 }
 
-fn sync_workspace_chat_tabs(buttons: &RefCell<HashMap<i64, GBox>>, selected: Option<i64>) {
-    for (thread_id, button) in buttons.borrow().iter() {
-        if Some(*thread_id) == selected {
-            button.add_css_class("ws-tab-active");
-            clear_selected_chat_tab_unread_state(button);
-        } else {
-            button.remove_css_class("ws-tab-active");
-        }
+fn sync_workspace_chat_tabs(
+    buttons: &RefCell<HashMap<i64, GBox>>,
+    selected: Option<i64>,
+    nav_items_by_thread: &RefCell<HashMap<i64, crate::background_sync::WorkspaceChatNavItem>>,
+    finished_unread_threads: &RefCell<HashSet<i64>>,
+    composer_dirty_threads: &RefCell<HashSet<i64>>,
+) {
+    let buttons = buttons.borrow();
+    let nav_items_by_thread = nav_items_by_thread.borrow();
+    let finished_unread_threads = finished_unread_threads.borrow();
+    let composer_dirty_threads = composer_dirty_threads.borrow();
+    for (thread_id, button) in buttons.iter() {
+        let state = reduce_workspace_chat_tab_state(WorkspaceChatTabStateInput {
+            selected: Some(*thread_id) == selected,
+            generating: nav_items_by_thread
+                .get(thread_id)
+                .is_some_and(|item| item.running),
+            finished_unread: finished_unread_threads.contains(thread_id),
+            composer_dirty: composer_dirty_threads.contains(thread_id),
+        });
+        apply_workspace_chat_tab_visual_state(button, state);
     }
 }
 
-fn clear_selected_chat_tab_unread_state(tab: &GBox) {
+fn apply_workspace_chat_tab_visual_state(tab: &GBox, state: WorkspaceChatTabVisualState) {
+    tab.remove_css_class("ws-tab-active");
+    tab.remove_css_class("ws-tab-running");
     tab.remove_css_class("ws-tab-unread");
-    let Some(label) = workspace_chat_tab_label_widget(tab) else {
-        return;
+    tab.remove_css_class("ws-tab-editing");
+
+    let indicator = workspace_chat_tab_indicator_widget(tab);
+    let indicator_child = match state {
+        WorkspaceChatTabVisualState::Generating => {
+            tab.add_css_class("ws-tab-running");
+            "spinner"
+        }
+        WorkspaceChatTabVisualState::FinishedGenerating => {
+            tab.add_css_class("ws-tab-unread");
+            "dot"
+        }
+        WorkspaceChatTabVisualState::Read => "empty",
+        WorkspaceChatTabVisualState::Selected => {
+            tab.add_css_class("ws-tab-active");
+            "empty"
+        }
+        WorkspaceChatTabVisualState::SelectedGenerating => {
+            tab.add_css_class("ws-tab-active");
+            tab.add_css_class("ws-tab-running");
+            "spinner"
+        }
+        WorkspaceChatTabVisualState::Editing => {
+            tab.add_css_class("ws-tab-editing");
+            "empty"
+        }
     };
-    let text = label.text().to_string();
-    let Some(base) = text.strip_suffix(" *") else {
-        return;
-    };
-    if tab.has_css_class("ws-tab-running") {
-        label.set_text(&format!("{base} ..."));
-    } else {
-        label.set_text(base);
+    if let Some(indicator) = indicator {
+        indicator.set_visible_child_name(indicator_child);
     }
 }
 
-fn workspace_chat_tab_label_widget(tab: &GBox) -> Option<Label> {
+fn workspace_chat_tab_indicator_widget(tab: &GBox) -> Option<Stack> {
     let mut child = tab.first_child();
     while let Some(widget) = child {
-        if widget.has_css_class("ws-tab-label") {
-            return widget.downcast::<Label>().ok();
+        if widget.has_css_class("ws-chat-tab-indicator") {
+            return widget.downcast::<Stack>().ok();
         }
         child = widget.next_sibling();
     }
     None
+}
+
+fn reconcile_finished_workspace_chat_tabs(
+    previous_nav_items_by_thread: &RefCell<
+        HashMap<i64, crate::background_sync::WorkspaceChatNavItem>,
+    >,
+    finished_unread_threads: &RefCell<HashSet<i64>>,
+    next_nav_items_by_thread: &HashMap<i64, crate::background_sync::WorkspaceChatNavItem>,
+    selected: Option<i64>,
+) {
+    let previous_nav_items_by_thread = previous_nav_items_by_thread.borrow();
+    let mut finished_unread_threads = finished_unread_threads.borrow_mut();
+    for (thread_id, next) in next_nav_items_by_thread {
+        let was_running = previous_nav_items_by_thread
+            .get(thread_id)
+            .is_some_and(|previous| previous.running);
+        if Some(*thread_id) == selected || next.running {
+            finished_unread_threads.remove(thread_id);
+        } else if was_running {
+            finished_unread_threads.insert(*thread_id);
+        }
+    }
 }
 
 fn sync_workspace_file_tabs(buttons: &RefCell<HashMap<String, GBox>>, selected: Option<&str>) {
@@ -1424,11 +1740,8 @@ fn workspace_chat_tab_label(thread: &ChatThreadRecord) -> String {
 
 fn workspace_chat_nav_label(item: &crate::background_sync::WorkspaceChatNavItem) -> String {
     let title = item.title.trim();
-    let title = if title.is_empty() { "New Chat" } else { title };
-    if item.unread {
-        format!("{title} *")
-    } else if item.running {
-        format!("{title} ...")
+    if title.is_empty() {
+        "New Chat".to_owned()
     } else {
         title.to_owned()
     }
@@ -2590,21 +2903,43 @@ fn workspace_files_panel(
             open_btn.connect_clicked(move |_| {
                 *selected_file_open.borrow_mut() = Some(relative_path.clone());
                 current_file_open.set_text(&relative_path);
-                let file_path = workspace_path.join(&relative_path);
-                let contents = fs::read_to_string(&file_path)
-                    .unwrap_or_else(|_| "[binary or unreadable file]".to_owned());
-                edit_buffer.set_text(&contents);
-                preview_buffer.set_text(&contents);
-                diff_buffer.set_text(&workspace_diff_text_for_path(
-                    &db_path_open,
-                    &workspace_name,
-                    Some(&relative_path),
-                ));
-                if relative_path.ends_with(".md") {
-                    mode_stack_open.set_visible_child_name("preview");
-                } else {
-                    mode_stack_open.set_visible_child_name("edit");
-                }
+                edit_buffer.set_text("Loading file...");
+                preview_buffer.set_text("Loading file...");
+                diff_buffer.set_text("Loading diff...");
+                let selected_file_apply = selected_file_open.clone();
+                let edit_buffer_apply = edit_buffer.clone();
+                let preview_buffer_apply = preview_buffer.clone();
+                let diff_buffer_apply = diff_buffer.clone();
+                let mode_stack_apply = mode_stack_open.clone();
+                let workspace_path = workspace_path.clone();
+                let db_path_open = db_path_open.clone();
+                let workspace_name = workspace_name.clone();
+                let relative_path = relative_path.clone();
+                spawn_background_job(
+                    move || {
+                        load_workspace_file_snapshot(
+                            workspace_path,
+                            db_path_open,
+                            workspace_name,
+                            relative_path,
+                        )
+                    },
+                    move |snapshot| {
+                        if selected_file_apply.borrow().as_deref()
+                            != Some(snapshot.relative_path.as_str())
+                        {
+                            return;
+                        }
+                        edit_buffer_apply.set_text(&snapshot.contents);
+                        preview_buffer_apply.set_text(&snapshot.contents);
+                        diff_buffer_apply.set_text(&snapshot.diff_text);
+                        if snapshot.relative_path.ends_with(".md") {
+                            mode_stack_apply.set_visible_child_name("preview");
+                        } else {
+                            mode_stack_apply.set_visible_child_name("edit");
+                        }
+                    },
+                );
             });
             file_list.append(&open_btn);
         }
@@ -2631,16 +2966,36 @@ fn workspace_files_panel(
             current_file_reload.set_text("Select a file.");
             return;
         };
-        let file_path = workspace_path_reload.join(&relative_path);
-        let contents = fs::read_to_string(&file_path)
-            .unwrap_or_else(|_| "[binary or unreadable file]".to_owned());
-        edit_buffer_reload.set_text(&contents);
-        preview_buffer_reload.set_text(&contents);
-        diff_buffer_reload.set_text(&workspace_diff_text_for_path(
-            &db_path_reload,
-            &workspace_name_reload,
-            Some(&relative_path),
-        ));
+        current_file_reload.set_text(&relative_path);
+        edit_buffer_reload.set_text("Loading file...");
+        preview_buffer_reload.set_text("Loading file...");
+        diff_buffer_reload.set_text("Loading diff...");
+        let selected_file_apply = selected_file_reload.clone();
+        let edit_buffer_apply = edit_buffer_reload.clone();
+        let preview_buffer_apply = preview_buffer_reload.clone();
+        let diff_buffer_apply = diff_buffer_reload.clone();
+        let workspace_path_reload = workspace_path_reload.clone();
+        let db_path_reload = db_path_reload.clone();
+        let workspace_name_reload = workspace_name_reload.clone();
+        spawn_background_job(
+            move || {
+                load_workspace_file_snapshot(
+                    workspace_path_reload,
+                    db_path_reload,
+                    workspace_name_reload,
+                    relative_path,
+                )
+            },
+            move |snapshot| {
+                if selected_file_apply.borrow().as_deref() != Some(snapshot.relative_path.as_str())
+                {
+                    return;
+                }
+                edit_buffer_apply.set_text(&snapshot.contents);
+                preview_buffer_apply.set_text(&snapshot.contents);
+                diff_buffer_apply.set_text(&snapshot.diff_text);
+            },
+        );
     });
 
     let selected_file_save = selected_file;
@@ -8175,30 +8530,17 @@ mod tests {
     }
 
     #[test]
-    fn chat_message_event_matches_only_selected_workspace_thread() {
-        assert!(chat_message_event_matches_selected_thread(
+    fn chat_message_event_matches_selected_workspace_for_background_cache_warm() {
+        assert!(chat_message_event_matches_selected_workspace(
             "berlin",
-            7,
             Some("berlin"),
-            Some(7),
         ));
-        assert!(!chat_message_event_matches_selected_thread(
-            "berlin",
-            7,
-            Some("berlin"),
-            None,
+        assert!(!chat_message_event_matches_selected_workspace(
+            "berlin", None,
         ));
-        assert!(!chat_message_event_matches_selected_thread(
+        assert!(!chat_message_event_matches_selected_workspace(
             "berlin",
-            7,
-            Some("berlin"),
-            Some(8),
-        ));
-        assert!(!chat_message_event_matches_selected_thread(
-            "berlin",
-            7,
             Some("tokyo"),
-            Some(7),
         ));
     }
 
@@ -8890,7 +9232,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_chat_nav_label_marks_running_and_unread_threads() {
+    fn workspace_chat_nav_label_keeps_status_out_of_visible_text() {
         let base = crate::background_sync::WorkspaceChatNavItem {
             thread_id: 7,
             title: "Fix auth".to_owned(),
@@ -8904,11 +9246,108 @@ mod tests {
 
         let mut running = base.clone();
         running.running = true;
-        assert_eq!(workspace_chat_nav_label(&running), "Fix auth ...");
+        assert_eq!(workspace_chat_nav_label(&running), "Fix auth");
 
         let mut unread = running;
         unread.unread = true;
-        assert_eq!(workspace_chat_nav_label(&unread), "Fix auth *");
+        assert_eq!(workspace_chat_nav_label(&unread), "Fix auth");
+    }
+
+    #[test]
+    fn workspace_chat_tab_state_reducer_maps_generating_finished_read_selected_and_editing() {
+        assert_eq!(
+            reduce_workspace_chat_tab_state(WorkspaceChatTabStateInput {
+                selected: false,
+                generating: true,
+                finished_unread: false,
+                composer_dirty: false,
+            }),
+            WorkspaceChatTabVisualState::Generating
+        );
+        assert_eq!(
+            reduce_workspace_chat_tab_state(WorkspaceChatTabStateInput {
+                selected: false,
+                generating: false,
+                finished_unread: true,
+                composer_dirty: false,
+            }),
+            WorkspaceChatTabVisualState::FinishedGenerating
+        );
+        assert_eq!(
+            reduce_workspace_chat_tab_state(WorkspaceChatTabStateInput {
+                selected: false,
+                generating: false,
+                finished_unread: false,
+                composer_dirty: false,
+            }),
+            WorkspaceChatTabVisualState::Read
+        );
+        assert_eq!(
+            reduce_workspace_chat_tab_state(WorkspaceChatTabStateInput {
+                selected: true,
+                generating: false,
+                finished_unread: false,
+                composer_dirty: false,
+            }),
+            WorkspaceChatTabVisualState::Selected
+        );
+        assert_eq!(
+            reduce_workspace_chat_tab_state(WorkspaceChatTabStateInput {
+                selected: true,
+                generating: true,
+                finished_unread: true,
+                composer_dirty: true,
+            }),
+            WorkspaceChatTabVisualState::SelectedGenerating
+        );
+        assert_eq!(
+            reduce_workspace_chat_tab_state(WorkspaceChatTabStateInput {
+                selected: true,
+                generating: false,
+                finished_unread: false,
+                composer_dirty: true,
+            }),
+            WorkspaceChatTabVisualState::Editing
+        );
+    }
+
+    #[test]
+    fn finished_chat_tab_reconciliation_marks_only_nonselected_stopped_threads() {
+        let mut previous = HashMap::new();
+        previous.insert(
+            7,
+            crate::background_sync::WorkspaceChatNavItem {
+                thread_id: 7,
+                title: "Fix auth".to_owned(),
+                provider: "codex".to_owned(),
+                status: "active".to_owned(),
+                running: true,
+                unread: true,
+                updated_at: "then".to_owned(),
+            },
+        );
+        previous.insert(
+            8,
+            crate::background_sync::WorkspaceChatNavItem {
+                thread_id: 8,
+                title: "Selected".to_owned(),
+                provider: "codex".to_owned(),
+                status: "active".to_owned(),
+                running: true,
+                unread: false,
+                updated_at: "then".to_owned(),
+            },
+        );
+        let mut next = previous.clone();
+        next.get_mut(&7).unwrap().running = false;
+        next.get_mut(&8).unwrap().running = false;
+
+        let previous = RefCell::new(previous);
+        let finished = RefCell::new(HashSet::new());
+        reconcile_finished_workspace_chat_tabs(&previous, &finished, &next, Some(8));
+
+        assert!(finished.borrow().contains(&7));
+        assert!(!finished.borrow().contains(&8));
     }
 
     #[test]
@@ -8945,9 +9384,102 @@ mod tests {
             "selecting a chat tab should use the direct thread selection refresh only"
         );
         assert!(
-            source.contains("clear_selected_chat_tab_unread_state(button);"),
-            "selected chat tab sync should clear unread label/classes locally"
+            source.contains("finished_unread_for_click.borrow_mut().remove(&thread_id);"),
+            "selected chat tab sync should clear finished unread state locally"
         );
+    }
+
+    #[test]
+    fn chat_tab_refresh_ignores_message_events_for_other_workspaces() {
+        let source = include_str!("workspace_command_center.rs");
+        let start = source
+            .find("refresh_hub.set_workspace_chat_tabs(move |event| {")
+            .expect("chat tab refresh handler exists");
+        let end = source[start..]
+            .find("let setup_readiness = setup_readiness.clone();")
+            .map(|offset| start + offset)
+            .expect("chat add button setup follows chat tab handler");
+        let handler_region = &source[start..end];
+
+        assert!(
+            handler_region.contains("RefreshEvent::WorkspaceChatMessagesChanged { workspace, .. }"),
+            "message events should be filtered to the visible workspace before refreshing chat tabs"
+        );
+        assert!(
+            handler_region.contains("RefreshEvent::WorkspaceChatLifecycleChanged { workspace }"),
+            "lifecycle events should remain filtered to the visible workspace"
+        );
+        assert!(
+            handler_region.contains("workspace != &workspace_name"),
+            "chat tab refreshes for other workspaces must not rebuild visible tabs"
+        );
+    }
+
+    #[test]
+    fn chat_tab_refresh_loads_thread_nav_in_background() {
+        let source = include_str!("workspace_command_center.rs");
+        let start = source
+            .find("refresh_hub.set_workspace_chat_tabs(move |event| {")
+            .expect("chat tab refresh handler exists");
+        let end = source[start..]
+            .find("let setup_readiness = setup_readiness.clone();")
+            .map(|offset| start + offset)
+            .expect("chat add button setup follows chat tab handler");
+        let handler_region = &source[start..end];
+
+        assert!(
+            handler_region.contains("spawn_background_job("),
+            "chat tab refresh must not load nav snapshots on the GTK thread"
+        );
+        assert!(
+            !handler_region.contains("WorkspaceStore::open_app"),
+            "chat tab refresh must not open SQLite on the GTK thread"
+        );
+        assert!(
+            !handler_region.contains("list_chat_threads"),
+            "chat tab refresh must not list chat threads on the GTK thread"
+        );
+    }
+
+    #[test]
+    fn workspace_file_open_and_reload_load_snapshots_in_background() {
+        let source = include_str!("workspace_command_center.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source exists");
+        for (name, start_needle, end_needle) in [
+            (
+                "workspace file tab",
+                "let open_file: Rc<dyn Fn(&str)> = Rc::new(move |rel_path: &str| {",
+                "let initial_threads = known_threads.borrow().clone();",
+            ),
+            (
+                "workspace files panel",
+                "fn workspace_files_panel(",
+                "fn list_workspace_files(",
+            ),
+        ] {
+            let start = production.find(start_needle).expect(name);
+            let end = production[start..]
+                .find(end_needle)
+                .map(|offset| start + offset)
+                .expect(name);
+            let region = &production[start..end];
+
+            assert!(
+                region.contains("spawn_background_job("),
+                "{name} must load file snapshots off the GTK thread"
+            );
+            assert!(
+                !region.contains("fs::read_to_string"),
+                "{name} must not read files on the GTK thread"
+            );
+            assert!(
+                !region.contains("workspace_diff_text_for_path("),
+                "{name} must not calculate diffs on the GTK thread"
+            );
+        }
     }
 
     #[test]
