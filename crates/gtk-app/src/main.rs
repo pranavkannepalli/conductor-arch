@@ -1107,17 +1107,15 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         // PER-190: Spotlight file events arrive on a notify thread via std::mpsc;
         // remove this timer when a GLib main-context channel replaces that bridge.
         glib::timeout_add_seconds_local(1, move || {
-            if rx.try_iter().next().is_some()
-                && reconcile_runtime_state_for_ui(
-                    &db_path_spotlight_events,
-                    &runtime_reporter_spotlight_events,
-                    &toast_spotlight_events,
+            if rx.try_iter().next().is_some() {
+                spawn_runtime_reconciliation(
+                    db_path_spotlight_events.clone(),
+                    hub_spotlight_events.clone(),
+                    state_spotlight_events.clone(),
+                    runtime_reporter_spotlight_events.clone(),
+                    toast_spotlight_events.clone(),
                     "spotlight event",
-                )
-            {
-                refresh_runtime_reconciliation_event(
-                    &hub_spotlight_events,
-                    &state_spotlight_events,
+                    false,
                 );
             }
             glib::ControlFlow::Continue
@@ -1126,18 +1124,14 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     };
 
     let spotlight_watcher = Rc::new(RefCell::new(None));
-    if let Err(err) = refresh_spotlight_file_watcher(
-        &app_state.workspace_database_path(),
-        &spotlight_event_tx,
-        &spotlight_watcher,
-    ) {
-        report_runtime_error(
-            &runtime_error_reporter,
-            &toast_manager,
-            "spotlight watcher",
-            err,
-        );
-    }
+    spawn_spotlight_file_watcher_refresh(
+        app_state.workspace_database_path(),
+        spotlight_event_tx.clone(),
+        spotlight_watcher.clone(),
+        runtime_error_reporter.clone(),
+        toast_manager.clone(),
+        "spotlight watcher",
+    );
 
     {
         let db_path_on_close = app_state.workspace_database_path();
@@ -1322,41 +1316,33 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
                 *prev_notif.borrow_mut() = None;
                 return glib::ControlFlow::Continue;
             };
-            let rules = WorkspaceStore::open_app(db_path_notif.clone())
-                .and_then(|store| store.workspace_view_defaults(&workspace))
-                .map(|defaults| defaults.notification_rules)
-                .unwrap_or_default();
-            let notify_session_stop = rules.iter().any(|r| {
-                matches!(
-                    r.to_ascii_lowercase().replace('_', "").as_str(),
-                    "sessionstopped" | "sessionstop" | "onsessionstop" | "session"
-                )
-            });
-            let notify_check_fail = rules.iter().any(|r| {
-                matches!(
-                    r.to_ascii_lowercase().replace('_', "").as_str(),
-                    "checksfailed" | "checkfail" | "oncheckfail" | "checks"
-                )
-            });
-            if !notify_session_stop && !notify_check_fail {
-                return glib::ControlFlow::Continue;
-            }
-            let Ok(summary) = WorkspaceStore::open_app(db_path_notif.clone())
-                .and_then(|store| store.checks_summary(&workspace))
-            else {
-                return glib::ControlFlow::Continue;
-            };
-            let current_active = summary.active_sessions;
-            let session_running = summary.session_status == Some(ProcessStatus::Running);
-            let mut prev = prev_notif.borrow_mut();
-            if let Some((ref prev_ws, _prev_active, prev_running)) = *prev {
-                if prev_ws == &workspace && notify_session_stop && prev_running && !session_running
-                {
-                    toast_notif.show(ToastMessage::success("Agent session stopped."));
-                }
-            }
-            let _ = notify_check_fail;
-            *prev = Some((workspace, current_active, session_running));
+            let db_path = db_path_notif.clone();
+            let toast_notif = toast_notif.clone();
+            let prev_notif = prev_notif.clone();
+            archcar_async::spawn_background_job(
+                move || load_notification_snapshot(db_path, workspace),
+                move |result| {
+                    let Ok(Some(snapshot)) = result else {
+                        return;
+                    };
+                    let mut prev = prev_notif.borrow_mut();
+                    if let Some((ref prev_ws, _prev_active, prev_running)) = *prev {
+                        if prev_ws == &snapshot.workspace
+                            && snapshot.notify_session_stop
+                            && prev_running
+                            && !snapshot.session_running
+                        {
+                            toast_notif.show(ToastMessage::success("Agent session stopped."));
+                        }
+                    }
+                    let _ = snapshot.notify_check_fail;
+                    *prev = Some((
+                        snapshot.workspace,
+                        snapshot.active_sessions,
+                        snapshot.session_running,
+                    ));
+                },
+            );
             glib::ControlFlow::Continue
         });
     }
@@ -1380,18 +1366,14 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
             "timer",
             false,
         );
-        if let Err(err) = refresh_spotlight_file_watcher(
-            &db_path_runtime_auto,
-            &spotlight_event_tx_auto,
-            &spotlight_watcher_auto,
-        ) {
-            report_runtime_error(
-                &runtime_reporter_auto,
-                &toast_auto,
-                "spotlight watcher",
-                err,
-            );
-        }
+        spawn_spotlight_file_watcher_refresh(
+            db_path_runtime_auto.clone(),
+            spotlight_event_tx_auto.clone(),
+            spotlight_watcher_auto.clone(),
+            runtime_reporter_auto.clone(),
+            toast_auto.clone(),
+            "spotlight watcher",
+        );
         glib::ControlFlow::Continue
     });
 }
@@ -1521,9 +1503,16 @@ fn apply_palette_target(
         PaletteTarget::ToggleSidebar => split.set_show_sidebar(!split.shows_sidebar()),
         PaletteTarget::RunCommand(cmd) => {
             if let Some(workspace) = state.selected_workspace() {
-                let _ = WorkspaceStore::open_app(state.workspace_database_path())
-                    .and_then(|store| store.terminal_command(&workspace, &cmd));
-                refresh_hub.refresh(RefreshScope::Workspace);
+                let db_path = state.workspace_database_path();
+                let refresh_hub = refresh_hub.clone();
+                archcar_async::spawn_background_job(
+                    move || {
+                        WorkspaceStore::open_app(db_path)
+                            .and_then(|store| store.terminal_command(&workspace, &cmd))
+                            .map_err(|err| format!("{err:#}"))
+                    },
+                    move |_| refresh_hub.refresh(RefreshScope::Workspace),
+                );
             }
         }
     }
@@ -1603,6 +1592,53 @@ fn report_runtime_error_message(
     if let Some(message) = reporter.borrow_mut().record(trigger, message) {
         toast_manager.show(ToastMessage::warning(message));
     }
+}
+
+struct NotificationSnapshot {
+    workspace: String,
+    notify_session_stop: bool,
+    notify_check_fail: bool,
+    active_sessions: usize,
+    session_running: bool,
+}
+
+fn notification_rule_enabled(rules: &[String], aliases: &[&str]) -> bool {
+    rules.iter().any(|rule| {
+        let normalized = rule.to_ascii_lowercase().replace('_', "");
+        aliases.iter().any(|alias| normalized == *alias)
+    })
+}
+
+fn load_notification_snapshot(
+    db_path: PathBuf,
+    workspace: String,
+) -> Result<Option<NotificationSnapshot>, String> {
+    let store = WorkspaceStore::open_app(db_path).map_err(|err| format!("{err:#}"))?;
+    let rules = store
+        .workspace_view_defaults(&workspace)
+        .map(|defaults| defaults.notification_rules)
+        .unwrap_or_default();
+    let notify_session_stop = notification_rule_enabled(
+        &rules,
+        &["sessionstopped", "sessionstop", "onsessionstop", "session"],
+    );
+    let notify_check_fail = notification_rule_enabled(
+        &rules,
+        &["checksfailed", "checkfail", "oncheckfail", "checks"],
+    );
+    if !notify_session_stop && !notify_check_fail {
+        return Ok(None);
+    }
+    let summary = store
+        .checks_summary(&workspace)
+        .map_err(|err| format!("{err:#}"))?;
+    Ok(Some(NotificationSnapshot {
+        workspace,
+        notify_session_stop,
+        notify_check_fail,
+        active_sessions: summary.active_sessions,
+        session_running: summary.session_status == Some(ProcessStatus::Running),
+    }))
 }
 
 fn spawn_runtime_reconciliation(
@@ -1784,13 +1820,21 @@ struct SpotlightFileWatcher {
     _watcher: RecommendedWatcher,
 }
 
-fn refresh_spotlight_file_watcher(
-    db_path: &Path,
-    event_tx: &Sender<()>,
-    current: &Rc<RefCell<Option<SpotlightFileWatcher>>>,
-) -> anyhow::Result<()> {
-    let store = WorkspaceStore::open_app(db_path)?;
-    let targets = store.spotlight_watch_targets()?;
+enum SpotlightWatchRefresh {
+    Unchanged,
+    Clear,
+    Active(SpotlightFileWatcher),
+}
+
+fn load_spotlight_file_watcher(
+    db_path: PathBuf,
+    event_tx: Sender<()>,
+    current_targets: Option<Vec<SpotlightWatchTargetKey>>,
+) -> Result<SpotlightWatchRefresh, String> {
+    let store = WorkspaceStore::open_app(db_path).map_err(|err| format!("{err:#}"))?;
+    let targets = store
+        .spotlight_watch_targets()
+        .map_err(|err| format!("{err:#}"))?;
     let target_keys = targets
         .iter()
         .map(|target| SpotlightWatchTargetKey {
@@ -1799,38 +1843,63 @@ fn refresh_spotlight_file_watcher(
         })
         .collect::<Vec<_>>();
 
-    if current
-        .borrow()
-        .as_ref()
-        .map(|watcher| watcher.targets == target_keys)
-        .unwrap_or(false)
-    {
-        return Ok(());
+    if current_targets.as_ref() == Some(&target_keys) {
+        return Ok(SpotlightWatchRefresh::Unchanged);
     }
 
     if targets.is_empty() {
-        *current.borrow_mut() = None;
-        return Ok(());
+        return Ok(SpotlightWatchRefresh::Clear);
     }
 
-    let tx = event_tx.clone();
     let mut watcher = RecommendedWatcher::new(
         move |event: notify::Result<notify::Event>| {
             if event.is_ok() {
-                let _ = tx.send(());
+                let _ = event_tx.send(());
             }
         },
         Config::default(),
-    )?;
+    )
+    .map_err(|err| format!("{err:#}"))?;
     for target in &targets {
-        watcher.watch(&target.workspace_path, RecursiveMode::Recursive)?;
+        watcher
+            .watch(&target.workspace_path, RecursiveMode::Recursive)
+            .map_err(|err| format!("{err:#}"))?;
     }
 
-    *current.borrow_mut() = Some(SpotlightFileWatcher {
+    Ok(SpotlightWatchRefresh::Active(SpotlightFileWatcher {
         targets: target_keys,
         _watcher: watcher,
-    });
-    Ok(())
+    }))
+}
+
+fn spawn_spotlight_file_watcher_refresh(
+    db_path: PathBuf,
+    event_tx: Sender<()>,
+    current: Rc<RefCell<Option<SpotlightFileWatcher>>>,
+    reporter: Rc<RefCell<RuntimeErrorReporter>>,
+    toast_manager: ToastManager,
+    trigger: &'static str,
+) {
+    let current_targets = current
+        .borrow()
+        .as_ref()
+        .map(|watcher| watcher.targets.clone());
+    archcar_async::spawn_background_job(
+        move || load_spotlight_file_watcher(db_path, event_tx, current_targets),
+        move |result| match result {
+            Ok(SpotlightWatchRefresh::Unchanged) => {}
+            Ok(SpotlightWatchRefresh::Clear) => {
+                *current.borrow_mut() = None;
+            }
+            Ok(SpotlightWatchRefresh::Active(watcher)) => {
+                *current.borrow_mut() = Some(watcher);
+            }
+            Err(message) => {
+                tracing::error!(trigger, error = %message, "runtime refresh failed");
+                report_runtime_error_message(&reporter, &toast_manager, trigger, &message);
+            }
+        },
+    );
 }
 
 pub(crate) fn title_case_workspace(name: &str) -> String {
@@ -2559,6 +2628,118 @@ mod tests {
                 "{name} must not reconcile runtime state on the GTK thread"
             );
         }
+    }
+
+    #[test]
+    fn notification_timer_loads_snapshot_in_background() {
+        let source = include_str!("main.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("main source should contain production code");
+        let start = production_source
+            .find("Notification tracker:")
+            .expect("notification tracker exists");
+        let end = production_source[start..]
+            .find("let db_path_runtime_auto")
+            .map(|offset| start + offset)
+            .expect("runtime auto timer follows notification tracker");
+        let region = &production_source[start..end];
+
+        assert!(
+            region.contains("spawn_background_job("),
+            "notification timer must load persisted state off the GTK thread"
+        );
+        assert!(
+            !region.contains("WorkspaceStore::open_app("),
+            "notification timer must not open workspace storage on the GTK thread"
+        );
+    }
+
+    #[test]
+    fn spotlight_sources_spawn_background_jobs() {
+        let source = include_str!("main.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("main source should contain production code");
+
+        let event_start = production_source
+            .find("let spotlight_event_tx = {")
+            .expect("spotlight event bridge exists");
+        let event_end = production_source[event_start..]
+            .find("let spotlight_watcher =")
+            .map(|offset| event_start + offset)
+            .expect("spotlight watcher follows event bridge");
+        let event_region = &production_source[event_start..event_end];
+        assert!(
+            event_region.contains("spawn_runtime_reconciliation("),
+            "spotlight event bridge must reconcile runtime state off the GTK thread"
+        );
+        assert!(
+            !event_region.contains("reconcile_runtime_state_for_ui("),
+            "spotlight event bridge must not reconcile runtime state on the GTK thread"
+        );
+
+        let startup_start = production_source
+            .find("let spotlight_watcher =")
+            .expect("spotlight watcher setup exists");
+        let startup_end = production_source[startup_start..]
+            .find("let db_path_on_close")
+            .map(|offset| startup_start + offset)
+            .expect("window close setup follows watcher setup");
+        let startup_region = &production_source[startup_start..startup_end];
+        assert!(
+            startup_region.contains("spawn_spotlight_file_watcher_refresh("),
+            "startup spotlight watcher setup must run off the GTK thread"
+        );
+        assert!(
+            !startup_region.contains("refresh_spotlight_file_watcher("),
+            "startup must not refresh spotlight watchers on the GTK thread"
+        );
+
+        let timer_start = production_source
+            .find("let spotlight_watcher_auto = spotlight_watcher.clone();")
+            .expect("spotlight timer captures watcher");
+        let timer_end = production_source[timer_start..]
+            .find("glib::ControlFlow::Continue\n    });\n}")
+            .map(|offset| timer_start + offset)
+            .expect("spotlight timer ends");
+        let timer_region = &production_source[timer_start..timer_end];
+        assert!(
+            timer_region.contains("spawn_spotlight_file_watcher_refresh("),
+            "periodic spotlight watcher refresh must run off the GTK thread"
+        );
+        assert!(
+            !timer_region.contains("refresh_spotlight_file_watcher("),
+            "periodic timer must not refresh spotlight watchers on the GTK thread"
+        );
+    }
+
+    #[test]
+    fn palette_run_command_spawns_background_job() {
+        let source = include_str!("main.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("main source should contain production code");
+        let start = production_source
+            .find("PaletteTarget::RunCommand(cmd) => {")
+            .expect("palette run command handler exists");
+        let end = production_source[start..]
+            .find("fn page_stack_name")
+            .map(|offset| start + offset)
+            .expect("page_stack_name follows palette handling");
+        let region = &production_source[start..end];
+
+        assert!(
+            region.contains("spawn_background_job("),
+            "palette run commands must execute storage/process work off the GTK thread"
+        );
+        assert!(
+            !region.contains("WorkspaceStore::open_app(state.workspace_database_path())"),
+            "palette run commands must not open workspace storage on the GTK thread"
+        );
     }
 
     fn init_repo(path: PathBuf) -> PathBuf {

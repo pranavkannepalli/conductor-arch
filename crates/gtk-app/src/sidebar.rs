@@ -63,6 +63,24 @@ where
     }
 }
 
+fn load_sidebar_workspace_lookup(
+    db_path: PathBuf,
+    workspace: String,
+) -> Result<SidebarWorkspaceLookup, String> {
+    WorkspaceStore::open_app(db_path)
+        .and_then(|store| {
+            if !store.workspace_exists_by_name(&workspace)? {
+                return Ok(SidebarWorkspaceLookup::MissingWorkspace);
+            }
+            store.workspace_view_defaults(&workspace).map(|defaults| {
+                SidebarWorkspaceLookup::Ready {
+                    default_visible_tab: defaults.default_visible_tab,
+                }
+            })
+        })
+        .map_err(|err| format!("{err:#}"))
+}
+
 pub(crate) fn build_app_sidebar(
     app_state: &AppState,
     refresh_hub: RefreshHub,
@@ -583,6 +601,7 @@ pub(crate) fn build_app_sidebar(
     let archcar_paths = app_state.paths.clone();
     let restoring_workspace_selection_select = restoring_workspace_selection.clone();
     let toast_select = toast_manager.clone();
+    let selection_generation = Rc::new(Cell::new(0_u64));
     list.connect_row_selected(move |_, row| {
         guarded_gtk_callback((), || {
             if !workspace_row_selection_should_open_workspace(
@@ -598,42 +617,61 @@ pub(crate) fn build_app_sidebar(
             }) else {
                 return;
             };
-            let default_tab =
-                match validate_sidebar_workspace_selection(&state_select, &name, |workspace| {
-                    WorkspaceStore::open_app(db_path_select.clone()).and_then(|store| {
-                        if !store.workspace_exists_by_name(workspace)? {
-                            return Ok(SidebarWorkspaceLookup::MissingWorkspace);
-                        }
-                        store.workspace_view_defaults(workspace).map(|defaults| {
-                            SidebarWorkspaceLookup::Ready {
-                                default_visible_tab: defaults.default_visible_tab,
+            let generation = selection_generation.get() + 1;
+            selection_generation.set(generation);
+            let db_path = db_path_select.clone();
+            let lookup_name = name.clone();
+            let state_select = state_select.clone();
+            let refresh_select = refresh_select.clone();
+            let toast_select = toast_select.clone();
+            let archcar_paths = archcar_paths.clone();
+            let refresh_view_preferences_select = refresh_view_preferences_select.clone();
+            let refresh_workspace_select = refresh_workspace_select.clone();
+            let stack_select = stack_select.clone();
+            let selection_generation = selection_generation.clone();
+            spawn_background_job(
+                move || load_sidebar_workspace_lookup(db_path, lookup_name),
+                move |result| {
+                    if selection_generation.get() != generation {
+                        return;
+                    }
+                    let default_tab = match result {
+                        Ok(lookup) => {
+                            match validate_sidebar_workspace_selection(&state_select, &name, |_| {
+                                Ok(lookup)
+                            }) {
+                                SidebarWorkspaceSelection::Ready { default_tab } => default_tab,
+                                SidebarWorkspaceSelection::Stale => {
+                                    refresh_select
+                                        .refresh_event(RefreshEvent::WorkspaceInventoryChanged);
+                                    return;
+                                }
+                                SidebarWorkspaceSelection::Unavailable { message } => {
+                                    toast_select.error(format!("Open workspace failed: {message}"));
+                                    return;
+                                }
                             }
-                        })
-                    })
-                }) {
-                    SidebarWorkspaceSelection::Ready { default_tab } => default_tab,
-                    SidebarWorkspaceSelection::Stale => {
-                        refresh_select.refresh_event(RefreshEvent::WorkspaceInventoryChanged);
-                        return;
-                    }
-                    SidebarWorkspaceSelection::Unavailable { message } => {
-                        toast_select.error(format!("Open workspace failed: {message}"));
-                        return;
-                    }
-                };
-            spawn_archcar_request(
-                archcar_paths.clone(),
-                ArchcarRequest::EnsureWorkspaceDefaultSession {
-                    workspace: name.clone(),
-                    kind: SessionKind::Codex,
-                    harness: None,
+                        }
+                        Err(message) => {
+                            toast_select.error(format!("Open workspace failed: {message}"));
+                            return;
+                        }
+                    };
+                    spawn_archcar_request(
+                        archcar_paths.clone(),
+                        ArchcarRequest::EnsureWorkspaceDefaultSession {
+                            workspace: name.clone(),
+                            kind: SessionKind::Codex,
+                            harness: None,
+                        },
+                    );
+                    state_select.navigate_to_workspace_with_default_tab(Some(name), default_tab);
+                    refresh_view_preferences_select();
+                    refresh_workspace_select();
+                    refresh_select.refresh(RefreshScope::Dashboard);
+                    stack_select.set_visible_child_name("workspace");
                 },
             );
-            state_select.navigate_to_workspace_with_default_tab(Some(name), default_tab);
-            refresh_view_preferences_select();
-            refresh_workspace_select();
-            refresh_select.refresh(RefreshScope::Dashboard);
-            stack_select.set_visible_child_name("workspace");
         })
     });
 
@@ -988,21 +1026,49 @@ fn attach_workspace_row_context_menu(
                     let state = state.clone();
                     let refresh_hub = refresh_hub.clone();
                     let refresh_view_preferences = refresh_view_preferences.clone();
+                    let window = window.clone();
+                    let toast_manager = toast_manager.clone();
                     move |new_name| {
                         let old_name = workspace_name.borrow().clone();
                         if new_name.is_empty() || new_name == old_name {
                             return Ok(());
                         }
-                        let workspace = WorkspaceStore::open_app(state.workspace_database_path())
-                            .and_then(|store| store.rename(&old_name, &new_name))
-                            .map_err(|err| format!("{err:#}"))?;
-                        state.rename_workspace_in_navigation(&old_name, &workspace.name);
-                        refresh_view_preferences();
-                        refresh_hub.refresh_event(RefreshEvent::WorkspaceMetadataChanged {
-                            old_workspace: old_name,
-                            workspace: workspace.name,
-                            branch: None,
-                        });
+                        let db_path = state.workspace_database_path();
+                        let state = state.clone();
+                        let refresh_hub = refresh_hub.clone();
+                        let refresh_view_preferences = refresh_view_preferences.clone();
+                        let window = window.clone();
+                        let toast_manager = toast_manager.clone();
+                        let old_name_for_job = old_name.clone();
+                        spawn_background_job(
+                            move || {
+                                WorkspaceStore::open_app(db_path)
+                                    .and_then(|store| store.rename(&old_name_for_job, &new_name))
+                                    .map_err(|err| format!("{err:#}"))
+                            },
+                            move |result| match result {
+                                Ok(workspace) => {
+                                    state
+                                        .rename_workspace_in_navigation(&old_name, &workspace.name);
+                                    refresh_view_preferences();
+                                    refresh_hub.refresh_event(
+                                        RefreshEvent::WorkspaceMetadataChanged {
+                                            old_workspace: old_name,
+                                            workspace: workspace.name,
+                                            branch: None,
+                                        },
+                                    );
+                                }
+                                Err(err) => {
+                                    show_workspace_error_dialog(
+                                        &window,
+                                        "Workspace action failed",
+                                        &err,
+                                        &toast_manager,
+                                    );
+                                }
+                            },
+                        );
                         Ok(())
                     }
                 }),
@@ -1773,6 +1839,32 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_selection_loads_defaults_in_background() {
+        let source = include_str!("sidebar.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("sidebar source should contain production code");
+        let start = production_source
+            .find("list.connect_row_selected(move |_, row| {")
+            .expect("row selection handler exists");
+        let end = production_source[start..]
+            .find("scroll.set_child(Some(&list));")
+            .map(|offset| start + offset)
+            .expect("sidebar scroll follows row selection handler");
+        let region = &production_source[start..end];
+
+        assert!(
+            region.contains("spawn_background_job("),
+            "sidebar row selection must load workspace defaults off the GTK thread"
+        );
+        assert!(
+            !region.contains("WorkspaceStore::open_app("),
+            "sidebar row selection must not open workspace storage on the GTK thread"
+        );
+    }
+
+    #[test]
     fn sidebar_restores_workspace_selection_only_on_workspace_pages() {
         assert!(sidebar_should_restore_workspace_selection(
             &AppPage::Workspace
@@ -1831,6 +1923,32 @@ mod tests {
         assert!(!production_source.contains(
             "state.rename_workspace_in_navigation(&workspace_name, &workspace.name);\n                        refresh_view_preferences();\n                        refresh_workspace();\n                        refresh_hub.refresh_event(RefreshEvent::WorkspaceInventoryChanged);"
         ));
+    }
+
+    #[test]
+    fn sidebar_rename_runs_storage_work_in_background() {
+        let source = include_str!("sidebar.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("sidebar source should contain production code");
+        let start = production_source
+            .find("let rename_btn = menu_text_button(\"Rename\");")
+            .expect("rename action exists");
+        let end = production_source[start..]
+            .find("let duplicate_btn = menu_text_button(\"Duplicate\");")
+            .map(|offset| start + offset)
+            .expect("duplicate action follows rename action");
+        let region = &production_source[start..end];
+
+        assert!(
+            region.contains("spawn_background_job("),
+            "sidebar rename must execute storage work off the GTK thread"
+        );
+        assert!(
+            !region.contains("WorkspaceStore::open_app(state.workspace_database_path())"),
+            "sidebar rename must not open workspace storage on the GTK thread"
+        );
     }
 
     #[test]
