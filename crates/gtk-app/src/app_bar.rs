@@ -5,7 +5,10 @@ use crate::workspace_command_center::{
 };
 use archductor_core::workspace::{Workspace, WorkspaceStore};
 use gtk::prelude::*;
-use gtk::{Align, Box as GBox, HeaderBar, Label, Orientation, Stack, Widget};
+use gtk::{
+    Align, Box as GBox, HeaderBar, Label, Orientation, PackType, Paned, Stack, Widget,
+    WindowControls,
+};
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -103,6 +106,9 @@ pub(crate) struct AppBar {
     repository_name: Label,
     branch_name: Label,
     pr_label: Label,
+    sidebar_segment: GBox,
+    review_segment: GBox,
+    navigation_changed: Rc<RefCell<Option<Rc<dyn Fn()>>>>,
     database_path: PathBuf,
     state: AppState,
     _subscription: AppStateSubscription,
@@ -114,15 +120,27 @@ impl AppBar {
         database_path: PathBuf,
         collapse_sidebar: Rc<dyn Fn()>,
     ) -> Self {
-        let header_bar = HeaderBar::builder().show_title_buttons(true).build();
+        let header_bar = HeaderBar::builder().show_title_buttons(false).build();
         header_bar.add_css_class("app-bar");
         header_bar.set_height_request(APP_BAR_HEIGHT);
 
         let back_button = icon_button("go-previous-symbolic", "Back");
         let forward_button = icon_button("go-next-symbolic", "Forward");
         let navigation = GBox::new(Orientation::Horizontal, 4);
+        navigation.set_halign(Align::Start);
         navigation.append(&back_button);
         navigation.append(&forward_button);
+
+        let sidebar_segment = GBox::new(Orientation::Horizontal, 8);
+        sidebar_segment.add_css_class("app-bar-sidebar-segment");
+        sidebar_segment.set_width_request(320);
+        let sidebar_toggle = icon_button("sidebar-hide-symbolic", "Hide sidebar");
+        {
+            let collapse_sidebar = collapse_sidebar.clone();
+            sidebar_toggle.connect_clicked(move |_| collapse_sidebar());
+        }
+        sidebar_segment.append(&sidebar_toggle);
+        sidebar_segment.append(&navigation);
 
         let stack = Stack::new();
         stack.set_hexpand(true);
@@ -140,34 +158,60 @@ impl AppBar {
         let repository_name = compact_label("app-bar-subtitle");
         let branch_name = compact_label("app-bar-subtitle");
         let pr_label = compact_label("app-bar-pr-status");
-        let workspace_context = GBox::new(Orientation::Horizontal, 8);
-        workspace_context.add_css_class("app-bar-context");
+        let center_segment = GBox::new(Orientation::Horizontal, 8);
+        center_segment.add_css_class("app-bar-center-segment");
+        center_segment.set_hexpand(true);
+        center_segment.set_vexpand(false);
+        center_segment.append(&workspace_name);
+        center_segment.append(&repository_name);
+        center_segment.append(&branch_name);
+
+        let review_segment = GBox::new(Orientation::Horizontal, 8);
+        review_segment.add_css_class("app-bar-review-segment");
+        review_segment.set_vexpand(false);
+        review_segment.append(&pr_label);
+        review_segment.append(&workspace_header_actions(collapse_sidebar));
+        let workspace_context = Paned::new(Orientation::Horizontal);
         workspace_context.add_css_class("app-bar-workspace-context");
         workspace_context.set_vexpand(false);
-        workspace_context.append(&workspace_name);
-        workspace_context.append(&repository_name);
-        workspace_context.append(&branch_name);
-        workspace_context.append(&pr_label);
-        workspace_context.append(&workspace_header_actions(collapse_sidebar));
+        workspace_context.set_wide_handle(false);
+        workspace_context.set_start_child(Some(&center_segment));
+        workspace_context.set_end_child(Some(&review_segment));
+        install_workspace_header_ratio(&workspace_context);
         stack.add_named(&workspace_context, Some("workspace"));
 
         let content = GBox::new(Orientation::Horizontal, 10);
         content.add_css_class("app-bar-context");
         content.set_hexpand(true);
-        content.append(&navigation);
+        content.append(&sidebar_segment);
         content.append(&stack);
+        let window_controls = WindowControls::new(PackType::End);
+        window_controls.add_css_class("app-bar-window-controls");
+        content.append(&window_controls);
         header_bar.set_title_widget(Some(&content));
+
+        let navigation_changed = Rc::new(RefCell::new(None::<Rc<dyn Fn()>>));
 
         {
             let state = state.clone();
+            let navigation_changed = Rc::clone(&navigation_changed);
             back_button.connect_clicked(move |_| {
-                state.navigate_back();
+                if state.navigate_back() {
+                    if let Some(callback) = navigation_changed.borrow().as_ref() {
+                        callback();
+                    }
+                }
             });
         }
         {
             let state = state.clone();
+            let navigation_changed = Rc::clone(&navigation_changed);
             forward_button.connect_clicked(move |_| {
-                state.navigate_forward();
+                if state.navigate_forward() {
+                    if let Some(callback) = navigation_changed.borrow().as_ref() {
+                        callback();
+                    }
+                }
             });
         }
 
@@ -195,6 +239,9 @@ impl AppBar {
             repository_name,
             branch_name,
             pr_label,
+            sidebar_segment,
+            review_segment,
+            navigation_changed,
             database_path,
             state: state.clone(),
             _subscription: subscription,
@@ -210,6 +257,31 @@ impl AppBar {
 
     pub(crate) fn content_widget(&self) -> Widget {
         self.header_bar.clone().upcast()
+    }
+
+    pub(crate) fn enable_window_drag(&self) {
+        let gesture = gtk::GestureClick::new();
+        gesture.set_button(1);
+        gesture.connect_pressed(move |gesture, _presses, x, y| {
+            let Some(event) = gesture.current_event() else {
+                return;
+            };
+            let Some(device) = event.device() else {
+                return;
+            };
+            let Some(surface) = gesture
+                .widget()
+                .and_then(|widget| widget.native())
+                .and_then(|native| native.surface())
+            else {
+                return;
+            };
+            let Ok(toplevel) = surface.downcast::<gtk::gdk::Toplevel>() else {
+                return;
+            };
+            toplevel.begin_move(&device, 1, x, y, event.time());
+        });
+        self.header_bar.add_controller(gesture);
     }
 
     pub(crate) fn set_page_header(&self, key: &str, widget: &Widget) {
@@ -230,6 +302,29 @@ impl AppBar {
 
     pub(crate) fn refresh_workspace(&self) {
         self.refresh(&self.state.snapshot());
+    }
+
+    pub(crate) fn set_navigation_changed(&self, callback: Rc<dyn Fn()>) {
+        *self.navigation_changed.borrow_mut() = Some(callback);
+    }
+
+    pub(crate) fn bind_sidebar(&self, split: &adw::OverlaySplitView, sidebar: &Widget) {
+        let segment = self.sidebar_segment.clone();
+        let split_for_tick = split.clone();
+        let sidebar = sidebar.clone();
+        self.header_bar.add_tick_callback(move |_, _| {
+            let collapsed = split_for_tick.is_collapsed();
+            segment.set_visible(!collapsed);
+            let width = sidebar.allocated_width();
+            if !collapsed && width > 0 && segment.width_request() != width {
+                segment.set_width_request(width);
+            }
+            gtk::glib::ControlFlow::Continue
+        });
+    }
+
+    pub(crate) fn set_review_visible(&self, visible: bool) {
+        self.review_segment.set_visible(visible);
     }
 
     fn workspace_context(&self, snapshot: &AppStateSnapshot) -> Option<AppBarContext> {
@@ -262,6 +357,18 @@ impl AppBar {
             database_path: self.database_path.clone(),
         }
     }
+}
+
+fn install_workspace_header_ratio(split: &Paned) {
+    let last_width = Rc::new(RefCell::new(0));
+    split.add_tick_callback(move |paned, _| {
+        let width = paned.allocated_width();
+        if width > 0 && *last_width.borrow() != width {
+            paned.set_position(width.saturating_mul(5) / 8);
+            *last_width.borrow_mut() = width;
+        }
+        gtk::glib::ControlFlow::Continue
+    });
 }
 
 struct AppBarRefreshWidgets {
@@ -576,5 +683,22 @@ mod tests {
         assert!(constructor.contains("workspace_context.set_vexpand(false)"));
         assert!(production.contains("app-bar-workspace-actions"));
         assert!(production.contains("actions.set_vexpand(false)"));
+    }
+
+    #[test]
+    fn app_bar_columns_follow_sidebar_center_and_review_structure() {
+        let source = include_str!("app_bar.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source exists");
+
+        assert!(production.contains("app-bar-sidebar-segment"));
+        assert!(production.contains("app-bar-center-segment"));
+        assert!(production.contains("app-bar-review-segment"));
+        assert!(production.contains("Paned::new(Orientation::Horizontal)"));
+        assert!(production.contains("set_review_visible"));
+        assert!(production.contains("bind_sidebar"));
+        assert!(production.contains("WindowControls::new"));
     }
 }

@@ -808,6 +808,10 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
                 let app_bar = Rc::clone(&app_bar);
                 Rc::new(move || app_bar.refresh_workspace())
             },
+            {
+                let app_bar = Rc::clone(&app_bar);
+                Rc::new(move |visible| app_bar.set_review_visible(visible))
+            },
         );
     let workspace_preference_scope = GBox::new(Orientation::Vertical, 0);
     workspace_preference_scope.set_hexpand(true);
@@ -951,6 +955,26 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         refresh_view_preferences.clone(),
         toast_manager.clone(),
     );
+    app_bar.bind_sidebar(&split, sidebar.upcast_ref());
+    app_bar.set_navigation_changed({
+        let state = app_state.clone();
+        let stack = main_stack.clone();
+        let refresh_workspace = refresh_workspace_detail.clone();
+        let refresh_hub = refresh_hub.clone();
+        Rc::new(move || {
+            match state.snapshot().active_page {
+                AppPage::Dashboard => stack.set_visible_child_name("dashboard"),
+                AppPage::Projects => stack.set_visible_child_name("projects"),
+                AppPage::Workspace | AppPage::Review => {
+                    stack.set_visible_child_name("workspace");
+                    refresh_workspace();
+                }
+                AppPage::History => stack.set_visible_child_name("history"),
+                AppPage::Settings => stack.set_visible_child_name("settings"),
+            }
+            refresh_hub.refresh(RefreshScope::Sidebar);
+        })
+    });
     tracing::info!(
         elapsed_ms = startup.elapsed().as_millis(),
         "gtk startup: sidebar built"
@@ -1936,14 +1960,14 @@ fn windows_cmd_terminal_fallback_args(full_cmd: &str) -> Vec<String> {
 fn configure_window_chrome(window: &ApplicationWindow, app_bar: &AppBar) -> bool {
     #[cfg(windows)]
     {
-        let _ = app_bar;
-        window.set_titlebar(None::<&gtk::Widget>);
-        window.set_decorated(true);
+        window.set_decorated(false);
+        app_bar.enable_window_drag();
         true
     }
 
     #[cfg(not(windows))]
     {
+        window.set_decorated(true);
         window.set_titlebar(Some(&app_bar.widget()));
         false
     }
@@ -2027,6 +2051,31 @@ mod tests {
             production.contains("window.set_titlebar(Some(&app_bar.widget()))"),
             "Linux should install the persistent app bar as its draggable titlebar"
         );
+    }
+
+    #[test]
+    fn app_bar_is_the_only_caption_on_every_platform() {
+        let source = include_str!("main.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source exists");
+
+        assert!(production.contains("window.set_titlebar(Some(&app_bar.widget()))"));
+        assert!(production.contains("window.set_decorated(false)"));
+        assert!(production.contains("window_content.append(&app_bar.content_widget())"));
+        assert!(!production.contains("window.set_titlebar(None::<&gtk::Widget>)"));
+    }
+
+    #[test]
+    fn sidebar_does_not_duplicate_app_bar_navigation_chrome() {
+        let sidebar = include_str!("sidebar.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source exists");
+
+        assert!(!sidebar.contains("sidebar_box.append(&chrome_row)"));
+        assert!(!sidebar.contains("sidebar_arrow_button("));
     }
 
     fn env_lock() -> &'static Mutex<()> {

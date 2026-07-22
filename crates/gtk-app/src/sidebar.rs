@@ -65,7 +65,7 @@ pub(crate) fn build_app_sidebar(
     refresh_hub: RefreshHub,
     stack: Stack,
     window: ApplicationWindow,
-    split: adw::OverlaySplitView,
+    _split: adw::OverlaySplitView,
     refresh_workspace: impl Fn() + Clone + 'static,
     refresh_view_preferences: Rc<dyn Fn()>,
     toast_manager: ToastManager,
@@ -74,40 +74,7 @@ pub(crate) fn build_app_sidebar(
     let sidebar_box = GBox::new(Orientation::Vertical, 0);
     sidebar_box.add_css_class("sidebar");
 
-    let chrome_row = GBox::new(Orientation::Horizontal, 4);
-    chrome_row.add_css_class("sidebar-chrome");
-
-    let chrome_spacer = GBox::new(Orientation::Horizontal, 0);
-    chrome_spacer.set_hexpand(true);
-    let chrome_right = GBox::new(Orientation::Horizontal, 4);
-
-    let sidebar_toggle_btn = sidebar_icon_button("sidebar-show-symbolic", "Hide sidebar");
-    {
-        let split = split.clone();
-        sidebar_toggle_btn.connect_clicked(move |_| {
-            split.set_collapsed(true);
-        });
-    }
-    chrome_right.append(&sidebar_toggle_btn);
-
-    let back_btn = sidebar_arrow_button("go-previous-symbolic", "Back");
-    let forward_btn = sidebar_arrow_button("go-next-symbolic", "Forward");
-    chrome_right.append(&back_btn);
-    chrome_right.append(&forward_btn);
-    chrome_row.append(&chrome_spacer);
-    chrome_row.append(&chrome_right);
-    sidebar_box.append(&chrome_row);
-
-    let sync_nav_buttons = {
-        let app_state = app_state.clone();
-        let back_btn = back_btn.clone();
-        let forward_btn = forward_btn.clone();
-        Rc::new(move || {
-            back_btn.set_sensitive(app_state.can_navigate_back());
-            forward_btn.set_sensitive(app_state.can_navigate_forward());
-        })
-    };
-    sync_nav_buttons();
+    let sync_nav_buttons: Rc<dyn Fn()> = Rc::new(|| {});
 
     let nav_group = GBox::new(Orientation::Vertical, 0);
     nav_group.add_css_class("sidebar-nav-group");
@@ -628,67 +595,11 @@ pub(crate) fn build_app_sidebar(
 
     sidebar_box.append(&bottom_bar);
 
-    {
-        let state_back = app_state.clone();
-        let stack_back = stack.clone();
-        let refresh_back = refresh_hub.clone();
-        let refresh_workspace_back = refresh_workspace.clone();
-        let sync_nav_buttons = sync_nav_buttons.clone();
-        back_btn.connect_clicked(move |_| {
-            if !state_back.navigate_back() {
-                return;
-            }
-            match state_back.snapshot().active_page {
-                AppPage::Dashboard => stack_back.set_visible_child_name("dashboard"),
-                AppPage::Projects => stack_back.set_visible_child_name("projects"),
-                AppPage::Workspace => {
-                    stack_back.set_visible_child_name("workspace");
-                    refresh_workspace_back();
-                }
-                AppPage::History => stack_back.set_visible_child_name("history"),
-                AppPage::Settings => stack_back.set_visible_child_name("settings"),
-                AppPage::Review => stack_back.set_visible_child_name("workspace"),
-            }
-            refresh_back.refresh(RefreshScope::Sidebar);
-            sync_nav_buttons();
-        });
-    }
-
-    {
-        let state_forward = app_state.clone();
-        let stack_forward = stack.clone();
-        let refresh_forward = refresh_hub.clone();
-        let refresh_workspace_forward = refresh_workspace.clone();
-        let sync_nav_buttons = sync_nav_buttons.clone();
-        forward_btn.connect_clicked(move |_| {
-            if !state_forward.navigate_forward() {
-                return;
-            }
-            match state_forward.snapshot().active_page {
-                AppPage::Dashboard => stack_forward.set_visible_child_name("dashboard"),
-                AppPage::Projects => stack_forward.set_visible_child_name("projects"),
-                AppPage::Workspace => {
-                    stack_forward.set_visible_child_name("workspace");
-                    refresh_workspace_forward();
-                }
-                AppPage::History => stack_forward.set_visible_child_name("history"),
-                AppPage::Settings => stack_forward.set_visible_child_name("settings"),
-                AppPage::Review => stack_forward.set_visible_child_name("workspace"),
-            }
-            refresh_forward.refresh(RefreshScope::Sidebar);
-            sync_nav_buttons();
-        });
-    }
-
     (sidebar_box, populate)
 }
 
 fn sidebar_icon_button(icon: &str, tooltip: &str) -> Button {
     sidebar_button(icon, tooltip, "sidebar-icon-button")
-}
-
-fn sidebar_arrow_button(icon: &str, tooltip: &str) -> Button {
-    sidebar_button(icon, tooltip, "sidebar-arrow-button")
 }
 
 fn sidebar_button(icon: &str, tooltip: &str, class_name: &str) -> Button {
@@ -1649,15 +1560,15 @@ mod tests {
     #[test]
     fn sidebar_does_not_duplicate_operating_system_window_controls() {
         let source = include_str!("sidebar.rs");
-        let chrome = source
-            .split("let chrome_row")
-            .nth(1)
-            .and_then(|source| source.split("sidebar_box.append(&chrome_row)").next())
-            .expect("sidebar chrome construction exists");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source exists");
 
-        assert!(!chrome.contains("window-close-symbolic"));
-        assert!(!chrome.contains("window-minimize-symbolic"));
-        assert!(!chrome.contains("window-maximize-symbolic"));
+        assert!(!production.contains("sidebar_box.append(&chrome_row)"));
+        assert!(!production.contains("window-close-symbolic"));
+        assert!(!production.contains("window-minimize-symbolic"));
+        assert!(!production.contains("window-maximize-symbolic"));
     }
 
     #[test]

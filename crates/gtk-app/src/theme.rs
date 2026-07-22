@@ -3126,7 +3126,7 @@ textview:focus,
 
 .app-bar {
     min-height: 56px;
-    padding: 0 12px;
+    padding: 0;
     background-color: @lc-surface;
     border-bottom: 1px solid @lc-border;
 }
@@ -3136,6 +3136,23 @@ textview:focus,
     margin-top: 0;
     margin-bottom: 0;
     padding: 0;
+}
+
+.app-bar-sidebar-segment {
+    min-height: 56px;
+    padding: 0 12px;
+    border-right: 1px solid @lc-border;
+}
+
+.app-bar-center-segment {
+    min-height: 56px;
+    padding: 0 12px;
+}
+
+.app-bar-review-segment {
+    min-height: 56px;
+    padding: 0 8px 0 12px;
+    border-left: 1px solid @lc-border;
 }
 
 .app-bar-page-header {
@@ -3211,13 +3228,17 @@ mod tests {
         let title = selector_block(css, ".app-bar-title");
 
         assert!(app_bar.contains("min-height: 56px;"));
-        assert!(app_bar.contains("padding: 0 12px;"));
+        assert!(app_bar.contains("padding: 0;"));
         assert!(context.contains("min-height: 56px;"));
         assert!(context.contains("margin-top: 0;"));
         assert!(context.contains("margin-bottom: 0;"));
         assert!(title.contains("min-width: 0;"));
         assert!(title.contains("margin-top: 0;"));
         assert!(title.contains("margin-bottom: 0;"));
+        assert!(selector_block(css, ".app-bar-sidebar-segment")
+            .contains("border-right: 1px solid @lc-border;"));
+        assert!(selector_block(css, ".app-bar-review-segment")
+            .contains("border-left: 1px solid @lc-border;"));
     }
 
     #[test]

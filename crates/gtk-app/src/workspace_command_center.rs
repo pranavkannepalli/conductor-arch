@@ -128,6 +128,7 @@ pub(crate) fn build_workspace_command_center(
     toast_overlay: ToastOverlay,
     collapse_sidebar: Rc<dyn Fn()>,
     refresh_workspace_app_bar: Rc<dyn Fn()>,
+    review_visibility_changed: Rc<dyn Fn(bool)>,
 ) -> (GBox, impl Fn() + Clone + 'static) {
     let root = GBox::new(Orientation::Vertical, 0);
     root.set_vexpand(true);
@@ -150,6 +151,7 @@ pub(crate) fn build_workspace_command_center(
         }
 
         let Some(name) = state.selected_workspace() else {
+            review_visibility_changed(false);
             let empty = Label::new(Some("Select a workspace from the sidebar."));
             empty.add_css_class("workspace-empty-label");
             empty.set_valign(Align::Center);
@@ -169,6 +171,7 @@ pub(crate) fn build_workspace_command_center(
         };
 
         if matches!(line.workspace.status.as_str(), "creating" | "failed") {
+            review_visibility_changed(false);
             body.append(&workspace_creation_status_shell(
                 &db_path,
                 &line.workspace,
@@ -190,6 +193,7 @@ pub(crate) fn build_workspace_command_center(
             toast_overlay.clone(),
             collapse_sidebar.clone(),
             refresh_workspace_app_bar.clone(),
+            review_visibility_changed.clone(),
         ));
     };
     refresh();
@@ -320,6 +324,7 @@ fn simple_workspace_shell(
     toast_overlay: ToastOverlay,
     collapse_sidebar: Rc<dyn Fn()>,
     refresh_workspace_app_bar: Rc<dyn Fn()>,
+    review_visibility_changed: Rc<dyn Fn(bool)>,
 ) -> GBox {
     let shell = GBox::new(Orientation::Vertical, 0);
     shell.set_vexpand(true);
@@ -341,9 +346,12 @@ fn simple_workspace_shell(
     let right_panel_handle = Rc::new(RefCell::new(None::<GBox>));
     let collapse_right_panel: Rc<dyn Fn()> = {
         let right_panel_handle = right_panel_handle.clone();
+        let review_visibility_changed = review_visibility_changed.clone();
         Rc::new(move || {
             if let Some(panel) = right_panel_handle.borrow().as_ref() {
-                panel.set_visible(!panel.is_visible());
+                let visible = !panel.is_visible();
+                panel.set_visible(visible);
+                review_visibility_changed(visible);
             }
         })
     };
@@ -375,6 +383,7 @@ fn simple_workspace_shell(
         collapse_sidebar,
     );
     *right_panel_handle.borrow_mut() = Some(right.clone());
+    review_visibility_changed(true);
     main_split.set_end_child(Some(&right));
 
     shell.append(&main_split);
