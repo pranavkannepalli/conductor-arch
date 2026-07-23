@@ -25,15 +25,15 @@ The speed model is:
 
 ## Primary Files
 
-| File | Role |
-| --- | --- |
-| `crates/gtk-app/src/state.rs` | Owns `AppState`, snapshots, events, queue APIs, optimistic phases, and navigation history. |
-| `crates/gtk-app/src/refresh.rs` | Owns `RefreshHub`, typed `RefreshEvent`s, refresh scopes, granular workspace refresh slots, and refresh metrics. |
-| `crates/gtk-app/src/main.rs` | Creates the singleton `AppState`, bridges `AppStateEvent::RefreshRequested` into `RefreshHub`, installs global refresh/timer paths. |
-| `crates/gtk-app/src/sidebar.rs` | Reads/mutates navigation state for page/workspace selection, stale workspace cleanup, rename/delete/archive navigation, and nav-row updates. |
-| `crates/gtk-app/src/projects.rs` | Marks optimistic workspace creation phases and navigates to the inserted workspace while creation continues. |
-| `crates/gtk-app/src/workspace_command_center.rs` | Reads selected workspace/tab/thread, wires workspace tabs, watches workspace phases, creates pending chat targets, queues prompts, and routes workspace action refreshes. |
-| `crates/gtk-app/src/session_surface.rs` | Owns the hot chat/session UI around `AppState`: selected thread/session, pending targets, composer queues, staged prompts, Archcar readiness, chat message refreshes, and deleted/renamed workspace recovery. |
+| File                                             | Role                                                                                                                                                                                                          |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `crates/gtk-app/src/state.rs`                    | Owns `AppState`, snapshots, events, queue APIs, optimistic phases, and navigation history.                                                                                                                    |
+| `crates/gtk-app/src/refresh.rs`                  | Owns `RefreshHub`, typed `RefreshEvent`s, refresh scopes, granular workspace refresh slots, and refresh metrics.                                                                                              |
+| `crates/gtk-app/src/main.rs`                     | Creates the singleton `AppState`, bridges `AppStateEvent::RefreshRequested` into `RefreshHub`, installs global refresh/timer paths.                                                                           |
+| `crates/gtk-app/src/sidebar.rs`                  | Reads/mutates navigation state for page/workspace selection, stale workspace cleanup, rename/delete/archive navigation, and nav-row updates.                                                                  |
+| `crates/gtk-app/src/projects.rs`                 | Marks optimistic workspace creation phases and navigates to the inserted workspace while creation continues.                                                                                                  |
+| `crates/gtk-app/src/workspace_command_center.rs` | Reads selected workspace/tab/thread, wires workspace tabs, watches workspace phases, creates pending chat targets, queues prompts, and routes workspace action refreshes.                                     |
+| `crates/gtk-app/src/session_surface.rs`          | Owns the hot chat/session UI around `AppState`: selected thread/session, pending targets, composer queues, staged prompts, Archcar readiness, chat message refreshes, and deleted/renamed workspace recovery. |
 
 No `AppState` dependency was found in `crates/core` or `crates/cli`. Those
 layers stay independent of GTK UI state.
@@ -69,6 +69,8 @@ watchers.
 - `ComposerTargetQueueChanged`
 - `WorkspacePhaseChanged`
 - `ChatPhaseChanged`
+- `AgentSessionSelectionChanged`
+- `StagedReviewPromptChanged`
 - `RefreshRequested(RefreshEvent)`
 
 `emit()` snapshots after mutation and clones watcher callbacks before invoking
@@ -193,6 +195,10 @@ switch the active workspace tab to Chats. Examples include create PR, commit
 and push, merge source branch, fix blockers, latest check output, PR summary,
 PR review, failing checks, continue after merge, and open review comments.
 
+Prompt-stage actions that need immediate chat UI refresh publish
+`WorkspaceChatLifecycleChanged`. This updates the chat surface and chat tabs
+through chat routing instead of rebuilding the full workspace shell.
+
 `session_surface.rs` consumes `take_pending_chat_prompt` when the chat surface
 is built/refreshed and inserts the text into the composer on the GTK idle loop.
 
@@ -276,13 +282,16 @@ This path does not mutate `AppState`.
   reentrant `RefCell` panics.
 - `RefreshHub` separates local UI events from durable reloads.
 - Typed refresh events prevent broad page rebuilds.
-- `RefreshScope::All` is reserved for startup/manual refresh; tests guard
+- `RefreshScope::All` is reserved for explicit manual refresh; tests guard
   routine code against using it.
 - Workspace refresh is split into shell, chat surface, chat tabs, runtime,
   review, and nav row.
 - Chat message refresh never falls back to full workspace shell rebuild.
 - Chat lifecycle refresh updates summaries/tabs/surface without touching
   projects.
+- Chat session callbacks and PR prompt staging publish
+  `WorkspaceChatLifecycleChanged` instead of manually refreshing
+  sidebar/dashboard/history or the full workspace shell.
 - Metadata refresh updates only the visible nav row.
 - Background sync samples ids and sequence markers instead of full chat
   timelines.
@@ -303,18 +312,21 @@ This path does not mutate `AppState`.
 
 - `AppState` is process-local. Restart recovery must come from SQLite/core
   stores, not from `AppState`.
-- Some setters mutate without emitting an event (`set_selected_agent_session`,
-  `set_staged_review_prompt`, right-panel tab, some navigation helpers). Callers
-  manually refresh or rebuild where needed.
+- Right-panel tab and some page-only navigation helpers still mutate without a
+  dedicated event. Callers manually refresh or update local chrome where needed.
 - `set_selected_workspace_with_default_tab` and
-  `navigate_to_workspace_with_default_tab` currently do not emit selection
-  events. Existing callers pair them with direct refresh callbacks.
+  `navigate_to_workspace_with_default_tab` now emit selection events when the
+  selected workspace changes.
 - `workspace_phases` and `chat_phases` are optimistic UI hints. They should not
   be treated as durable lifecycle truth.
 - `pending_chat_prompt` is a single slot. Multiple prompt-stage actions before
   consumption overwrite earlier text.
 - `RefreshHub` intentionally has no shared error channel; pages own load/store
   errors and render failures locally.
+- Some non-chat workspace content actions still use the full workspace shell
+  refresh because there is no narrower target yet. Current examples are file
+  save, non-metadata branch actions, checkpoint create/restore, linked
+  directory changes, and sibling conflict copy.
 - Some fallback timers remain because not every producer emits reliable typed
   refresh events yet.
 
@@ -338,6 +350,8 @@ Notable protections:
 - workspace create progress marks optimistic phases
 - typed refresh fanout counts are asserted
 - routine sources are forbidden from using `RefreshScope::All`
+- chat session callbacks and PR prompt staging are guarded against direct
+  sidebar/dashboard/history triples or workspace-shell rebuilds
 - chat message refresh loads timelines off the GTK thread
 - message refreshes warm nonselected thread caches without rendering them
 - Archcar wake burst debounce is asserted

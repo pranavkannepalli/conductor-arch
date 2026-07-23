@@ -1074,6 +1074,7 @@ fn ws_center_panel(
             }
         }
     });
+    let workspace_for_chat_refresh = ws.name.clone();
     let chat_widget = session_surface::agent_session_panel(
         db_path.to_path_buf(),
         &ws.name,
@@ -1082,9 +1083,7 @@ fn ws_center_panel(
         collapse_sidebar.clone(),
         state.clone(),
         move || {
-            refresh_sessions.refresh(RefreshScope::Sidebar);
-            refresh_sessions.refresh(RefreshScope::Dashboard);
-            refresh_sessions.refresh(RefreshScope::History);
+            refresh_workspace_chat_lifecycle(&refresh_sessions, &workspace_for_chat_refresh);
         },
         false,
         Some(setup_readiness.clone()),
@@ -3244,6 +3243,7 @@ fn agents_panel(
     let db_for_sessions = db_path.to_path_buf();
     let workspace_for_sessions = ws.name.clone();
     let refresh_sessions = refresh_hub.clone();
+    let workspace_for_sessions_refresh = workspace_for_sessions.clone();
     session_box.append(&session_surface::agent_session_panel(
         db_for_sessions,
         &workspace_for_sessions,
@@ -3252,9 +3252,7 @@ fn agents_panel(
         collapse_sidebar.clone(),
         app_state.clone(),
         move || {
-            refresh_sessions.refresh(RefreshScope::Sidebar);
-            refresh_sessions.refresh(RefreshScope::Dashboard);
-            refresh_sessions.refresh(RefreshScope::History);
+            refresh_workspace_chat_lifecycle(&refresh_sessions, &workspace_for_sessions_refresh);
         },
         false,
         None,
@@ -4403,6 +4401,7 @@ fn chat_terminal_split(
     let db_for_sessions = db_path.to_path_buf();
     let workspace_for_sessions = ws.name.clone();
     let refresh_sessions = refresh_hub.clone();
+    let workspace_for_sessions_refresh = workspace_for_sessions.clone();
     chat_box.append(&session_surface::agent_session_panel(
         db_for_sessions,
         &workspace_for_sessions,
@@ -4411,9 +4410,7 @@ fn chat_terminal_split(
         collapse_sidebar.clone(),
         app_state,
         move || {
-            refresh_sessions.refresh(RefreshScope::Sidebar);
-            refresh_sessions.refresh(RefreshScope::Dashboard);
-            refresh_sessions.refresh(RefreshScope::History);
+            refresh_workspace_chat_lifecycle(&refresh_sessions, &workspace_for_sessions_refresh);
         },
         false,
         None,
@@ -4473,6 +4470,7 @@ fn parallel_agents_panel(
     chat_box.add_css_class("session-tool-surface");
     chat_box.append(&section_title("Chat"));
     let refresh_chat = refresh_hub.clone();
+    let workspace_for_chat_refresh = ws.name.clone();
     chat_box.append(&session_surface::agent_session_panel(
         db_path.to_path_buf(),
         &ws.name,
@@ -4484,9 +4482,7 @@ fn parallel_agents_panel(
         collapse_sidebar.clone(),
         app_state,
         move || {
-            refresh_chat.refresh(RefreshScope::Sidebar);
-            refresh_chat.refresh(RefreshScope::Dashboard);
-            refresh_chat.refresh(RefreshScope::History);
+            refresh_workspace_chat_lifecycle(&refresh_chat, &workspace_for_chat_refresh);
         },
         false,
         None,
@@ -5810,6 +5806,23 @@ fn workspace_pr_primary_action_label(snapshot: &WorkspacePrStatusSnapshot) -> Op
     workspace_pr_primary_action(snapshot).map(|action| action.label)
 }
 
+fn refresh_workspace_chat_lifecycle(refresh_hub: &RefreshHub, workspace_name: &str) {
+    refresh_hub.refresh_event(RefreshEvent::WorkspaceChatLifecycleChanged {
+        workspace: workspace_name.to_owned(),
+    });
+}
+
+fn stage_prompt_for_chat(
+    state: &AppState,
+    refresh_hub: &RefreshHub,
+    workspace_name: &str,
+    prompt: String,
+) {
+    state.queue_pending_chat_prompt(prompt);
+    state.set_active_workspace_tab(WorkspaceTab::Chats);
+    refresh_workspace_chat_lifecycle(refresh_hub, workspace_name);
+}
+
 fn connect_create_pr_prompt_button(
     button: &Button,
     db_path: PathBuf,
@@ -5819,9 +5832,7 @@ fn connect_create_pr_prompt_button(
 ) {
     button.connect_clicked(move |_| {
         let prompt = workspace_create_pr_chat_prompt(&db_path, &workspace_name);
-        state.queue_pending_chat_prompt(prompt);
-        state.set_active_workspace_tab(WorkspaceTab::Chats);
-        refresh_hub.refresh(RefreshScope::Workspace);
+        stage_prompt_for_chat(&state, &refresh_hub, &workspace_name, prompt);
     });
 }
 
@@ -5834,9 +5845,7 @@ fn connect_commit_and_push_prompt_button(
 ) {
     button.connect_clicked(move |_| {
         let prompt = workspace_commit_and_push_chat_prompt(&db_path, &workspace_name);
-        state.queue_pending_chat_prompt(prompt);
-        state.set_active_workspace_tab(WorkspaceTab::Chats);
-        refresh_hub.refresh(RefreshScope::Workspace);
+        stage_prompt_for_chat(&state, &refresh_hub, &workspace_name, prompt);
     });
 }
 
@@ -5849,9 +5858,7 @@ fn connect_merge_source_branch_prompt_button(
 ) {
     button.connect_clicked(move |_| {
         let prompt = workspace_merge_source_branch_chat_prompt(&db_path, &workspace_name);
-        state.queue_pending_chat_prompt(prompt);
-        state.set_active_workspace_tab(WorkspaceTab::Chats);
-        refresh_hub.refresh(RefreshScope::Workspace);
+        stage_prompt_for_chat(&state, &refresh_hub, &workspace_name, prompt);
     });
 }
 
@@ -9503,6 +9510,53 @@ mod tests {
         assert!(
             !handler_region.contains("list_chat_threads"),
             "chat tab refresh must not list chat threads on the GTK thread"
+        );
+    }
+
+    #[test]
+    fn chat_session_refresh_callbacks_publish_chat_lifecycle_events() {
+        let source = include_str!("workspace_command_center.rs");
+
+        assert!(
+            !source.contains(
+                "refresh_sessions.refresh(RefreshScope::Sidebar);\n            refresh_sessions.refresh(RefreshScope::Dashboard);\n            refresh_sessions.refresh(RefreshScope::History);"
+            ),
+            "chat session callbacks should publish one typed chat lifecycle event"
+        );
+        assert!(
+            !source.contains(
+                "refresh_chat.refresh(RefreshScope::Sidebar);\n            refresh_chat.refresh(RefreshScope::Dashboard);\n            refresh_chat.refresh(RefreshScope::History);"
+            ),
+            "parallel chat callbacks should publish one typed chat lifecycle event"
+        );
+        assert!(
+            source.contains("refresh_workspace_chat_lifecycle("),
+            "chat lifecycle refreshes should use the shared typed helper"
+        );
+    }
+
+    #[test]
+    fn pr_prompt_buttons_refresh_chat_without_workspace_shell_rebuild() {
+        let source = include_str!("workspace_command_center.rs");
+        let start = source
+            .find("fn connect_create_pr_prompt_button(")
+            .expect("create PR prompt helper exists");
+        let end = source[start..]
+            .find("fn connect_fix_blocked_prompt_button(")
+            .map(|offset| start + offset)
+            .expect("fix blocked prompt helper follows PR prompt helpers");
+        let prompt_button_region = &source[start..end];
+
+        assert!(
+            !prompt_button_region.contains("refresh_hub.refresh(RefreshScope::Workspace)"),
+            "PR prompt buttons should not rebuild the whole workspace shell"
+        );
+        assert!(
+            prompt_button_region
+                .matches("stage_prompt_for_chat(")
+                .count()
+                >= 3,
+            "PR prompt buttons should stage prompts through the typed chat helper"
         );
     }
 

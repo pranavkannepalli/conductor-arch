@@ -19,15 +19,15 @@ timeline only when the affected thread needs to render.
 
 ## Primary Files
 
-| File | Role |
-| --- | --- |
-| `crates/gtk-app/src/main.rs` | Installs the two-second background sync timer and forwards diffed events through `AppState::request_refresh`. |
-| `crates/gtk-app/src/background_sync.rs` | Loads lightweight running-thread snapshots, diffs them, coalesces refresh events, and builds chat tab nav items. |
-| `crates/core/src/workspace.rs` | Provides `list_running_chat_thread_summaries`, the SQLite query behind the sampler. |
-| `crates/gtk-app/src/refresh.rs` | Routes `WorkspaceChatMessagesChanged` and `WorkspaceChatLifecycleChanged` to granular chat handlers. |
-| `crates/gtk-app/src/workspace_command_center.rs` | Owns workspace chat tabs, running/unread/draft visual state, and selected-workspace filtering. |
-| `crates/gtk-app/src/session_surface.rs` | Owns selected chat rendering, Archcar event draining, timeline cache, message refresh dispatch, and wake debounce. |
-| `crates/gtk-app/src/archcar_async.rs` | Runs Archcar request and event bridges on background threads and calls the installed GTK wake callback. |
+| File                                             | Role                                                                                                               |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
+| `crates/gtk-app/src/main.rs`                     | Installs the two-second background sync timer and forwards diffed events through `AppState::request_refresh`.      |
+| `crates/gtk-app/src/background_sync.rs`          | Loads lightweight running-thread snapshots, diffs them, coalesces refresh events, and builds chat tab nav items.   |
+| `crates/core/src/workspace.rs`                   | Provides `list_running_chat_thread_summaries`, the SQLite query behind the sampler.                                |
+| `crates/gtk-app/src/refresh.rs`                  | Routes `WorkspaceChatMessagesChanged` and `WorkspaceChatLifecycleChanged` to granular chat handlers.               |
+| `crates/gtk-app/src/workspace_command_center.rs` | Owns workspace chat tabs, running/unread/draft visual state, and selected-workspace filtering.                     |
+| `crates/gtk-app/src/session_surface.rs`          | Owns selected chat rendering, Archcar event draining, timeline cache, message refresh dispatch, and wake debounce. |
+| `crates/gtk-app/src/archcar_async.rs`            | Runs Archcar request and event bridges on background threads and calls the installed GTK wake callback.            |
 
 ## Data Sampled In The Background
 
@@ -103,7 +103,10 @@ subscribes once and forwards the contained `RefreshEvent` to `RefreshHub`.
   tabs, and chat surface
 
 Neither route rebuilds the Projects page. Message changes do not rebuild the
-full workspace shell.
+full workspace shell. Chat session lifecycle callbacks and PR prompt staging
+also publish `WorkspaceChatLifecycleChanged`, so chat-related navigation
+summaries update through the chat route instead of hand-refreshing
+sidebar/dashboard/history or rebuilding the workspace shell.
 
 ## Chat Tabs
 
@@ -162,6 +165,10 @@ It converts refresh events to `ChatRefreshKind`:
 - `WorkspaceChatMessagesChanged` -> `Messages { thread_id }`
 - `WorkspaceChatLifecycleChanged` -> `ThreadNav`
 - anything else -> `Full`
+
+Prompt staging that needs the composer to update immediately uses the lifecycle
+route. The staged prompt still lives in `AppState`; the durable stores remain
+the source of truth for threads, messages, sessions, and provider events.
 
 ## Message Timeline Refresh
 
