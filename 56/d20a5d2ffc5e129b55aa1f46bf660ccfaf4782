@@ -1,0 +1,19 @@
+docs/background-chat-update-map.md
+  s_18173f9e66549c::t_20df709ad5de7c 1-321
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "56d20a5d2ffc5e129b55aa1f46bf660ccfaf4782",
+  "prompts": {},
+  "sessions": {
+    "s_18173f9e66549c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8d12-8ab5-7d32-9cfe-b7cfd5b13967",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
