@@ -13,6 +13,7 @@ pub(crate) enum ButtonVariant {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ButtonSize {
+    Xs,
     Sm,
     Md,
 }
@@ -25,6 +26,12 @@ pub(crate) fn button(label: &str, variant: ButtonVariant, size: ButtonSize) -> B
 
 pub(crate) fn text_button(label: &str) -> Button {
     let button = button(label, ButtonVariant::Secondary, ButtonSize::Md);
+    style_text_button(&button);
+    button
+}
+
+pub(crate) fn compact_text_button(label: &str) -> Button {
+    let button = button(label, ButtonVariant::Secondary, ButtonSize::Xs);
     style_text_button(&button);
     button
 }
@@ -124,6 +131,7 @@ pub(crate) fn button_variant_class(variant: ButtonVariant) -> &'static str {
 
 pub(crate) fn button_size_class(size: ButtonSize) -> &'static str {
     match size {
+        ButtonSize::Xs => "ui-button-xs",
         ButtonSize::Sm => "ui-button-sm",
         ButtonSize::Md => "ui-button-md",
     }
@@ -194,6 +202,7 @@ mod tests {
 
     #[test]
     fn button_sizes_map_to_shared_ui_classes() {
+        assert_eq!(button_size_class(ButtonSize::Xs), "ui-button-xs");
         assert_eq!(button_size_class(ButtonSize::Sm), "ui-button-sm");
         assert_eq!(button_size_class(ButtonSize::Md), "ui-button-md");
     }

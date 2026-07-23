@@ -128,7 +128,7 @@ use crate::state::{
 use crate::toast::{show_toast as emit_toast, surface_label_error, ToastManager, ToastMessage};
 use crate::{
     archcar_async::{spawn_archcar_request, spawn_background_job},
-    buttons::{menu_text_button, text_button},
+    buttons::{compact_text_button, menu_text_button, text_button},
     cli_binary, detail_row, history, session_surface, shell_quote, spawn_terminal_command,
     terminal, title_case_workspace,
 };
@@ -831,7 +831,7 @@ fn ws_center_panel(
 
     let setup_readiness = Rc::new(RefCell::new(SetupReadiness::from_host()));
 
-    let add_tab_btn = text_button("+");
+    let add_tab_btn = compact_text_button("+");
     add_tab_btn.add_css_class("ws-tab-add-btn");
     sync_workspace_chat_add_button_with_readiness(
         &add_tab_btn,
@@ -2537,7 +2537,7 @@ fn ws_run_console(
         })
     };
 
-    let add_btn = text_button("+");
+    let add_btn = compact_text_button("+");
     add_btn.add_css_class("ws-run-tab-add-btn");
     let collapse_btn = text_button("▾");
     collapse_btn.add_css_class("ws-run-collapse-btn");
@@ -9622,6 +9622,29 @@ mod tests {
                 .count()
                 >= 3,
             "PR prompt buttons should resolve the current selected workspace at click time"
+        );
+    }
+
+    #[test]
+    fn plus_tab_buttons_use_extra_small_text_button_state() {
+        let source = include_str!("workspace_command_center.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source exists");
+
+        assert_eq!(
+            production.matches("compact_text_button(\"+\")").count(),
+            2,
+            "chat and run plus buttons should use the extra-small button state"
+        );
+        assert!(
+            !production.contains("let add_tab_btn = text_button(\"+\");"),
+            "chat plus button must not inherit medium text-button height"
+        );
+        assert!(
+            !production.contains("let add_btn = text_button(\"+\");"),
+            "run plus button must not inherit medium text-button height"
         );
     }
 

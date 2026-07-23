@@ -548,6 +548,15 @@ button.text-button {
     min-height: 34px;
 }
 
+button.ui-button-xs,
+button.text-button.ui-button-xs {
+    font-size: 10px;
+    line-height: 1;
+    min-height: 0;
+    min-width: 12px;
+    padding: 0 2px;
+}
+
 button.icon-button,
 button.ui-button-icon {
     padding: 0;
@@ -2132,10 +2141,6 @@ row:hover .ws-folder-name {
     border: none;
     border-radius: 2px;
     color: #5a5a5a;
-    font-size: 10px;
-    min-height: 0;
-    min-width: 12px;
-    padding: 0 2px;
     box-shadow: none;
     text-shadow: none;
 }
@@ -2501,6 +2506,13 @@ popover.context-menu-popover arrow {
     min-width: 10px;
     padding: 0 2px;
 }
+button.chat-inline-event-expander {
+    font-size: 9px;
+    line-height: 1;
+    min-height: 0;
+    min-width: 10px;
+    padding: 0 2px;
+}
 .chat-inline-event-expander:hover,
 .chat-inline-event-expander:checked {
     background-color: #202020;
@@ -2793,10 +2805,6 @@ popover.context-menu-popover arrow {
     border: none;
     border-radius: 2px;
     color: #555555;
-    font-size: 10px;
-    min-height: 0;
-    min-width: 12px;
-    padding: 0 2px;
     box-shadow: none;
     text-shadow: none;
 }
@@ -3316,6 +3324,9 @@ mod tests {
         assert!(expander_block.contains("min-height: 0;"));
         assert!(expander_block.contains("min-width: 10px;"));
         assert!(expander_block.contains("padding: 0 2px;"));
+        let button_expander_block = selector_block(css, "button.chat-inline-event-expander");
+        assert!(button_expander_block.contains("line-height: 1;"));
+        assert!(button_expander_block.contains("min-height: 0;"));
         let action_block = selector_block(css, ".chat-inline-event-action");
         assert!(action_block.contains("font-size: 11px;"));
         assert!(action_block.contains("color: #8f8f8f;"));
@@ -3440,13 +3451,17 @@ mod tests {
     #[test]
     fn plus_buttons_match_compact_chat_chip_height() {
         let css = app_css();
+        let xs_block = selector_block(css, "button.ui-button-xs,\nbutton.text-button.ui-button-xs");
+        assert!(xs_block.contains("font-size: 10px;"));
+        assert!(xs_block.contains("line-height: 1;"));
+        assert!(xs_block.contains("min-height: 0;"));
+        assert!(xs_block.contains("min-width: 12px;"));
+        assert!(xs_block.contains("padding: 0 2px;"));
 
         for selector in [".ws-tab-add-btn", ".ws-run-tab-add-btn"] {
             let block = selector_block(css, selector);
-            assert!(block.contains("font-size: 10px;"));
-            assert!(block.contains("min-height: 0;"));
-            assert!(block.contains("min-width: 12px;"));
-            assert!(block.contains("padding: 0 2px;"));
+            assert!(!block.contains("min-height: 30px;"));
+            assert!(!block.contains("min-height: 34px;"));
         }
     }
 
