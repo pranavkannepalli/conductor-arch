@@ -550,11 +550,20 @@ button.text-button {
 
 button.ui-button-xs,
 button.text-button.ui-button-xs {
-    font-size: 10px;
+    border-radius: 2px;
+    font-size: 11px;
     line-height: 1;
     min-height: 20px;
     min-width: 20px;
-    padding: 2px 5px;
+    padding: 0;
+}
+
+button.ui-button-xs label,
+button.text-button.ui-button-xs label {
+    line-height: 1;
+    margin: 0;
+    min-height: 0;
+    padding: 0;
 }
 
 button.icon-button,
@@ -2502,18 +2511,25 @@ popover.context-menu-popover arrow {
     box-shadow: none;
     color: #8f8f8f;
     font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
-    font-size: 9px;
+    font-size: 10px;
     font-weight: 700;
-    min-height: 0;
-    min-width: 10px;
-    padding: 0 2px;
+    min-height: 16px;
+    min-width: 16px;
+    padding: 0;
 }
 button.chat-inline-event-expander {
-    font-size: 9px;
+    border-radius: 2px;
+    font-size: 10px;
     line-height: 1;
+    min-height: 16px;
+    min-width: 16px;
+    padding: 0;
+}
+button.chat-inline-event-expander label {
+    line-height: 1;
+    margin: 0;
     min-height: 0;
-    min-width: 10px;
-    padding: 0 2px;
+    padding: 0;
 }
 .chat-inline-event-expander:hover,
 .chat-inline-event-expander:checked {
@@ -3324,13 +3340,17 @@ mod tests {
         assert!(css.contains("margin: 0;"));
         let expander_block = selector_block(css, ".chat-inline-event-expander");
         assert!(expander_block.contains("border-radius: 2px;"));
-        assert!(expander_block.contains("font-size: 9px;"));
-        assert!(expander_block.contains("min-height: 0;"));
-        assert!(expander_block.contains("min-width: 10px;"));
-        assert!(expander_block.contains("padding: 0 2px;"));
+        assert!(expander_block.contains("font-size: 10px;"));
+        assert!(expander_block.contains("min-height: 16px;"));
+        assert!(expander_block.contains("min-width: 16px;"));
+        assert!(expander_block.contains("padding: 0;"));
         let button_expander_block = selector_block(css, "button.chat-inline-event-expander");
+        assert!(button_expander_block.contains("border-radius: 2px;"));
         assert!(button_expander_block.contains("line-height: 1;"));
-        assert!(button_expander_block.contains("min-height: 0;"));
+        assert!(button_expander_block.contains("min-height: 16px;"));
+        let expander_label_block = selector_block(css, "button.chat-inline-event-expander label");
+        assert!(expander_label_block.contains("line-height: 1;"));
+        assert!(expander_label_block.contains("padding: 0;"));
         let action_block = selector_block(css, ".chat-inline-event-action");
         assert!(action_block.contains("font-size: 11px;"));
         assert!(action_block.contains("color: #8f8f8f;"));
@@ -3456,11 +3476,19 @@ mod tests {
     fn plus_buttons_match_compact_chat_chip_height() {
         let css = app_css();
         let xs_block = selector_block(css, "button.ui-button-xs,\nbutton.text-button.ui-button-xs");
-        assert!(xs_block.contains("font-size: 10px;"));
+        assert!(xs_block.contains("border-radius: 2px;"));
+        assert!(xs_block.contains("font-size: 11px;"));
         assert!(xs_block.contains("line-height: 1;"));
         assert!(xs_block.contains("min-height: 20px;"));
         assert!(xs_block.contains("min-width: 20px;"));
-        assert!(xs_block.contains("padding: 2px 5px;"));
+        assert!(xs_block.contains("padding: 0;"));
+        let xs_label_block = selector_block(
+            css,
+            "button.ui-button-xs label,\nbutton.text-button.ui-button-xs label",
+        );
+        assert!(xs_label_block.contains("line-height: 1;"));
+        assert!(xs_label_block.contains("margin: 0;"));
+        assert!(xs_label_block.contains("padding: 0;"));
 
         for selector in [".ws-tab-add-btn", ".ws-run-tab-add-btn"] {
             let block = selector_block(css, selector);
