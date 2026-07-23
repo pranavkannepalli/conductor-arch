@@ -2132,10 +2132,10 @@ row:hover .ws-folder-name {
     border: none;
     border-radius: 2px;
     color: #5a5a5a;
-    font-size: 11px;
+    font-size: 10px;
     min-height: 0;
-    min-width: 16px;
-    padding: 0 4px;
+    min-width: 12px;
+    padding: 0 2px;
     box-shadow: none;
     text-shadow: none;
 }
@@ -2474,16 +2474,16 @@ popover.context-menu-popover arrow {
     border-radius: 2px;
     box-shadow: none;
     color: #bdbdbd;
-    font-family: "Mona Sans", "Inter", "Segoe UI", system-ui, sans-serif;
-    font-size: 10px;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-size: 9px;
     font-weight: 500;
     min-height: 0;
     min-width: 0;
-    padding: 0 4px;
+    padding: 0 3px;
 }
 .chat-inline-event-action {
     color: #8f8f8f;
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 600;
     margin: 0;
     padding: 0;
@@ -2495,11 +2495,11 @@ popover.context-menu-popover arrow {
     box-shadow: none;
     color: #8f8f8f;
     font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
-    font-size: 10px;
+    font-size: 9px;
     font-weight: 700;
     min-height: 0;
-    min-width: 14px;
-    padding: 0 3px;
+    min-width: 10px;
+    padding: 0 2px;
 }
 .chat-inline-event-expander:hover,
 .chat-inline-event-expander:checked {
@@ -2508,22 +2508,15 @@ popover.context-menu-popover arrow {
     box-shadow: none;
     color: #e7e7e7;
 }
-button.chat-inline-event-chip {
-    background-color: #191919;
-    border: 1px solid #343434;
-    box-shadow: none;
-    margin: 0;
-    min-height: 0;
-    min-width: 0;
-    padding: 0 4px;
-}
-button.chat-inline-event-chip:hover,
-button.chat-inline-event-chip:checked {
+.chat-inline-event-chip:hover {
     background-color: #232323;
     border-color: #4a4a4a;
     box-shadow: none;
 }
-.chat-inline-event-chip label {
+.chat-inline-event-chip-label {
+    color: #bdbdbd;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-size: 9px;
     margin: 0;
     min-height: 0;
     padding: 0;
@@ -2800,10 +2793,10 @@ button.chat-inline-event-chip:checked {
     border: none;
     border-radius: 2px;
     color: #555555;
-    font-size: 11px;
+    font-size: 10px;
     min-height: 0;
-    min-width: 16px;
-    padding: 0 4px;
+    min-width: 12px;
+    padding: 0 2px;
     box-shadow: none;
     text-shadow: none;
 }
@@ -3309,22 +3302,26 @@ mod tests {
         assert!(chip_block.contains("background-color: #191919;"));
         assert!(chip_block.contains("border: 1px solid #343434;"));
         assert!(chip_block.contains("border-radius: 2px;"));
-        assert!(chip_block.contains("font-size: 10px;"));
+        assert!(chip_block.contains("font-family: \"Commit Mono\""));
+        assert!(chip_block.contains("font-size: 9px;"));
         assert!(chip_block.contains("min-height: 0;"));
-        assert!(chip_block.contains("padding: 0 4px;"));
+        assert!(chip_block.contains("padding: 0 3px;"));
         assert!(chip_block.contains("min-width: 0;"));
-        assert!(css.contains("button.chat-inline-event-chip"));
-        assert!(css.contains(".chat-inline-event-chip label"));
+        assert!(!css.contains("button.chat-inline-event-chip"));
+        assert!(css.contains(".chat-inline-event-chip-label"));
         assert!(css.contains("margin: 0;"));
         let expander_block = selector_block(css, ".chat-inline-event-expander");
         assert!(expander_block.contains("border-radius: 2px;"));
-        assert!(expander_block.contains("font-size: 10px;"));
+        assert!(expander_block.contains("font-size: 9px;"));
         assert!(expander_block.contains("min-height: 0;"));
-        assert!(expander_block.contains("min-width: 14px;"));
-        assert!(expander_block.contains("padding: 0 3px;"));
+        assert!(expander_block.contains("min-width: 10px;"));
+        assert!(expander_block.contains("padding: 0 2px;"));
         let action_block = selector_block(css, ".chat-inline-event-action");
-        assert!(action_block.contains("font-size: 10px;"));
+        assert!(action_block.contains("font-size: 11px;"));
         assert!(action_block.contains("color: #8f8f8f;"));
+        let chip_label_block = selector_block(css, ".chat-inline-event-chip-label");
+        assert!(chip_label_block.contains("font-family: \"Commit Mono\""));
+        assert!(chip_label_block.contains("font-size: 9px;"));
         assert!(css.contains(".chat-reasoning-text"));
         assert!(css.contains(".chat-user-row {\n    margin-top: 12px;\n    margin-bottom: 10px;"));
         assert!(css.contains(".chat-agent-text {\n    color: #c6c6c6;\n    line-height: 1.55;\n    margin-bottom: 0;"));
@@ -3446,10 +3443,10 @@ mod tests {
 
         for selector in [".ws-tab-add-btn", ".ws-run-tab-add-btn"] {
             let block = selector_block(css, selector);
-            assert!(block.contains("font-size: 11px;"));
+            assert!(block.contains("font-size: 10px;"));
             assert!(block.contains("min-height: 0;"));
-            assert!(block.contains("min-width: 16px;"));
-            assert!(block.contains("padding: 0 4px;"));
+            assert!(block.contains("min-width: 12px;"));
+            assert!(block.contains("padding: 0 2px;"));
         }
     }
 

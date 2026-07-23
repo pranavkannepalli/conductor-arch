@@ -6992,7 +6992,7 @@ fn inline_event_widget(event: &CodexInlineEvent, open_file: Option<OpenWorkspace
     root.set_margin_bottom(0);
 
     let expand_by_default = inline_event_expands_body_by_default(event);
-    let header = GBox::new(Orientation::Horizontal, 4);
+    let header = GBox::new(Orientation::Horizontal, 3);
     header.set_halign(Align::Start);
     header.set_margin_top(0);
     header.set_margin_bottom(0);
@@ -7001,7 +7001,7 @@ fn inline_event_widget(event: &CodexInlineEvent, open_file: Option<OpenWorkspace
     expander.add_css_class("chat-inline-event-expander");
     expander.set_halign(Align::Start);
     expander.set_margin_top(0);
-    expander.set_margin_bottom(1);
+    expander.set_margin_bottom(0);
     expander.set_tooltip_text(Some("Show details"));
     header.append(&expander);
 
@@ -7011,19 +7011,20 @@ fn inline_event_widget(event: &CodexInlineEvent, open_file: Option<OpenWorkspace
     action_label.set_xalign(0.0);
     header.append(&action_label);
 
-    let chip = Button::new();
+    let chip = GBox::new(Orientation::Horizontal, 0);
     chip.add_css_class("chat-inline-event-chip");
     chip.set_halign(Align::Start);
     chip.set_margin_top(0);
-    chip.set_margin_bottom(1);
+    chip.set_margin_bottom(0);
     chip.set_tooltip_text(Some(&inline_event_tooltip(event)));
     let chip_label = Label::new(None);
+    chip_label.add_css_class("chat-inline-event-chip-label");
     chip_label.set_markup(&inline_event_chip_markup(event, expand_by_default));
     configure_inline_event_chip_label(
         &chip_label,
         &inline_event_chip_label(event, expand_by_default),
     );
-    chip.set_child(Some(&chip_label));
+    chip.append(&chip_label);
     header.append(&chip);
     root.append(&header);
 
@@ -7073,7 +7074,8 @@ fn inline_event_widget(event: &CodexInlineEvent, open_file: Option<OpenWorkspace
         }
     });
 
-    chip.connect_clicked({
+    let chip_click = GestureClick::new();
+    chip_click.connect_released({
         let expander = expander.clone();
         let open_file = open_file.clone();
         let path = event
@@ -7081,7 +7083,7 @@ fn inline_event_widget(event: &CodexInlineEvent, open_file: Option<OpenWorkspace
             .as_ref()
             .and_then(|path| path.to_str())
             .map(str::to_owned);
-        move |_| {
+        move |_, _, _, _| {
             if let (Some(open_file), Some(path)) = (open_file.as_ref(), path.as_deref()) {
                 open_file(path);
                 return;
@@ -7089,6 +7091,7 @@ fn inline_event_widget(event: &CodexInlineEvent, open_file: Option<OpenWorkspace
             expander.set_active(true);
         }
     });
+    chip.add_controller(chip_click);
 
     root.upcast()
 }
@@ -15108,9 +15111,16 @@ fix it
             .expect("body helper follows widget");
         let widget_source = &source[start..end];
 
+        assert!(widget_source.contains("let chip = GBox::new(Orientation::Horizontal, 0);"));
+        assert!(!widget_source.contains("let chip = Button::new();"));
+        assert!(!widget_source.contains("chip.connect_clicked"));
+        assert!(
+            widget_source.contains("chip_label.add_css_class(\"chat-inline-event-chip-label\")")
+        );
         assert!(widget_source.contains("action_label.add_css_class(\"chat-inline-event-action\")"));
         assert!(widget_source.contains("header.append(&action_label);"));
         assert!(widget_source.contains("header.append(&chip);"));
+        assert!(widget_source.contains("chip.add_controller(chip_click);"));
     }
 
     #[test]
