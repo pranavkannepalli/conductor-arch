@@ -726,7 +726,7 @@ mod tests {
         }
 
         let main_source = include_str!("main.rs");
-        assert_eq!(main_source.matches("RefreshScope::All").count(), 3);
+        assert_eq!(main_source.matches("RefreshScope::All").count(), 2);
         assert!(main_source.contains("Some(ShortcutAction::Refresh)"));
         assert!(main_source.contains("PaletteTarget::Refresh =>"));
     }

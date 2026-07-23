@@ -136,6 +136,8 @@ pub enum AppStateEvent {
     ComposerTargetQueueChanged { target: ChatUiTarget },
     WorkspacePhaseChanged { workspace: String },
     ChatPhaseChanged { target: ChatUiTarget },
+    AgentSessionSelectionChanged { session_id: Option<i64> },
+    StagedReviewPromptChanged,
     RefreshRequested(crate::refresh::RefreshEvent),
 }
 
@@ -290,19 +292,28 @@ impl AppState {
         workspace: Option<String>,
         default_tab: Option<WorkspaceTab>,
     ) {
-        let mut state = self.inner.borrow_mut();
-        if state.selected_workspace != workspace {
-            state.selected_chat_thread = None;
-            state.selected_chat_target = None;
-            state.selected_agent_session = None;
-            state.staged_review_prompt = None;
-            state.pending_chat_prompt = None;
-            if let Some(tab) = default_tab {
-                state.active_workspace_tab = tab;
+        let changed = {
+            let mut state = self.inner.borrow_mut();
+            if state.selected_workspace != workspace {
+                state.selected_chat_thread = None;
+                state.selected_chat_target = None;
+                state.selected_agent_session = None;
+                state.staged_review_prompt = None;
+                state.pending_chat_prompt = None;
+                if let Some(tab) = default_tab {
+                    state.active_workspace_tab = tab;
+                }
+                state.selected_workspace = workspace.clone();
+                state.active_page = AppPage::Workspace;
+                true
+            } else {
+                state.active_page = AppPage::Workspace;
+                false
             }
+        };
+        if changed {
+            self.emit(AppStateEvent::WorkspaceSelectionChanged { workspace });
         }
-        state.selected_workspace = workspace;
-        state.active_page = AppPage::Workspace;
     }
 
     pub fn navigate_to_workspace_with_default_tab(
@@ -310,23 +321,33 @@ impl AppState {
         workspace: Option<String>,
         default_tab: Option<WorkspaceTab>,
     ) {
-        let mut state = self.inner.borrow_mut();
-        if state.selected_workspace == workspace && state.active_page == AppPage::Workspace {
-            return;
-        }
-        push_navigation_entry(&mut state);
-        if state.selected_workspace != workspace {
-            state.selected_chat_thread = None;
-            state.selected_chat_target = None;
-            state.selected_agent_session = None;
-            state.staged_review_prompt = None;
-            state.pending_chat_prompt = None;
-            if let Some(tab) = default_tab {
-                state.active_workspace_tab = tab;
+        let changed = {
+            let mut state = self.inner.borrow_mut();
+            if state.selected_workspace == workspace && state.active_page == AppPage::Workspace {
+                false
+            } else {
+                push_navigation_entry(&mut state);
+                if state.selected_workspace != workspace {
+                    state.selected_chat_thread = None;
+                    state.selected_chat_target = None;
+                    state.selected_agent_session = None;
+                    state.staged_review_prompt = None;
+                    state.pending_chat_prompt = None;
+                    if let Some(tab) = default_tab {
+                        state.active_workspace_tab = tab;
+                    }
+                    state.selected_workspace = workspace.clone();
+                    state.active_page = AppPage::Workspace;
+                    true
+                } else {
+                    state.active_page = AppPage::Workspace;
+                    false
+                }
             }
+        };
+        if changed {
+            self.emit(AppStateEvent::WorkspaceSelectionChanged { workspace });
         }
-        state.selected_workspace = workspace;
-        state.active_page = AppPage::Workspace;
     }
 
     pub fn selected_agent_session(&self) -> Option<i64> {
@@ -358,7 +379,18 @@ impl AppState {
     }
 
     pub fn set_selected_agent_session(&self, session_id: Option<i64>) {
-        self.inner.borrow_mut().selected_agent_session = session_id;
+        let changed = {
+            let mut state = self.inner.borrow_mut();
+            if state.selected_agent_session == session_id {
+                false
+            } else {
+                state.selected_agent_session = session_id;
+                true
+            }
+        };
+        if changed {
+            self.emit(AppStateEvent::AgentSessionSelectionChanged { session_id });
+        }
     }
 
     pub fn staged_review_prompt(&self) -> Option<String> {
@@ -366,7 +398,18 @@ impl AppState {
     }
 
     pub fn set_staged_review_prompt(&self, prompt: Option<String>) {
-        self.inner.borrow_mut().staged_review_prompt = prompt;
+        let changed = {
+            let mut state = self.inner.borrow_mut();
+            if state.staged_review_prompt == prompt {
+                false
+            } else {
+                state.staged_review_prompt = prompt;
+                true
+            }
+        };
+        if changed {
+            self.emit(AppStateEvent::StagedReviewPromptChanged);
+        }
     }
 
     pub fn queue_pending_chat_prompt(&self, prompt: String) {
@@ -1018,6 +1061,84 @@ mod tests {
             Some(WorkspaceTab::Checks),
         );
         assert_eq!(state.snapshot().active_workspace_tab, WorkspaceTab::Checks);
+    }
+
+    #[test]
+    fn default_tab_workspace_selection_emits_only_when_workspace_changes() {
+        let state = AppState::new(
+            AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            WorkspaceTab::Terminal,
+            AppPage::Workspace,
+        );
+        let observed = Rc::new(RefCell::new(Vec::new()));
+        let observed_for_sub = observed.clone();
+        let _subscription =
+            state.subscribe(move |event, _| observed_for_sub.borrow_mut().push(event.clone()));
+
+        state.set_selected_workspace_with_default_tab(
+            Some("berlin".to_owned()),
+            Some(WorkspaceTab::Checks),
+        );
+        state.navigate_to_workspace_with_default_tab(
+            Some("berlin".to_owned()),
+            Some(WorkspaceTab::Checks),
+        );
+        assert!(observed.borrow().is_empty());
+
+        state.set_selected_workspace_with_default_tab(
+            Some("tokyo".to_owned()),
+            Some(WorkspaceTab::Checks),
+        );
+        state.navigate_to_workspace_with_default_tab(
+            Some("oslo".to_owned()),
+            Some(WorkspaceTab::Review),
+        );
+
+        assert_eq!(
+            observed.borrow().as_slice(),
+            &[
+                AppStateEvent::WorkspaceSelectionChanged {
+                    workspace: Some("tokyo".to_owned())
+                },
+                AppStateEvent::WorkspaceSelectionChanged {
+                    workspace: Some("oslo".to_owned())
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn selected_agent_session_and_staged_prompt_emit_on_change() {
+        let state = AppState::new(
+            AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+        let observed = Rc::new(RefCell::new(Vec::new()));
+        let observed_for_sub = observed.clone();
+        let _subscription =
+            state.subscribe(move |event, _| observed_for_sub.borrow_mut().push(event.clone()));
+
+        state.set_selected_agent_session(Some(42));
+        state.set_selected_agent_session(Some(42));
+        state.set_staged_review_prompt(Some("review".to_owned()));
+        state.set_staged_review_prompt(Some("review".to_owned()));
+        state.set_selected_agent_session(None);
+        state.set_staged_review_prompt(None);
+
+        assert_eq!(
+            observed.borrow().as_slice(),
+            &[
+                AppStateEvent::AgentSessionSelectionChanged {
+                    session_id: Some(42)
+                },
+                AppStateEvent::StagedReviewPromptChanged,
+                AppStateEvent::AgentSessionSelectionChanged { session_id: None },
+                AppStateEvent::StagedReviewPromptChanged
+            ]
+        );
     }
 
     #[test]
