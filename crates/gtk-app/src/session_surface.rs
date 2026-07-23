@@ -17078,7 +17078,7 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
         );
         assert_eq!(
             inline_event_chip_name(&inline_events[0]),
-            inline_events[0].title
+            "harness-smoke-note.md"
         );
         assert_eq!(inline_events[0].subtitle.as_deref(), None);
         let body = inline_events[0].body.as_deref().unwrap();
@@ -18041,11 +18041,12 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
             .unwrap();
 
         assert!(source.contains("let expander = ToggleButton::with_label(\"+\");"));
-        assert!(source.contains("let chip = Button::new();"));
+        assert!(source.contains("let chip = GBox::new(Orientation::Horizontal, 0);"));
         assert!(source.contains("chip.add_css_class(\"chat-inline-event-chip\");"));
         assert!(source.contains("header.append(&expander);"));
         assert!(source.contains("header.append(&chip);"));
-        assert!(source.contains("chip.connect_clicked"));
+        assert!(source.contains("chip_click.connect_released"));
+        assert!(source.contains("chip.add_controller(chip_click);"));
         assert!(source.contains("expander.set_active(true);"));
     }
 
