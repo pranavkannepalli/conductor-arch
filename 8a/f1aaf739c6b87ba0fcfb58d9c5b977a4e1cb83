@@ -1,0 +1,29 @@
+crates/gtk-app/src/theme.rs
+  s_d6fc0e6ad8da2b::t_cc4e703b3ffae8 3327-3329,3454-3459,3463-3464
+  s_d6fc0e6ad8da2b::t_b3423b2000bf11 551-559,2512,2514-2515
+  s_d6fc0e6ad8da2b::t_3e244c3288a1d2 2509-2511
+  s_d6fc0e6ad8da2b::t_51808df1647525 2513
+crates/gtk-app/src/workspace_command_center.rs
+  s_d6fc0e6ad8da2b::t_e83d3662dd7401 834,2540
+  s_d6fc0e6ad8da2b::t_e7146d61175e76 9629-9650
+  s_d6fc0e6ad8da2b::t_9165ac5328a6fb 131
+  s_d6fc0e6ad8da2b::t_8d868ed844b31c 9628
+crates/gtk-app/src/buttons.rs
+  s_d6fc0e6ad8da2b::t_9480a4ceacdb61 16,33-38,134,205
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "8af1aaf739c6b87ba0fcfb58d9c5b977a4e1cb83",
+  "prompts": {},
+  "sessions": {
+    "s_d6fc0e6ad8da2b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8de4-718d-7192-94e9-d194eca32af3",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
