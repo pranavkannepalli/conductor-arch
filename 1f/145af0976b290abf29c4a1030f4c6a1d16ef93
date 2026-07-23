@@ -1,0 +1,19 @@
+crates/gtk-app/src/theme.rs
+  s_d6fc0e6ad8da2b::t_07ef1c01b2441e 555-557,2142,2144-2145,2808,2810-2811,3461-3463,3467-3469
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "1f145af0976b290abf29c4a1030f4c6a1d16ef93",
+  "prompts": {},
+  "sessions": {
+    "s_d6fc0e6ad8da2b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8de4-718d-7192-94e9-d194eca32af3",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
