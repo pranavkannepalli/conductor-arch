@@ -348,6 +348,8 @@ struct SessionChatCreateUi {
     toast_manager: ToastManager,
 }
 
+type OpenInlineFile = Rc<dyn Fn(&str)>;
+
 fn spawn_session_chat_thread_create(
     database_path: PathBuf,
     workspace_name: String,
@@ -555,6 +557,7 @@ pub fn agent_session_panel(
     include_header: bool,
     setup_readiness: Option<Rc<RefCell<SetupReadiness>>>,
     external_chat_tabs: Option<ExternalChatTabs>,
+    open_file: Option<OpenInlineFile>,
     toast_manager: ToastManager,
 ) -> GBox {
     let root = GBox::new(Orientation::Vertical, 0);
@@ -1365,6 +1368,7 @@ pub fn agent_session_panel(
         let refresh_queue_overlay = refresh_queue_overlay.clone();
         let eager_start_chat_agent = eager_start_chat_agent.clone();
         let refresh_for_metadata = refresh_for_metadata.clone();
+        let open_file = open_file.clone();
         Rc::new(move || {
             let mut outcome = ChatRefreshOutcome::default();
             let workspace = current_workspace_name.borrow().clone();
@@ -2073,6 +2077,7 @@ pub fn agent_session_panel(
                                             &timeline[start..],
                                             &transcript_display,
                                             render_legacy_inline_events,
+                                            open_file.as_ref(),
                                         );
                                     }
                                     ChatTimelineRefreshPlan::RebuildFrom { start } => {
@@ -2085,6 +2090,7 @@ pub fn agent_session_panel(
                                             &timeline[start..],
                                             &transcript_display,
                                             render_legacy_inline_events,
+                                            open_file.as_ref(),
                                         );
                                     }
                                     ChatTimelineRefreshPlan::RebuildMessages => {
@@ -2100,6 +2106,7 @@ pub fn agent_session_panel(
                                             &timeline,
                                             &transcript_display,
                                             render_legacy_inline_events,
+                                            open_file.as_ref(),
                                         );
                                     }
                                 }
@@ -2227,6 +2234,7 @@ pub fn agent_session_panel(
                 let inflight_archcar_actions = inflight_archcar_actions.clone();
                 let last_timeline_render_state = last_timeline_render_state.clone();
                 let toast_manager = toast_manager.clone();
+                let open_file = open_file.clone();
                 let message_refresh_generation = Rc::new(Cell::new(0_u64));
                 Rc::new(move |thread_id| {
                     if *selected_thread.borrow() != Some(thread_id) {
@@ -2247,6 +2255,7 @@ pub fn agent_session_panel(
                     let last_timeline_render_state = last_timeline_render_state.clone();
                     let toast_manager = toast_manager.clone();
                     let message_refresh_generation = message_refresh_generation.clone();
+                    let open_file = open_file.clone();
                     spawn_background_job(
                         move || {
                             load_chat_timeline_snapshot(
@@ -2331,6 +2340,7 @@ pub fn agent_session_panel(
                                         &timeline[start..],
                                         &transcript_display,
                                         render_legacy_inline_events,
+                                        open_file.as_ref(),
                                     );
                                 }
                                 ChatTimelineRefreshPlan::RebuildFrom { start } => {
@@ -2347,6 +2357,7 @@ pub fn agent_session_panel(
                                         &timeline[start..],
                                         &transcript_display,
                                         render_legacy_inline_events,
+                                        open_file.as_ref(),
                                     );
                                 }
                                 ChatTimelineRefreshPlan::RebuildMessages => {
@@ -2360,6 +2371,7 @@ pub fn agent_session_panel(
                                         &timeline,
                                         &transcript_display,
                                         render_legacy_inline_events,
+                                        open_file.as_ref(),
                                     );
                                 }
                             }
@@ -3793,12 +3805,14 @@ fn append_chat_timeline_items(
     items: &[ChatTimelineItem],
     transcript_display: &str,
     render_legacy_inline_events: bool,
+    open_file: Option<&OpenInlineFile>,
 ) {
     for item in items {
         if let Some(widget) = chat_timeline_item_widget(
             item,
             render_raw_message_content(transcript_display),
             render_legacy_inline_events,
+            open_file,
         ) {
             append_chat_refresh_row(container, &widget);
         }
@@ -3982,7 +3996,7 @@ fn session_transcript_event_widget(event: &SessionTranscriptEvent) -> Widget {
         SessionTranscriptRole::Tool | SessionTranscriptRole::Skill => {
             let inline_events = session_transcript_inline_events(event);
             if !inline_events.is_empty() {
-                return inline_events_widget(&inline_events);
+                return inline_events_widget(&inline_events, None);
             }
             session_transcript_label_widget(event)
         }
@@ -4676,6 +4690,7 @@ fn chat_message_widget(
     message: &ChatMessageRecord,
     render_raw_message_content: bool,
     render_legacy_inline_events: bool,
+    open_file: Option<&OpenInlineFile>,
 ) -> Option<Widget> {
     if !chat_message_is_renderable(message) {
         return None;
@@ -4695,7 +4710,7 @@ fn chat_message_widget(
             let inline_events =
                 legacy_inline_events_for_message(message, render_legacy_inline_events);
             if !inline_events.is_empty() {
-                return Some(inline_events_widget(&inline_events));
+                return Some(inline_events_widget(&inline_events, open_file));
             }
             let content = chat_agent_message_display_content(message, render_raw_message_content);
             if content.trim().is_empty() {
@@ -4710,15 +4725,19 @@ fn chat_timeline_item_widget(
     item: &ChatTimelineItem,
     render_raw_message_content: bool,
     render_legacy_inline_events: bool,
+    open_file: Option<&OpenInlineFile>,
 ) -> Option<Widget> {
     match item {
         ChatTimelineItem::Message(message) => chat_message_widget(
             message,
             render_raw_message_content,
             render_legacy_inline_events,
+            open_file,
         ),
-        ChatTimelineItem::Event(event) => Some(chat_event_widget(event)),
-        ChatTimelineItem::ProviderProjection(item) => Some(provider_projection_item_widget(item)),
+        ChatTimelineItem::Event(event) => Some(chat_event_widget(event, open_file)),
+        ChatTimelineItem::ProviderProjection(item) => {
+            Some(provider_projection_item_widget(item, open_file))
+        }
         ChatTimelineItem::InterruptedNotice { .. } => Some(chat_interrupted_notice_widget()),
         ChatTimelineItem::OptimisticUserInput(input) => Some(chat_user_bubble(input).upcast()),
         ChatTimelineItem::WorkingIndicator(elapsed) => Some(working_indicator_widget(*elapsed)),
@@ -4789,9 +4808,9 @@ fn legacy_inline_events_for_message(
     }
 }
 
-fn chat_event_widget(event: &ChatEventRecord) -> Widget {
+fn chat_event_widget(event: &ChatEventRecord, open_file: Option<&OpenInlineFile>) -> Widget {
     stored_chat_event_inline_event(event)
-        .map(|inline| inline_event_widget(&inline))
+        .map(|inline| inline_event_widget(&inline, open_file))
         .unwrap_or_else(|| chat_text_label(&event.body).upcast())
 }
 
@@ -4953,9 +4972,12 @@ fn apply_agent_metadata_ui_update(
     }
 }
 
-fn provider_projection_item_widget(item: &ProviderProjectionItem) -> Widget {
+fn provider_projection_item_widget(
+    item: &ProviderProjectionItem,
+    open_file: Option<&OpenInlineFile>,
+) -> Widget {
     if let Some(inline_event) = provider_projection_inline_event(item) {
-        return inline_event_widget(&inline_event);
+        return inline_event_widget(&inline_event, open_file);
     }
 
     match item.render_class {
@@ -6137,18 +6159,18 @@ fn extract_local_path(line: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn inline_events_widget(events: &[CodexInlineEvent]) -> Widget {
+fn inline_events_widget(events: &[CodexInlineEvent], open_file: Option<&OpenInlineFile>) -> Widget {
     let group = GBox::new(Orientation::Vertical, 3);
     group.set_hexpand(true);
     group.set_margin_top(0);
     group.set_margin_bottom(0);
     for event in events {
-        group.append(&inline_event_widget(event));
+        group.append(&inline_event_widget(event, open_file));
     }
     group.upcast()
 }
 
-fn inline_event_widget(event: &CodexInlineEvent) -> Widget {
+fn inline_event_widget(event: &CodexInlineEvent, open_file: Option<&OpenInlineFile>) -> Widget {
     let root = GBox::new(Orientation::Vertical, 2);
     root.add_css_class("chat-inline-event");
     root.add_css_class(inline_event_type_css_class(event));
@@ -6160,20 +6182,34 @@ fn inline_event_widget(event: &CodexInlineEvent) -> Widget {
     root.set_margin_bottom(0);
 
     let expand_by_default = inline_event_expands_body_by_default(event);
-    let toggle = ToggleButton::new();
-    toggle.add_css_class("chat-inline-event-chip");
-    toggle.set_halign(Align::Start);
-    toggle.set_margin_top(0);
-    toggle.set_margin_bottom(1);
-    toggle.set_tooltip_text(Some(&inline_event_tooltip(event)));
-    let toggle_label = Label::new(None);
-    toggle_label.set_markup(&inline_event_chip_markup(event, expand_by_default));
+    let header = GBox::new(Orientation::Horizontal, 4);
+    header.set_halign(Align::Start);
+    header.set_margin_top(0);
+    header.set_margin_bottom(0);
+
+    let expander = ToggleButton::with_label("+");
+    expander.add_css_class("chat-inline-event-expander");
+    expander.set_halign(Align::Start);
+    expander.set_margin_top(0);
+    expander.set_margin_bottom(1);
+    expander.set_tooltip_text(Some("Show details"));
+    header.append(&expander);
+
+    let chip = Button::new();
+    chip.add_css_class("chat-inline-event-chip");
+    chip.set_halign(Align::Start);
+    chip.set_margin_top(0);
+    chip.set_margin_bottom(1);
+    chip.set_tooltip_text(Some(&inline_event_tooltip(event)));
+    let chip_label = Label::new(None);
+    chip_label.set_markup(&inline_event_chip_markup(event, expand_by_default));
     configure_inline_event_chip_label(
-        &toggle_label,
+        &chip_label,
         &inline_event_chip_label(event, expand_by_default),
     );
-    toggle.set_child(Some(&toggle_label));
-    root.append(&toggle);
+    chip.set_child(Some(&chip_label));
+    header.append(&chip);
+    root.append(&header);
 
     let body_text = inline_event_body_text(event);
     let body_preview = inline_event_body_preview(event, &body_text);
@@ -6195,32 +6231,56 @@ fn inline_event_widget(event: &CodexInlineEvent) -> Widget {
     body_revealer.set_visible(expand_by_default);
     body_revealer.set_child(Some(&body_scroll));
     root.append(&body_revealer);
-    toggle.set_active(expand_by_default);
+    expander.set_active(expand_by_default);
 
-    toggle.connect_toggled({
+    expander.connect_toggled({
         let body = body.clone();
         let body_revealer = body_revealer.clone();
         let full = body_preview.full.clone();
         let preview = body_preview.preview.clone();
-        let toggle_label = toggle_label.clone();
-        let collapsed_label = inline_event_chip_markup(event, false);
-        let expanded_label = inline_event_chip_markup(event, true);
         move |button| {
             if button.is_active() {
                 body.set_markup(&chat_text_markup(&full));
                 body_revealer.set_visible(true);
                 body_revealer.set_reveal_child(true);
-                toggle_label.set_markup(&expanded_label);
+                button.set_label("-");
             } else {
                 body.set_markup(&chat_text_markup(&preview));
                 body_revealer.set_reveal_child(false);
                 body_revealer.set_visible(false);
-                toggle_label.set_markup(&collapsed_label);
+                button.set_label("+");
             }
         }
     });
 
+    chip.connect_clicked({
+        let body = body.clone();
+        let body_revealer = body_revealer.clone();
+        let expander = expander.clone();
+        let full = body_preview.full.clone();
+        let open_file = open_file.cloned();
+        let path = event
+            .path
+            .as_ref()
+            .and_then(|path| path.to_str())
+            .map(str::to_owned);
+        move |_| {
+            if let (Some(open_file), Some(path)) = (open_file.as_ref(), path.as_deref()) {
+                open_file(path);
+                return;
+            }
+            open_inline_event_file(&body, &body_revealer, &full);
+            expander.set_active(true);
+        }
+    });
+
     root.upcast()
+}
+
+fn open_inline_event_file(body: &Label, body_revealer: &Revealer, full: &str) {
+    body.set_markup(&chat_text_markup(full));
+    body_revealer.set_visible(true);
+    body_revealer.set_reveal_child(true);
 }
 
 fn inline_event_tooltip(event: &CodexInlineEvent) -> String {
@@ -15797,8 +15857,24 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
 
         assert!(source.contains("let group = GBox::new(Orientation::Vertical, 3);"));
         assert!(source.contains("let root = GBox::new(Orientation::Vertical, 2);"));
-        assert!(source.contains("toggle.set_margin_bottom(1);"));
+        assert!(source.contains("expander.set_margin_bottom(1);"));
         assert!(source.contains("body.set_margin_top(2);"));
+    }
+
+    #[test]
+    fn inline_file_events_use_separate_expander_and_chip_targets() {
+        let source = include_str!("session_surface.rs")
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("let expander = ToggleButton::with_label(\"+\");"));
+        assert!(source.contains("let chip = Button::new();"));
+        assert!(source.contains("chip.add_css_class(\"chat-inline-event-chip\");"));
+        assert!(source.contains("header.append(&expander);"));
+        assert!(source.contains("header.append(&chip);"));
+        assert!(source.contains("chip.connect_clicked"));
+        assert!(source.contains("open_inline_event_file"));
     }
 
     #[test]

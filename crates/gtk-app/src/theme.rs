@@ -1715,7 +1715,7 @@ button.ws-tab-shell {
     color: #c6c6c6;
 }
 .ws-tab-shell.ws-tab-running {
-    border-bottom-color: #4f8cff;
+    border-bottom-color: transparent;
 }
 .ws-tab-shell.ws-tab-running .ws-tab-label,
 .ws-tab-shell.ws-tab-running .ws-tab-close-icon {
@@ -2429,6 +2429,24 @@ popover.context-menu-popover arrow {
     min-height: 22px;
     min-width: 0;
     padding: 2px 0;
+}
+.chat-inline-event-expander {
+    background-color: transparent;
+    border: none;
+    box-shadow: none;
+    color: #8f8f8f;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-size: 12px;
+    font-weight: 700;
+    min-height: 22px;
+    min-width: 18px;
+    padding: 2px 0;
+}
+.chat-inline-event-expander:hover,
+.chat-inline-event-expander:checked {
+    background-color: transparent;
+    box-shadow: none;
+    color: #e7e7e7;
 }
 button.chat-inline-event-chip {
     background-color: transparent;
@@ -3272,6 +3290,15 @@ mod tests {
                 "missing shared class {class_name}"
             );
         }
+    }
+
+    #[test]
+    fn running_chat_tabs_do_not_use_blue_underline() {
+        let css = app_css();
+        let running = selector_block(css, ".ws-tab-shell.ws-tab-running");
+
+        assert!(!running.contains("border-bottom-color: #4f8cff;"));
+        assert!(!running.contains("#4f8cff"));
     }
 
     #[test]

@@ -698,8 +698,8 @@ fn ws_center_panel(
         let reopen_popover = reopen_popover.clone();
         reopen_tab_btn.connect_clicked(move |_| reopen_popover.popup());
     }
-    tab_bar.append(&chat_tabs_scroll);
     tab_bar.append(&file_tabs);
+    tab_bar.append(&chat_tabs_scroll);
     panel.append(&tab_bar);
 
     // Separator below tab bar
@@ -956,6 +956,15 @@ fn ws_center_panel(
             chat_tabs.append(&add_tab_btn);
         })
     };
+    let inline_open_file_handle = Rc::new(RefCell::new(None::<OpenWorkspaceFile>));
+    let inline_open_file: OpenWorkspaceFile = {
+        let inline_open_file_handle = inline_open_file_handle.clone();
+        Rc::new(move |rel_path: &str| {
+            if let Some(open_file) = inline_open_file_handle.borrow().as_ref() {
+                open_file(rel_path);
+            }
+        })
+    };
     let chat_widget = session_surface::agent_session_panel(
         db_path.to_path_buf(),
         &ws.name,
@@ -1011,6 +1020,7 @@ fn ws_center_panel(
                 }))
             },
         }),
+        Some(inline_open_file.clone()),
         toast_manager.clone(),
     );
     content.add_named(&chat_widget, Some("chat"));
@@ -1133,7 +1143,9 @@ fn ws_center_panel(
     let open_file: Rc<dyn Fn(&str)> = Rc::new(move |rel_path: &str| {
         let tab_key = format!("file:{rel_path}");
 
-        if content_ref.child_by_name(&tab_key).is_none() {
+        close_existing_file_tabs(&content_ref, &file_tabs_ref, file_tab_buttons_ref.as_ref());
+        file_tab_buttons_ref.borrow_mut().clear();
+        {
             // File pane with Edit / Diff mode switcher
             let file_pane = GBox::new(Orientation::Vertical, 0);
             file_pane.set_vexpand(true);
@@ -1242,6 +1254,7 @@ fn ws_center_panel(
         sync_workspace_chat_tabs(chat_tab_buttons_for_files.as_ref(), None);
         sync_workspace_file_tabs(file_tab_buttons_ref.as_ref(), Some(&tab_key));
     });
+    *inline_open_file_handle.borrow_mut() = Some(open_file.clone());
 
     let initial_threads = known_threads.borrow().clone();
     let initial_selected_thread = *selected_thread.borrow();
@@ -1335,6 +1348,22 @@ fn sync_workspace_file_tabs(buttons: &RefCell<HashMap<String, GBox>>, selected: 
         } else {
             button.remove_css_class("ws-tab-active");
         }
+    }
+}
+
+fn close_existing_file_tabs(
+    content: &Stack,
+    file_tabs: &GBox,
+    buttons: &RefCell<HashMap<String, GBox>>,
+) {
+    let tab_keys = buttons.borrow().keys().cloned().collect::<Vec<_>>();
+    for tab_key in tab_keys {
+        if let Some(child) = content.child_by_name(&tab_key) {
+            content.remove(&child);
+        }
+    }
+    while let Some(child) = file_tabs.first_child() {
+        file_tabs.remove(&child);
     }
 }
 
@@ -2874,6 +2903,7 @@ fn agents_panel(
         false,
         None,
         None,
+        None,
         toast_manager.clone(),
     ));
     panel.append(&session_box);
@@ -4032,6 +4062,7 @@ fn chat_terminal_split(
         false,
         None,
         None,
+        None,
         toast_manager.clone(),
     ));
     for chat in history::sessions_for_workspace_path(db_path, &ws.path)
@@ -4102,6 +4133,7 @@ fn parallel_agents_panel(
             refresh_chat.refresh(RefreshScope::History);
         },
         false,
+        None,
         None,
         None,
         toast_manager.clone(),
@@ -8927,6 +8959,38 @@ mod tests {
             !chat_region.contains("RefreshScope::Workspace"),
             "chat tab region must not rebuild the workspace shell"
         );
+    }
+
+    #[test]
+    fn workspace_file_tab_is_anchored_left_of_chat_tabs() {
+        let source = include_str!("workspace_command_center.rs");
+        let start = source.find("let tab_bar = GBox::new").unwrap();
+        let end = source[start..]
+            .find("panel.append(&tab_bar);")
+            .map(|offset| start + offset)
+            .unwrap();
+        let tab_bar_region = &source[start..end];
+
+        assert!(
+            tab_bar_region.find("tab_bar.append(&file_tabs);")
+                < tab_bar_region.find("tab_bar.append(&chat_tabs_scroll);"),
+            "file tab should be immediately left of the chat tab strip"
+        );
+    }
+
+    #[test]
+    fn workspace_file_opener_keeps_only_one_file_tab() {
+        let source = include_str!("workspace_command_center.rs");
+        let start = source.find("let open_file: Rc<dyn Fn(&str)>").unwrap();
+        let end = source[start..]
+            .find("let initial_threads = known_threads.borrow().clone();")
+            .map(|offset| start + offset)
+            .unwrap();
+        let open_file_region = &source[start..end];
+
+        assert!(open_file_region.contains("close_existing_file_tabs("));
+        assert!(open_file_region.contains("file_tab_buttons_ref.borrow_mut().clear();"));
+        assert!(!open_file_region.contains("if content_ref.child_by_name(&tab_key).is_none()"));
     }
 
     #[test]
