@@ -53,6 +53,8 @@ use tracing::warn;
 use uuid::Uuid;
 use walkdir::WalkDir;
 
+use crate::archcar::protocol::ArchcarInputKind;
+
 const ARCHDUCTOR_METADATA_OPEN: &str = "<archductor_metadata>";
 const ARCHDUCTOR_METADATA_CLOSE: &str = "</archductor_metadata>";
 const ARCHDUCTOR_HIDDEN_INSTRUCTION_OPEN: &str = "<archductor_hidden_instruction>";
@@ -764,6 +766,18 @@ pub struct ChatMessageRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedChatInputRecord {
+    pub id: i64,
+    pub thread_id: i64,
+    pub input: String,
+    pub visible_input: Option<String>,
+    pub input_kind: ArchcarInputKind,
+    pub session_kind: SessionKind,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunningChatThreadSummary {
     pub workspace: String,
     pub thread_id: i64,
@@ -1233,6 +1247,8 @@ impl WorkspaceStore {
         let db_path = path.as_ref().to_path_buf();
         let conn = Connection::open(&db_path)
             .with_context(|| format!("open database {}", db_path.display()))?;
+        conn.execute_batch("PRAGMA foreign_keys = ON")
+            .with_context(|| format!("enable foreign keys for {}", db_path.display()))?;
         let store = Self {
             conn,
             db_path,
@@ -3956,7 +3972,13 @@ impl WorkspaceStore {
         );
 
         let sections = if settings.customization.naming.pr_body_sections.is_empty() {
-            vec!["Summary".to_owned(), "Tests".to_owned(), "Risk".to_owned()]
+            vec![
+                "Summary".to_owned(),
+                "What Changed".to_owned(),
+                "Why".to_owned(),
+                "User Impact".to_owned(),
+                "Validation".to_owned(),
+            ]
         } else {
             settings.customization.naming.pr_body_sections
         };
@@ -3973,8 +3995,17 @@ impl WorkspaceStore {
                     changed_files_text,
                     session_summary
                 ));
-            } else if normalized.contains("test") || normalized.contains("verification") {
+            } else if normalized.contains("changed") {
+                body.push_str(&format!("{changed_files_text}\n"));
+            } else if normalized.contains("test")
+                || normalized.contains("verification")
+                || normalized.contains("validation")
+            {
                 body.push_str("- TODO: Add checks/tests run before creating the PR.\n");
+            } else if normalized.contains("impact") {
+                body.push_str("- TODO: Describe customer-visible behavior changes.\n");
+            } else if normalized.contains("why") {
+                body.push_str("- TODO: Explain the product reason or root cause.\n");
             } else if normalized.contains("risk") {
                 body.push_str("- TODO: Note migration, data, rollout, or UX risk.\n");
             } else {
@@ -6364,6 +6395,152 @@ mutation($threadId: ID!) {{
         self.get_chat_thread(thread_id)
     }
 
+    pub fn enqueue_chat_input(
+        &self,
+        thread_id: i64,
+        input: &str,
+        visible_input: Option<&str>,
+        input_kind: ArchcarInputKind,
+        session_kind: SessionKind,
+    ) -> Result<QueuedChatInputRecord> {
+        let input = input.trim();
+        anyhow::ensure!(!input.is_empty(), "queued chat input cannot be empty");
+        let now = timestamp();
+        self.conn.execute(
+            "INSERT INTO chat_queued_inputs (
+                thread_id, input, visible_input, input_kind, session_kind, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+            params![
+                thread_id,
+                input,
+                visible_input,
+                archcar_input_kind_as_str(input_kind),
+                session_kind_as_str(session_kind),
+                now
+            ],
+        )?;
+        self.touch_chat_thread(thread_id, &now)?;
+        self.get_queued_chat_input(self.conn.last_insert_rowid())
+    }
+
+    pub fn list_queued_chat_inputs(&self, thread_id: i64) -> Result<Vec<QueuedChatInputRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, thread_id, input, visible_input, input_kind, session_kind, created_at, updated_at
+             FROM chat_queued_inputs
+             WHERE thread_id = ?1
+             ORDER BY id ASC",
+        )?;
+        let rows = stmt
+            .query_map([thread_id], row_to_queued_chat_input)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub fn list_queued_chat_thread_ids(&self) -> Result<Vec<i64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT thread_id
+             FROM chat_queued_inputs
+             ORDER BY thread_id ASC",
+        )?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub fn peek_next_queued_chat_input(
+        &self,
+        thread_id: i64,
+    ) -> Result<Option<QueuedChatInputRecord>> {
+        self.conn
+            .query_row(
+                "SELECT id, thread_id, input, visible_input, input_kind, session_kind, created_at, updated_at
+                 FROM chat_queued_inputs
+                 WHERE thread_id = ?1
+                 ORDER BY id ASC
+                 LIMIT 1",
+                [thread_id],
+                row_to_queued_chat_input,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn claim_next_queued_chat_input(
+        &self,
+        thread_id: i64,
+    ) -> Result<Option<QueuedChatInputRecord>> {
+        self.conn
+            .query_row(
+                "DELETE FROM chat_queued_inputs
+                 WHERE id = (
+                   SELECT id
+                   FROM chat_queued_inputs
+                   WHERE thread_id = ?1
+                   ORDER BY id ASC
+                   LIMIT 1
+                 )
+                 RETURNING id, thread_id, input, visible_input, input_kind, session_kind, created_at, updated_at",
+                [thread_id],
+                row_to_queued_chat_input,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn requeue_claimed_chat_input_front(&self, input: &QueuedChatInputRecord) -> Result<()> {
+        let restore_id = self.conn.query_row(
+            "SELECT CASE
+                   WHEN NOT EXISTS (SELECT 1 FROM chat_queued_inputs WHERE id = ?1) THEN ?1
+                   ELSE COALESCE((SELECT MIN(id) FROM chat_queued_inputs), ?1) - 1
+                 END",
+            params![input.id],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let now = timestamp();
+        self.conn.execute(
+            "INSERT INTO chat_queued_inputs (
+                id, thread_id, input, visible_input, input_kind, session_kind, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                restore_id,
+                input.thread_id,
+                &input.input,
+                input.visible_input.as_deref(),
+                archcar_input_kind_as_str(input.input_kind.clone()),
+                session_kind_as_str(input.session_kind),
+                &input.created_at,
+                now
+            ],
+        )?;
+        self.touch_chat_thread(input.thread_id, &now)?;
+        Ok(())
+    }
+
+    pub fn delete_queued_chat_input(&self, id: i64) -> Result<Option<QueuedChatInputRecord>> {
+        let existing = self.get_queued_chat_input_optional(id)?;
+        if existing.is_some() {
+            self.conn
+                .execute("DELETE FROM chat_queued_inputs WHERE id = ?1", [id])?;
+        }
+        Ok(existing)
+    }
+
+    pub fn remove_queued_chat_input_at(
+        &self,
+        thread_id: i64,
+        index: usize,
+    ) -> Result<Option<QueuedChatInputRecord>> {
+        let Some(record) = self
+            .list_queued_chat_inputs(thread_id)?
+            .into_iter()
+            .nth(index)
+        else {
+            return Ok(None);
+        };
+        self.delete_queued_chat_input(record.id)
+    }
+
     pub fn append_chat_message(
         &self,
         thread_id: i64,
@@ -7351,6 +7528,24 @@ mutation($threadId: ID!) {{
                 row_to_chat_thread,
             )
             .with_context(|| format!("load chat thread {id}"))
+    }
+
+    fn get_queued_chat_input(&self, id: i64) -> Result<QueuedChatInputRecord> {
+        self.get_queued_chat_input_optional(id)?
+            .with_context(|| format!("load queued chat input {id}"))
+    }
+
+    fn get_queued_chat_input_optional(&self, id: i64) -> Result<Option<QueuedChatInputRecord>> {
+        self.conn
+            .query_row(
+                "SELECT id, thread_id, input, visible_input, input_kind, session_kind, created_at, updated_at
+                 FROM chat_queued_inputs
+                 WHERE id = ?1",
+                [id],
+                row_to_queued_chat_input,
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     fn get_chat_message(&self, id: i64) -> Result<ChatMessageRecord> {
@@ -8409,6 +8604,39 @@ fn row_to_chat_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessageR
     })
 }
 
+fn row_to_queued_chat_input(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueuedChatInputRecord> {
+    let input_kind: String = row.get(4)?;
+    let session_kind: String = row.get(5)?;
+    Ok(QueuedChatInputRecord {
+        id: row.get(0)?,
+        thread_id: row.get(1)?,
+        input: row.get(2)?,
+        visible_input: row.get(3)?,
+        input_kind: archcar_input_kind_from_str(&input_kind).map_err(|message| {
+            rusqlite::Error::FromSqlConversionFailure(
+                4,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    message,
+                )),
+            )
+        })?,
+        session_kind: session_kind_from_str(&session_kind).map_err(|message| {
+            rusqlite::Error::FromSqlConversionFailure(
+                5,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    message,
+                )),
+            )
+        })?,
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
+    })
+}
+
 fn row_to_chat_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatEventRecord> {
     Ok(ChatEventRecord {
         id: row.get(0)?,
@@ -8423,6 +8651,40 @@ fn row_to_chat_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatEventRecor
         created_at: row.get(9)?,
         updated_at: row.get(10)?,
     })
+}
+
+fn archcar_input_kind_as_str(kind: ArchcarInputKind) -> &'static str {
+    match kind {
+        ArchcarInputKind::User => "user",
+        ArchcarInputKind::ReviewPrompt => "review_prompt",
+        ArchcarInputKind::ControlCommand => "control_command",
+    }
+}
+
+fn archcar_input_kind_from_str(value: &str) -> Result<ArchcarInputKind, String> {
+    match value {
+        "user" => Ok(ArchcarInputKind::User),
+        "review_prompt" => Ok(ArchcarInputKind::ReviewPrompt),
+        "control_command" => Ok(ArchcarInputKind::ControlCommand),
+        other => Err(format!("unknown archcar input kind {other}")),
+    }
+}
+
+fn session_kind_as_str(kind: SessionKind) -> &'static str {
+    match kind {
+        SessionKind::Shell => "shell",
+        SessionKind::Codex => "codex",
+        SessionKind::Claude => "claude",
+    }
+}
+
+fn session_kind_from_str(value: &str) -> Result<SessionKind, String> {
+    match value {
+        "shell" => Ok(SessionKind::Shell),
+        "codex" => Ok(SessionKind::Codex),
+        "claude" => Ok(SessionKind::Claude),
+        other => Err(format!("unknown session kind {other}")),
+    }
 }
 
 fn row_to_workspace_timeline_event(
@@ -11654,6 +11916,209 @@ branch_prefix = "team"
 
         assert!(renamed.is_none());
         assert_eq!(store.get_by_name("berlin").unwrap(), workspace);
+    }
+
+    #[test]
+    fn queued_chat_inputs_are_durable_fifo_and_thread_scoped() {
+        let (temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+        let other_thread = store
+            .create_chat_thread("berlin", "claude", "Other Chat", None)
+            .unwrap();
+
+        let first = store
+            .enqueue_chat_input(
+                thread.id,
+                " first ",
+                Some("first visible"),
+                ArchcarInputKind::User,
+                SessionKind::Codex,
+            )
+            .unwrap();
+        let second = store
+            .enqueue_chat_input(
+                thread.id,
+                "second",
+                None,
+                ArchcarInputKind::ReviewPrompt,
+                SessionKind::Codex,
+            )
+            .unwrap();
+        let other = store
+            .enqueue_chat_input(
+                other_thread.id,
+                "other",
+                None,
+                ArchcarInputKind::User,
+                SessionKind::Claude,
+            )
+            .unwrap();
+
+        let reopened =
+            WorkspaceStore::open_with_logs(temp.path().join("state.db"), temp.path().join("logs"))
+                .unwrap();
+        let queued = reopened.list_queued_chat_inputs(thread.id).unwrap();
+        assert_eq!(
+            queued.iter().map(|item| item.id).collect::<Vec<_>>(),
+            vec![first.id, second.id]
+        );
+        assert_eq!(queued[0].input, "first");
+        assert_eq!(queued[0].visible_input.as_deref(), Some("first visible"));
+        assert_eq!(queued[1].input_kind, ArchcarInputKind::ReviewPrompt);
+        assert_eq!(
+            reopened.list_queued_chat_thread_ids().unwrap(),
+            vec![thread.id, other_thread.id]
+        );
+
+        assert_eq!(
+            reopened
+                .peek_next_queued_chat_input(thread.id)
+                .unwrap()
+                .unwrap()
+                .id,
+            first.id
+        );
+        assert_eq!(
+            reopened
+                .delete_queued_chat_input(first.id)
+                .unwrap()
+                .unwrap()
+                .id,
+            first.id
+        );
+        assert_eq!(
+            reopened
+                .peek_next_queued_chat_input(thread.id)
+                .unwrap()
+                .unwrap()
+                .id,
+            second.id
+        );
+        assert_eq!(
+            reopened
+                .remove_queued_chat_input_at(other_thread.id, 0)
+                .unwrap()
+                .unwrap()
+                .id,
+            other.id
+        );
+        assert_eq!(
+            reopened.list_queued_chat_thread_ids().unwrap(),
+            vec![thread.id]
+        );
+    }
+
+    #[test]
+    fn claim_next_queued_chat_input_removes_row_before_delivery() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+        let queued = store
+            .enqueue_chat_input(
+                thread.id,
+                "run tests",
+                None,
+                ArchcarInputKind::User,
+                SessionKind::Codex,
+            )
+            .unwrap();
+
+        let claimed = store
+            .claim_next_queued_chat_input(thread.id)
+            .unwrap()
+            .expect("queued row should be claimed");
+
+        assert_eq!(claimed.id, queued.id);
+        assert!(store
+            .peek_next_queued_chat_input(thread.id)
+            .unwrap()
+            .is_none());
+        assert!(store
+            .claim_next_queued_chat_input(thread.id)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn deleting_chat_thread_cascades_queued_inputs() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+        let queued = store
+            .enqueue_chat_input(
+                thread.id,
+                "run tests",
+                Some("visible run tests"),
+                ArchcarInputKind::User,
+                SessionKind::Codex,
+            )
+            .unwrap();
+
+        store
+            .conn
+            .execute("DELETE FROM chat_threads WHERE id = ?1", [thread.id])
+            .unwrap();
+
+        assert!(store
+            .get_queued_chat_input_optional(queued.id)
+            .unwrap()
+            .is_none());
+        assert!(store.list_queued_chat_thread_ids().unwrap().is_empty());
+    }
+
+    #[test]
+    fn requeue_claimed_chat_input_front_restores_after_delivery_failure() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+        let first = store
+            .enqueue_chat_input(
+                thread.id,
+                "first",
+                Some("visible first"),
+                ArchcarInputKind::User,
+                SessionKind::Codex,
+            )
+            .unwrap();
+        let second = store
+            .enqueue_chat_input(
+                thread.id,
+                "second",
+                None,
+                ArchcarInputKind::ReviewPrompt,
+                SessionKind::Codex,
+            )
+            .unwrap();
+        let claimed = store
+            .claim_next_queued_chat_input(thread.id)
+            .unwrap()
+            .expect("input should be claimed for provider delivery");
+
+        assert_eq!(claimed.id, first.id);
+        assert_eq!(
+            store
+                .peek_next_queued_chat_input(thread.id)
+                .unwrap()
+                .unwrap()
+                .id,
+            second.id
+        );
+
+        store
+            .requeue_claimed_chat_input_front(&claimed)
+            .expect("claimed input should be restored when delivery fails");
+
+        let queued = store.list_queued_chat_inputs(thread.id).unwrap();
+        assert_eq!(queued.len(), 2);
+        assert_eq!(queued[0].input, "first");
+        assert_eq!(queued[0].visible_input.as_deref(), Some("visible first"));
+        assert_eq!(queued[0].input_kind, ArchcarInputKind::User);
+        assert_eq!(queued[1].id, second.id);
     }
 
     #[test]
@@ -19815,7 +20280,6 @@ exit 1
             r#"
 [customization.naming]
 pr_title_template = "{workspace}: {branch} ({changed_files_count})"
-pr_body_sections = ["Summary", "Tests", "Risk"]
 "#,
         )
         .unwrap();
@@ -19867,9 +20331,15 @@ pr_body_sections = ["Summary", "Tests", "Risk"]
         let template = store.render_pull_request_template("berlin").unwrap();
 
         assert_eq!(template.title, "berlin: lc/berlin (1)");
-        assert!(template.body.contains("## Summary"));
-        assert!(template.body.contains("## Tests"));
-        assert!(template.body.contains("## Risk"));
+        for heading in [
+            "## Summary",
+            "## What Changed",
+            "## Why",
+            "## User Impact",
+            "## Validation",
+        ] {
+            assert!(template.body.contains(heading), "missing {heading}");
+        }
         assert!(template.body.contains("- README.md"));
         assert!(template
             .body

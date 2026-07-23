@@ -90,6 +90,7 @@ pub struct AppStateSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueuedChatInputDraft {
+    pub id: Option<i64>,
     pub input: String,
     pub visible_input: Option<String>,
     pub kind: ArchcarInputKind,
@@ -136,6 +137,8 @@ pub enum AppStateEvent {
     ComposerTargetQueueChanged { target: ChatUiTarget },
     WorkspacePhaseChanged { workspace: String },
     ChatPhaseChanged { target: ChatUiTarget },
+    AgentSessionSelectionChanged { session_id: Option<i64> },
+    StagedReviewPromptChanged,
     RefreshRequested(crate::refresh::RefreshEvent),
 }
 
@@ -290,19 +293,28 @@ impl AppState {
         workspace: Option<String>,
         default_tab: Option<WorkspaceTab>,
     ) {
-        let mut state = self.inner.borrow_mut();
-        if state.selected_workspace != workspace {
-            state.selected_chat_thread = None;
-            state.selected_chat_target = None;
-            state.selected_agent_session = None;
-            state.staged_review_prompt = None;
-            state.pending_chat_prompt = None;
-            if let Some(tab) = default_tab {
-                state.active_workspace_tab = tab;
+        let changed = {
+            let mut state = self.inner.borrow_mut();
+            if state.selected_workspace != workspace {
+                state.selected_chat_thread = None;
+                state.selected_chat_target = None;
+                state.selected_agent_session = None;
+                state.staged_review_prompt = None;
+                state.pending_chat_prompt = None;
+                if let Some(tab) = default_tab {
+                    state.active_workspace_tab = tab;
+                }
+                state.selected_workspace = workspace.clone();
+                state.active_page = AppPage::Workspace;
+                true
+            } else {
+                state.active_page = AppPage::Workspace;
+                false
             }
+        };
+        if changed {
+            self.emit(AppStateEvent::WorkspaceSelectionChanged { workspace });
         }
-        state.selected_workspace = workspace;
-        state.active_page = AppPage::Workspace;
     }
 
     pub fn navigate_to_workspace_with_default_tab(
@@ -310,23 +322,33 @@ impl AppState {
         workspace: Option<String>,
         default_tab: Option<WorkspaceTab>,
     ) {
-        let mut state = self.inner.borrow_mut();
-        if state.selected_workspace == workspace && state.active_page == AppPage::Workspace {
-            return;
-        }
-        push_navigation_entry(&mut state);
-        if state.selected_workspace != workspace {
-            state.selected_chat_thread = None;
-            state.selected_chat_target = None;
-            state.selected_agent_session = None;
-            state.staged_review_prompt = None;
-            state.pending_chat_prompt = None;
-            if let Some(tab) = default_tab {
-                state.active_workspace_tab = tab;
+        let changed = {
+            let mut state = self.inner.borrow_mut();
+            if state.selected_workspace == workspace && state.active_page == AppPage::Workspace {
+                false
+            } else {
+                push_navigation_entry(&mut state);
+                if state.selected_workspace != workspace {
+                    state.selected_chat_thread = None;
+                    state.selected_chat_target = None;
+                    state.selected_agent_session = None;
+                    state.staged_review_prompt = None;
+                    state.pending_chat_prompt = None;
+                    if let Some(tab) = default_tab {
+                        state.active_workspace_tab = tab;
+                    }
+                    state.selected_workspace = workspace.clone();
+                    state.active_page = AppPage::Workspace;
+                    true
+                } else {
+                    state.active_page = AppPage::Workspace;
+                    false
+                }
             }
+        };
+        if changed {
+            self.emit(AppStateEvent::WorkspaceSelectionChanged { workspace });
         }
-        state.selected_workspace = workspace;
-        state.active_page = AppPage::Workspace;
     }
 
     pub fn selected_agent_session(&self) -> Option<i64> {
@@ -358,7 +380,18 @@ impl AppState {
     }
 
     pub fn set_selected_agent_session(&self, session_id: Option<i64>) {
-        self.inner.borrow_mut().selected_agent_session = session_id;
+        let changed = {
+            let mut state = self.inner.borrow_mut();
+            if state.selected_agent_session == session_id {
+                false
+            } else {
+                state.selected_agent_session = session_id;
+                true
+            }
+        };
+        if changed {
+            self.emit(AppStateEvent::AgentSessionSelectionChanged { session_id });
+        }
     }
 
     pub fn staged_review_prompt(&self) -> Option<String> {
@@ -366,7 +399,18 @@ impl AppState {
     }
 
     pub fn set_staged_review_prompt(&self, prompt: Option<String>) {
-        self.inner.borrow_mut().staged_review_prompt = prompt;
+        let changed = {
+            let mut state = self.inner.borrow_mut();
+            if state.staged_review_prompt == prompt {
+                false
+            } else {
+                state.staged_review_prompt = prompt;
+                true
+            }
+        };
+        if changed {
+            self.emit(AppStateEvent::StagedReviewPromptChanged);
+        }
     }
 
     pub fn queue_pending_chat_prompt(&self, prompt: String) {
@@ -448,6 +492,34 @@ impl AppState {
             .get(&thread_id)
             .map(Vec::len)
             .unwrap_or_default()
+    }
+
+    pub fn queued_chat_thread_ids(&self) -> Vec<i64> {
+        self.inner
+            .borrow()
+            .queued_chat_inputs
+            .iter()
+            .filter_map(|(thread_id, inputs)| (!inputs.is_empty()).then_some(*thread_id))
+            .collect()
+    }
+
+    pub fn replace_queued_chat_inputs(&self, thread_id: i64, inputs: Vec<QueuedChatInputDraft>) {
+        let mut state = self.inner.borrow_mut();
+        if inputs.is_empty() {
+            state.queued_chat_inputs.remove(&thread_id);
+        } else {
+            state.queued_chat_inputs.insert(thread_id, inputs);
+        }
+        drop(state);
+        self.emit(AppStateEvent::ComposerQueueChanged { thread_id });
+    }
+
+    pub fn visible_selected_chat_thread(&self) -> Option<i64> {
+        let state = self.inner.borrow();
+        (state.active_page == AppPage::Workspace
+            && state.active_workspace_tab == WorkspaceTab::Chats)
+            .then_some(state.selected_chat_thread)
+            .flatten()
     }
 
     pub fn pop_next_queued_chat_input(&self, thread_id: i64) -> Option<QueuedChatInputDraft> {
@@ -543,6 +615,7 @@ impl AppState {
         let replacement_text = replacement_text.trim().to_owned();
         if !replacement_text.is_empty() {
             let mut replacement = editing.original;
+            replacement.id = None;
             replacement.input = replacement_text;
             replacement.visible_input = None;
             self.insert_queued_chat_input(thread_id, editing.index, replacement);
@@ -965,6 +1038,7 @@ mod tests {
         state.queue_chat_input_for_target(
             pending.clone(),
             QueuedChatInputDraft {
+                id: None,
                 input: "fix auth".to_owned(),
                 visible_input: None,
                 kind: ArchcarInputKind::User,
@@ -1018,6 +1092,84 @@ mod tests {
             Some(WorkspaceTab::Checks),
         );
         assert_eq!(state.snapshot().active_workspace_tab, WorkspaceTab::Checks);
+    }
+
+    #[test]
+    fn default_tab_workspace_selection_emits_only_when_workspace_changes() {
+        let state = AppState::new(
+            AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            WorkspaceTab::Terminal,
+            AppPage::Workspace,
+        );
+        let observed = Rc::new(RefCell::new(Vec::new()));
+        let observed_for_sub = observed.clone();
+        let _subscription =
+            state.subscribe(move |event, _| observed_for_sub.borrow_mut().push(event.clone()));
+
+        state.set_selected_workspace_with_default_tab(
+            Some("berlin".to_owned()),
+            Some(WorkspaceTab::Checks),
+        );
+        state.navigate_to_workspace_with_default_tab(
+            Some("berlin".to_owned()),
+            Some(WorkspaceTab::Checks),
+        );
+        assert!(observed.borrow().is_empty());
+
+        state.set_selected_workspace_with_default_tab(
+            Some("tokyo".to_owned()),
+            Some(WorkspaceTab::Checks),
+        );
+        state.navigate_to_workspace_with_default_tab(
+            Some("oslo".to_owned()),
+            Some(WorkspaceTab::Review),
+        );
+
+        assert_eq!(
+            observed.borrow().as_slice(),
+            &[
+                AppStateEvent::WorkspaceSelectionChanged {
+                    workspace: Some("tokyo".to_owned())
+                },
+                AppStateEvent::WorkspaceSelectionChanged {
+                    workspace: Some("oslo".to_owned())
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn selected_agent_session_and_staged_prompt_emit_on_change() {
+        let state = AppState::new(
+            AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            WorkspaceTab::Chats,
+            AppPage::Workspace,
+        );
+        let observed = Rc::new(RefCell::new(Vec::new()));
+        let observed_for_sub = observed.clone();
+        let _subscription =
+            state.subscribe(move |event, _| observed_for_sub.borrow_mut().push(event.clone()));
+
+        state.set_selected_agent_session(Some(42));
+        state.set_selected_agent_session(Some(42));
+        state.set_staged_review_prompt(Some("review".to_owned()));
+        state.set_staged_review_prompt(Some("review".to_owned()));
+        state.set_selected_agent_session(None);
+        state.set_staged_review_prompt(None);
+
+        assert_eq!(
+            observed.borrow().as_slice(),
+            &[
+                AppStateEvent::AgentSessionSelectionChanged {
+                    session_id: Some(42)
+                },
+                AppStateEvent::StagedReviewPromptChanged,
+                AppStateEvent::AgentSessionSelectionChanged { session_id: None },
+                AppStateEvent::StagedReviewPromptChanged
+            ]
+        );
     }
 
     #[test]
@@ -1081,6 +1233,7 @@ mod tests {
 
     fn queued_chat_input(text: &str) -> QueuedChatInputDraft {
         QueuedChatInputDraft {
+            id: None,
             input: text.to_owned(),
             visible_input: None,
             kind: ArchcarInputKind::User,

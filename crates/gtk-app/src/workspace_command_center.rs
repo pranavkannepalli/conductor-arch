@@ -128,7 +128,7 @@ use crate::state::{
 use crate::toast::{show_toast as emit_toast, surface_label_error, ToastManager, ToastMessage};
 use crate::{
     archcar_async::{spawn_archcar_request, spawn_background_job},
-    buttons::{menu_text_button, text_button},
+    buttons::{compact_text_button, menu_text_button, text_button},
     cli_binary, detail_row, history, session_surface, shell_quote, spawn_terminal_command,
     terminal, title_case_workspace,
 };
@@ -831,7 +831,7 @@ fn ws_center_panel(
 
     let setup_readiness = Rc::new(RefCell::new(SetupReadiness::from_host()));
 
-    let add_tab_btn = text_button("+");
+    let add_tab_btn = compact_text_button("+");
     add_tab_btn.add_css_class("ws-tab-add-btn");
     sync_workspace_chat_add_button_with_readiness(
         &add_tab_btn,
@@ -1074,6 +1074,8 @@ fn ws_center_panel(
             }
         }
     });
+    let workspace_for_chat_refresh = ws.name.clone();
+    let state_for_chat_refresh = state.clone();
     let chat_widget = session_surface::agent_session_panel(
         db_path.to_path_buf(),
         &ws.name,
@@ -1082,9 +1084,11 @@ fn ws_center_panel(
         collapse_sidebar.clone(),
         state.clone(),
         move || {
-            refresh_sessions.refresh(RefreshScope::Sidebar);
-            refresh_sessions.refresh(RefreshScope::Dashboard);
-            refresh_sessions.refresh(RefreshScope::History);
+            let workspace_name = current_workspace_action_target(
+                &state_for_chat_refresh,
+                &workspace_for_chat_refresh,
+            );
+            refresh_workspace_chat_lifecycle(&refresh_sessions, &workspace_name);
         },
         false,
         Some(setup_readiness.clone()),
@@ -2533,7 +2537,7 @@ fn ws_run_console(
         })
     };
 
-    let add_btn = text_button("+");
+    let add_btn = compact_text_button("+");
     add_btn.add_css_class("ws-run-tab-add-btn");
     let collapse_btn = text_button("▾");
     collapse_btn.add_css_class("ws-run-collapse-btn");
@@ -3244,6 +3248,8 @@ fn agents_panel(
     let db_for_sessions = db_path.to_path_buf();
     let workspace_for_sessions = ws.name.clone();
     let refresh_sessions = refresh_hub.clone();
+    let workspace_for_sessions_refresh = workspace_for_sessions.clone();
+    let state_for_sessions_refresh = app_state.clone();
     session_box.append(&session_surface::agent_session_panel(
         db_for_sessions,
         &workspace_for_sessions,
@@ -3252,9 +3258,11 @@ fn agents_panel(
         collapse_sidebar.clone(),
         app_state.clone(),
         move || {
-            refresh_sessions.refresh(RefreshScope::Sidebar);
-            refresh_sessions.refresh(RefreshScope::Dashboard);
-            refresh_sessions.refresh(RefreshScope::History);
+            let workspace_name = current_workspace_action_target(
+                &state_for_sessions_refresh,
+                &workspace_for_sessions_refresh,
+            );
+            refresh_workspace_chat_lifecycle(&refresh_sessions, &workspace_name);
         },
         false,
         None,
@@ -4403,6 +4411,8 @@ fn chat_terminal_split(
     let db_for_sessions = db_path.to_path_buf();
     let workspace_for_sessions = ws.name.clone();
     let refresh_sessions = refresh_hub.clone();
+    let workspace_for_sessions_refresh = workspace_for_sessions.clone();
+    let state_for_sessions_refresh = app_state.clone();
     chat_box.append(&session_surface::agent_session_panel(
         db_for_sessions,
         &workspace_for_sessions,
@@ -4411,9 +4421,11 @@ fn chat_terminal_split(
         collapse_sidebar.clone(),
         app_state,
         move || {
-            refresh_sessions.refresh(RefreshScope::Sidebar);
-            refresh_sessions.refresh(RefreshScope::Dashboard);
-            refresh_sessions.refresh(RefreshScope::History);
+            let workspace_name = current_workspace_action_target(
+                &state_for_sessions_refresh,
+                &workspace_for_sessions_refresh,
+            );
+            refresh_workspace_chat_lifecycle(&refresh_sessions, &workspace_name);
         },
         false,
         None,
@@ -4473,6 +4485,8 @@ fn parallel_agents_panel(
     chat_box.add_css_class("session-tool-surface");
     chat_box.append(&section_title("Chat"));
     let refresh_chat = refresh_hub.clone();
+    let workspace_for_chat_refresh = ws.name.clone();
+    let state_for_chat_refresh = app_state.clone();
     chat_box.append(&session_surface::agent_session_panel(
         db_path.to_path_buf(),
         &ws.name,
@@ -4484,9 +4498,11 @@ fn parallel_agents_panel(
         collapse_sidebar.clone(),
         app_state,
         move || {
-            refresh_chat.refresh(RefreshScope::Sidebar);
-            refresh_chat.refresh(RefreshScope::Dashboard);
-            refresh_chat.refresh(RefreshScope::History);
+            let workspace_name = current_workspace_action_target(
+                &state_for_chat_refresh,
+                &workspace_for_chat_refresh,
+            );
+            refresh_workspace_chat_lifecycle(&refresh_chat, &workspace_name);
         },
         false,
         None,
@@ -5810,6 +5826,24 @@ fn workspace_pr_primary_action_label(snapshot: &WorkspacePrStatusSnapshot) -> Op
     workspace_pr_primary_action(snapshot).map(|action| action.label)
 }
 
+fn refresh_workspace_chat_lifecycle(refresh_hub: &RefreshHub, workspace_name: &str) {
+    refresh_hub.refresh_event(RefreshEvent::WorkspaceChatLifecycleChanged {
+        workspace: workspace_name.to_owned(),
+    });
+}
+
+fn stage_prompt_for_chat(
+    state: &AppState,
+    refresh_hub: &RefreshHub,
+    workspace_name: &str,
+    prompt: String,
+) {
+    let workspace_name = current_workspace_action_target(state, workspace_name);
+    state.queue_pending_chat_prompt(prompt);
+    state.set_active_workspace_tab(WorkspaceTab::Chats);
+    refresh_workspace_chat_lifecycle(refresh_hub, &workspace_name);
+}
+
 fn connect_create_pr_prompt_button(
     button: &Button,
     db_path: PathBuf,
@@ -5818,10 +5852,9 @@ fn connect_create_pr_prompt_button(
     refresh_hub: RefreshHub,
 ) {
     button.connect_clicked(move |_| {
+        let workspace_name = current_workspace_action_target(&state, &workspace_name);
         let prompt = workspace_create_pr_chat_prompt(&db_path, &workspace_name);
-        state.queue_pending_chat_prompt(prompt);
-        state.set_active_workspace_tab(WorkspaceTab::Chats);
-        refresh_hub.refresh(RefreshScope::Workspace);
+        stage_prompt_for_chat(&state, &refresh_hub, &workspace_name, prompt);
     });
 }
 
@@ -5833,10 +5866,9 @@ fn connect_commit_and_push_prompt_button(
     refresh_hub: RefreshHub,
 ) {
     button.connect_clicked(move |_| {
+        let workspace_name = current_workspace_action_target(&state, &workspace_name);
         let prompt = workspace_commit_and_push_chat_prompt(&db_path, &workspace_name);
-        state.queue_pending_chat_prompt(prompt);
-        state.set_active_workspace_tab(WorkspaceTab::Chats);
-        refresh_hub.refresh(RefreshScope::Workspace);
+        stage_prompt_for_chat(&state, &refresh_hub, &workspace_name, prompt);
     });
 }
 
@@ -5848,10 +5880,9 @@ fn connect_merge_source_branch_prompt_button(
     refresh_hub: RefreshHub,
 ) {
     button.connect_clicked(move |_| {
+        let workspace_name = current_workspace_action_target(&state, &workspace_name);
         let prompt = workspace_merge_source_branch_chat_prompt(&db_path, &workspace_name);
-        state.queue_pending_chat_prompt(prompt);
-        state.set_active_workspace_tab(WorkspaceTab::Chats);
-        refresh_hub.refresh(RefreshScope::Workspace);
+        stage_prompt_for_chat(&state, &refresh_hub, &workspace_name, prompt);
     });
 }
 
@@ -9503,6 +9534,117 @@ mod tests {
         assert!(
             !handler_region.contains("list_chat_threads"),
             "chat tab refresh must not list chat threads on the GTK thread"
+        );
+    }
+
+    #[test]
+    fn chat_session_refresh_callbacks_publish_chat_lifecycle_events() {
+        let source = include_str!("workspace_command_center.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source exists");
+        let callback_regions = [
+            (
+                "workspace chat widget",
+                "let chat_widget = session_surface::agent_session_panel(",
+                "Some(session_surface::ExternalChatTabs",
+            ),
+            (
+                "workspace session box",
+                "session_box.append(&session_surface::agent_session_panel(",
+                "panel.append(&session_box);",
+            ),
+            (
+                "chat terminal split",
+                "fn chat_terminal_split(",
+                "chat_box.append(&linked_directories_panel(",
+            ),
+            (
+                "parallel agents panel",
+                "fn parallel_agents_panel(",
+                "chat_box.append(&linked_directories_panel(",
+            ),
+        ];
+
+        for (name, start_needle, end_needle) in callback_regions {
+            let start = production.find(start_needle).expect(name);
+            let end = production[start..]
+                .find(end_needle)
+                .map(|offset| start + offset)
+                .expect(name);
+            let region = &production[start..end];
+
+            assert_eq!(
+                region.matches("refresh_workspace_chat_lifecycle(").count(),
+                1,
+                "{name} callback should publish one typed chat lifecycle event"
+            );
+            assert!(
+                region.contains("current_workspace_action_target("),
+                "{name} callback should resolve the current selected workspace"
+            );
+            assert!(
+                !region.contains("RefreshScope::Sidebar")
+                    && !region.contains("RefreshScope::Dashboard")
+                    && !region.contains("RefreshScope::History"),
+                "{name} callback must not restore broad sidebar/dashboard/history refreshes"
+            );
+        }
+    }
+
+    #[test]
+    fn pr_prompt_buttons_refresh_chat_without_workspace_shell_rebuild() {
+        let source = include_str!("workspace_command_center.rs");
+        let start = source
+            .find("fn connect_create_pr_prompt_button(")
+            .expect("create PR prompt helper exists");
+        let end = source[start..]
+            .find("fn connect_fix_blocked_prompt_button(")
+            .map(|offset| start + offset)
+            .expect("fix blocked prompt helper follows PR prompt helpers");
+        let prompt_button_region = &source[start..end];
+
+        assert!(
+            !prompt_button_region.contains("refresh_hub.refresh(RefreshScope::Workspace)"),
+            "PR prompt buttons should not rebuild the whole workspace shell"
+        );
+        assert!(
+            prompt_button_region
+                .matches("stage_prompt_for_chat(")
+                .count()
+                >= 3,
+            "PR prompt buttons should stage prompts through the typed chat helper"
+        );
+        assert!(
+            prompt_button_region
+                .matches("current_workspace_action_target(")
+                .count()
+                >= 3,
+            "PR prompt buttons should resolve the current selected workspace at click time"
+        );
+    }
+
+    #[test]
+    fn plus_tab_buttons_use_extra_small_text_button_state() {
+        let source = include_str!("workspace_command_center.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source exists");
+
+        assert_eq!(
+            production.matches("compact_text_button(\"+\")").count(),
+            2,
+            "chat and run plus buttons should use the extra-small button state"
+        );
+        assert!(
+            !production.contains("let add_tab_btn = text_button(\"+\");"),
+            "chat plus button must not inherit medium text-button height"
+        );
+        assert!(
+            !production.contains("let add_btn = text_button(\"+\");"),
+            "run plus button must not inherit medium text-button height"
         );
     }
 

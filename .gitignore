@@ -3,6 +3,8 @@
 /dist/
 .worktrees/
 .context/
+.codex/skills/
+.flatpak-builder/
 docs/superpowers/plans/*.md
 .archductor/dev-instances/
 .archductor/settings.local.toml*

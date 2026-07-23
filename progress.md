@@ -60,6 +60,10 @@ paths and known rough edges.
   enum.
 - Immediate Codex delivery from GTK Ctrl+Enter and CLI `session send`/`archcar
   send --immediate`, using active-turn steer with transparent new-turn fallback.
+- Archcar owns durable managed chat input queues in SQLite, exposes queue
+  add/list/remove through the protocol and CLI, emits queue update events, and
+  drains queued automatic input when the matching managed session becomes
+  ready.
 - Archcar-managed Claude Code stream-json sessions with local auth readiness,
   persistent input delivery, resumable controls, process-group interrupt,
   native hook settings, provider interaction records, and common CLI commands
@@ -108,16 +112,18 @@ paths and known rough edges.
 - GTK uses managed harness descriptors for Codex and Claude live controls:
   provider/model/thinking are baseline controls, Codex-only goals remain
   visible, and Claude hides unsupported goals.
-- Plain Enter follow-up queueing, Ctrl+Enter immediate Codex delivery, and
-  queue-row reconciliation isolated from streaming chat refreshes.
+- Plain Enter follow-up queueing goes through the Archcar durable queue,
+  Ctrl+Enter immediate Codex delivery steers active turns, and GTK queue-row
+  reconciliation follows Archcar queue responses/events without broad streaming
+  chat refreshes.
 - GTK composer Ctrl+V paste saves images and long text under
   `.context/archductor/{chatId}/`, inserts a shared Archductor attachment token,
   and renders persisted user-message tokens as compact attachment chips.
 - GTK keeps hot workspace/chat UI state in watched AppState slices for
   selection, refresh requests, pending workspace phases, pending chat targets,
-  and queued composer input. Workspace and chat creation publish optimistic
-  status, keep the composer usable, and drain queued input after the real
-  workspace/chat thread and agent session are ready.
+  and a composer queue cache. Workspace and chat creation publish optimistic
+  status, keep the composer usable, and wake Archcar to drain queued input after
+  the real workspace/chat thread and agent session are ready.
 - GTK refreshes use typed events for routine runtime, review, workspace
   inventory, terminal, and chat changes; `RefreshScope::All` is reserved for
   explicit manual refresh and startup reconciliation.
@@ -176,21 +182,21 @@ paths and known rough edges.
 - Release packaging still needs full manual validation on target distros before
   public launch.
 
-## Agent Reading Order
+## Agent Context Policy
 
-Coding agents should read these durable docs before changing behavior or docs:
+Coding agents should read `.codex/AGENTS.md` or `claude/CLAUDE.md`, depending on
+agent, then this `progress.md` file. Load the larger durable docs only when the
+task needs that context:
 
-1. `.codex/AGENTS.md` or `claude/CLAUDE.md`, depending on agent.
-2. `docs/conductor-gui-mvp-handoff.md`
-3. `progress.md`
-4. `docs/mvp-scope.md`
-5. `docs/manual-testing-checklist.md`
-6. `docs/archductor-docs-parity-map.md`
-7. `README.md`
+- Product scope or feature priority: `docs/conductor-gui-mvp-handoff.md` and
+  `docs/mvp-scope.md`
+- Manual release/app verification: `docs/manual-testing-checklist.md`
+- Upstream Conductor parity: `docs/archductor-docs-parity-map.md`
+- User-facing install, workflow, or configuration docs: `README.md`
 
-Old one-off implementation plans and specs were pruned from `docs/superpowers`
-because they were dated task artifacts, not current product or agent
-instructions.
+Old one-off implementation specs remain in `docs/superpowers/specs` only as
+historical task artifacts. Do not read dated plans/specs for routine startup
+context.
 
 ## Verification Standard
 

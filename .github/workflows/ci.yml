@@ -2,7 +2,7 @@ name: CI
 
 on:
   pull_request:
-    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft]
+    types: [opened, edited, reopened, synchronize, ready_for_review, converted_to_draft]
   push:
     branches: [main]
   schedule:
@@ -104,6 +104,39 @@ jobs:
             echo "run_rust=false" >> "$GITHUB_OUTPUT"
           else
             echo "run_rust=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  pr-description:
+    name: PR Description
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require PR template sections
+        env:
+          PR_BODY: ${{ github.event.pull_request.body || '' }}
+        run: |
+          set -euo pipefail
+
+          required_headings=(
+            "## Summary"
+            "## What Changed"
+            "## Why"
+            "## User Impact"
+            "## Validation"
+          )
+
+          missing=0
+          for heading in "${required_headings[@]}"; do
+            if ! grep -Fqx "$heading" <<< "$PR_BODY"; then
+              echo "Missing required PR body section: $heading" >&2
+              missing=1
+            fi
+          done
+
+          if [ "$missing" -ne 0 ]; then
+            echo "Use .github/pull_request_template.md for the required PR body structure." >&2
+            exit 1
           fi
 
   workflow-audit:

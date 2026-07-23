@@ -2,6 +2,7 @@
 #![allow(clippy::ptr_arg, clippy::too_many_arguments)]
 
 mod archcar_async;
+mod background_chat;
 mod background_sync;
 mod buttons;
 mod command_palette;
@@ -757,6 +758,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
             }
         })
     };
+    background_chat::install_background_chat_runner(&app_state);
     let window = ApplicationWindow::builder()
         .application(app)
         .title("Archductor")
@@ -1091,7 +1093,6 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         runtime_error_reporter.clone(),
         toast_manager.clone(),
         "startup",
-        true,
     );
     spawn_workspace_lifecycle_recovery(
         app_state.workspace_database_path(),
@@ -1119,7 +1120,6 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
                     runtime_reporter_spotlight_events.clone(),
                     toast_spotlight_events.clone(),
                     "spotlight event",
-                    false,
                 );
             }
             glib::ControlFlow::Continue
@@ -1157,7 +1157,6 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
                 runtime_reporter_on_close.clone(),
                 toast_on_close.clone(),
                 "close",
-                false,
             );
         });
     }
@@ -1179,7 +1178,6 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
                 runtime_reporter_on_focus.clone(),
                 toast_on_focus.clone(),
                 "focus",
-                false,
             );
             spawn_workspace_lifecycle_recovery(
                 db_path_on_focus.clone(),
@@ -1386,7 +1384,6 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
             runtime_reporter_auto.clone(),
             toast_auto.clone(),
             "timer",
-            false,
         );
         spawn_spotlight_file_watcher_refresh(
             db_path_runtime_auto.clone(),
@@ -1696,7 +1693,6 @@ fn spawn_runtime_reconciliation(
     reporter: Rc<RefCell<RuntimeErrorReporter>>,
     toast_manager: ToastManager,
     trigger: &'static str,
-    refresh_all: bool,
 ) {
     archcar_async::spawn_background_job(
         move || {
@@ -1705,7 +1701,6 @@ fn spawn_runtime_reconciliation(
                 .map_err(|err| format!("{err:#}"))
         },
         move |result| match result {
-            Ok(true) if refresh_all => refresh_hub.refresh(RefreshScope::All),
             Ok(true) => refresh_runtime_reconciliation_event(&refresh_hub, &state),
             Ok(false) => {}
             Err(message) => {

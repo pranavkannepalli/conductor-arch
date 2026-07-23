@@ -21,6 +21,7 @@ pub struct BackgroundThreadSnapshot {
     pub title: String,
     pub provider: String,
     pub status: String,
+    pub active_work: bool,
     pub latest_message_id: Option<i64>,
     pub latest_provider_sequence: Option<i64>,
     pub running_session_id: Option<i64>,
@@ -45,21 +46,25 @@ pub(crate) struct WorkspaceChatNavItem {
 
 pub fn load_background_sync_snapshot(db_path: &Path) -> Result<BackgroundSyncSnapshot> {
     let store = WorkspaceStore::open_app(db_path)?;
-    let running_threads = store
-        .list_running_chat_thread_summaries()?
-        .into_iter()
-        .map(|summary| BackgroundThreadSnapshot {
+    let provider_store = ProviderEventStore::new(db_path);
+    let mut running_threads = Vec::new();
+    for summary in store.list_running_chat_thread_summaries()? {
+        let active_work = provider_events_have_active_work(
+            &provider_store.list_for_chat_thread(summary.thread_id)?,
+        );
+        running_threads.push(BackgroundThreadSnapshot {
             workspace: summary.workspace,
             thread_id: summary.thread_id,
             title: summary.title,
             provider: summary.provider,
             status: summary.status,
+            active_work,
             latest_message_id: summary.latest_message_id,
             latest_provider_sequence: summary.latest_provider_sequence,
             running_session_id: summary.running_session_id,
             updated_at: summary.updated_at,
-        })
-        .collect();
+        });
+    }
     Ok(BackgroundSyncSnapshot { running_threads })
 }
 
@@ -87,16 +92,7 @@ pub(crate) fn load_workspace_chat_nav(
 }
 
 pub(crate) fn provider_events_have_active_work(events: &[ProviderEventRecord]) -> bool {
-    let terminal_keys = events
-        .iter()
-        .filter(|event| provider_event_phase_is_terminal(event.phase))
-        .map(provider_event_activity_key)
-        .collect::<HashSet<_>>();
-    if events.iter().any(|event| {
-        event.kind == ProviderEventKind::Turn
-            && provider_event_phase_is_active(event.phase)
-            && !terminal_keys.contains(&provider_event_activity_key(event))
-    }) {
+    if provider_events_latest_turn_has_active_work(events) {
         return true;
     }
 
@@ -107,6 +103,36 @@ pub(crate) fn provider_events_have_active_work(events: &[ProviderEventRecord]) -
             item.status == ProviderProjectionStatus::Running
                 && provider_projection_item_is_relevant_chat_event(item)
         })
+}
+
+fn provider_events_latest_turn_has_active_work(events: &[ProviderEventRecord]) -> bool {
+    let mut latest_turn_by_thread = BTreeMap::<String, ((i64, i64), String)>::new();
+    let mut active_turns = HashSet::<String>::new();
+    let mut terminal_turns = HashSet::<String>::new();
+    for event in events
+        .iter()
+        .filter(|event| event.kind == ProviderEventKind::Turn)
+    {
+        let turn_key = provider_event_activity_key(event);
+        if provider_event_phase_is_active(event.phase) {
+            active_turns.insert(turn_key.clone());
+        }
+        if provider_event_phase_is_terminal(event.phase) {
+            terminal_turns.insert(turn_key.clone());
+        }
+        let thread_key = provider_event_thread_key(event);
+        let order_key = provider_event_order_key(event);
+        let replace = latest_turn_by_thread
+            .get(&thread_key)
+            .is_none_or(|(current_order, _)| order_key > *current_order);
+        if replace {
+            latest_turn_by_thread.insert(thread_key, (order_key, turn_key));
+        }
+    }
+
+    latest_turn_by_thread
+        .values()
+        .any(|(_, turn_key)| active_turns.contains(turn_key) && !terminal_turns.contains(turn_key))
 }
 
 fn provider_event_phase_is_active(phase: ProviderEventPhase) -> bool {
@@ -126,17 +152,35 @@ fn provider_event_phase_is_terminal(phase: ProviderEventPhase) -> bool {
     )
 }
 
+fn provider_event_order_key(event: &ProviderEventRecord) -> (i64, i64) {
+    (
+        event
+            .timeline_seq
+            .or(event.provider_sequence)
+            .unwrap_or(event.received_sequence),
+        event.id,
+    )
+}
+
+fn provider_event_thread_key(event: &ProviderEventRecord) -> String {
+    format!(
+        "{}:{}",
+        event.provider,
+        event.provider_thread_id.as_deref().unwrap_or("-")
+    )
+}
+
 fn provider_event_activity_key(event: &ProviderEventRecord) -> String {
-    if let Some(item_id) = event.provider_item_id.as_deref() {
+    if let Some(turn_id) = event.provider_turn_id.as_deref() {
         return format!(
-            "{}:{}:item:{item_id}",
+            "{}:{}:turn:{turn_id}",
             event.provider,
             event.provider_thread_id.as_deref().unwrap_or("-")
         );
     }
-    if let Some(turn_id) = event.provider_turn_id.as_deref() {
+    if let Some(item_id) = event.provider_item_id.as_deref() {
         return format!(
-            "{}:{}:turn:{turn_id}",
+            "{}:{}:item:{item_id}",
             event.provider,
             event.provider_thread_id.as_deref().unwrap_or("-")
         );
@@ -186,6 +230,7 @@ pub fn diff_background_sync(
         if previous_thread.title != next_thread.title
             || previous_thread.provider != next_thread.provider
             || previous_thread.status != next_thread.status
+            || previous_thread.active_work != next_thread.active_work
             || previous_thread.running_session_id != next_thread.running_session_id
         {
             lifecycle_workspaces.insert(next_thread.workspace.clone());
@@ -270,6 +315,7 @@ mod tests {
             title: "Fix auth".into(),
             provider: "codex".into(),
             status: "running".into(),
+            active_work: false,
             latest_message_id: Some(11),
             latest_provider_sequence: Some(99),
             running_session_id: Some(22),
@@ -319,12 +365,20 @@ mod tests {
     }
 
     fn provider_event_draft(thread_id: i64, phase: ProviderEventPhase) -> ProviderEventDraft {
+        provider_turn_event_draft(thread_id, "turn-1", phase)
+    }
+
+    fn provider_turn_event_draft(
+        thread_id: i64,
+        turn_id: &str,
+        phase: ProviderEventPhase,
+    ) -> ProviderEventDraft {
         ProviderEventDraft {
             provider: "codex".to_owned(),
-            provider_event_id: Some("event-1".to_owned()),
-            provider_item_id: Some("turn-1".to_owned()),
+            provider_event_id: Some(format!("event-{turn_id}-{}", phase.as_str())),
+            provider_item_id: None,
             provider_thread_id: Some("native-thread-1".to_owned()),
-            provider_turn_id: Some("turn-1".to_owned()),
+            provider_turn_id: Some(turn_id.to_owned()),
             parent_provider_item_id: None,
             parent_provider_thread_id: None,
             workspace_id: Some(1),
@@ -387,6 +441,27 @@ mod tests {
         };
         let mut changed = thread_snapshot();
         changed.title = "Fix login".into();
+        let next = BackgroundSyncSnapshot {
+            running_threads: vec![changed],
+        };
+
+        let events = diff_background_sync(&previous, &next);
+
+        assert_eq!(
+            events,
+            vec![RefreshEvent::WorkspaceChatLifecycleChanged {
+                workspace: "berlin".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn diff_reports_active_work_change_as_lifecycle_change() {
+        let previous = BackgroundSyncSnapshot {
+            running_threads: vec![thread_snapshot()],
+        };
+        let mut changed = thread_snapshot();
+        changed.active_work = true;
         let next = BackgroundSyncSnapshot {
             running_threads: vec![changed],
         };
@@ -533,6 +608,40 @@ mod tests {
             .unwrap();
         provider_store
             .upsert_event(&provider_event_draft(7, ProviderEventPhase::Completed))
+            .unwrap();
+        let store = WorkspaceStore::open_app(&db_path).unwrap();
+
+        let items = load_workspace_chat_nav(&store, "berlin", Some(8)).unwrap();
+
+        assert_eq!(items.len(), 1);
+        assert!(!items[0].running);
+        assert!(!items[0].unread);
+    }
+
+    #[test]
+    fn workspace_chat_nav_ignores_old_unmatched_turn_after_newer_completed_turn() {
+        let (_temp, db_path) = create_nav_fixture();
+        let provider_store = ProviderEventStore::new(&db_path);
+        provider_store
+            .upsert_event(&provider_turn_event_draft(
+                7,
+                "older-turn",
+                ProviderEventPhase::Started,
+            ))
+            .unwrap();
+        provider_store
+            .upsert_event(&provider_turn_event_draft(
+                7,
+                "newer-turn",
+                ProviderEventPhase::Started,
+            ))
+            .unwrap();
+        provider_store
+            .upsert_event(&provider_turn_event_draft(
+                7,
+                "newer-turn",
+                ProviderEventPhase::Completed,
+            ))
             .unwrap();
         let store = WorkspaceStore::open_app(&db_path).unwrap();
 

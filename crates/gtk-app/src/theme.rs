@@ -548,6 +548,24 @@ button.text-button {
     min-height: 34px;
 }
 
+button.ui-button-xs,
+button.text-button.ui-button-xs {
+    border-radius: 2px;
+    font-size: 11px;
+    line-height: 1;
+    min-height: 20px;
+    min-width: 20px;
+    padding: 0;
+}
+
+button.ui-button-xs label,
+button.text-button.ui-button-xs label {
+    line-height: 1;
+    margin: 0;
+    min-height: 0;
+    padding: 0;
+}
+
 button.icon-button,
 button.ui-button-icon {
     padding: 0;
@@ -2130,11 +2148,10 @@ row:hover .ws-folder-name {
 .ws-run-tab-add-btn {
     background: transparent;
     border: none;
-    border-radius: 5px;
+    border-radius: 2px;
     color: #5a5a5a;
-    font-size: 16px;
-    padding: 0 8px;
-    min-height: 30px;
+    margin-left: 4px;
+    margin-right: 4px;
     box-shadow: none;
     text-shadow: none;
 }
@@ -2381,7 +2398,6 @@ popover.context-menu-popover arrow {
 }
 .chat-menu-item-label {
     color: inherit;
-    text-align: left;
 }
 .chat-menu-shortcut {
     min-width: 22px;
@@ -2399,7 +2415,7 @@ popover.context-menu-popover arrow {
     padding: 22px 24px 24px;
 }
 .chat-working-indicator {
-    margin: 2px 24px 12px;
+    margin: 2px 0 12px;
     padding: 6px 0;
     color: #b8c7de;
 }
@@ -2469,51 +2485,68 @@ popover.context-menu-popover arrow {
     padding: 0;
 }
 .chat-inline-event-chip {
-    background-color: transparent;
-    border: none;
-    border-radius: 0;
+    background-color: #191919;
+    border: 1px solid #343434;
+    border-radius: 2px;
     box-shadow: none;
-    color: #e7e7e7;
-    font-family: "Mona Sans", "Inter", "Segoe UI", system-ui, sans-serif;
-    font-size: 13px;
+    color: #bdbdbd;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-size: 9px;
     font-weight: 500;
-    min-height: 22px;
+    min-height: 0;
     min-width: 0;
-    padding: 2px 0;
+    padding: 0 3px;
+}
+.chat-inline-event-action {
+    color: #8f8f8f;
+    font-size: 11px;
+    font-weight: 600;
+    margin: 0;
+    padding: 0;
 }
 .chat-inline-event-expander {
-    background-color: transparent;
-    border: none;
+    background-color: #171717;
+    border: 1px solid #303030;
+    border-radius: 2px;
     box-shadow: none;
     color: #8f8f8f;
     font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
-    font-size: 12px;
+    font-size: 10px;
     font-weight: 700;
-    min-height: 22px;
-    min-width: 18px;
-    padding: 2px 0;
+    min-height: 16px;
+    min-width: 16px;
+    padding: 0;
+}
+button.chat-inline-event-expander {
+    border-radius: 2px;
+    font-size: 10px;
+    line-height: 1;
+    min-height: 16px;
+    min-width: 16px;
+    padding: 0;
+}
+button.chat-inline-event-expander label {
+    line-height: 1;
+    margin: 0;
+    min-height: 0;
+    padding: 0;
 }
 .chat-inline-event-expander:hover,
 .chat-inline-event-expander:checked {
-    background-color: transparent;
+    background-color: #202020;
+    border-color: #424242;
     box-shadow: none;
     color: #e7e7e7;
 }
-button.chat-inline-event-chip {
-    background-color: transparent;
-    border: none;
-    box-shadow: none;
-    margin: 0;
-    min-height: 22px;
-    min-width: 0;
-    padding: 2px 0;
-}
-button.chat-inline-event-chip:hover,
-button.chat-inline-event-chip:checked {
-    background-color: transparent;
+.chat-inline-event-chip:hover {
+    background-color: #232323;
+    border-color: #4a4a4a;
     box-shadow: none;
 }
-.chat-inline-event-chip label {
+.chat-inline-event-chip-label {
+    color: #bdbdbd;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-size: 9px;
     margin: 0;
     min-height: 0;
     padding: 0;
@@ -2788,11 +2821,10 @@ button.chat-inline-event-chip:checked {
 .ws-tab-add-btn {
     background: transparent;
     border: none;
-    border-radius: 5px;
+    border-radius: 2px;
     color: #555555;
-    font-size: 16px;
-    padding: 0 8px;
-    min-height: 30px;
+    margin-left: 4px;
+    margin-right: 4px;
     box-shadow: none;
     text-shadow: none;
 }
@@ -3295,15 +3327,36 @@ mod tests {
         assert!(css.contains("transition-duration: 160ms"));
         assert!(css.contains(".chat-inline-event-chip"));
         let chip_block = selector_block(css, ".chat-inline-event-chip");
-        assert!(chip_block.contains("background-color: transparent;"));
-        assert!(chip_block.contains("border: none;"));
-        assert!(chip_block.contains("font-size: 13px;"));
-        assert!(chip_block.contains("min-height: 22px;"));
-        assert!(chip_block.contains("padding: 2px 0;"));
+        assert!(chip_block.contains("background-color: #191919;"));
+        assert!(chip_block.contains("border: 1px solid #343434;"));
+        assert!(chip_block.contains("border-radius: 2px;"));
+        assert!(chip_block.contains("font-family: \"Commit Mono\""));
+        assert!(chip_block.contains("font-size: 9px;"));
+        assert!(chip_block.contains("min-height: 0;"));
+        assert!(chip_block.contains("padding: 0 3px;"));
         assert!(chip_block.contains("min-width: 0;"));
-        assert!(css.contains("button.chat-inline-event-chip"));
-        assert!(css.contains(".chat-inline-event-chip label"));
+        assert!(!css.contains("button.chat-inline-event-chip"));
+        assert!(css.contains(".chat-inline-event-chip-label"));
         assert!(css.contains("margin: 0;"));
+        let expander_block = selector_block(css, ".chat-inline-event-expander");
+        assert!(expander_block.contains("border-radius: 2px;"));
+        assert!(expander_block.contains("font-size: 10px;"));
+        assert!(expander_block.contains("min-height: 16px;"));
+        assert!(expander_block.contains("min-width: 16px;"));
+        assert!(expander_block.contains("padding: 0;"));
+        let button_expander_block = selector_block(css, "button.chat-inline-event-expander");
+        assert!(button_expander_block.contains("border-radius: 2px;"));
+        assert!(button_expander_block.contains("line-height: 1;"));
+        assert!(button_expander_block.contains("min-height: 16px;"));
+        let expander_label_block = selector_block(css, "button.chat-inline-event-expander label");
+        assert!(expander_label_block.contains("line-height: 1;"));
+        assert!(expander_label_block.contains("padding: 0;"));
+        let action_block = selector_block(css, ".chat-inline-event-action");
+        assert!(action_block.contains("font-size: 11px;"));
+        assert!(action_block.contains("color: #8f8f8f;"));
+        let chip_label_block = selector_block(css, ".chat-inline-event-chip-label");
+        assert!(chip_label_block.contains("font-family: \"Commit Mono\""));
+        assert!(chip_label_block.contains("font-size: 9px;"));
         assert!(css.contains(".chat-reasoning-text"));
         assert!(css.contains(".chat-user-row {\n    margin-top: 12px;\n    margin-bottom: 10px;"));
         assert!(css.contains(".chat-agent-text {\n    color: #c6c6c6;\n    line-height: 1.55;\n    margin-bottom: 0;"));
@@ -3420,6 +3473,34 @@ mod tests {
     }
 
     #[test]
+    fn plus_buttons_match_compact_chat_chip_height() {
+        let css = app_css();
+        let xs_block = selector_block(css, "button.ui-button-xs,\nbutton.text-button.ui-button-xs");
+        assert!(xs_block.contains("border-radius: 2px;"));
+        assert!(xs_block.contains("font-size: 11px;"));
+        assert!(xs_block.contains("line-height: 1;"));
+        assert!(xs_block.contains("min-height: 20px;"));
+        assert!(xs_block.contains("min-width: 20px;"));
+        assert!(xs_block.contains("padding: 0;"));
+        let xs_label_block = selector_block(
+            css,
+            "button.ui-button-xs label,\nbutton.text-button.ui-button-xs label",
+        );
+        assert!(xs_label_block.contains("line-height: 1;"));
+        assert!(xs_label_block.contains("margin: 0;"));
+        assert!(xs_label_block.contains("padding: 0;"));
+
+        for selector in [".ws-tab-add-btn", ".ws-run-tab-add-btn"] {
+            let block = selector_block(css, selector);
+            assert!(block.contains("border-radius: 2px;"));
+            assert!(block.contains("margin-left: 4px;"));
+            assert!(block.contains("margin-right: 4px;"));
+            assert!(!block.contains("min-height: 30px;"));
+            assert!(!block.contains("min-height: 34px;"));
+        }
+    }
+
+    #[test]
     fn compact_icon_button_padding_wins_after_small_button_rules() {
         let css = app_css();
         let small_rule = css
@@ -3452,6 +3533,8 @@ mod tests {
 
         let working_meta = selector_block(css, ".chat-working-indicator .card-meta");
         assert!(working_meta.contains("color: #b8c7de;"));
+        let working = selector_block(css, ".chat-working-indicator");
+        assert!(working.contains("margin: 2px 0 12px;"));
 
         let messages = selector_block(css, ".chat-messages");
         assert!(messages.contains("padding: 22px 24px 24px;"));
