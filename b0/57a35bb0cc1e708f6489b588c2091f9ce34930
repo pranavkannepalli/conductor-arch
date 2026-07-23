@@ -1,0 +1,24 @@
+docs/codex-claude-archductor-event-map.md
+  s_18173f9e66549c::t_9f67e0d6695fba 1-171
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "b057a35bb0cc1e708f6489b588c2091f9ce34930",
+  "prompts": {},
+  "humans": {
+    "h_eea9a3b4c316fe": {
+      "author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_18173f9e66549c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8d12-8ab5-7d32-9cfe-b7cfd5b13967",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
