@@ -1,0 +1,23 @@
+crates/gtk-app/src/session_surface.rs
+  s_74274fa42decc0::t_9acaf656d9a98c 13304-13331,13369,13379-13380,13396-13397
+  s_74274fa42decc0::t_16d12e8d14a8ce 1639-1669
+  s_74274fa42decc0::t_0f7e880cd80c99 7804-7883
+  s_74274fa42decc0::t_b138fe686db877 13303,13332-13368,13370-13378,13381-13395,13398-13399
+  s_74274fa42decc0::t_d882545351f105 13302
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "b958831bd676397075c2206c8e0a32ff5c1e5e7d",
+  "prompts": {},
+  "sessions": {
+    "s_74274fa42decc0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8cd8-aa35-71f1-bd26-1d51b40d13b0",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
