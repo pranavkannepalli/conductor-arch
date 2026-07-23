@@ -1,0 +1,21 @@
+.github/pull_request_template.md
+  s_3258700a64a029::t_550bbdf707430e 1-20
+.github/workflows/ci.yml
+  s_3258700a64a029::t_550bbdf707430e 109-141
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "f690eb5fdd1016acd93691628f4e5634867c43f4",
+  "prompts": {},
+  "sessions": {
+    "s_3258700a64a029": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8d80-ca3a-74b3-8691-f821986cefa3",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
