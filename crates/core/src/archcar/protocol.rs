@@ -101,6 +101,20 @@ pub enum ArchcarRequest {
     GetSessionMessages {
         thread_id: i64,
     },
+    QueueChatInput {
+        thread_id: i64,
+        input: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        visible_input: Option<String>,
+        kind: ArchcarInputKind,
+        session_kind: SessionKind,
+    },
+    ListQueuedChatInputs {
+        thread_id: i64,
+    },
+    RemoveQueuedChatInput {
+        queue_id: i64,
+    },
     KillSession {
         session_id: i64,
     },
@@ -157,6 +171,13 @@ pub enum ArchcarResponse {
     SessionMessages {
         thread_id: i64,
         messages: Vec<ArchcarMessage>,
+    },
+    QueuedChatInput {
+        input: QueuedArchcarInput,
+    },
+    QueuedChatInputs {
+        thread_id: i64,
+        inputs: Vec<QueuedArchcarInput>,
     },
     ProviderInteraction {
         interaction: ProviderInteractionRecord,
@@ -219,6 +240,19 @@ pub struct ArchcarMessage {
     pub inline_event: Option<CodexInlineEvent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_usage: Option<CodexContextUsage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueuedArchcarInput {
+    pub id: i64,
+    pub thread_id: i64,
+    pub input: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_input: Option<String>,
+    pub kind: ArchcarInputKind,
+    pub session_kind: SessionKind,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
@@ -296,6 +330,24 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         }
         ArchcarRequest::GetSessionMessages { thread_id } => {
             format!("get_session_messages thread_id={thread_id}")
+        }
+        ArchcarRequest::QueueChatInput {
+            thread_id,
+            input,
+            kind,
+            session_kind,
+            ..
+        } => format!(
+            "queue_chat_input thread_id={thread_id} kind={} session_kind={} chars={}",
+            input_kind_label(kind),
+            session_kind_label(*session_kind),
+            input.chars().count()
+        ),
+        ArchcarRequest::ListQueuedChatInputs { thread_id } => {
+            format!("list_queued_chat_inputs thread_id={thread_id}")
+        }
+        ArchcarRequest::RemoveQueuedChatInput { queue_id } => {
+            format!("remove_queued_chat_input queue_id={queue_id}")
         }
         ArchcarRequest::KillSession { session_id } => {
             format!("kill_session session_id={session_id}")
@@ -390,6 +442,12 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
             "session_messages thread_id={thread_id} count={}",
             messages.len()
         ),
+        ArchcarResponse::QueuedChatInput { input } => {
+            format!("queued_chat_input id={} thread_id={}", input.id, input.thread_id)
+        }
+        ArchcarResponse::QueuedChatInputs { thread_id, inputs } => {
+            format!("queued_chat_inputs thread_id={thread_id} count={}", inputs.len())
+        }
         ArchcarResponse::ProviderInteraction { interaction } => format!(
             "provider_interaction id={} kind={:?} status={:?}",
             interaction.id, interaction.kind, interaction.status
@@ -446,6 +504,9 @@ pub fn archcar_event_summary(event: &ArchcarEvent) -> String {
         }
         ArchcarEvent::SessionMessagesUpdated { thread_id } => {
             format!("session_messages_updated thread_id={thread_id}")
+        }
+        ArchcarEvent::ChatQueueUpdated { thread_id } => {
+            format!("chat_queue_updated thread_id={thread_id}")
         }
         ArchcarEvent::SessionExited {
             session_id,
@@ -519,6 +580,9 @@ pub enum ArchcarEvent {
         session_id: i64,
     },
     SessionMessagesUpdated {
+        thread_id: i64,
+    },
+    ChatQueueUpdated {
         thread_id: i64,
     },
     SessionExited {
@@ -602,6 +666,37 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<ArchcarRequest>(&json).unwrap(),
             immediate
+        );
+    }
+
+    #[test]
+    fn queued_chat_input_protocol_round_trips() {
+        let request = ArchcarRequest::QueueChatInput {
+            thread_id: 42,
+            input: "run tests".to_owned(),
+            visible_input: Some("visible run tests".to_owned()),
+            kind: ArchcarInputKind::User,
+            session_kind: SessionKind::Codex,
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("\"type\":\"queue_chat_input\""));
+        assert_eq!(
+            archcar_request_summary(&request),
+            "queue_chat_input thread_id=42 kind=user session_kind=Codex chars=9"
+        );
+        assert_eq!(
+            serde_json::from_str::<ArchcarRequest>(&json).unwrap(),
+            request
+        );
+
+        let event = ArchcarEvent::ChatQueueUpdated { thread_id: 42 };
+        assert_eq!(
+            archcar_event_summary(&event),
+            "chat_queue_updated thread_id=42"
+        );
+        assert_eq!(
+            serde_json::from_str::<ArchcarEvent>(&serde_json::to_string(&event).unwrap()).unwrap(),
+            event
         );
     }
 

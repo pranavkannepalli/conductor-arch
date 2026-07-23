@@ -130,6 +130,20 @@ pub(crate) fn migrate_workspace_db(conn: &Connection) -> Result<()> {
           updated_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS chat_queued_inputs (
+          id INTEGER PRIMARY KEY,
+          thread_id INTEGER NOT NULL REFERENCES chat_threads(id) ON DELETE CASCADE,
+          input TEXT NOT NULL,
+          visible_input TEXT,
+          input_kind TEXT NOT NULL,
+          session_kind TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_chat_queued_inputs_thread
+          ON chat_queued_inputs(thread_id, id);
+
         CREATE TABLE IF NOT EXISTS chat_timeline_seq (
           id INTEGER PRIMARY KEY AUTOINCREMENT
         );

@@ -60,6 +60,10 @@ paths and known rough edges.
   enum.
 - Immediate Codex delivery from GTK Ctrl+Enter and CLI `session send`/`archcar
   send --immediate`, using active-turn steer with transparent new-turn fallback.
+- Archcar owns durable managed chat input queues in SQLite, exposes queue
+  add/list/remove through the protocol and CLI, emits queue update events, and
+  drains queued automatic input when the matching managed session becomes
+  ready.
 - Archcar-managed Claude Code stream-json sessions with local auth readiness,
   persistent input delivery, resumable controls, process-group interrupt,
   native hook settings, provider interaction records, and common CLI commands
@@ -108,16 +112,17 @@ paths and known rough edges.
 - GTK uses managed harness descriptors for Codex and Claude live controls:
   provider/model/thinking are baseline controls, Codex-only goals remain
   visible, and Claude hides unsupported goals.
-- Plain Enter follow-up queueing, Ctrl+Enter immediate Codex delivery, and
-  queue-row reconciliation isolated from streaming chat refreshes.
+- Plain Enter follow-up queueing goes through the Archcar durable queue,
+  Ctrl+Enter immediate Codex delivery steers active turns, and queue-row
+  reconciliation is isolated from streaming chat refreshes.
 - GTK composer Ctrl+V paste saves images and long text under
   `.context/archductor/{chatId}/`, inserts a shared Archductor attachment token,
   and renders persisted user-message tokens as compact attachment chips.
 - GTK keeps hot workspace/chat UI state in watched AppState slices for
   selection, refresh requests, pending workspace phases, pending chat targets,
-  and queued composer input. Workspace and chat creation publish optimistic
-  status, keep the composer usable, and drain queued input after the real
-  workspace/chat thread and agent session are ready.
+  and a composer queue cache. Workspace and chat creation publish optimistic
+  status, keep the composer usable, and wake Archcar to drain queued input after
+  the real workspace/chat thread and agent session are ready.
 - GTK refreshes use typed events for routine runtime, review, workspace
   inventory, terminal, and chat changes; `RefreshScope::All` is reserved for
   explicit manual refresh and startup reconciliation.

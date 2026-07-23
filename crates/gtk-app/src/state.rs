@@ -502,6 +502,17 @@ impl AppState {
             .collect()
     }
 
+    pub fn replace_queued_chat_inputs(&self, thread_id: i64, inputs: Vec<QueuedChatInputDraft>) {
+        let mut state = self.inner.borrow_mut();
+        if inputs.is_empty() {
+            state.queued_chat_inputs.remove(&thread_id);
+        } else {
+            state.queued_chat_inputs.insert(thread_id, inputs);
+        }
+        drop(state);
+        self.emit(AppStateEvent::ComposerQueueChanged { thread_id });
+    }
+
     pub fn visible_selected_chat_thread(&self) -> Option<i64> {
         let state = self.inner.borrow();
         (state.active_page == AppPage::Workspace

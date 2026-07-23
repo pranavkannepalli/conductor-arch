@@ -3,6 +3,7 @@ use archductor_core::archcar::client::ArchcarClient;
 use archductor_core::archcar::harness_contract::ProviderInteractionResolution;
 use archductor_core::archcar::protocol::{
     ArchcarInputDelivery, ArchcarInputKind, ArchcarMessage, ArchcarRequest, ArchcarResponse,
+    QueuedArchcarInput,
 };
 use archductor_core::archcar::server::{reconcile_managed_sessions_on_startup, ArchcarServer};
 use archductor_core::doctor;
@@ -189,6 +190,10 @@ enum ArchcarCommand {
     Messages {
         thread_id: i64,
     },
+    Queue {
+        #[command(subcommand)]
+        command: ArchcarQueueCommand,
+    },
     Interactions {
         #[command(subcommand)]
         command: ArchcarInteractionsCommand,
@@ -228,6 +233,26 @@ enum ArchcarCommand {
     },
     Kill {
         session_id: i64,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ArchcarQueueCommand {
+    Add {
+        thread_id: i64,
+        #[arg(long, value_enum, default_value_t = CliArchcarInputKind::User)]
+        kind: CliArchcarInputKind,
+        #[arg(long, value_enum, default_value_t = CliSessionKind::Codex)]
+        session_kind: CliSessionKind,
+        #[arg(long)]
+        visible_input: Option<String>,
+        input: Vec<String>,
+    },
+    List {
+        thread_id: i64,
+    },
+    Remove {
+        queue_id: i64,
     },
 }
 
@@ -692,6 +717,39 @@ fn main() -> Result<()> {
                         response => print_archcar_response(response),
                     }
                 }
+                ArchcarCommand::Queue { command } => match command {
+                    ArchcarQueueCommand::Add {
+                        thread_id,
+                        kind,
+                        session_kind,
+                        visible_input,
+                        input,
+                    } => match client.send(ArchcarRequest::QueueChatInput {
+                        thread_id,
+                        input: input.join(" "),
+                        visible_input,
+                        kind: kind.into(),
+                        session_kind: session_kind.into(),
+                    })? {
+                        ArchcarResponse::Error { message } => anyhow::bail!(message),
+                        response => print_archcar_response(response),
+                    },
+                    ArchcarQueueCommand::List { thread_id } => {
+                        match client.send(ArchcarRequest::ListQueuedChatInputs { thread_id })? {
+                            ArchcarResponse::Error { message } => anyhow::bail!(message),
+                            ArchcarResponse::QueuedChatInputs { inputs, .. } => {
+                                print!("{}", render_queued_archcar_inputs(&inputs));
+                            }
+                            response => print_archcar_response(response),
+                        }
+                    }
+                    ArchcarQueueCommand::Remove { queue_id } => {
+                        match client.send(ArchcarRequest::RemoveQueuedChatInput { queue_id })? {
+                            ArchcarResponse::Error { message } => anyhow::bail!(message),
+                            response => print_archcar_response(response),
+                        }
+                    }
+                },
                 ArchcarCommand::Interactions { command } => match command {
                     ArchcarInteractionsCommand::List {
                         thread_id,
@@ -1679,6 +1737,12 @@ fn print_archcar_response(response: ArchcarResponse) {
         ArchcarResponse::SessionMessages { messages, .. } => {
             print!("{}", render_archcar_protocol_messages(&messages));
         }
+        ArchcarResponse::QueuedChatInput { input } => {
+            print!("{}", render_queued_archcar_inputs(&[input]));
+        }
+        ArchcarResponse::QueuedChatInputs { inputs, .. } => {
+            print!("{}", render_queued_archcar_inputs(&inputs));
+        }
         ArchcarResponse::ProviderInteraction { interaction } => {
             print!("{}", render_provider_interactions(&[interaction], false));
         }
@@ -1689,6 +1753,31 @@ fn print_archcar_response(response: ArchcarResponse) {
             eprintln!("{message}");
         }
     }
+}
+
+fn render_queued_archcar_inputs(inputs: &[QueuedArchcarInput]) -> String {
+    let mut output = String::new();
+    if inputs.is_empty() {
+        output.push_str("queued chat inputs 0\n");
+        return output;
+    }
+    for input in inputs {
+        let preview = input
+            .visible_input
+            .as_deref()
+            .unwrap_or(&input.input)
+            .replace('\n', " ");
+        output.push_str(&format!(
+            "{} thread={} kind={:?} session_kind={:?} chars={} {}\n",
+            input.id,
+            input.thread_id,
+            input.kind,
+            input.session_kind,
+            input.input.chars().count(),
+            preview
+        ));
+    }
+    output
 }
 
 fn render_provider_interactions(
@@ -3092,6 +3181,72 @@ mod tests {
         };
 
         assert_eq!(thread_id, 42);
+    }
+
+    #[test]
+    fn cli_archcar_queue_parses_shared_archcar_queue_commands() {
+        let add = Cli::try_parse_from([
+            "archductor",
+            "archcar",
+            "queue",
+            "add",
+            "42",
+            "--kind",
+            "review-prompt",
+            "--session-kind",
+            "claude",
+            "--visible-input",
+            "Review staged comments",
+            "address",
+            "comments",
+        ])
+        .unwrap();
+        let Command::Archcar {
+            command:
+                ArchcarCommand::Queue {
+                    command:
+                        ArchcarQueueCommand::Add {
+                            thread_id,
+                            kind,
+                            session_kind,
+                            visible_input,
+                            input,
+                        },
+                },
+        } = add.command
+        else {
+            panic!("expected archcar queue add");
+        };
+        assert_eq!(thread_id, 42);
+        assert_eq!(kind, CliArchcarInputKind::ReviewPrompt);
+        assert_eq!(session_kind, CliSessionKind::Claude);
+        assert_eq!(visible_input.as_deref(), Some("Review staged comments"));
+        assert_eq!(input, vec!["address".to_owned(), "comments".to_owned()]);
+
+        let list = Cli::try_parse_from(["archductor", "archcar", "queue", "list", "42"]).unwrap();
+        let Command::Archcar {
+            command:
+                ArchcarCommand::Queue {
+                    command: ArchcarQueueCommand::List { thread_id },
+                },
+        } = list.command
+        else {
+            panic!("expected archcar queue list");
+        };
+        assert_eq!(thread_id, 42);
+
+        let remove =
+            Cli::try_parse_from(["archductor", "archcar", "queue", "remove", "99"]).unwrap();
+        let Command::Archcar {
+            command:
+                ArchcarCommand::Queue {
+                    command: ArchcarQueueCommand::Remove { queue_id },
+                },
+        } = remove.command
+        else {
+            panic!("expected archcar queue remove");
+        };
+        assert_eq!(queue_id, 99);
     }
 
     #[test]

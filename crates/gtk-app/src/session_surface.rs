@@ -367,6 +367,7 @@ fn cached_chat_timeline_snapshot(
 
 struct SessionChatCreateUi {
     app_state: AppState,
+    archcar_bridge: AsyncArchcarBridge,
     selected_thread: Rc<RefCell<Option<i64>>>,
     thread_state: Rc<RefCell<Vec<ChatThreadRecord>>>,
     pending_archcar_inputs: Rc<RefCell<HashMap<i64, Vec<QueuedArchcarInput>>>>,
@@ -405,8 +406,9 @@ fn spawn_session_chat_thread_create(
                 ui.thread_state.borrow_mut().insert(0, thread.clone());
                 ui.app_state
                     .resolve_pending_chat_target(pending_target.clone(), thread.id);
-                move_queued_chat_inputs_to_pending_archcar_inputs(
+                move_queued_chat_inputs_to_archcar_queue(
                     &ui.app_state,
+                    &ui.archcar_bridge,
                     ui.pending_archcar_inputs.as_ref(),
                     thread.id,
                 );
@@ -1402,7 +1404,6 @@ pub fn agent_session_panel(
         let toast_manager = toast_manager.clone();
         let restore_composer_draft = restore_composer_draft.clone();
         let sync_live_controls = sync_live_controls.clone();
-        let send_text_after_ready_queue = send_text_after_ready_queue.clone();
         let refresh_queue_overlay = refresh_queue_overlay.clone();
         let eager_start_chat_agent = eager_start_chat_agent.clone();
         let refresh_for_metadata = refresh_for_metadata.clone();
@@ -1674,22 +1675,7 @@ pub fn agent_session_panel(
                     inflight_archcar_actions.as_ref(),
                     &app_state,
                 );
-                let staged_queued = if !flushed_pending {
-                    stage_ready_background_queued_chat_inputs(
-                        &database_path,
-                        &workspace,
-                        &app_state,
-                        &thread_state.borrow(),
-                        &record_state.borrow(),
-                        archcar_ready_cache.as_ref(),
-                        inflight_archcar_actions.as_ref(),
-                        pending_archcar_inputs.as_ref(),
-                        queued_auto_drain_holds.as_ref(),
-                        &working_threads,
-                    )
-                } else {
-                    false
-                };
+                let staged_queued = false;
                 if staged_queued {
                     if let Some(refresh) = refresh_queue_overlay.borrow().as_ref().cloned() {
                         refresh();
@@ -1716,52 +1702,16 @@ pub fn agent_session_panel(
                             queued_auto_drain_holds.as_ref(),
                             &working_threads,
                         );
-                        if can_send_next {
-                            if let Some(send_text) =
-                                send_text_after_ready_queue.borrow().as_ref().cloned()
-                            {
-                                if let Some(queued_input) =
-                                    pop_next_queued_chat_input(&app_state, thread_id)
-                                {
-                                    let app_state_for_idle = app_state.clone();
-                                    let queued_auto_drain_holds_for_idle =
-                                        queued_auto_drain_holds.clone();
-                                    let refresh_queue_overlay_for_idle =
-                                        refresh_queue_overlay.clone();
-                                    let staged_review =
-                                        matches!(queued_input.kind, ArchcarInputKind::ReviewPrompt);
-                                    if let Some(refresh) =
-                                        refresh_queue_overlay.borrow().as_ref().cloned()
-                                    {
-                                        refresh();
-                                    }
-                                    gtk::glib::idle_add_local_once(move || {
-                                        if !send_text(queued_input.input.clone(), staged_review) {
-                                            requeue_pending_input_front(
-                                                &app_state_for_idle,
-                                                thread_id,
-                                                queued_input,
-                                            );
-                                        } else {
-                                            release_queued_auto_drain_if_queue_empty(
-                                                queued_auto_drain_holds_for_idle.as_ref(),
-                                                thread_id,
-                                                queued_chat_inputs_count(
-                                                    &app_state_for_idle,
-                                                    thread_id,
-                                                ),
-                                            );
-                                        }
-                                        if let Some(refresh) = refresh_queue_overlay_for_idle
-                                            .borrow()
-                                            .as_ref()
-                                            .cloned()
-                                        {
-                                            refresh();
-                                        }
-                                    });
-                                }
-                            }
+                        if can_send_next
+                            && archcar_bridge
+                                .ensure_thread_session(workspace.clone(), thread_id, current_kind)
+                                .is_some()
+                        {
+                            release_queued_auto_drain_if_queue_empty(
+                                queued_auto_drain_holds.as_ref(),
+                                thread_id,
+                                queued_chat_inputs_count(&app_state, thread_id),
+                            );
                         }
                     }
                 }
@@ -2965,6 +2915,7 @@ pub fn agent_session_panel(
         let thread_state_for_switch = thread_state.clone();
         let selected_thread_for_switch = selected_thread.clone();
         let pending_archcar_inputs_for_switch = pending_archcar_inputs.clone();
+        let archcar_bridge_for_switch = archcar_bridge.clone();
         let external_chat_tabs_for_switch = external_chat_tabs.clone();
         let selected_harness_for_switch = selected_harness.clone();
         let reasoning_mode_for_switch = reasoning_mode.clone();
@@ -3072,6 +3023,7 @@ pub fn agent_session_panel(
                         pending_target,
                         SessionChatCreateUi {
                             app_state: app_state_for_switch.clone(),
+                            archcar_bridge: archcar_bridge_for_switch.clone(),
                             selected_thread: selected_thread_for_switch.clone(),
                             thread_state: thread_state_for_switch.clone(),
                             pending_archcar_inputs: pending_archcar_inputs_for_switch.clone(),
@@ -3320,8 +3272,10 @@ pub fn agent_session_panel(
         let selected_harness = selected_harness.clone();
         let record_state = record_state.clone();
         let archcar_ready_cache = archcar_ready_cache.clone();
+        let archcar_bridge = archcar_bridge.clone();
         let codex_startup_states = codex_startup_states.clone();
         let app_state = app_state.clone();
+        let current_workspace_name = current_workspace_name.clone();
         let working_threads = working_threads.clone();
         let refresh_view = refresh_view.clone();
         let send_text = send_text.clone();
@@ -3430,8 +3384,9 @@ pub fn agent_session_panel(
                         update_composer_state();
                         return;
                     };
-                    queue_archcar_input(
+                    queue_archcar_input_with_bridge(
                         &app_state,
+                        &archcar_bridge,
                         thread_id,
                         command.clone(),
                         None,
@@ -3450,18 +3405,16 @@ pub fn agent_session_panel(
                     let Some(thread_id) = action_thread_id else {
                         return;
                     };
-                    if let Some(queued_input) = pop_next_queued_chat_input(&app_state, thread_id) {
-                        let staged_review =
-                            matches!(queued_input.kind, ArchcarInputKind::ReviewPrompt);
-                        if !(send_text)(queued_input.input.clone(), staged_review) {
-                            requeue_pending_input_front(&app_state, thread_id, queued_input);
-                        } else {
-                            release_queued_auto_drain_if_queue_empty(
-                                queued_auto_drain_holds.as_ref(),
-                                thread_id,
-                                queued_chat_inputs_count(&app_state, thread_id),
-                            );
-                        }
+                    if let Some(_token) = archcar_bridge.ensure_thread_session(
+                        current_workspace_name.borrow().clone(),
+                        thread_id,
+                        *selected_harness.borrow(),
+                    ) {
+                        release_queued_auto_drain_if_queue_empty(
+                            queued_auto_drain_holds.as_ref(),
+                            thread_id,
+                            queued_chat_inputs_count(&app_state, thread_id),
+                        );
                     }
                     update_composer_state();
                 }
@@ -3627,6 +3580,7 @@ pub fn agent_session_panel(
                 pending_target,
                 SessionChatCreateUi {
                     app_state: app_state.clone(),
+                    archcar_bridge: archcar_bridge.clone(),
                     selected_thread: selected_thread.clone(),
                     thread_state: thread_state.clone(),
                     pending_archcar_inputs: pending_archcar_inputs.clone(),
@@ -8405,6 +8359,34 @@ fn queue_archcar_input(
     );
 }
 
+fn queue_archcar_input_with_bridge(
+    app_state: &AppState,
+    bridge: &AsyncArchcarBridge,
+    thread_id: i64,
+    input: String,
+    visible_input: Option<String>,
+    kind: ArchcarInputKind,
+    session_kind: SessionKind,
+) {
+    queue_archcar_input(
+        app_state,
+        thread_id,
+        input.clone(),
+        visible_input.clone(),
+        kind.clone(),
+        session_kind,
+    );
+    if bridge
+        .queue_chat_input(thread_id, input, visible_input, kind, session_kind)
+        .is_none()
+    {
+        warn!(
+            thread_id,
+            "could not submit queued chat input to archcar; GTK cache will retry from local state"
+        );
+    }
+}
+
 fn queue_archcar_input_for_target(
     app_state: &AppState,
     target: ChatUiTarget,
@@ -8606,22 +8588,34 @@ fn queue_pending_archcar_input(
         .push(input);
 }
 
-fn move_queued_chat_inputs_to_pending_archcar_inputs(
+fn move_queued_chat_inputs_to_archcar_queue(
     app_state: &AppState,
+    bridge: &AsyncArchcarBridge,
     pending: &RefCell<HashMap<i64, Vec<QueuedArchcarInput>>>,
     thread_id: i64,
 ) {
     while let Some(input) = pop_next_queued_chat_input(app_state, thread_id) {
-        queue_pending_archcar_input(
-            pending,
-            thread_id,
-            QueuedArchcarInput {
-                input: input.input,
-                visible_input: input.visible_input,
-                kind: input.kind,
-                session_kind: input.session_kind,
-            },
-        );
+        if bridge
+            .queue_chat_input(
+                thread_id,
+                input.input.clone(),
+                input.visible_input.clone(),
+                input.kind.clone(),
+                input.session_kind,
+            )
+            .is_none()
+        {
+            queue_pending_archcar_input(
+                pending,
+                thread_id,
+                QueuedArchcarInput {
+                    input: input.input,
+                    visible_input: input.visible_input,
+                    kind: input.kind,
+                    session_kind: input.session_kind,
+                },
+            );
+        }
     }
 }
 
@@ -11504,6 +11498,7 @@ fn update_working_indicator_for_archcar_event(
         | ArchcarEvent::SessionStarted { .. }
         | ArchcarEvent::SessionCapabilitiesChanged { .. }
         | ArchcarEvent::SessionScreenUpdated { .. }
+        | ArchcarEvent::ChatQueueUpdated { .. }
         | ArchcarEvent::ProviderInteractionRequested { .. }
         | ArchcarEvent::ProviderInteractionResolved { .. } => false,
         // Input acceptance arms the working timer. Message refreshes can arrive after
@@ -11634,6 +11629,10 @@ fn handle_archcar_event(
         }
         ArchcarEvent::SessionMessagesUpdated { thread_id } => {
             trace!(thread_id, "archcar session messages updated");
+            clear_inflight_user_sends_for_thread(inflight_actions, *thread_id);
+        }
+        ArchcarEvent::ChatQueueUpdated { thread_id } => {
+            trace!(thread_id, "archcar chat queue updated");
             clear_inflight_user_sends_for_thread(inflight_actions, *thread_id);
         }
         ArchcarEvent::ProviderInteractionRequested { interaction } => {
@@ -12130,6 +12129,11 @@ fn archcar_message_refresh_intent(message: &AsyncArchcarMessage) -> ArchcarRefre
                 global_summary: true,
             },
             ArchcarEvent::SessionMessagesUpdated { .. } => ArchcarRefreshIntent {
+                chat_surface: true,
+                workspace_nav: false,
+                global_summary: false,
+            },
+            ArchcarEvent::ChatQueueUpdated { .. } => ArchcarRefreshIntent {
                 chat_surface: true,
                 workspace_nav: false,
                 global_summary: false,
@@ -13898,15 +13902,12 @@ fix it
         );
         state.resolve_pending_chat_target(pending, 42);
         let pending_archcar_inputs = RefCell::new(HashMap::<i64, Vec<QueuedArchcarInput>>::new());
+        let bridge = AsyncArchcarBridge::new(state.paths.clone());
 
-        move_queued_chat_inputs_to_pending_archcar_inputs(&state, &pending_archcar_inputs, 42);
+        move_queued_chat_inputs_to_archcar_queue(&state, &bridge, &pending_archcar_inputs, 42);
 
         assert_eq!(state.queued_chat_inputs_count(42), 0);
-        let pending = pending_archcar_inputs.borrow();
-        let queued = pending.get(&42).expect("queued first input");
-        assert_eq!(queued.len(), 1);
-        assert_eq!(queued[0].input, "first message in new claude chat");
-        assert_eq!(queued[0].session_kind, SessionKind::Claude);
+        assert!(pending_archcar_inputs.borrow().get(&42).is_none());
     }
 
     #[test]

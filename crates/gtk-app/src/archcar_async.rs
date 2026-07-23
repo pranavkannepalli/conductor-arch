@@ -63,6 +63,19 @@ pub enum AsyncArchcarRequestKind {
     GetSessionStatus {
         session_id: i64,
     },
+    QueueChatInput {
+        thread_id: i64,
+        input: String,
+        visible_input: Option<String>,
+        kind: ArchcarInputKind,
+        session_kind: SessionKind,
+    },
+    ListQueuedChatInputs {
+        thread_id: i64,
+    },
+    RemoveQueuedChatInput {
+        queue_id: i64,
+    },
     KillSession {
         session_id: i64,
     },
@@ -282,6 +295,31 @@ impl AsyncArchcarBridge {
 
     pub fn get_session_status(&self, session_id: i64) -> Option<u64> {
         self.submit(ArchcarRequest::GetSessionStatus { session_id })
+    }
+
+    pub fn queue_chat_input(
+        &self,
+        thread_id: i64,
+        input: String,
+        visible_input: Option<String>,
+        kind: ArchcarInputKind,
+        session_kind: SessionKind,
+    ) -> Option<u64> {
+        self.submit(ArchcarRequest::QueueChatInput {
+            thread_id,
+            input,
+            visible_input,
+            kind,
+            session_kind,
+        })
+    }
+
+    pub fn list_queued_chat_inputs(&self, thread_id: i64) -> Option<u64> {
+        self.submit(ArchcarRequest::ListQueuedChatInputs { thread_id })
+    }
+
+    pub fn remove_queued_chat_input(&self, queue_id: i64) -> Option<u64> {
+        self.submit(ArchcarRequest::RemoveQueuedChatInput { queue_id })
     }
 
     pub fn list_provider_interactions(
@@ -632,6 +670,29 @@ fn request_kind(request: &ArchcarRequest) -> AsyncArchcarRequestKind {
         ArchcarRequest::GetSessionMessages { thread_id } => {
             AsyncArchcarRequestKind::GetSessionStatus {
                 session_id: *thread_id,
+            }
+        }
+        ArchcarRequest::QueueChatInput {
+            thread_id,
+            input,
+            visible_input,
+            kind,
+            session_kind,
+        } => AsyncArchcarRequestKind::QueueChatInput {
+            thread_id: *thread_id,
+            input: input.clone(),
+            visible_input: visible_input.clone(),
+            kind: kind.clone(),
+            session_kind: *session_kind,
+        },
+        ArchcarRequest::ListQueuedChatInputs { thread_id } => {
+            AsyncArchcarRequestKind::ListQueuedChatInputs {
+                thread_id: *thread_id,
+            }
+        }
+        ArchcarRequest::RemoveQueuedChatInput { queue_id } => {
+            AsyncArchcarRequestKind::RemoveQueuedChatInput {
+                queue_id: *queue_id,
             }
         }
         ArchcarRequest::RegisterProviderInteraction { interaction } => {

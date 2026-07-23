@@ -8,10 +8,12 @@ flow through the app, and the speed choices in the current harness.
 ## Short Version
 
 `AppState` is GTK-only hot UI state. It is not the source of truth for
-projects, workspaces, sessions, chat history, terminal output, PR state, or
-checks. Durable state lives in `crates/core` stores and SQLite. `AppState`
-holds only the selected workspace/page/tab/chat/session, transient composer
-queues, optimistic workspace/chat phases, and navigation history.
+projects, workspaces, sessions, chat history, terminal output, PR state,
+checks, or chat input queues. Durable state lives in `crates/core` stores and
+SQLite, with Archcar owning managed session runtime and queued chat delivery.
+`AppState` holds only the selected workspace/page/tab/chat/session, pending
+target drafts, a composer queue cache for rendering, optimistic
+workspace/chat phases, and navigation history.
 
 The speed model is:
 
@@ -48,8 +50,9 @@ layers stay independent of GTK UI state.
 - chat selection: `selected_chat_thread`, `selected_chat_target`
 - session selection: `selected_agent_session`
 - staged prompt text: `staged_review_prompt`, `pending_chat_prompt`
-- composer queues: per-thread `queued_chat_inputs`, pending-target
-  `queued_pending_chat_inputs`, and `editing_queued_chat_inputs`
+- composer queues: per-thread `queued_chat_inputs` as a cache of Archcar queue
+  rows, pending-target `queued_pending_chat_inputs` before a real thread exists,
+  and `editing_queued_chat_inputs`
 - optimistic phases: per-workspace `workspace_phases`, per-target
   `chat_phases`
 - pending target id allocation: `next_pending_chat_id`
@@ -208,15 +211,18 @@ is built/refreshed and inserts the text into the composer on the GTK idle loop.
 Composer send logic uses `selected_chat_target_for_submit`:
 
 - if the selected target is pending, input is queued on
-  `queued_pending_chat_inputs`
+  `queued_pending_chat_inputs` until the real thread exists
 - if a real thread is selected and the agent is busy/startup-blocked, input is
-  queued on `queued_chat_inputs`
+  queued through Archcar and mirrored in `queued_chat_inputs` for immediate UI
+  rendering
 - if the thread/session is ready, input is sent through Archcar
 - Ctrl+Enter uses immediate delivery for managed harnesses
 
-Queue mutations emit `ComposerQueueChanged` or `ComposerTargetQueueChanged`.
-The overlay renders queued items, supports delete/edit, and avoids rebuilding
-when its signature has not changed.
+Archcar queue mutations emit `ChatQueueUpdated`; GTK reloads the cache and then
+emits `ComposerQueueChanged`. Pending-target mutations still emit
+`ComposerTargetQueueChanged` because no durable thread id exists yet. The
+overlay renders queued items, supports delete/edit from the cache, and avoids
+rebuilding when its signature has not changed.
 
 ### Queue Drain And Archcar Readiness
 

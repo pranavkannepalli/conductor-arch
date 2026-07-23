@@ -7,7 +7,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use archductor_core::archcar::harness::managed_harness_for_kind;
-use archductor_core::archcar::protocol::{ArchcarEvent, ArchcarInputKind, ArchcarResponse};
+#[cfg(test)]
+use archductor_core::archcar::protocol::ArchcarInputKind;
+use archductor_core::archcar::protocol::{ArchcarEvent, ArchcarResponse};
 use archductor_core::provider_events::ProviderEventStore;
 use archductor_core::workspace::{
     ChatMessageRecord, ChatThreadRecord, ProcessRecord, ProcessStatus, SessionKind, WorkspaceStore,
@@ -21,7 +23,6 @@ use crate::archcar_async::{
 };
 use crate::background_sync::provider_events_have_active_work;
 use crate::refresh::RefreshEvent;
-use crate::session_surface::prepare_session_send_input;
 use crate::state::{AppState, QueuedChatInputDraft};
 
 const BACKGROUND_CHAT_TICK_SECONDS: u32 = 1;
@@ -40,6 +41,8 @@ struct BackgroundQueueCandidate {
     branch_prefix: String,
     thread: ChatThreadRecord,
     messages: Vec<ChatMessageRecord>,
+    queued_count: usize,
+    queued_session_kind: SessionKind,
     running_session_id: Option<i64>,
     active_work: bool,
 }
@@ -149,13 +152,9 @@ fn schedule_background_queue_scan(
     if scan_in_flight.get() {
         return;
     }
-    let queued_thread_ids = app_state.queued_chat_thread_ids();
-    if queued_thread_ids.is_empty() {
-        return;
-    }
     scan_in_flight.set(true);
     spawn_background_job(
-        move || load_background_queue_candidates(&db_path, queued_thread_ids),
+        move || load_background_queue_candidates(&db_path),
         move |result| {
             scan_in_flight.set(false);
             let candidates = match result {
@@ -172,15 +171,18 @@ fn schedule_background_queue_scan(
 
 fn load_background_queue_candidates(
     db_path: &Path,
-    thread_ids: Vec<i64>,
 ) -> anyhow::Result<Vec<BackgroundQueueCandidate>> {
     let store = WorkspaceStore::open_app(db_path)?;
     let provider_store = ProviderEventStore::new(db_path);
     let mut candidates = Vec::new();
-    for thread_id in thread_ids {
+    for thread_id in store.list_queued_chat_thread_ids()? {
+        let queued_inputs = store.list_queued_chat_inputs(thread_id)?;
+        let Some(first_queued) = queued_inputs.first() else {
+            continue;
+        };
         let thread = store.get_chat_thread_record(thread_id)?;
         let workspace = store.get_workspace_record(thread.workspace_id)?;
-        let session_kind = session_kind_from_provider(&thread.provider);
+        let session_kind = first_queued.session_kind;
         let records = store.list_thread_processes(thread_id)?;
         let running_session_id = records
             .iter()
@@ -194,6 +196,8 @@ fn load_background_queue_candidates(
         candidates.push(BackgroundQueueCandidate {
             branch_prefix: store.workspace_branch_prefix(&workspace.name)?,
             messages: store.list_chat_messages(thread_id)?,
+            queued_count: queued_inputs.len(),
+            queued_session_kind: session_kind,
             workspace: workspace.name,
             thread,
             running_session_id,
@@ -212,24 +216,26 @@ fn drive_background_queue_candidates(
     let selected_visible_thread = app_state.visible_selected_chat_thread();
     for candidate in candidates {
         let thread_id = candidate.thread.id;
-        let Some(draft) = app_state.queued_chat_inputs(thread_id).first().cloned() else {
-            continue;
-        };
         state
             .borrow_mut()
             .thread_workspaces
             .insert(thread_id, candidate.workspace.clone());
-        let queued_count = app_state.queued_chat_inputs_count(thread_id);
         let plan = plan_background_queue_drain(
             &candidate,
             &state.borrow(),
             selected_visible_thread,
-            queued_count,
-            draft.session_kind,
+            candidate.queued_count,
+            candidate.queued_session_kind,
         );
         match plan {
             Some(BackgroundQueuePlan::Ensure) => {
-                request_background_ensure(bridge, state, &candidate.workspace, thread_id, draft);
+                request_background_ensure(
+                    bridge,
+                    state,
+                    &candidate.workspace,
+                    thread_id,
+                    candidate.queued_session_kind,
+                );
             }
             Some(BackgroundQueuePlan::ProbeStatus { session_id }) => {
                 request_background_status_probe(bridge, state, thread_id, session_id);
@@ -285,10 +291,9 @@ fn request_background_ensure(
     state: &Rc<RefCell<BackgroundChatRunnerState>>,
     workspace: &str,
     thread_id: i64,
-    draft: QueuedChatInputDraft,
+    session_kind: SessionKind,
 ) {
-    let Some(token) =
-        bridge.ensure_thread_session(workspace.to_owned(), thread_id, draft.session_kind)
+    let Some(token) = bridge.ensure_thread_session(workspace.to_owned(), thread_id, session_kind)
     else {
         return;
     };
@@ -297,7 +302,7 @@ fn request_background_ensure(
         BackgroundChatAction::Ensure {
             workspace: workspace.to_owned(),
             thread_id,
-            kind: draft.session_kind,
+            kind: session_kind,
         },
     );
 }
@@ -325,64 +330,28 @@ fn send_background_queued_input(
     app_state: &AppState,
     state: &Rc<RefCell<BackgroundChatRunnerState>>,
     candidate: BackgroundQueueCandidate,
-    session_id: i64,
+    _session_id: i64,
 ) {
     let thread_id = candidate.thread.id;
     if app_state.visible_selected_chat_thread() == Some(thread_id) {
         return;
     }
-    let Some(draft) = app_state.pop_next_queued_chat_input(thread_id) else {
-        return;
-    };
-    let staged_review = matches!(draft.kind, ArchcarInputKind::ReviewPrompt);
-    let prepared = prepare_session_send_input(
-        &draft.input,
-        &candidate.workspace,
-        &candidate.branch_prefix,
-        staged_review,
-        draft.session_kind,
-        &candidate.thread,
-        &candidate.messages,
-    );
-    let checkpoint_id = create_background_turn_checkpoint(
-        app_state,
-        &candidate.workspace,
+    let token = bridge.ensure_thread_session(
+        candidate.workspace.clone(),
         thread_id,
-        Some(session_id),
-        staged_review,
-    );
-    let token = bridge.send_input(
-        session_id,
-        prepared.input,
-        prepared
-            .visible_input
-            .or_else(|| draft.visible_input.clone()),
-        draft.kind.clone(),
+        candidate.queued_session_kind,
     );
     let Some(token) = token else {
-        if let Some(checkpoint_id) = checkpoint_id {
-            discard_background_turn_checkpoint(app_state, &candidate.workspace, checkpoint_id);
-        }
-        app_state.requeue_chat_input_front(thread_id, draft);
         return;
     };
-    let mut state = state.borrow_mut();
-    note_archcar_ready(&mut state.ready_sessions, session_id, false);
-    state.working_threads.insert(thread_id);
-    state.inflight_actions.insert(
+    state.borrow_mut().inflight_actions.insert(
         token,
-        BackgroundChatAction::UserSend {
+        BackgroundChatAction::Ensure {
             workspace: candidate.workspace.clone(),
             thread_id,
-            session_id,
-            draft,
-            checkpoint_id,
+            kind: candidate.queued_session_kind,
         },
     );
-    drop(state);
-    if staged_review {
-        app_state.set_staged_review_prompt(None);
-    }
     app_state.request_refresh(RefreshEvent::WorkspaceChatLifecycleChanged {
         workspace: candidate.workspace,
     });
@@ -485,6 +454,7 @@ fn reduce_background_archcar_event(event: &ArchcarEvent, state: &mut BackgroundC
         }
         ArchcarEvent::SessionSpawnQueued { .. }
         | ArchcarEvent::SessionCapabilitiesChanged { .. }
+        | ArchcarEvent::ChatQueueUpdated { .. }
         | ArchcarEvent::SessionScreenUpdated { .. } => {}
     }
 }
@@ -644,6 +614,10 @@ fn request_refresh_for_archcar_event(
         | ArchcarEvent::SessionCapabilitiesChanged { thread_id, .. } => {
             request_thread_chat_refresh(db_path, app_state, state, *thread_id, false);
         }
+        ArchcarEvent::ChatQueueUpdated { thread_id } => {
+            sync_queued_inputs_cache(db_path.to_path_buf(), app_state.clone(), *thread_id);
+            request_thread_chat_refresh(db_path, app_state, state, *thread_id, false);
+        }
         ArchcarEvent::TurnCompleted { thread_id, .. } => {
             request_thread_chat_refresh(db_path, app_state, state, *thread_id, true);
             refresh_pull_request_after_background_turn(
@@ -743,6 +717,34 @@ fn refresh_pull_request_after_background_turn(
             Err(err) => {
                 debug!(thread_id, error = %err, "background PR refresh skipped");
             }
+        },
+    );
+}
+
+fn sync_queued_inputs_cache(db_path: PathBuf, app_state: AppState, thread_id: i64) {
+    spawn_background_job(
+        move || {
+            WorkspaceStore::open_app(&db_path)
+                .and_then(|store| store.list_queued_chat_inputs(thread_id))
+                .map(|inputs| {
+                    inputs
+                        .into_iter()
+                        .map(|input| QueuedChatInputDraft {
+                            input: input.input,
+                            visible_input: input.visible_input,
+                            kind: input.input_kind,
+                            session_kind: input.session_kind,
+                        })
+                        .collect::<Vec<_>>()
+                })
+        },
+        move |result| match result {
+            Ok(inputs) => app_state.replace_queued_chat_inputs(thread_id, inputs),
+            Err(err) => warn!(
+                thread_id,
+                error = %format!("{err:#}"),
+                "failed to sync background chat queue cache"
+            ),
         },
     );
 }
@@ -910,6 +912,8 @@ mod tests {
             branch_prefix: "lc".to_owned(),
             thread: thread("codex"),
             messages: Vec::new(),
+            queued_count: 1,
+            queued_session_kind: SessionKind::Codex,
             running_session_id,
             active_work,
         }
