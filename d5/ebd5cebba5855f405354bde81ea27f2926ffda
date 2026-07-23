@@ -1,0 +1,100 @@
+crates/gtk-app/Cargo.toml
+  s_e667c8481af502::t_e259fd32f4e058 21
+docs/background-chat-update-map.md
+  s_3e3088228791b9::t_b2f9a0a084391b 78-84
+.codex/AGENTS.md
+  s_479960eeee2353::t_9ff7cd72a75203 3,5-6,8,10-16,28-29
+claude/CLAUDE.md
+  s_479960eeee2353::t_9ff7cd72a75203 3,5-6,8,10-16
+progress.md
+  s_479960eeee2353::t_9ff7cd72a75203 185,187-189,191-195,197-199
+crates/core/src/workspace.rs
+  s_3e3088228791b9::t_93972f6ff47438 1250-1251,6497
+  s_3e3088228791b9::t_c66e7308eee4c7 20334-20342
+  s_3e3088228791b9::t_b1226f9407230e 12045-12065,12068,12070-12122
+  s_3e3088228791b9::t_33cdc0bb92b465 3975-3981,3998-3999,4005-4008
+  s_e667c8481af502::t_3f3939d14cbc32 4000-4003
+  s_3e3088228791b9::t_4a8c3893731ddf 12066-12067
+  s_3e3088228791b9::t_7b023ed49102cf 12069
+  s_3e3088228791b9::t_6fb1c3834517d9 12123
+crates/gtk-app/src/session_surface.rs
+  s_e667c8481af502::t_fac80e530edccd 1977-1989
+  s_e667c8481af502::t_a0be11325dc922 14467-14495,14497-14522,14524-14541
+  s_e667c8481af502::t_dc7f164b712cc0 9507-9522
+  s_e667c8481af502::t_7fcbdb7f834cf4 6134-6137,6178-6179
+  s_3e3088228791b9::t_5b5dd654756b8d 1689,3414,8567,8578-8595
+  s_e667c8481af502::t_d12069c8d3d4ce 14548
+  s_e667c8481af502::t_4adf467f91f703 6221-6223
+  s_e667c8481af502::t_ca7573e098bc9f 6029-6077,6079-6081,6083-6096,6098,6100-6106,6109-6124,6126,6128-6133,6138-6145,6147,6149-6177,6180-6184,6186,6188-6194,6198-6201,6209-6210,6214-6220,6224-6248,9523
+  s_3e3088228791b9::t_0cdd6721f859b4 14373-14391
+  s_3e3088228791b9::t_fb5836d93775dd 3296
+  s_e667c8481af502::t_55cd2622063b19 14496,14523
+  s_e667c8481af502::t_428569c7d9d41f 14542,14545-14547,14549
+  s_e667c8481af502::t_988d4cea7156b3 6203-6208
+  s_e667c8481af502::t_6469df2ff232c4 6097,17852
+  s_d6fc0e6ad8da2b::t_35ce3635dd8363 14372,14392,14466,14550,15025,15029,15067-15101,15125
+  s_e667c8481af502::t_9f9ae6ae3fa97a 6099
+  s_e667c8481af502::t_6d5f8bce391e1f 6078,6107-6108,14543-14544
+  s_e667c8481af502::t_b6be11ead16a3e 49
+  s_e667c8481af502::t_4f7b77b62c4bf9 1872-1873
+  s_e667c8481af502::t_cc18271879c694 9524
+  s_d6fc0e6ad8da2b::t_581d1951ea990a 14393
+  s_d6fc0e6ad8da2b::t_bdedfa7ec3cdfb 14551
+crates/dev-runner/src/process.rs
+  s_3e3088228791b9::t_ed0dc738675e1a 13,26,29-33,51-56,188-194
+.gitignore
+  s_479960eeee2353::t_9ff7cd72a75203 6-7
+docs/app-state-refresh-map.md
+  s_3e3088228791b9::t_d80ad864fc8413 293-294
+crates/gtk-app/src/workspace_command_center.rs
+  s_3e3088228791b9::t_4a8c3893731ddf 1087-1090,4501-4504
+  s_3e3088228791b9::t_79da743548f474 9543-9551,9553-9556,9558-9593,9619-9624
+  s_3e3088228791b9::t_c5f25cabed5728 1078,1091,3252,3261-3265,4415,4424-4428,4489,4505,5841,5844,5855,5869,5883
+  s_3e3088228791b9::t_5abe9bdf54e6fc 9625
+crates/core/src/archcar/protocol.rs
+  s_3e3088228791b9::t_7ff8ec7a2e741b 701-737
+crates/dev-runner/src/main.rs
+  s_3e3088228791b9::t_f1b7d0b777cf29 29-30
+Cargo.lock
+  s_e667c8481af502::t_af9b080e290997 137,655-663,1378-1396,1962-1967
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "d5ebd5cebba5855f405354bde81ea27f2926ffda",
+  "prompts": {},
+  "sessions": {
+    "s_3e3088228791b9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8dc8-d06b-7c02-9cb8-e07a2ff6a325",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    },
+    "s_479960eeee2353": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8de2-6704-7840-aeb8-b6644bbef178",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    },
+    "s_d6fc0e6ad8da2b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8de4-718d-7192-94e9-d194eca32af3",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    },
+    "s_e667c8481af502": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8ddc-5317-7f31-ba0d-f0b2a47c9791",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
