@@ -2415,7 +2415,7 @@ popover.context-menu-popover arrow {
     padding: 22px 24px 24px;
 }
 .chat-working-indicator {
-    margin: 2px 24px 12px;
+    margin: 2px 0 12px;
     padding: 6px 0;
     color: #b8c7de;
 }
@@ -3533,6 +3533,8 @@ mod tests {
 
         let working_meta = selector_block(css, ".chat-working-indicator .card-meta");
         assert!(working_meta.contains("color: #b8c7de;"));
+        let working = selector_block(css, ".chat-working-indicator");
+        assert!(working.contains("margin: 2px 0 12px;"));
 
         let messages = selector_block(css, ".chat-messages");
         assert!(messages.contains("padding: 22px 24px 24px;"));
