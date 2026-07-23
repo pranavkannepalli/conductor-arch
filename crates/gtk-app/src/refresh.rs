@@ -303,6 +303,11 @@ impl RefreshHub {
             }
             RefreshEvent::WorkspaceChatMessagesChanged { .. } => {
                 self.refresh_workspace_event(WorkspaceRefreshTarget::ChatSurface, &event);
+                self.run_event(
+                    RefreshMetricTarget::WorkspaceChatTabs,
+                    &self.workspace_chat_tabs,
+                    &event,
+                );
             }
         }
     }
@@ -531,7 +536,7 @@ mod tests {
     }
 
     #[test]
-    fn chat_message_refresh_event_only_refreshes_chat_surface() {
+    fn chat_message_refresh_event_updates_chat_surface_and_tabs_only() {
         let hub = RefreshHub::default();
         let counts = RefreshCounts::default();
         counts.install(&hub);
@@ -542,7 +547,7 @@ mod tests {
             thread_id: 7,
         });
 
-        assert_eq!(counts.values(), (0, 0, 0, 0, 0, 1, 0, 0, 0, 0));
+        assert_eq!(counts.values(), (0, 0, 0, 0, 0, 1, 1, 0, 0, 0));
     }
 
     #[test]
@@ -561,7 +566,7 @@ mod tests {
     }
 
     #[test]
-    fn refresh_metrics_count_chat_message_surface_refreshes() {
+    fn refresh_metrics_count_chat_message_surface_and_tab_refreshes() {
         let hub = RefreshHub::default();
         let counts = RefreshCounts::default();
         counts.install(&hub);
@@ -572,8 +577,9 @@ mod tests {
         });
 
         let metrics = hub.refresh_metrics_snapshot();
-        assert_eq!(metrics.total, 1);
+        assert_eq!(metrics.total, 2);
         assert_eq!(metrics.workspace_chat_surface, 1);
+        assert_eq!(metrics.workspace_chat_tabs, 1);
         assert_eq!(metrics.workspace_shell, 0);
     }
 

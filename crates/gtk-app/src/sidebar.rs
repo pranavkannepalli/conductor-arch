@@ -1,6 +1,8 @@
 use archductor_core::archcar::protocol::ArchcarRequest;
-use archductor_core::repository::RepositoryStore;
-use archductor_core::workspace::{CreateWorkspace, SessionKind, WorkspaceStore};
+use archductor_core::repository::{Repository, RepositoryStore};
+use archductor_core::workspace::{
+    CreateWorkspace, SessionKind, WorkspaceStatusLine, WorkspaceStore,
+};
 use gtk::prelude::*;
 use gtk::{
     Align, ApplicationWindow, Box as GBox, Button, Entry, EventControllerKey,
@@ -10,6 +12,7 @@ use gtk::{
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use tracing::error;
@@ -58,6 +61,24 @@ where
             message: err.to_string(),
         },
     }
+}
+
+fn load_sidebar_workspace_lookup(
+    db_path: PathBuf,
+    workspace: String,
+) -> Result<SidebarWorkspaceLookup, String> {
+    WorkspaceStore::open_app(db_path)
+        .and_then(|store| {
+            if !store.workspace_exists_by_name(&workspace)? {
+                return Ok(SidebarWorkspaceLookup::MissingWorkspace);
+            }
+            store.workspace_view_defaults(&workspace).map(|defaults| {
+                SidebarWorkspaceLookup::Ready {
+                    default_visible_tab: defaults.default_visible_tab,
+                }
+            })
+        })
+        .map_err(|err| format!("{err:#}"))
 }
 
 pub(crate) fn build_app_sidebar(
@@ -220,6 +241,7 @@ pub(crate) fn build_app_sidebar(
     let restoring_workspace_selection = Rc::new(Cell::new(false));
     let db_path = app_state.workspace_database_path();
     let db_path_populate = db_path.clone();
+    let populate_generation = Rc::new(Cell::new(0_u64));
 
     let populate = {
         let list = list.clone();
@@ -237,6 +259,7 @@ pub(crate) fn build_app_sidebar(
         let db_path_populate = db_path_populate.clone();
         let pending_workspace_creates = Rc::clone(&pending_workspace_creates);
         let toast_populate = toast_manager.clone();
+        let populate_generation = populate_generation.clone();
         move || {
             sync_nav_buttons();
             while let Some(child) = list.first_child() {
@@ -246,227 +269,285 @@ pub(crate) fn build_app_sidebar(
             workspace_rows.borrow_mut().clear();
             let filter = search_entry.text().to_string().to_lowercase();
             let prev_selected = state.selected_workspace();
-            let mut row_idx = 0;
+            let loading = Label::new(Some("Loading workspaces..."));
+            loading.add_css_class("empty-label");
+            loading.set_margin_start(12);
+            loading.set_margin_top(16);
+            list.append(&ListBoxRow::builder().child(&loading).build());
 
-            if let (Ok(repo_store), Ok(workspace_store)) = (
-                RepositoryStore::open(db_path_populate.clone()),
-                WorkspaceStore::open_app(db_path_populate.clone()),
-            ) {
-                let repositories = repo_store.list().unwrap_or_default();
-                let statuses = workspace_store.list_status().unwrap_or_default();
-                let mut grouped: HashMap<String, Vec<_>> = HashMap::new();
-
-                for line in statuses {
-                    if line.workspace.status == "archived" {
-                        continue;
+            let generation = populate_generation.get() + 1;
+            populate_generation.set(generation);
+            let db_path_for_job = db_path_populate.clone();
+            let list_for_apply = list.clone();
+            let names_for_apply = Rc::clone(&names);
+            let workspace_rows_for_apply = Rc::clone(&workspace_rows);
+            let restoring_workspace_selection = restoring_workspace_selection.clone();
+            let state_for_apply = state.clone();
+            let app_state = app_state.clone();
+            let stack = stack.clone();
+            let window = window.clone();
+            let refresh_hub = refresh_hub.clone();
+            let refresh_workspace = refresh_workspace.clone();
+            let refresh_view_preferences = refresh_view_preferences.clone();
+            let db_path_populate_for_apply = db_path_populate.clone();
+            let pending_workspace_creates = Rc::clone(&pending_workspace_creates);
+            let toast_populate = toast_populate.clone();
+            let populate_generation = populate_generation.clone();
+            spawn_background_job(
+                move || load_sidebar_snapshot(db_path_for_job),
+                move |result| {
+                    if populate_generation.get() != generation {
+                        return;
                     }
-                    grouped
-                        .entry(line.repository_name.clone())
-                        .or_default()
-                        .push(line);
-                }
+                    while let Some(child) = list_for_apply.first_child() {
+                        list_for_apply.remove(&child);
+                    }
+                    names_for_apply.borrow_mut().clear();
+                    workspace_rows_for_apply.borrow_mut().clear();
+                    let mut row_idx = 0;
+                    let snapshot = match result {
+                        Ok(snapshot) => snapshot,
+                        Err(message) => {
+                            let error =
+                                Label::new(Some(&format!("Could not load workspaces: {message}")));
+                            error.add_css_class("empty-label");
+                            error.set_margin_start(12);
+                            error.set_margin_top(16);
+                            list_for_apply.append(&ListBoxRow::builder().child(&error).build());
+                            return;
+                        }
+                    };
+                    let mut grouped: HashMap<String, Vec<_>> = HashMap::new();
 
-                for repo in repositories {
-                    let repo_name = repo.name;
-                    let repo_matches =
-                        filter.is_empty() || repo_name.to_lowercase().contains(&filter);
-                    let mut lines = grouped.remove(&repo_name).unwrap_or_default();
-                    lines.retain(|line| {
-                        let ws = &line.workspace;
-                        filter.is_empty()
-                            || repo_matches
-                            || ws.name.to_lowercase().contains(&filter)
-                            || ws.branch.to_lowercase().contains(&filter)
-                    });
-
-                    if !repo_matches && lines.is_empty() {
-                        continue;
+                    for line in snapshot.statuses {
+                        if line.workspace.status == "archived" {
+                            continue;
+                        }
+                        grouped
+                            .entry(line.repository_name.clone())
+                            .or_default()
+                            .push(line);
                     }
 
-                    let create_pending = pending_workspace_creates.borrow().contains(&repo_name);
-                    let header_row = section_header_row(&repo_name, lines.len(), create_pending, {
-                        let db_path = db_path_populate.clone();
-                        let refresh_hub = refresh_hub.clone();
-                        let refresh_workspace = refresh_workspace.clone();
-                        let refresh_view_preferences = refresh_view_preferences.clone();
-                        let app_state = app_state.clone();
-                        let stack = stack.clone();
-                        let repo_name = repo_name.clone();
-                        let pending_workspace_creates = Rc::clone(&pending_workspace_creates);
-                        let toast_create = toast_populate.clone();
-                        move |add_btn: Button| {
-                            if !pending_workspace_creates
-                                .borrow_mut()
-                                .insert(repo_name.clone())
-                            {
-                                return;
-                            }
-                            add_btn.set_sensitive(false);
-                            add_btn.set_tooltip_text(Some("Creating workspace..."));
-                            let refresh_hub = refresh_hub.clone();
-                            let refresh_workspace = refresh_workspace.clone();
-                            let refresh_view_preferences = refresh_view_preferences.clone();
-                            let app_state = app_state.clone();
-                            let stack = stack.clone();
-                            let pending_workspace_creates = Rc::clone(&pending_workspace_creates);
-                            let repo_name_for_callback = repo_name.clone();
-                            let toast_create = toast_create.clone();
-                            let inserted_workspace_name = Arc::new(Mutex::new(None::<String>));
-                            spawn_background_job_with_progress(
-                                {
-                                    let db_path = db_path.clone();
-                                    let repo_name = repo_name.clone();
-                                    let inserted_workspace_name = inserted_workspace_name.clone();
-                                    move |progress| {
-                                        WorkspaceStore::open_app(db_path).and_then(|store| {
-                                            store.create_lifecycle_job_with_progress(
-                                                CreateWorkspace {
-                                                    repository_name: repo_name,
-                                                    name: String::new(),
-                                                    branch: String::new(),
-                                                    base_ref: None,
-                                                },
-                                                |workspace| {
-                                                    if let Ok(mut name) =
-                                                        inserted_workspace_name.lock()
-                                                    {
-                                                        *name = Some(workspace.name.clone());
-                                                    }
-                                                    progress();
-                                                },
-                                            )
-                                        })
+                    for repo in snapshot.repositories {
+                        let repo_name = repo.name;
+                        let repo_matches =
+                            filter.is_empty() || repo_name.to_lowercase().contains(&filter);
+                        let mut lines = grouped.remove(&repo_name).unwrap_or_default();
+                        lines.retain(|line| {
+                            let ws = &line.workspace;
+                            filter.is_empty()
+                                || repo_matches
+                                || ws.name.to_lowercase().contains(&filter)
+                                || ws.branch.to_lowercase().contains(&filter)
+                        });
+
+                        if !repo_matches && lines.is_empty() {
+                            continue;
+                        }
+
+                        let create_pending =
+                            pending_workspace_creates.borrow().contains(&repo_name);
+                        let header_row =
+                            section_header_row(&repo_name, lines.len(), create_pending, {
+                                let db_path = db_path_populate_for_apply.clone();
+                                let refresh_hub = refresh_hub.clone();
+                                let refresh_workspace = refresh_workspace.clone();
+                                let refresh_view_preferences = refresh_view_preferences.clone();
+                                let app_state = app_state.clone();
+                                let stack = stack.clone();
+                                let repo_name = repo_name.clone();
+                                let pending_workspace_creates =
+                                    Rc::clone(&pending_workspace_creates);
+                                let toast_create = toast_populate.clone();
+                                move |add_btn: Button| {
+                                    if !pending_workspace_creates
+                                        .borrow_mut()
+                                        .insert(repo_name.clone())
+                                    {
+                                        return;
                                     }
-                                },
-                                {
-                                    let inserted_workspace_name = inserted_workspace_name.clone();
-                                    let app_state = app_state.clone();
-                                    let stack = stack.clone();
+                                    add_btn.set_sensitive(false);
+                                    add_btn.set_tooltip_text(Some("Creating workspace..."));
                                     let refresh_hub = refresh_hub.clone();
                                     let refresh_workspace = refresh_workspace.clone();
                                     let refresh_view_preferences = refresh_view_preferences.clone();
-                                    move || {
-                                        let workspace_name = inserted_workspace_name
-                                            .lock()
-                                            .ok()
-                                            .and_then(|name| name.clone());
-                                        if let Some(workspace_name) = workspace_name {
-                                            app_state.navigate_to_workspace_with_default_tab(
-                                                Some(workspace_name),
-                                                Some(WorkspaceTab::Chats),
-                                            );
-                                            stack.set_visible_child_name("workspace");
-                                            refresh_hub.refresh(RefreshScope::Sidebar);
-                                            refresh_hub.refresh(RefreshScope::Dashboard);
-                                            refresh_workspace();
-                                            refresh_view_preferences();
-                                        }
-                                    }
-                                },
-                                move |result| {
-                                    pending_workspace_creates
-                                        .borrow_mut()
-                                        .remove(&repo_name_for_callback);
-                                    add_btn.set_sensitive(true);
-                                    add_btn.set_tooltip_text(Some("Create workspace"));
-                                    match result {
-                                        Ok(workspace) => {
-                                            app_state.navigate_to_workspace_with_default_tab(
-                                                Some(workspace.name),
-                                                Some(WorkspaceTab::Chats),
-                                            );
-                                            stack.set_visible_child_name("workspace");
-                                            refresh_hub.refresh(RefreshScope::Projects);
-                                            refresh_hub.refresh(RefreshScope::Sidebar);
-                                            refresh_hub.refresh(RefreshScope::Dashboard);
-                                            refresh_workspace();
-                                            refresh_view_preferences();
-                                        }
-                                        Err(err) => toast_create
-                                            .error(format!("Create workspace failed: {err:#}")),
-                                    }
+                                    let app_state = app_state.clone();
+                                    let stack = stack.clone();
+                                    let pending_workspace_creates =
+                                        Rc::clone(&pending_workspace_creates);
+                                    let repo_name_for_callback = repo_name.clone();
+                                    let toast_create = toast_create.clone();
+                                    let inserted_workspace_name =
+                                        Arc::new(Mutex::new(None::<String>));
+                                    spawn_background_job_with_progress(
+                                        {
+                                            let db_path = db_path.clone();
+                                            let repo_name = repo_name.clone();
+                                            let inserted_workspace_name =
+                                                inserted_workspace_name.clone();
+                                            move |progress| {
+                                                WorkspaceStore::open_app(db_path).and_then(
+                                                    |store| {
+                                                        store.create_lifecycle_job_with_progress(
+                                                            CreateWorkspace {
+                                                                repository_name: repo_name,
+                                                                name: String::new(),
+                                                                branch: String::new(),
+                                                                base_ref: None,
+                                                            },
+                                                            |workspace| {
+                                                                if let Ok(mut name) =
+                                                                    inserted_workspace_name.lock()
+                                                                {
+                                                                    *name = Some(
+                                                                        workspace.name.clone(),
+                                                                    );
+                                                                }
+                                                                progress();
+                                                            },
+                                                        )
+                                                    },
+                                                )
+                                            }
+                                        },
+                                        {
+                                            let inserted_workspace_name =
+                                                inserted_workspace_name.clone();
+                                            let app_state = app_state.clone();
+                                            let stack = stack.clone();
+                                            let refresh_hub = refresh_hub.clone();
+                                            let refresh_workspace = refresh_workspace.clone();
+                                            let refresh_view_preferences =
+                                                refresh_view_preferences.clone();
+                                            move || {
+                                                let workspace_name = inserted_workspace_name
+                                                    .lock()
+                                                    .ok()
+                                                    .and_then(|name| name.clone());
+                                                if let Some(workspace_name) = workspace_name {
+                                                    app_state
+                                                        .navigate_to_workspace_with_default_tab(
+                                                            Some(workspace_name),
+                                                            Some(WorkspaceTab::Chats),
+                                                        );
+                                                    stack.set_visible_child_name("workspace");
+                                                    refresh_hub.refresh(RefreshScope::Sidebar);
+                                                    refresh_hub.refresh(RefreshScope::Dashboard);
+                                                    refresh_workspace();
+                                                    refresh_view_preferences();
+                                                }
+                                            }
+                                        },
+                                        move |result| {
+                                            pending_workspace_creates
+                                                .borrow_mut()
+                                                .remove(&repo_name_for_callback);
+                                            add_btn.set_sensitive(true);
+                                            add_btn.set_tooltip_text(Some("Create workspace"));
+                                            match result {
+                                                Ok(workspace) => {
+                                                    app_state
+                                                        .navigate_to_workspace_with_default_tab(
+                                                            Some(workspace.name),
+                                                            Some(WorkspaceTab::Chats),
+                                                        );
+                                                    stack.set_visible_child_name("workspace");
+                                                    refresh_hub.refresh(RefreshScope::Projects);
+                                                    refresh_hub.refresh(RefreshScope::Sidebar);
+                                                    refresh_hub.refresh(RefreshScope::Dashboard);
+                                                    refresh_workspace();
+                                                    refresh_view_preferences();
+                                                }
+                                                Err(err) => toast_create.error(format!(
+                                                    "Create workspace failed: {err:#}"
+                                                )),
+                                            }
+                                        },
+                                    );
+                                }
+                            });
+                        list_for_apply.append(&header_row);
+                        row_idx += 1;
+
+                        if lines.is_empty() {
+                            let empty_row = empty_repo_row();
+                            list_for_apply.append(&empty_row);
+                            row_idx += 1;
+                            continue;
+                        }
+
+                        for line in lines {
+                            let ws = &line.workspace;
+                            let row = build_workspace_row(
+                                &ws.name,
+                                &ws.branch,
+                                &ws.status,
+                                line.diff_additions,
+                                line.diff_deletions,
+                                &ws.updated_at,
+                            );
+                            let workspace_name = Rc::new(RefCell::new(ws.name.clone()));
+                            workspace_rows_for_apply.borrow_mut().insert(
+                                ws.name.clone(),
+                                SidebarWorkspaceRow {
+                                    name: Rc::clone(&workspace_name),
+                                    name_label: row.name_label.clone(),
+                                    meta_label: row.meta_label.clone(),
+                                    status: ws.status.clone(),
+                                    updated_at: ws.updated_at.clone(),
                                 },
                             );
+                            if workspace_status_allows_sidebar_actions(&ws.status) {
+                                attach_workspace_row_context_menu(
+                                    &row.row,
+                                    Rc::clone(&workspace_name),
+                                    ws.status.clone(),
+                                    app_state.clone(),
+                                    stack.clone(),
+                                    window.clone(),
+                                    refresh_hub.clone(),
+                                    refresh_workspace.clone(),
+                                    refresh_view_preferences.clone(),
+                                    toast_populate.clone(),
+                                );
+                                names_for_apply
+                                    .borrow_mut()
+                                    .insert(row_idx, Rc::clone(&workspace_name));
+                            }
+                            list_for_apply.append(&row.row);
+                            row_idx += 1;
                         }
-                    });
-                    list.append(&header_row);
-                    row_idx += 1;
-
-                    if lines.is_empty() {
-                        let empty_row = empty_repo_row();
-                        list.append(&empty_row);
-                        row_idx += 1;
-                        continue;
                     }
 
-                    for line in lines {
-                        let ws = &line.workspace;
-                        let row = build_workspace_row(
-                            &ws.name,
-                            &ws.branch,
-                            &ws.status,
-                            line.diff_additions,
-                            line.diff_deletions,
-                            &ws.updated_at,
-                        );
-                        let workspace_name = Rc::new(RefCell::new(ws.name.clone()));
-                        workspace_rows.borrow_mut().insert(
-                            ws.name.clone(),
-                            SidebarWorkspaceRow {
-                                name: Rc::clone(&workspace_name),
-                                name_label: row.name_label.clone(),
-                                meta_label: row.meta_label.clone(),
-                                status: ws.status.clone(),
-                                updated_at: ws.updated_at.clone(),
-                            },
-                        );
-                        if workspace_status_allows_sidebar_actions(&ws.status) {
-                            attach_workspace_row_context_menu(
-                                &row.row,
-                                Rc::clone(&workspace_name),
-                                ws.status.clone(),
-                                app_state.clone(),
-                                stack.clone(),
-                                window.clone(),
-                                refresh_hub.clone(),
-                                refresh_workspace.clone(),
-                                refresh_view_preferences.clone(),
-                                toast_populate.clone(),
-                            );
-                            names
-                                .borrow_mut()
-                                .insert(row_idx, Rc::clone(&workspace_name));
+                    if list_for_apply.first_child().is_none() {
+                        let empty = Label::new(Some("No workspaces."));
+                        empty.add_css_class("empty-label");
+                        empty.set_margin_start(12);
+                        empty.set_margin_top(16);
+                        list_for_apply.append(&ListBoxRow::builder().child(&empty).build());
+                    }
+
+                    if sidebar_should_restore_workspace_selection(
+                        &state_for_apply.snapshot().active_page,
+                    ) {
+                        let names_ref = names_for_apply.borrow();
+                        let target_idx = prev_selected.as_deref().and_then(|name| {
+                            names_ref.iter().find_map(|(&idx, row_name)| {
+                                (row_name.borrow().as_str() == name).then_some(idx)
+                            })
+                        });
+                        drop(names_ref);
+                        if let Some(idx) = target_idx {
+                            if let Some(row) = list_for_apply.row_at_index(idx) {
+                                restoring_workspace_selection.set(true);
+                                list_for_apply.select_row(Some(&row));
+                                restoring_workspace_selection.set(false);
+                            }
                         }
-                        list.append(&row.row);
-                        row_idx += 1;
                     }
-                }
-            }
-
-            if list.first_child().is_none() {
-                let empty = Label::new(Some("No workspaces."));
-                empty.add_css_class("empty-label");
-                empty.set_margin_start(12);
-                empty.set_margin_top(16);
-                list.append(&ListBoxRow::builder().child(&empty).build());
-            }
-
-            if sidebar_should_restore_workspace_selection(&state.snapshot().active_page) {
-                let names_ref = names.borrow();
-                let target_idx = prev_selected.as_deref().and_then(|name| {
-                    names_ref.iter().find_map(|(&idx, row_name)| {
-                        (row_name.borrow().as_str() == name).then_some(idx)
-                    })
-                });
-                drop(names_ref);
-                if let Some(idx) = target_idx {
-                    if let Some(row) = list.row_at_index(idx) {
-                        restoring_workspace_selection.set(true);
-                        list.select_row(Some(&row));
-                        restoring_workspace_selection.set(false);
-                    }
-                }
-            }
+                },
+            );
         }
     };
 
@@ -520,6 +601,7 @@ pub(crate) fn build_app_sidebar(
     let archcar_paths = app_state.paths.clone();
     let restoring_workspace_selection_select = restoring_workspace_selection.clone();
     let toast_select = toast_manager.clone();
+    let selection_generation = Rc::new(Cell::new(0_u64));
     list.connect_row_selected(move |_, row| {
         guarded_gtk_callback((), || {
             if !workspace_row_selection_should_open_workspace(
@@ -535,42 +617,61 @@ pub(crate) fn build_app_sidebar(
             }) else {
                 return;
             };
-            let default_tab =
-                match validate_sidebar_workspace_selection(&state_select, &name, |workspace| {
-                    WorkspaceStore::open_app(db_path_select.clone()).and_then(|store| {
-                        if !store.workspace_exists_by_name(workspace)? {
-                            return Ok(SidebarWorkspaceLookup::MissingWorkspace);
-                        }
-                        store.workspace_view_defaults(workspace).map(|defaults| {
-                            SidebarWorkspaceLookup::Ready {
-                                default_visible_tab: defaults.default_visible_tab,
+            let generation = selection_generation.get() + 1;
+            selection_generation.set(generation);
+            let db_path = db_path_select.clone();
+            let lookup_name = name.clone();
+            let state_select = state_select.clone();
+            let refresh_select = refresh_select.clone();
+            let toast_select = toast_select.clone();
+            let archcar_paths = archcar_paths.clone();
+            let refresh_view_preferences_select = refresh_view_preferences_select.clone();
+            let refresh_workspace_select = refresh_workspace_select.clone();
+            let stack_select = stack_select.clone();
+            let selection_generation = selection_generation.clone();
+            spawn_background_job(
+                move || load_sidebar_workspace_lookup(db_path, lookup_name),
+                move |result| {
+                    if selection_generation.get() != generation {
+                        return;
+                    }
+                    let default_tab = match result {
+                        Ok(lookup) => {
+                            match validate_sidebar_workspace_selection(&state_select, &name, |_| {
+                                Ok(lookup)
+                            }) {
+                                SidebarWorkspaceSelection::Ready { default_tab } => default_tab,
+                                SidebarWorkspaceSelection::Stale => {
+                                    refresh_select
+                                        .refresh_event(RefreshEvent::WorkspaceInventoryChanged);
+                                    return;
+                                }
+                                SidebarWorkspaceSelection::Unavailable { message } => {
+                                    toast_select.error(format!("Open workspace failed: {message}"));
+                                    return;
+                                }
                             }
-                        })
-                    })
-                }) {
-                    SidebarWorkspaceSelection::Ready { default_tab } => default_tab,
-                    SidebarWorkspaceSelection::Stale => {
-                        refresh_select.refresh_event(RefreshEvent::WorkspaceInventoryChanged);
-                        return;
-                    }
-                    SidebarWorkspaceSelection::Unavailable { message } => {
-                        toast_select.error(format!("Open workspace failed: {message}"));
-                        return;
-                    }
-                };
-            spawn_archcar_request(
-                archcar_paths.clone(),
-                ArchcarRequest::EnsureWorkspaceDefaultSession {
-                    workspace: name.clone(),
-                    kind: SessionKind::Codex,
-                    harness: None,
+                        }
+                        Err(message) => {
+                            toast_select.error(format!("Open workspace failed: {message}"));
+                            return;
+                        }
+                    };
+                    spawn_archcar_request(
+                        archcar_paths.clone(),
+                        ArchcarRequest::EnsureWorkspaceDefaultSession {
+                            workspace: name.clone(),
+                            kind: SessionKind::Codex,
+                            harness: None,
+                        },
+                    );
+                    state_select.navigate_to_workspace_with_default_tab(Some(name), default_tab);
+                    refresh_view_preferences_select();
+                    refresh_workspace_select();
+                    refresh_select.refresh(RefreshScope::Dashboard);
+                    stack_select.set_visible_child_name("workspace");
                 },
             );
-            state_select.navigate_to_workspace_with_default_tab(Some(name), default_tab);
-            refresh_view_preferences_select();
-            refresh_workspace_select();
-            refresh_select.refresh(RefreshScope::Dashboard);
-            stack_select.set_visible_child_name("workspace");
         })
     });
 
@@ -746,6 +847,25 @@ struct SidebarWorkspaceRow {
     updated_at: String,
 }
 
+#[derive(Clone)]
+struct SidebarSnapshot {
+    repositories: Vec<Repository>,
+    statuses: Vec<WorkspaceStatusLine>,
+}
+
+fn load_sidebar_snapshot(db_path: PathBuf) -> Result<SidebarSnapshot, String> {
+    let repositories = RepositoryStore::open(db_path.clone())
+        .and_then(|store| store.list())
+        .map_err(|err| format!("{err:#}"))?;
+    let statuses = WorkspaceStore::open_app(db_path)
+        .and_then(|store| store.list_status())
+        .map_err(|err| format!("{err:#}"))?;
+    Ok(SidebarSnapshot {
+        repositories,
+        statuses,
+    })
+}
+
 struct BuiltWorkspaceRow {
     row: ListBoxRow,
     name_label: Label,
@@ -906,21 +1026,49 @@ fn attach_workspace_row_context_menu(
                     let state = state.clone();
                     let refresh_hub = refresh_hub.clone();
                     let refresh_view_preferences = refresh_view_preferences.clone();
+                    let window = window.clone();
+                    let toast_manager = toast_manager.clone();
                     move |new_name| {
                         let old_name = workspace_name.borrow().clone();
                         if new_name.is_empty() || new_name == old_name {
                             return Ok(());
                         }
-                        let workspace = WorkspaceStore::open_app(state.workspace_database_path())
-                            .and_then(|store| store.rename(&old_name, &new_name))
-                            .map_err(|err| format!("{err:#}"))?;
-                        state.rename_workspace_in_navigation(&old_name, &workspace.name);
-                        refresh_view_preferences();
-                        refresh_hub.refresh_event(RefreshEvent::WorkspaceMetadataChanged {
-                            old_workspace: old_name,
-                            workspace: workspace.name,
-                            branch: None,
-                        });
+                        let db_path = state.workspace_database_path();
+                        let state = state.clone();
+                        let refresh_hub = refresh_hub.clone();
+                        let refresh_view_preferences = refresh_view_preferences.clone();
+                        let window = window.clone();
+                        let toast_manager = toast_manager.clone();
+                        let old_name_for_job = old_name.clone();
+                        spawn_background_job(
+                            move || {
+                                WorkspaceStore::open_app(db_path)
+                                    .and_then(|store| store.rename(&old_name_for_job, &new_name))
+                                    .map_err(|err| format!("{err:#}"))
+                            },
+                            move |result| match result {
+                                Ok(workspace) => {
+                                    state
+                                        .rename_workspace_in_navigation(&old_name, &workspace.name);
+                                    refresh_view_preferences();
+                                    refresh_hub.refresh_event(
+                                        RefreshEvent::WorkspaceMetadataChanged {
+                                            old_workspace: old_name,
+                                            workspace: workspace.name,
+                                            branch: None,
+                                        },
+                                    );
+                                }
+                                Err(err) => {
+                                    show_workspace_error_dialog(
+                                        &window,
+                                        "Workspace action failed",
+                                        &err,
+                                        &toast_manager,
+                                    );
+                                }
+                            },
+                        );
                         Ok(())
                     }
                 }),
@@ -1667,6 +1815,56 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_populate_loads_snapshot_in_background() {
+        let source = include_str!("sidebar.rs");
+        let start = source.find("let populate = {").expect("populate exists");
+        let end = source[start..]
+            .find("refresh_hub.set_workspace_nav_row")
+            .map(|offset| start + offset)
+            .expect("workspace nav row handler follows populate");
+        let populate_region = &source[start..end];
+
+        assert!(
+            populate_region.contains("spawn_background_job("),
+            "sidebar populate must load workspace snapshots off the GTK thread"
+        );
+        assert!(
+            !populate_region.contains("RepositoryStore::open(db_path_populate.clone())"),
+            "sidebar populate must not open repository storage on the GTK thread"
+        );
+        assert!(
+            !populate_region.contains("WorkspaceStore::open_app(db_path_populate.clone())"),
+            "sidebar populate must not open workspace storage on the GTK thread"
+        );
+    }
+
+    #[test]
+    fn sidebar_selection_loads_defaults_in_background() {
+        let source = include_str!("sidebar.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("sidebar source should contain production code");
+        let start = production_source
+            .find("list.connect_row_selected(move |_, row| {")
+            .expect("row selection handler exists");
+        let end = production_source[start..]
+            .find("scroll.set_child(Some(&list));")
+            .map(|offset| start + offset)
+            .expect("sidebar scroll follows row selection handler");
+        let region = &production_source[start..end];
+
+        assert!(
+            region.contains("spawn_background_job("),
+            "sidebar row selection must load workspace defaults off the GTK thread"
+        );
+        assert!(
+            !region.contains("WorkspaceStore::open_app("),
+            "sidebar row selection must not open workspace storage on the GTK thread"
+        );
+    }
+
+    #[test]
     fn sidebar_restores_workspace_selection_only_on_workspace_pages() {
         assert!(sidebar_should_restore_workspace_selection(
             &AppPage::Workspace
@@ -1725,6 +1923,32 @@ mod tests {
         assert!(!production_source.contains(
             "state.rename_workspace_in_navigation(&workspace_name, &workspace.name);\n                        refresh_view_preferences();\n                        refresh_workspace();\n                        refresh_hub.refresh_event(RefreshEvent::WorkspaceInventoryChanged);"
         ));
+    }
+
+    #[test]
+    fn sidebar_rename_runs_storage_work_in_background() {
+        let source = include_str!("sidebar.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("sidebar source should contain production code");
+        let start = production_source
+            .find("let rename_btn = menu_text_button(\"Rename\");")
+            .expect("rename action exists");
+        let end = production_source[start..]
+            .find("let duplicate_btn = menu_text_button(\"Duplicate\");")
+            .map(|offset| start + offset)
+            .expect("duplicate action follows rename action");
+        let region = &production_source[start..end];
+
+        assert!(
+            region.contains("spawn_background_job("),
+            "sidebar rename must execute storage work off the GTK thread"
+        );
+        assert!(
+            !region.contains("WorkspaceStore::open_app(state.workspace_database_path())"),
+            "sidebar rename must not open workspace storage on the GTK thread"
+        );
     }
 
     #[test]

@@ -6,6 +6,7 @@ mod background_sync;
 mod buttons;
 mod command_palette;
 mod dashboard;
+mod file_component;
 mod font_assets;
 mod history;
 mod history_data;
@@ -253,6 +254,32 @@ fn sanitize_dev_application_id_suffix(value: &str) -> String {
         }
     }
     out.trim_matches('-').to_owned()
+}
+
+fn dev_instance_banner_text() -> Option<String> {
+    let instance = std::env::var("ARCHDUCTOR_DEV_INSTANCE").ok()?;
+    let instance = instance.trim();
+    if instance.is_empty() {
+        None
+    } else {
+        Some(format!("Dev worktree: {instance}"))
+    }
+}
+
+fn build_dev_instance_banner(text: &str) -> GBox {
+    let banner = GBox::new(Orientation::Horizontal, 0);
+    banner.add_css_class("dev-instance-banner");
+    banner.set_hexpand(true);
+
+    let label = Label::new(Some(text));
+    label.add_css_class("dev-instance-banner-label");
+    label.set_hexpand(true);
+    label.set_xalign(0.5);
+    label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    label.set_tooltip_text(Some(text));
+    banner.append(&label);
+
+    banner
 }
 
 fn parse_launch_target<I, S>(args: I) -> Result<LaunchTarget, String>
@@ -987,6 +1014,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         let main_stack_for_palette = main_stack.clone();
         let split_for_palette = split.clone();
         let hub_for_palette = refresh_hub.clone();
+        let toast_for_palette = toast_manager.clone();
         let refresh_workspace_for_palette = refresh_workspace_detail.clone();
         let keybindings_for_palette = Rc::clone(&current_keybindings);
         Rc::new(move || {
@@ -1009,6 +1037,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
             let stack_for_action = main_stack_for_palette.clone();
             let split_for_action = split_for_palette.clone();
             let hub_for_action = hub_for_palette.clone();
+            let toast_for_action = toast_for_palette.clone();
             let refresh_workspace_for_action = refresh_workspace_for_palette.clone();
             show_command_palette(
                 &window_for_palette,
@@ -1020,6 +1049,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
                         &stack_for_action,
                         &split_for_action,
                         &hub_for_action,
+                        &toast_for_action,
                         &refresh_workspace_for_action,
                     );
                 }),
@@ -1027,6 +1057,8 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         })
     };
     let window_content = gtk::Overlay::new();
+    window_content.set_hexpand(true);
+    window_content.set_vexpand(true);
     window_content.set_child(Some(&split));
     let window_controls = gtk::WindowControls::new(gtk::PackType::Start);
     window_controls.set_decoration_layout(Some("close,minimize,maximize:"));
@@ -1036,7 +1068,15 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     window_controls.set_height_request(COLUMN_HEADER_HEIGHT);
     window_controls.set_overflow(gtk::Overflow::Hidden);
     window_content.add_overlay(&window_controls);
-    window.set_child(Some(&window_content));
+    let window_shell = GBox::new(Orientation::Vertical, 0);
+    window_shell.set_hexpand(true);
+    window_shell.set_vexpand(true);
+    if let Some(banner_text) = dev_instance_banner_text() {
+        let banner = build_dev_instance_banner(&banner_text);
+        window_shell.prepend(&banner);
+    }
+    window_shell.append(&window_content);
+    window.set_child(Some(&window_shell));
     window.present();
     setup::show_blocking_setup_if_needed(&window);
     tracing::info!(
@@ -1044,28 +1084,22 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         "gtk startup: window presented"
     );
 
-    if reconcile_runtime_state_for_ui(
-        &app_state.workspace_database_path(),
-        &runtime_error_reporter,
-        &toast_manager,
+    spawn_runtime_reconciliation(
+        app_state.workspace_database_path(),
+        refresh_hub.clone(),
+        app_state.clone(),
+        runtime_error_reporter.clone(),
+        toast_manager.clone(),
         "startup",
-    ) {
-        refresh_hub.refresh(RefreshScope::All);
-    }
-    match WorkspaceStore::open_app(app_state.workspace_database_path())
-        .and_then(|store| store.recover_workspace_lifecycle_jobs())
-    {
-        Ok(recovered) if recovered > 0 => {
-            refresh_hub.refresh_event(RefreshEvent::WorkspaceInventoryChanged);
-        }
-        Ok(_) => {}
-        Err(err) => report_runtime_error(
-            &runtime_error_reporter,
-            &toast_manager,
-            "workspace lifecycle recovery",
-            err,
-        ),
-    }
+        true,
+    );
+    spawn_workspace_lifecycle_recovery(
+        app_state.workspace_database_path(),
+        refresh_hub.clone(),
+        runtime_error_reporter.clone(),
+        toast_manager.clone(),
+        "workspace lifecycle recovery",
+    );
 
     let spotlight_event_tx = {
         let (tx, rx) = mpsc::channel();
@@ -1077,17 +1111,15 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         // PER-190: Spotlight file events arrive on a notify thread via std::mpsc;
         // remove this timer when a GLib main-context channel replaces that bridge.
         glib::timeout_add_seconds_local(1, move || {
-            if rx.try_iter().next().is_some()
-                && reconcile_runtime_state_for_ui(
-                    &db_path_spotlight_events,
-                    &runtime_reporter_spotlight_events,
-                    &toast_spotlight_events,
+            if rx.try_iter().next().is_some() {
+                spawn_runtime_reconciliation(
+                    db_path_spotlight_events.clone(),
+                    hub_spotlight_events.clone(),
+                    state_spotlight_events.clone(),
+                    runtime_reporter_spotlight_events.clone(),
+                    toast_spotlight_events.clone(),
                     "spotlight event",
-                )
-            {
-                refresh_runtime_reconciliation_event(
-                    &hub_spotlight_events,
-                    &state_spotlight_events,
+                    false,
                 );
             }
             glib::ControlFlow::Continue
@@ -1096,18 +1128,14 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     };
 
     let spotlight_watcher = Rc::new(RefCell::new(None));
-    if let Err(err) = refresh_spotlight_file_watcher(
-        &app_state.workspace_database_path(),
-        &spotlight_event_tx,
-        &spotlight_watcher,
-    ) {
-        report_runtime_error(
-            &runtime_error_reporter,
-            &toast_manager,
-            "spotlight watcher",
-            err,
-        );
-    }
+    spawn_spotlight_file_watcher_refresh(
+        app_state.workspace_database_path(),
+        spotlight_event_tx.clone(),
+        spotlight_watcher.clone(),
+        runtime_error_reporter.clone(),
+        toast_manager.clone(),
+        "spotlight watcher",
+    );
 
     {
         let db_path_on_close = app_state.workspace_database_path();
@@ -1122,14 +1150,15 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
             let _keep_refresh_subscription_alive = &app_state_refresh_subscription;
             navigation_coordinator_on_close.borrow_mut().take();
             *spotlight_watcher_on_close.borrow_mut() = None;
-            if reconcile_runtime_state_for_ui(
-                &db_path_on_close,
-                &runtime_reporter_on_close,
-                &toast_on_close,
+            spawn_runtime_reconciliation(
+                db_path_on_close.clone(),
+                hub_on_close.clone(),
+                state_on_close.clone(),
+                runtime_reporter_on_close.clone(),
+                toast_on_close.clone(),
                 "close",
-            ) {
-                refresh_runtime_reconciliation_event(&hub_on_close, &state_on_close);
-            }
+                false,
+            );
         });
     }
 
@@ -1143,28 +1172,22 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
             if !window.is_active() {
                 return;
             }
-            if reconcile_runtime_state_for_ui(
-                &db_path_on_focus,
-                &runtime_reporter_on_focus,
-                &toast_on_focus,
+            spawn_runtime_reconciliation(
+                db_path_on_focus.clone(),
+                hub_on_focus.clone(),
+                state_on_focus.clone(),
+                runtime_reporter_on_focus.clone(),
+                toast_on_focus.clone(),
                 "focus",
-            ) {
-                refresh_runtime_reconciliation_event(&hub_on_focus, &state_on_focus);
-            }
-            match WorkspaceStore::open_app(&db_path_on_focus)
-                .and_then(|store| store.recover_workspace_lifecycle_jobs())
-            {
-                Ok(recovered) if recovered > 0 => {
-                    hub_on_focus.refresh_event(RefreshEvent::WorkspaceInventoryChanged);
-                }
-                Ok(_) => {}
-                Err(err) => report_runtime_error(
-                    &runtime_reporter_on_focus,
-                    &toast_on_focus,
-                    "workspace lifecycle recovery",
-                    err,
-                ),
-            }
+                false,
+            );
+            spawn_workspace_lifecycle_recovery(
+                db_path_on_focus.clone(),
+                hub_on_focus.clone(),
+                runtime_reporter_on_focus.clone(),
+                toast_on_focus.clone(),
+                "workspace lifecycle recovery",
+            );
         });
     }
 
@@ -1226,6 +1249,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     let keybindings_kb = Rc::clone(&current_keybindings);
     let state_kb = app_state.clone();
     let stack_kb = main_stack.clone();
+    let toast_kb = toast_manager.clone();
     let refresh_workspace_kb = refresh_workspace_detail.clone();
     evk.connect_key_pressed(move |_, keyval, _, modifiers| {
         if let Some(key) = keyval.to_unicode() {
@@ -1239,6 +1263,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
                     &stack_kb,
                     &split_kb,
                     &hub_kb,
+                    &toast_kb,
                     &refresh_workspace_kb,
                 );
                 return gtk::glib::Propagation::Stop;
@@ -1271,6 +1296,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
                         &stack_kb,
                         &split_kb,
                         &hub_kb,
+                        &toast_kb,
                         &refresh_workspace_kb,
                     );
                     return gtk::glib::Propagation::Stop;
@@ -1283,55 +1309,62 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     window.add_controller(evk);
 
     // Notification tracker: fires toasts when sessions stop or checks fail.
-    // State is (workspace_name, prev_active_sessions, prev_session_was_running).
-    let notification_prev: Rc<RefCell<Option<(String, usize, bool)>>> = Rc::new(RefCell::new(None));
+    // State tracks the previously sampled workspace notification status.
+    let notification_prev: Rc<RefCell<Option<NotificationPrevious>>> = Rc::new(RefCell::new(None));
     {
         let db_path_notif = app_state.workspace_database_path();
         let state_notif = app_state.clone();
         let toast_notif = toast_manager.clone();
         let prev_notif = notification_prev.clone();
+        let notification_in_flight = Rc::new(Cell::new(false));
         // PER-190: Notification rules intentionally sample persisted workspace
         // status every five seconds; remove when process-exit events drive rules.
         glib::timeout_add_seconds_local(5, move || {
+            if notification_in_flight.get() {
+                return glib::ControlFlow::Continue;
+            }
             let Some(workspace) = state_notif.selected_workspace() else {
                 *prev_notif.borrow_mut() = None;
                 return glib::ControlFlow::Continue;
             };
-            let rules = WorkspaceStore::open_app(db_path_notif.clone())
-                .and_then(|store| store.workspace_view_defaults(&workspace))
-                .map(|defaults| defaults.notification_rules)
-                .unwrap_or_default();
-            let notify_session_stop = rules.iter().any(|r| {
-                matches!(
-                    r.to_ascii_lowercase().replace('_', "").as_str(),
-                    "sessionstopped" | "sessionstop" | "onsessionstop" | "session"
-                )
-            });
-            let notify_check_fail = rules.iter().any(|r| {
-                matches!(
-                    r.to_ascii_lowercase().replace('_', "").as_str(),
-                    "checksfailed" | "checkfail" | "oncheckfail" | "checks"
-                )
-            });
-            if !notify_session_stop && !notify_check_fail {
-                return glib::ControlFlow::Continue;
-            }
-            let Ok(summary) = WorkspaceStore::open_app(db_path_notif.clone())
-                .and_then(|store| store.checks_summary(&workspace))
-            else {
-                return glib::ControlFlow::Continue;
-            };
-            let current_active = summary.active_sessions;
-            let session_running = summary.session_status == Some(ProcessStatus::Running);
-            let mut prev = prev_notif.borrow_mut();
-            if let Some((ref prev_ws, _prev_active, prev_running)) = *prev {
-                if prev_ws == &workspace && notify_session_stop && prev_running && !session_running
-                {
-                    toast_notif.show(ToastMessage::success("Agent session stopped."));
-                }
-            }
-            let _ = notify_check_fail;
-            *prev = Some((workspace, current_active, session_running));
+            notification_in_flight.set(true);
+            let db_path = db_path_notif.clone();
+            let toast_notif = toast_notif.clone();
+            let prev_notif = prev_notif.clone();
+            let in_flight = Rc::clone(&notification_in_flight);
+            archcar_async::spawn_background_job(
+                move || load_notification_snapshot(db_path, workspace),
+                move |result| {
+                    in_flight.set(false);
+                    let Ok(Some(snapshot)) = result else {
+                        return;
+                    };
+                    let mut prev = prev_notif.borrow_mut();
+                    if let Some(previous) = prev.as_ref() {
+                        let prev_check_fail = previous.checks_failed;
+                        if previous.workspace == snapshot.workspace
+                            && snapshot.notify_session_stop
+                            && previous.session_running
+                            && !snapshot.session_running
+                        {
+                            toast_notif.show(ToastMessage::success("Agent session stopped."));
+                        }
+                        if previous.workspace == snapshot.workspace
+                            && snapshot.notify_check_fail
+                            && !prev_check_fail
+                            && snapshot.checks_failed
+                        {
+                            toast_notif.show(ToastMessage::warning("Checks failed."));
+                        }
+                    }
+                    *prev = Some(NotificationPrevious {
+                        workspace: snapshot.workspace,
+                        active_sessions: snapshot.active_sessions,
+                        session_running: snapshot.session_running,
+                        checks_failed: snapshot.checks_failed,
+                    });
+                },
+            );
             glib::ControlFlow::Continue
         });
     }
@@ -1346,26 +1379,23 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     // PER-190: This is the fallback runtime reconciler for missed focus/file
     // events; remove when all runtime producers emit reliable RefreshHub events.
     glib::timeout_add_seconds_local(5, move || {
-        if reconcile_runtime_state_for_ui(
-            &db_path_runtime_auto,
-            &runtime_reporter_auto,
-            &toast_auto,
+        spawn_runtime_reconciliation(
+            db_path_runtime_auto.clone(),
+            hub_runtime_auto.clone(),
+            state_runtime_auto.clone(),
+            runtime_reporter_auto.clone(),
+            toast_auto.clone(),
             "timer",
-        ) {
-            refresh_runtime_reconciliation_event(&hub_runtime_auto, &state_runtime_auto);
-        }
-        if let Err(err) = refresh_spotlight_file_watcher(
-            &db_path_runtime_auto,
-            &spotlight_event_tx_auto,
-            &spotlight_watcher_auto,
-        ) {
-            report_runtime_error(
-                &runtime_reporter_auto,
-                &toast_auto,
-                "spotlight watcher",
-                err,
-            );
-        }
+            false,
+        );
+        spawn_spotlight_file_watcher_refresh(
+            db_path_runtime_auto.clone(),
+            spotlight_event_tx_auto.clone(),
+            spotlight_watcher_auto.clone(),
+            runtime_reporter_auto.clone(),
+            toast_auto.clone(),
+            "spotlight watcher",
+        );
         glib::ControlFlow::Continue
     });
 }
@@ -1474,6 +1504,7 @@ fn apply_palette_target(
     main_stack: &Stack,
     split: &adw::OverlaySplitView,
     refresh_hub: &RefreshHub,
+    toast_manager: &ToastManager,
     refresh_workspace: &impl Fn(),
 ) {
     match target {
@@ -1495,9 +1526,24 @@ fn apply_palette_target(
         PaletteTarget::ToggleSidebar => split.set_show_sidebar(!split.shows_sidebar()),
         PaletteTarget::RunCommand(cmd) => {
             if let Some(workspace) = state.selected_workspace() {
-                let _ = WorkspaceStore::open_app(state.workspace_database_path())
-                    .and_then(|store| store.terminal_command(&workspace, &cmd));
-                refresh_hub.refresh(RefreshScope::Workspace);
+                let db_path = state.workspace_database_path();
+                let refresh_hub = refresh_hub.clone();
+                let toast_manager = toast_manager.clone();
+                archcar_async::spawn_background_job(
+                    move || {
+                        WorkspaceStore::open_app(db_path)
+                            .and_then(|store| store.terminal_command(&workspace, &cmd))
+                            .map_err(|err| format!("{err:#}"))
+                    },
+                    move |result| {
+                        if let Err(err) = result {
+                            toast_manager.show(ToastMessage::warning(format!(
+                                "Terminal command failed: {err}"
+                            )));
+                        }
+                        refresh_hub.refresh(RefreshScope::Workspace);
+                    },
+                );
             }
         }
     }
@@ -1565,9 +1611,135 @@ fn report_runtime_error(
     err: anyhow::Error,
 ) {
     tracing::error!(trigger, error = %err, "runtime refresh failed");
-    if let Some(message) = reporter.borrow_mut().record(trigger, &format!("{err:#}")) {
+    report_runtime_error_message(reporter, toast_manager, trigger, &format!("{err:#}"));
+}
+
+fn report_runtime_error_message(
+    reporter: &Rc<RefCell<RuntimeErrorReporter>>,
+    toast_manager: &ToastManager,
+    trigger: &str,
+    message: &str,
+) {
+    if let Some(message) = reporter.borrow_mut().record(trigger, message) {
         toast_manager.show(ToastMessage::warning(message));
     }
+}
+
+struct NotificationSnapshot {
+    workspace: String,
+    notify_session_stop: bool,
+    notify_check_fail: bool,
+    active_sessions: usize,
+    session_running: bool,
+    checks_failed: bool,
+}
+
+struct NotificationPrevious {
+    workspace: String,
+    active_sessions: usize,
+    session_running: bool,
+    checks_failed: bool,
+}
+
+fn notification_rule_enabled(rules: &[String], aliases: &[&str]) -> bool {
+    rules.iter().any(|rule| {
+        let normalized = rule.to_ascii_lowercase().replace('_', "");
+        aliases.iter().any(|alias| normalized == *alias)
+    })
+}
+
+fn load_notification_snapshot(
+    db_path: PathBuf,
+    workspace: String,
+) -> Result<Option<NotificationSnapshot>, String> {
+    let store = WorkspaceStore::open_app(db_path).map_err(|err| format!("{err:#}"))?;
+    let rules = store
+        .workspace_view_defaults(&workspace)
+        .map(|defaults| defaults.notification_rules)
+        .unwrap_or_default();
+    let notify_session_stop = notification_rule_enabled(
+        &rules,
+        &["sessionstopped", "sessionstop", "onsessionstop", "session"],
+    );
+    let notify_check_fail = notification_rule_enabled(
+        &rules,
+        &["checksfailed", "checkfail", "oncheckfail", "checks"],
+    );
+    if !notify_session_stop && !notify_check_fail {
+        return Ok(None);
+    }
+    let summary = store
+        .checks_summary(&workspace)
+        .map_err(|err| format!("{err:#}"))?;
+    let checks_failed = store
+        .list_checks(&workspace)
+        .map_err(|err| format!("{err:#}"))?
+        .into_iter()
+        .next()
+        .is_some_and(|check| {
+            check.status == ProcessStatus::Exited && check.exit_code.is_some_and(|code| code != 0)
+        });
+    Ok(Some(NotificationSnapshot {
+        workspace,
+        notify_session_stop,
+        notify_check_fail,
+        active_sessions: summary.active_sessions,
+        session_running: summary.session_status == Some(ProcessStatus::Running),
+        checks_failed,
+    }))
+}
+
+fn spawn_runtime_reconciliation(
+    db_path: PathBuf,
+    refresh_hub: RefreshHub,
+    state: AppState,
+    reporter: Rc<RefCell<RuntimeErrorReporter>>,
+    toast_manager: ToastManager,
+    trigger: &'static str,
+    refresh_all: bool,
+) {
+    archcar_async::spawn_background_job(
+        move || {
+            reconcile_runtime_state(&db_path)
+                .map(|report| report.changed())
+                .map_err(|err| format!("{err:#}"))
+        },
+        move |result| match result {
+            Ok(true) if refresh_all => refresh_hub.refresh(RefreshScope::All),
+            Ok(true) => refresh_runtime_reconciliation_event(&refresh_hub, &state),
+            Ok(false) => {}
+            Err(message) => {
+                tracing::error!(trigger, error = %message, "runtime refresh failed");
+                report_runtime_error_message(&reporter, &toast_manager, trigger, &message);
+            }
+        },
+    );
+}
+
+fn spawn_workspace_lifecycle_recovery(
+    db_path: PathBuf,
+    refresh_hub: RefreshHub,
+    reporter: Rc<RefCell<RuntimeErrorReporter>>,
+    toast_manager: ToastManager,
+    trigger: &'static str,
+) {
+    archcar_async::spawn_background_job(
+        move || {
+            WorkspaceStore::open_app(db_path)
+                .and_then(|store| store.recover_workspace_lifecycle_jobs())
+                .map_err(|err| format!("{err:#}"))
+        },
+        move |result| match result {
+            Ok(recovered) if recovered > 0 => {
+                refresh_hub.refresh_event(RefreshEvent::WorkspaceInventoryChanged);
+            }
+            Ok(_) => {}
+            Err(message) => {
+                tracing::error!(trigger, error = %message, "runtime refresh failed");
+                report_runtime_error_message(&reporter, &toast_manager, trigger, &message);
+            }
+        },
+    );
 }
 
 fn reconcile_runtime_state_for_ui(
@@ -1696,13 +1868,21 @@ struct SpotlightFileWatcher {
     _watcher: RecommendedWatcher,
 }
 
-fn refresh_spotlight_file_watcher(
-    db_path: &Path,
-    event_tx: &Sender<()>,
-    current: &Rc<RefCell<Option<SpotlightFileWatcher>>>,
-) -> anyhow::Result<()> {
-    let store = WorkspaceStore::open_app(db_path)?;
-    let targets = store.spotlight_watch_targets()?;
+enum SpotlightWatchRefresh {
+    Unchanged,
+    Clear,
+    Active(SpotlightFileWatcher),
+}
+
+fn load_spotlight_file_watcher(
+    db_path: PathBuf,
+    event_tx: Sender<()>,
+    current_targets: Option<Vec<SpotlightWatchTargetKey>>,
+) -> Result<SpotlightWatchRefresh, String> {
+    let store = WorkspaceStore::open_app(db_path).map_err(|err| format!("{err:#}"))?;
+    let targets = store
+        .spotlight_watch_targets()
+        .map_err(|err| format!("{err:#}"))?;
     let target_keys = targets
         .iter()
         .map(|target| SpotlightWatchTargetKey {
@@ -1711,38 +1891,63 @@ fn refresh_spotlight_file_watcher(
         })
         .collect::<Vec<_>>();
 
-    if current
-        .borrow()
-        .as_ref()
-        .map(|watcher| watcher.targets == target_keys)
-        .unwrap_or(false)
-    {
-        return Ok(());
+    if current_targets.as_ref() == Some(&target_keys) {
+        return Ok(SpotlightWatchRefresh::Unchanged);
     }
 
     if targets.is_empty() {
-        *current.borrow_mut() = None;
-        return Ok(());
+        return Ok(SpotlightWatchRefresh::Clear);
     }
 
-    let tx = event_tx.clone();
     let mut watcher = RecommendedWatcher::new(
         move |event: notify::Result<notify::Event>| {
             if event.is_ok() {
-                let _ = tx.send(());
+                let _ = event_tx.send(());
             }
         },
         Config::default(),
-    )?;
+    )
+    .map_err(|err| format!("{err:#}"))?;
     for target in &targets {
-        watcher.watch(&target.workspace_path, RecursiveMode::Recursive)?;
+        watcher
+            .watch(&target.workspace_path, RecursiveMode::Recursive)
+            .map_err(|err| format!("{err:#}"))?;
     }
 
-    *current.borrow_mut() = Some(SpotlightFileWatcher {
+    Ok(SpotlightWatchRefresh::Active(SpotlightFileWatcher {
         targets: target_keys,
         _watcher: watcher,
-    });
-    Ok(())
+    }))
+}
+
+fn spawn_spotlight_file_watcher_refresh(
+    db_path: PathBuf,
+    event_tx: Sender<()>,
+    current: Rc<RefCell<Option<SpotlightFileWatcher>>>,
+    reporter: Rc<RefCell<RuntimeErrorReporter>>,
+    toast_manager: ToastManager,
+    trigger: &'static str,
+) {
+    let current_targets = current
+        .borrow()
+        .as_ref()
+        .map(|watcher| watcher.targets.clone());
+    archcar_async::spawn_background_job(
+        move || load_spotlight_file_watcher(db_path, event_tx, current_targets),
+        move |result| match result {
+            Ok(SpotlightWatchRefresh::Unchanged) => {}
+            Ok(SpotlightWatchRefresh::Clear) => {
+                *current.borrow_mut() = None;
+            }
+            Ok(SpotlightWatchRefresh::Active(watcher)) => {
+                *current.borrow_mut() = Some(watcher);
+            }
+            Err(message) => {
+                tracing::error!(trigger, error = %message, "runtime refresh failed");
+                report_runtime_error_message(&reporter, &toast_manager, trigger, &message);
+            }
+        },
+    );
 }
 
 pub(crate) fn title_case_workspace(name: &str) -> String {
@@ -2145,6 +2350,20 @@ mod tests {
     }
 
     #[test]
+    fn dev_instance_banner_is_inserted_above_app_content() {
+        let source = include_str!("main.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source exists");
+
+        assert!(production.contains("dev_instance_banner_text()"));
+        assert!(production.contains("build_dev_instance_banner(&banner_text)"));
+        assert!(production.contains("window_shell.prepend(&banner)"));
+        assert!(production.contains("window.set_child(Some(&window_shell))"));
+    }
+
+    #[test]
     fn dashboard_navigation_refreshes_selected_workspace_before_showing_it() {
         let state = AppState::new(
             AppPaths::from_env(),
@@ -2414,6 +2633,229 @@ mod tests {
             reporter.record("spotlight watcher", "watch permission denied"),
             Some("spotlight watcher runtime refresh failed: watch permission denied".to_owned())
         );
+    }
+
+    #[test]
+    fn runtime_reconciliation_sources_spawn_background_jobs() {
+        let source = include_str!("main.rs");
+        for (name, start_needle, end_needle) in [
+            (
+                "startup",
+                "\"gtk startup: window presented\"",
+                "let spotlight_event_tx = {",
+            ),
+            (
+                "close",
+                "window.connect_destroy(move |_| {",
+                "window.connect_is_active_notify(move |window| {",
+            ),
+            (
+                "focus",
+                "window.connect_is_active_notify(move |window| {",
+                "let db_path_background = app_state.workspace_database_path();",
+            ),
+            (
+                "timer",
+                concat!("glib::timeout", "_add_seconds_local(5, move || {"),
+                "glib::ControlFlow::Continue\n    });\n}",
+            ),
+        ] {
+            let start = source.find(start_needle).expect(name);
+            let end = source[start..]
+                .find(end_needle)
+                .map(|offset| start + offset)
+                .expect(name);
+            let region = &source[start..end];
+
+            assert!(
+                region.contains("spawn_runtime_reconciliation("),
+                "{name} runtime reconciliation must be scheduled off the GTK thread"
+            );
+            assert!(
+                !region.contains("reconcile_runtime_state_for_ui("),
+                "{name} must not reconcile runtime state on the GTK thread"
+            );
+        }
+    }
+
+    #[test]
+    fn notification_timer_loads_snapshot_in_background() {
+        let source = include_str!("main.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("main source should contain production code");
+        let start = production_source
+            .find("Notification tracker:")
+            .expect("notification tracker exists");
+        let end = production_source[start..]
+            .find("let db_path_runtime_auto")
+            .map(|offset| start + offset)
+            .expect("runtime auto timer follows notification tracker");
+        let region = &production_source[start..end];
+
+        assert!(
+            region.contains("spawn_background_job("),
+            "notification timer must load persisted state off the GTK thread"
+        );
+        assert!(
+            !region.contains("WorkspaceStore::open_app("),
+            "notification timer must not open workspace storage on the GTK thread"
+        );
+    }
+
+    #[test]
+    fn notification_timer_coalesces_background_loads() {
+        let source = include_str!("main.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("main source should contain production code");
+        let start = production_source
+            .find("Notification tracker:")
+            .expect("notification tracker exists");
+        let end = production_source[start..]
+            .find("let db_path_runtime_auto")
+            .map(|offset| start + offset)
+            .expect("runtime auto timer follows notification tracker");
+        let region = &production_source[start..end];
+
+        assert!(region.contains("notification_in_flight.get()"));
+        assert!(region.contains("notification_in_flight.set(true);"));
+        assert!(region.contains("in_flight.set(false);"));
+    }
+
+    #[test]
+    fn notification_timer_toasts_on_check_failure_transition() {
+        let source = include_str!("main.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("main source should contain production code");
+        let start = production_source
+            .find("Notification tracker:")
+            .expect("notification tracker exists");
+        let end = production_source[start..]
+            .find("let db_path_runtime_auto")
+            .map(|offset| start + offset)
+            .expect("runtime auto timer follows notification tracker");
+        let region = &production_source[start..end];
+
+        assert!(region.contains("prev_check_fail"));
+        assert!(region.contains("snapshot.notify_check_fail"));
+        assert!(region.contains("!prev_check_fail"));
+        assert!(region.contains("snapshot.checks_failed"));
+        assert!(region.contains("Checks failed."));
+        assert!(!region.contains("let _ = snapshot.notify_check_fail"));
+    }
+
+    #[test]
+    fn spotlight_sources_spawn_background_jobs() {
+        let source = include_str!("main.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("main source should contain production code");
+
+        let event_start = production_source
+            .find("let spotlight_event_tx = {")
+            .expect("spotlight event bridge exists");
+        let event_end = production_source[event_start..]
+            .find("let spotlight_watcher =")
+            .map(|offset| event_start + offset)
+            .expect("spotlight watcher follows event bridge");
+        let event_region = &production_source[event_start..event_end];
+        assert!(
+            event_region.contains("spawn_runtime_reconciliation("),
+            "spotlight event bridge must reconcile runtime state off the GTK thread"
+        );
+        assert!(
+            !event_region.contains("reconcile_runtime_state_for_ui("),
+            "spotlight event bridge must not reconcile runtime state on the GTK thread"
+        );
+
+        let startup_start = production_source
+            .find("let spotlight_watcher =")
+            .expect("spotlight watcher setup exists");
+        let startup_end = production_source[startup_start..]
+            .find("let db_path_on_close")
+            .map(|offset| startup_start + offset)
+            .expect("window close setup follows watcher setup");
+        let startup_region = &production_source[startup_start..startup_end];
+        assert!(
+            startup_region.contains("spawn_spotlight_file_watcher_refresh("),
+            "startup spotlight watcher setup must run off the GTK thread"
+        );
+        assert!(
+            !startup_region.contains("refresh_spotlight_file_watcher("),
+            "startup must not refresh spotlight watchers on the GTK thread"
+        );
+
+        let timer_start = production_source
+            .find("let spotlight_watcher_auto = spotlight_watcher.clone();")
+            .expect("spotlight timer captures watcher");
+        let timer_end = production_source[timer_start..]
+            .find("glib::ControlFlow::Continue\n    });\n}")
+            .map(|offset| timer_start + offset)
+            .expect("spotlight timer ends");
+        let timer_region = &production_source[timer_start..timer_end];
+        assert!(
+            timer_region.contains("spawn_spotlight_file_watcher_refresh("),
+            "periodic spotlight watcher refresh must run off the GTK thread"
+        );
+        assert!(
+            !timer_region.contains("refresh_spotlight_file_watcher("),
+            "periodic timer must not refresh spotlight watchers on the GTK thread"
+        );
+    }
+
+    #[test]
+    fn palette_run_command_spawns_background_job() {
+        let source = include_str!("main.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("main source should contain production code");
+        let start = production_source
+            .find("PaletteTarget::RunCommand(cmd) => {")
+            .expect("palette run command handler exists");
+        let end = production_source[start..]
+            .find("fn page_stack_name")
+            .map(|offset| start + offset)
+            .expect("page_stack_name follows palette handling");
+        let region = &production_source[start..end];
+
+        assert!(
+            region.contains("spawn_background_job("),
+            "palette run commands must execute storage/process work off the GTK thread"
+        );
+        assert!(
+            !region.contains("WorkspaceStore::open_app(state.workspace_database_path())"),
+            "palette run commands must not open workspace storage on the GTK thread"
+        );
+    }
+
+    #[test]
+    fn palette_run_command_surfaces_terminal_command_errors() {
+        let source = include_str!("main.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("main source should contain production code");
+        let start = production_source
+            .find("PaletteTarget::RunCommand(cmd) => {")
+            .expect("palette run command handler exists");
+        let end = production_source[start..]
+            .find("fn page_stack_name")
+            .map(|offset| start + offset)
+            .expect("page_stack_name follows palette handling");
+        let region = &production_source[start..end];
+
+        assert!(region.contains("toast_manager.clone()"));
+        assert!(region.contains("if let Err(err) = result"));
+        assert!(region.contains("ToastMessage::warning"));
+        assert!(region.contains("Terminal command failed"));
+        assert!(region.contains("refresh_hub.refresh(RefreshScope::Workspace)"));
     }
 
     fn init_repo(path: PathBuf) -> PathBuf {

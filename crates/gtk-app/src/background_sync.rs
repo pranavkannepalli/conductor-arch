@@ -64,13 +64,12 @@ pub fn load_background_sync_snapshot(db_path: &Path) -> Result<BackgroundSyncSna
 }
 
 pub(crate) fn load_workspace_chat_nav(
-    db_path: &Path,
+    store: &WorkspaceStore,
     workspace: &str,
     selected_thread: Option<i64>,
 ) -> Result<Vec<WorkspaceChatNavItem>> {
-    let store = WorkspaceStore::open_app(db_path)?;
-    let provider_store = ProviderEventStore::new(db_path);
     let threads = store.list_chat_threads(workspace)?;
+    let provider_store = ProviderEventStore::new(store.db_path());
     let working_threads = threads
         .iter()
         .filter_map(|thread| {
@@ -501,8 +500,9 @@ mod tests {
     #[test]
     fn workspace_chat_nav_does_not_mark_idle_running_session_as_working() {
         let (_temp, db_path) = create_nav_fixture();
+        let store = WorkspaceStore::open_app(&db_path).unwrap();
 
-        let items = load_workspace_chat_nav(&db_path, "berlin", Some(7)).unwrap();
+        let items = load_workspace_chat_nav(&store, "berlin", Some(7)).unwrap();
 
         assert_eq!(items.len(), 1);
         assert!(!items[0].running);
@@ -515,8 +515,9 @@ mod tests {
         ProviderEventStore::new(&db_path)
             .upsert_event(&provider_event_draft(7, ProviderEventPhase::Started))
             .unwrap();
+        let store = WorkspaceStore::open_app(&db_path).unwrap();
 
-        let items = load_workspace_chat_nav(&db_path, "berlin", Some(8)).unwrap();
+        let items = load_workspace_chat_nav(&store, "berlin", Some(8)).unwrap();
 
         assert_eq!(items.len(), 1);
         assert!(items[0].running);
@@ -533,8 +534,9 @@ mod tests {
         provider_store
             .upsert_event(&provider_event_draft(7, ProviderEventPhase::Completed))
             .unwrap();
+        let store = WorkspaceStore::open_app(&db_path).unwrap();
 
-        let items = load_workspace_chat_nav(&db_path, "berlin", Some(8)).unwrap();
+        let items = load_workspace_chat_nav(&store, "berlin", Some(8)).unwrap();
 
         assert_eq!(items.len(), 1);
         assert!(!items[0].running);

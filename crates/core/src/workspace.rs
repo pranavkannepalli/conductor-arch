@@ -1216,6 +1216,10 @@ impl WorkspaceStore {
         )
     }
 
+    pub fn db_path(&self) -> &Path {
+        &self.db_path
+    }
+
     fn open_with_logs_and_app_settings(
         path: impl AsRef<Path>,
         logs_dir: impl AsRef<Path>,

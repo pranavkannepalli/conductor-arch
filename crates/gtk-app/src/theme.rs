@@ -102,6 +102,20 @@ window {
     font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", "Cantarell", "Noto Sans", sans-serif;
 }
 
+.dev-instance-banner {
+    background-color: #6d28d9;
+    border-bottom: 1px solid #8b5cf6;
+    min-height: 30px;
+    padding: 5px 16px;
+}
+
+.dev-instance-banner-label {
+    color: #ffffff;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0;
+}
+
 button,
 entry,
 combobox,
@@ -1710,6 +1724,22 @@ button.ws-tab-shell {
     min-width: 14px;
     min-height: 14px;
 }
+.ws-chat-tab-indicator {
+    min-width: 14px;
+    min-height: 14px;
+}
+.ws-chat-tab-spinner {
+    min-width: 12px;
+    min-height: 12px;
+    color: #8fb5ff;
+}
+.ws-chat-tab-dot {
+    min-width: 12px;
+    min-height: 12px;
+    color: #f0c36a;
+    font-size: 18px;
+    font-weight: 700;
+}
 .ws-tab-shell:hover .ws-tab-label,
 .ws-tab-shell:hover .ws-tab-close-icon {
     color: #c6c6c6;
@@ -1723,13 +1753,12 @@ button.ws-tab-shell {
     font-weight: 500;
 }
 .ws-tab-shell.ws-tab-unread {
-    background-color: #242424;
-    border-bottom-color: #f0c36a;
+    border-bottom-color: #5a5a5a;
 }
 .ws-tab-shell.ws-tab-unread .ws-tab-label,
 .ws-tab-shell.ws-tab-unread .ws-tab-close-icon {
-    color: #f2f2f2;
-    font-weight: 600;
+    color: #d7d7d7;
+    font-weight: 500;
 }
 .ws-tab-shell.ws-tab-active {
     background-color: #242424;
@@ -1738,6 +1767,15 @@ button.ws-tab-shell {
 .ws-tab-shell.ws-tab-active .ws-tab-label,
 .ws-tab-shell.ws-tab-active .ws-tab-close-icon {
     color: #e8e8e8;
+    font-weight: 600;
+}
+.ws-tab-shell.ws-tab-editing {
+    background-color: #222a24;
+    border-bottom-color: #62c073;
+}
+.ws-tab-shell.ws-tab-editing .ws-tab-label,
+.ws-tab-shell.ws-tab-editing .ws-tab-close-icon {
+    color: #d7f2dc;
     font-weight: 600;
 }
 .ws-mode-switcher button {
@@ -2467,6 +2505,29 @@ button.chat-inline-event-chip:checked {
     min-height: 0;
     padding: 0;
 }
+.workspace-file-link {
+    background-color: transparent;
+    border: none;
+    border-radius: 4px;
+    box-shadow: none;
+    color: #e7e7e7;
+    font-family: "Mona Sans", "Inter", "Segoe UI", system-ui, sans-serif;
+    font-size: 13px;
+    font-weight: 600;
+    min-height: 22px;
+    min-width: 0;
+    padding: 2px 4px;
+}
+.workspace-file-link:hover {
+    background-color: rgba(134, 239, 172, 0.12);
+    box-shadow: none;
+}
+.workspace-file-link label {
+    color: #d8f8e0;
+    margin: 0;
+    min-height: 0;
+    padding: 0;
+}
 .chat-inline-event-meta {
     color: #8f8f8f;
     font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
@@ -3183,6 +3244,16 @@ mod tests {
         &rest[..end]
     }
 
+    fn property_value<'a>(block: &'a str, property: &str) -> Option<&'a str> {
+        block
+            .lines()
+            .map(str::trim)
+            .find_map(|line| line.strip_prefix(property))
+            .and_then(|value| value.strip_prefix(':'))
+            .map(str::trim)
+            .and_then(|value| value.strip_suffix(';'))
+    }
+
     #[test]
     fn refreshed_theme_exposes_graphite_palette_fonts_and_neutral_focus_color() {
         let css = app_css();
@@ -3236,6 +3307,41 @@ mod tests {
         assert!(!css.contains("#0f172a"));
         assert!(!css.contains("#1e293b"));
         assert!(!css.contains("#334155"));
+    }
+
+    #[test]
+    fn unread_chat_tabs_do_not_reuse_active_selection_treatment() {
+        let css = app_css();
+        let unread_block = selector_block(css, ".ws-tab-shell.ws-tab-unread");
+        let active_block = selector_block(css, ".ws-tab-shell.ws-tab-active");
+
+        assert!(!unread_block.contains("background-color"));
+        assert_eq!(
+            property_value(unread_block, "border-bottom-color"),
+            Some("#5a5a5a")
+        );
+        assert_eq!(
+            property_value(active_block, "border-bottom-color"),
+            Some("#f0c36a")
+        );
+    }
+
+    #[test]
+    fn chat_tab_state_indicators_have_stable_styling() {
+        let css = app_css();
+        let indicator_block = selector_block(css, ".ws-chat-tab-indicator");
+        let spinner_block = selector_block(css, ".ws-chat-tab-spinner");
+        let dot_block = selector_block(css, ".ws-chat-tab-dot");
+
+        assert_eq!(property_value(indicator_block, "min-width"), Some("14px"));
+        assert_eq!(property_value(indicator_block, "min-height"), Some("14px"));
+        assert_eq!(property_value(spinner_block, "min-width"), Some("12px"));
+        assert_eq!(property_value(spinner_block, "min-height"), Some("12px"));
+        assert_eq!(property_value(spinner_block, "color"), Some("#8fb5ff"));
+        assert_eq!(property_value(dot_block, "min-width"), Some("12px"));
+        assert_eq!(property_value(dot_block, "min-height"), Some("12px"));
+        assert_eq!(property_value(dot_block, "color"), Some("#f0c36a"));
+        assert!(css.contains(".ws-tab-shell.ws-tab-editing"));
     }
 
     #[test]
@@ -3431,5 +3537,20 @@ mod tests {
         assert!(css.contains(".toast-success"));
         assert!(css.contains(".toast-warning"));
         assert!(css.contains(".toast-error"));
+    }
+
+    #[test]
+    fn dev_instance_banner_is_full_width_purple() {
+        let css = app_css();
+        let banner = selector_block(css, ".dev-instance-banner");
+
+        assert!(banner.contains("background-color: #6d28d9;"));
+        assert!(banner.contains("min-height: 30px;"));
+        assert!(banner.contains("padding: 5px 16px;"));
+        assert!(banner.contains("border-bottom: 1px solid"));
+
+        let label = selector_block(css, ".dev-instance-banner-label");
+        assert!(label.contains("color: #ffffff;"));
+        assert!(label.contains("font-weight: 700;"));
     }
 }
