@@ -3329,6 +3329,13 @@ pub fn agent_session_panel(
                                     "Could not remove the original queued message because archcar is unavailable."
                                         .to_owned(),
                                 );
+                                update_composer_state();
+                                if let Some(refresh) =
+                                    refresh_queue_overlay.borrow().as_ref().cloned()
+                                {
+                                    refresh();
+                                }
+                                return;
                             }
                         } else {
                             toast_manager.error(
@@ -14615,6 +14622,24 @@ fix it
         assert!(
             !edit_save_body.contains("archcar_bridge.queue_chat_input("),
             "queued edit replacement must not bypass tracked queue response handling"
+        );
+    }
+
+    #[test]
+    fn editing_queued_message_save_aborts_when_removal_tracking_fails() {
+        let source = include_str!("session_surface.rs");
+        let start = source
+            .find("if !removal_tracked {")
+            .expect("queued edit removal failure branch exists");
+        let end = source[start..]
+            .find("} else {")
+            .map(|offset| start + offset)
+            .expect("replacement failure branch follows removal tracking");
+        let removal_failure_body = &source[start..end];
+
+        assert!(
+            removal_failure_body.contains("return;"),
+            "queued edit save must not update optimistic state when original removal cannot be tracked"
         );
     }
 
