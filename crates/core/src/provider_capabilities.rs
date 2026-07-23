@@ -45,6 +45,12 @@ fn command_supports_bare(command: &mut Command, timeout: Duration) -> bool {
 }
 
 pub fn add_bare_when_supported(args: &mut Vec<String>, program: &str) {
+    #[cfg(test)]
+    {
+        let _ = (args, program);
+    }
+
+    #[cfg(not(test))]
     if executable_supports_bare(program) {
         args.push("--bare".to_owned());
     }

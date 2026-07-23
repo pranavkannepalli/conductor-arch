@@ -3542,7 +3542,7 @@ mod tests {
             &fake_claude,
             r#"#!/usr/bin/env bash
 printf '%s\n' '{"type":"system","subtype":"hook_started","session_id":"fake-session","hook":"startup"}'
-sleep 0.35
+while [ ! -f "$ARCHDUCTOR_TEST_INIT_GATE" ]; do sleep 0.02; done
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"fake-session","model":"claude-sonnet-fixture","capabilities":["streaming"]}'
 IFS= read -r _line
 printf '%s\n' '{"type":"user","session_id":"fake-session","isReplay":true,"message":{"role":"user","content":[{"type":"text","text":"hello lifecycle"}]}}'
@@ -3559,11 +3559,13 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             fs::set_permissions(&fake_claude, perms).unwrap();
         }
 
+        let init_gate = temp.path().join("allow-claude-init");
         let store = seeded_workspace_store(temp.path());
         let thread = store
             .create_chat_thread("berlin", "claude", "Claude", None)
             .unwrap();
         let mut child = ProcessCommand::new(&fake_claude)
+            .env("ARCHDUCTOR_TEST_INIT_GATE", &init_gate)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
@@ -3622,6 +3624,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             }
         }
         assert!(!snapshot.lock().unwrap().ready);
+        fs::write(&init_gate, b"ready").unwrap();
 
         recv_archcar_event_until(
             &event_rx,

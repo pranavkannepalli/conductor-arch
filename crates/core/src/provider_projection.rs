@@ -244,6 +244,10 @@ pub fn render_provider_event_projection(
 }
 
 pub fn provider_projection_item_is_relevant_chat_event(item: &ProviderProjectionItem) -> bool {
+    if provider_projection_item_is_parser_noise(item) {
+        return false;
+    }
+
     match item.render_class {
         ProjectionRenderClass::FallbackCard => false,
         ProjectionRenderClass::StatusCard => matches!(
@@ -251,6 +255,16 @@ pub fn provider_projection_item_is_relevant_chat_event(item: &ProviderProjection
             ProviderProjectionStatus::Failed | ProviderProjectionStatus::Canceled
         ),
         _ => true,
+    }
+}
+
+fn provider_projection_item_is_parser_noise(item: &ProviderProjectionItem) -> bool {
+    match item.category {
+        ProviderProjectionCategory::Skill | ProviderProjectionCategory::FileDiff => true,
+        ProviderProjectionCategory::McpTool => {
+            matches!(item.title.trim(), "MCP loading" | "MCP loaded")
+        }
+        _ => false,
     }
 }
 
@@ -765,6 +779,68 @@ mod tests {
         assert!(!provider_projection_item_is_pending_interaction_event(
             completed_item
         ));
+    }
+
+    #[test]
+    fn chat_projection_hides_codex_parser_noise_events() {
+        let cases = [
+            (
+                ProviderEventKind::Mcp,
+                "mcpServer/startupStatus/updated",
+                "MCP loaded",
+                "github: ready",
+            ),
+            (
+                ProviderEventKind::SkillPluginHook,
+                "skill",
+                "superpowers:test-driven-development",
+                "Read SKILL.md",
+            ),
+            (
+                ProviderEventKind::DiffFileChange,
+                "file_change",
+                "File changes",
+                "changed crates/core/src/lib.rs",
+            ),
+        ];
+
+        for (kind, subtype, title, body) in cases {
+            let mut event = record(kind, ProviderEventPhase::Completed, subtype);
+            event.normalized_payload = json!({
+                "title": title,
+                "body": body,
+            });
+            let item = provider_projection_from_records(&[event])
+                .items
+                .into_iter()
+                .next()
+                .unwrap();
+
+            assert!(
+                !provider_projection_item_is_relevant_chat_event(&item),
+                "{title} should not render in normal chat"
+            );
+        }
+    }
+
+    #[test]
+    fn chat_projection_keeps_real_tool_events_visible() {
+        let mut event = record(
+            ProviderEventKind::Mcp,
+            ProviderEventPhase::Completed,
+            "item/mcpToolCall/completed",
+        );
+        event.normalized_payload = json!({
+            "title": "get_wiki_page",
+            "body": "Project Context",
+        });
+        let item = provider_projection_from_records(&[event])
+            .items
+            .into_iter()
+            .next()
+            .unwrap();
+
+        assert!(provider_projection_item_is_relevant_chat_event(&item));
     }
 
     #[test]

@@ -666,7 +666,7 @@ fn cli_archcar_messages_renders_projected_provider_events() {
 }
 
 #[test]
-fn cli_archcar_messages_updates_mcp_startup_status_provider_event() {
+fn cli_archcar_messages_hides_mcp_startup_status_provider_event() {
     let temp = tempfile::tempdir().unwrap();
     let repo_path = init_repo(temp.path().join("demo"));
     let workspace_parent = temp.path().join("workspaces/demo");
@@ -733,7 +733,8 @@ fn cli_archcar_messages_updates_mcp_startup_status_provider_event() {
         .args(["archcar", "messages", &thread.id.to_string()])
         .assert()
         .success()
-        .stdout(contains("Tool\nMCP loaded\ngithub: ready\n\n"))
+        .stdout(predicates::str::contains("MCP loaded").not())
+        .stdout(predicates::str::contains("github: ready").not())
         .stdout(predicates::str::contains("MCP loading").not())
         .stdout(predicates::str::contains("mcpServer/startupStatus/updated").not());
 }

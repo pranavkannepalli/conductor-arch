@@ -57,11 +57,10 @@ pub fn load_background_sync_snapshot(db_path: &Path) -> Result<BackgroundSyncSna
 }
 
 pub(crate) fn load_workspace_chat_nav(
-    db_path: &Path,
+    store: &WorkspaceStore,
     workspace: &str,
     selected_thread: Option<i64>,
 ) -> Result<Vec<WorkspaceChatNavItem>> {
-    let store = WorkspaceStore::open_app(db_path)?;
     let running_threads = store
         .list_sessions(workspace)?
         .into_iter()

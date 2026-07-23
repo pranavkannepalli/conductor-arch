@@ -57,9 +57,9 @@ The current app supports the core Archductor loop, with some rough edges:
   local `gh` auth.
 - Restore archived workspaces, inspect saved Linux session history, and read
   older macOS Conductor chat history when that database is available.
-- Expand Codex transcript events inline: skill reads, command/tool runs, and
-  added/edited/deleted file summaries render as compact `+ name` chips that
-  open into the full captured output, file preview, or structured diff body.
+- Expand useful Codex transcript events inline: command/tool runs and file
+  reads render as compact `+ name` chips, while internal skill-load, MCP
+  startup, and file-change parser notices stay out of normal chat.
 - Customize repository behavior with editable prompts, scripts, environment,
   provider paths, Git behavior, file-copy rules, monorepo working directories,
   and file-editable workflow defaults for naming, automation, agents, merge
