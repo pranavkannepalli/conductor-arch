@@ -46,6 +46,7 @@ use gtk::{
     RevealerTransitionType, ScrolledWindow, Spinner, TextBuffer, TextTag, TextView, ToggleButton,
     Widget,
 };
+use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use std::any::Any;
 use std::backtrace::Backtrace;
 use std::cell::{Cell, RefCell};
@@ -1685,22 +1686,7 @@ pub fn agent_session_panel(
                     inflight_archcar_actions.as_ref(),
                     &app_state,
                 );
-                let staged_queued = false;
-                if staged_queued {
-                    if let Some(refresh) = refresh_queue_overlay.borrow().as_ref().cloned() {
-                        refresh();
-                    }
-                    let _ = flush_pending_archcar_inputs(
-                        &archcar_bridge,
-                        &database_path,
-                        &workspace,
-                        pending_commands.as_ref(),
-                        pending_archcar_inputs.as_ref(),
-                        archcar_ready_cache.as_ref(),
-                        inflight_archcar_actions.as_ref(),
-                        &app_state,
-                    );
-                } else if !flushed_pending {
+                if !flushed_pending {
                     if let Some(thread_id) = selected_thread_id {
                         let can_send_next = queued_chat_auto_drain_ready(
                             current_kind,
@@ -1883,7 +1869,8 @@ pub fn agent_session_panel(
                     } else {
                         CodexStartupState::Idle
                     };
-                    let working_elapsed = working_elapsed_for_thread(&working_threads, thread_id);
+                    let mut working_elapsed =
+                        working_elapsed_for_thread(&working_threads, thread_id);
                     if let Some(harness) = managed_harness_for_kind(current_kind) {
                         let descriptor = harness.descriptor();
                         if thread_has_live_managed_session(&current, thread_id, descriptor)
@@ -1987,6 +1974,19 @@ pub fn agent_session_panel(
                                 render_legacy_inline_events,
                                 "chat refresh_view loaded persisted chat timeline"
                             );
+                            if reconcile_thread_working_from_provider_events(
+                                working_threads.as_ref(),
+                                thread_id,
+                                &provider_events,
+                            ) {
+                                clear_inflight_user_sends_for_thread(
+                                    inflight_archcar_actions.as_ref(),
+                                    thread_id,
+                                );
+                                working_elapsed =
+                                    working_elapsed_for_thread(&working_threads, thread_id);
+                                outcome.messages_changed = true;
+                            }
                             if !thread_messages.is_empty()
                                 || !thread_events.is_empty()
                                 || !provider_events.is_empty()
@@ -3293,6 +3293,7 @@ pub fn agent_session_panel(
         let interrupt_current_session = interrupt_current_session.clone();
         let send_immediate_input = send_immediate_input.clone();
         let refresh_queue_overlay = refresh_queue_overlay.clone();
+        let inflight_archcar_actions = inflight_archcar_actions.clone();
         move |intent: ComposerSubmitIntent| {
             let command = buffer
                 .text(&buffer.start_iter(), &buffer.end_iter(), true)
@@ -3410,6 +3411,7 @@ pub fn agent_session_panel(
                     queue_archcar_input_with_bridge(
                         &app_state,
                         &archcar_bridge,
+                        inflight_archcar_actions.as_ref(),
                         thread_id,
                         command.clone(),
                         None,
@@ -6024,50 +6026,226 @@ fn markdown_file_link_label(label: &str, path: &str) -> String {
 }
 
 fn chat_text_markup(text: &str) -> String {
-    let mut markup = String::new();
-    let mut in_fence = false;
-    let mut fence_body = String::new();
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_TASKLISTS);
+    let mut renderer = ChatMarkdownMarkupRenderer::default();
+    for event in Parser::new_ext(text, options) {
+        renderer.push(event);
+    }
+    renderer.finish()
+}
 
-    for line in text.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("```") {
-            if in_fence {
-                if !markup.is_empty() {
-                    markup.push('\n');
-                }
-                markup.push_str(&chat_code_span_markup(fence_body.trim_matches('\n')));
-                fence_body.clear();
-                in_fence = false;
-            } else {
-                in_fence = true;
+#[derive(Debug, Default)]
+struct ChatMarkdownMarkupRenderer {
+    markup: String,
+    list_stack: Vec<ChatMarkdownListState>,
+    quote_depth: usize,
+    in_code_block: bool,
+    table_cell_open: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ChatMarkdownListState {
+    next_number: Option<u64>,
+}
+
+impl ChatMarkdownMarkupRenderer {
+    fn push(&mut self, event: Event<'_>) {
+        match event {
+            Event::Start(tag) => self.start_tag(tag),
+            Event::End(tag) => self.end_tag(tag),
+            Event::Text(text) => self.push_text(&text),
+            Event::Code(code) => self.markup.push_str(&chat_code_span_markup(&code)),
+            Event::InlineMath(math) | Event::DisplayMath(math) => {
+                self.markup.push_str(&chat_code_span_markup(&math));
             }
-            continue;
-        }
-
-        if in_fence {
-            fence_body.push_str(line);
-            fence_body.push('\n');
-            continue;
-        }
-
-        if !markup.is_empty() {
-            markup.push('\n');
-        }
-        markup.push_str(&chat_markdown_line_markup(line));
-    }
-
-    if in_fence {
-        if !markup.is_empty() {
-            markup.push('\n');
-        }
-        markup.push_str(&pango_escape_text("```"));
-        if !fence_body.is_empty() {
-            markup.push('\n');
-            markup.push_str(&pango_escape_text(fence_body.trim_end()));
+            Event::Html(html) | Event::InlineHtml(html) => {
+                self.markup.push_str(&pango_escape_text(&html));
+            }
+            Event::FootnoteReference(reference) => {
+                self.markup.push_str("<sup>");
+                self.markup.push_str(&pango_escape_text(&reference));
+                self.markup.push_str("</sup>");
+            }
+            Event::SoftBreak | Event::HardBreak => self.markup.push('\n'),
+            Event::Rule => {
+                self.ensure_block_gap();
+                self.markup.push_str(&pango_escape_text("---"));
+            }
+            Event::TaskListMarker(checked) => {
+                self.markup.push_str(if checked { "[x] " } else { "[ ] " });
+            }
         }
     }
 
-    markup
+    fn start_tag(&mut self, tag: Tag<'_>) {
+        match tag {
+            Tag::Paragraph => self.ensure_block_gap(),
+            Tag::Heading { level, .. } => {
+                self.ensure_block_gap();
+                self.markup.push_str(&format!(
+                    "<span weight=\"bold\" size=\"{}\">",
+                    heading_level_pango_size(level)
+                ));
+            }
+            Tag::BlockQuote(_) => {
+                self.ensure_block_gap();
+                self.quote_depth += 1;
+                self.markup.push_str("<span foreground=\"#9aa4ad\">");
+                self.push_quote_prefix();
+            }
+            Tag::CodeBlock(_) => {
+                self.ensure_block_gap();
+                self.in_code_block = true;
+                self.markup
+                    .push_str("<span font_family=\"monospace\" foreground=\"#f2f5f8\">");
+            }
+            Tag::List(start) => {
+                self.ensure_block_gap();
+                self.list_stack
+                    .push(ChatMarkdownListState { next_number: start });
+            }
+            Tag::Item => {
+                self.ensure_block_gap();
+                self.push_list_prefix();
+            }
+            Tag::Emphasis => self.markup.push_str("<i>"),
+            Tag::Strong => self.markup.push_str("<b>"),
+            Tag::Strikethrough => self.markup.push_str("<span strikethrough=\"true\">"),
+            Tag::Link { .. } => self.markup.push_str("<u>"),
+            Tag::Image { .. } => self.markup.push_str("<i>"),
+            Tag::Table(_) => self.ensure_block_gap(),
+            Tag::TableHead => {}
+            Tag::TableRow => self.ensure_block_gap(),
+            Tag::TableCell => {
+                if self.table_cell_open {
+                    self.markup.push_str(" | ");
+                }
+                self.table_cell_open = true;
+            }
+            Tag::FootnoteDefinition(name) => {
+                self.ensure_block_gap();
+                self.markup.push_str("<sup>");
+                self.markup.push_str(&pango_escape_text(&name));
+                self.markup.push_str("</sup> ");
+            }
+            Tag::HtmlBlock
+            | Tag::MetadataBlock(_)
+            | Tag::DefinitionList
+            | Tag::DefinitionListTitle => {
+                self.ensure_block_gap();
+            }
+            Tag::DefinitionListDefinition => {
+                self.ensure_block_gap();
+                self.markup.push_str("  ");
+            }
+            Tag::Superscript => self.markup.push_str("<sup>"),
+            Tag::Subscript => self.markup.push_str("<sub>"),
+        }
+    }
+
+    fn end_tag(&mut self, tag: TagEnd) {
+        match tag {
+            TagEnd::Paragraph => {}
+            TagEnd::Heading(_) => self.markup.push_str("</span>"),
+            TagEnd::BlockQuote(_) => {
+                self.markup.push_str("</span>");
+                self.quote_depth = self.quote_depth.saturating_sub(1);
+            }
+            TagEnd::CodeBlock => {
+                self.trim_trailing_newline();
+                self.markup.push_str("</span>");
+                self.in_code_block = false;
+            }
+            TagEnd::List(_) => {
+                self.list_stack.pop();
+            }
+            TagEnd::Item => {}
+            TagEnd::Emphasis => self.markup.push_str("</i>"),
+            TagEnd::Strong => self.markup.push_str("</b>"),
+            TagEnd::Strikethrough => self.markup.push_str("</span>"),
+            TagEnd::Link => self.markup.push_str("</u>"),
+            TagEnd::Image => self.markup.push_str("</i>"),
+            TagEnd::Table => {}
+            TagEnd::TableHead => {}
+            TagEnd::TableRow => {
+                self.table_cell_open = false;
+            }
+            TagEnd::TableCell => {}
+            TagEnd::FootnoteDefinition => {}
+            TagEnd::HtmlBlock
+            | TagEnd::MetadataBlock(_)
+            | TagEnd::DefinitionList
+            | TagEnd::DefinitionListTitle
+            | TagEnd::DefinitionListDefinition => {}
+            TagEnd::Superscript => self.markup.push_str("</sup>"),
+            TagEnd::Subscript => self.markup.push_str("</sub>"),
+        }
+    }
+
+    fn push_text(&mut self, text: &str) {
+        self.markup.push_str(&pango_escape_text(text));
+    }
+
+    fn push_quote_prefix(&mut self) {
+        for _ in 0..self.quote_depth {
+            self.markup.push_str("| ");
+        }
+    }
+
+    fn push_list_prefix(&mut self) {
+        let depth = self.list_stack.len().saturating_sub(1);
+        for _ in 0..depth {
+            self.markup.push_str("  ");
+        }
+        let number = self.list_stack.last_mut().and_then(|state| {
+            let number = state.next_number?;
+            state.next_number = Some(number + 1);
+            Some(number)
+        });
+        match number {
+            Some(number) => self.markup.push_str(&format!("{number}. ")),
+            None => self.markup.push_str("• "),
+        }
+    }
+
+    fn ensure_block_gap(&mut self) {
+        if self.markup.is_empty() {
+            return;
+        }
+        if self.in_code_block {
+            return;
+        }
+        if self.markup.ends_with("| ") {
+            return;
+        }
+        if !self.markup.ends_with('\n') {
+            self.markup.push('\n');
+        }
+    }
+
+    fn trim_trailing_newline(&mut self) {
+        if self.markup.ends_with('\n') {
+            self.markup.pop();
+        }
+    }
+
+    fn finish(mut self) -> String {
+        while self.markup.ends_with('\n') {
+            self.markup.pop();
+        }
+        self.markup
+    }
+}
+
+fn heading_level_pango_size(level: HeadingLevel) -> &'static str {
+    match level {
+        HeadingLevel::H1 => "large",
+        HeadingLevel::H2 => "medium",
+        _ => "small",
+    }
 }
 
 fn chat_markdown_line_markup(line: &str) -> String {
@@ -8386,6 +8564,7 @@ fn queue_archcar_input(
 fn queue_archcar_input_with_bridge(
     app_state: &AppState,
     bridge: &AsyncArchcarBridge,
+    inflight_actions: &RefCell<HashMap<u64, PendingArchcarAction>>,
     thread_id: i64,
     input: String,
     visible_input: Option<String>,
@@ -8396,17 +8575,24 @@ fn queue_archcar_input_with_bridge(
     if input.is_empty() {
         return;
     }
-    if bridge
-        .queue_chat_input(
-            thread_id,
-            input.clone(),
-            visible_input.clone(),
-            kind.clone(),
-            session_kind,
-        )
-        .is_some()
-    {
-        queue_archcar_input(
+    if let Some(token) = bridge.queue_chat_input(
+        thread_id,
+        input.clone(),
+        visible_input.clone(),
+        kind.clone(),
+        session_kind,
+    ) {
+        inflight_actions.borrow_mut().insert(
+            token,
+            PendingArchcarAction::QueueChatInput {
+                thread_id,
+                input: input.clone(),
+                visible_input: visible_input.clone(),
+                kind: kind.clone(),
+                session_kind,
+            },
+        );
+        ensure_optimistic_queued_chat_input(
             app_state,
             thread_id,
             input,
@@ -9316,6 +9502,24 @@ fn seed_active_provider_working_threads(
             mark_thread_working(working_threads, thread.id);
         }
     }
+}
+
+fn reconcile_thread_working_from_provider_events(
+    working_threads: &RefCell<HashMap<i64, Instant>>,
+    thread_id: i64,
+    provider_events: &[ProviderEventRecord],
+) -> bool {
+    if provider_events.is_empty() {
+        return false;
+    }
+    if crate::background_sync::provider_events_have_active_work(provider_events) {
+        if working_threads.borrow().contains_key(&thread_id) {
+            return false;
+        }
+        mark_thread_working(working_threads, thread_id);
+        return true;
+    }
+    clear_thread_working(working_threads, thread_id)
 }
 
 fn icon_text_button(text: &str, class_name: &str) -> Button {
@@ -14166,6 +14370,28 @@ fix it
     }
 
     #[test]
+    fn queue_submit_with_bridge_tracks_queue_chat_input_token() {
+        let source = include_str!("session_surface.rs");
+        let start = source
+            .find("fn queue_archcar_input_with_bridge(")
+            .expect("queue helper exists");
+        let end = source[start..]
+            .find("fn queue_archcar_input_for_target(")
+            .map(|offset| start + offset)
+            .expect("target queue helper follows bridge helper");
+        let helper = &source[start..end];
+
+        assert!(
+            helper.contains("PendingArchcarAction::QueueChatInput"),
+            "bridge queue submissions must track QueueChatInput responses"
+        );
+        assert!(
+            !helper.contains("queue_archcar_input("),
+            "bridge queue submissions must not bypass tracked response handling"
+        );
+    }
+
+    #[test]
     fn resolved_empty_pending_chat_becomes_ready_for_first_send() {
         let state = AppState::new(
             archductor_core::paths::AppPaths::from_env(),
@@ -14235,6 +14461,92 @@ fix it
 
         assert!(changed);
         assert!(!working_threads.borrow().contains_key(&7));
+    }
+
+    #[test]
+    fn persisted_completed_provider_turn_clears_selected_chat_working_state() {
+        let working_threads = RefCell::new(HashMap::new());
+        mark_thread_working(&working_threads, 7);
+        let provider_events = vec![
+            ProviderEventRecord {
+                id: 1,
+                identity_key: "codex:native-thread-1:turn:turn-1".to_owned(),
+                provider: "codex".to_owned(),
+                provider_event_id: Some("event-1".to_owned()),
+                provider_item_id: None,
+                provider_thread_id: Some("native-thread-1".to_owned()),
+                provider_turn_id: Some("turn-1".to_owned()),
+                parent_provider_item_id: None,
+                parent_provider_thread_id: None,
+                workspace_id: Some(1),
+                chat_thread_id: Some(7),
+                process_id: Some(11),
+                phase: ProviderEventPhase::Started,
+                kind: ProviderEventKind::Turn,
+                provider_subtype: Some("turn".to_owned()),
+                provider_sequence: Some(1),
+                received_sequence: 1,
+                occurred_at_ms: 1,
+                normalized_payload: serde_json::json!({"title": "Turn", "body": "working"}),
+                raw_json: serde_json::json!({"method": "turn/started"}),
+                timeline_seq: Some(1),
+                schema_version: 1,
+                adapter_version: "test".to_owned(),
+                created_at: "now".to_owned(),
+                updated_at: "now".to_owned(),
+            },
+            ProviderEventRecord {
+                id: 2,
+                identity_key: "codex:native-thread-1:turn:turn-1:complete".to_owned(),
+                provider: "codex".to_owned(),
+                provider_event_id: Some("event-2".to_owned()),
+                provider_item_id: None,
+                provider_thread_id: Some("native-thread-1".to_owned()),
+                provider_turn_id: Some("turn-1".to_owned()),
+                parent_provider_item_id: None,
+                parent_provider_thread_id: None,
+                workspace_id: Some(1),
+                chat_thread_id: Some(7),
+                process_id: Some(11),
+                phase: ProviderEventPhase::Completed,
+                kind: ProviderEventKind::Turn,
+                provider_subtype: Some("turn".to_owned()),
+                provider_sequence: Some(2),
+                received_sequence: 2,
+                occurred_at_ms: 2,
+                normalized_payload: serde_json::json!({"title": "Turn", "body": "done"}),
+                raw_json: serde_json::json!({"method": "turn/completed"}),
+                timeline_seq: Some(2),
+                schema_version: 1,
+                adapter_version: "test".to_owned(),
+                created_at: "now".to_owned(),
+                updated_at: "now".to_owned(),
+            },
+        ];
+
+        let changed =
+            reconcile_thread_working_from_provider_events(&working_threads, 7, &provider_events);
+
+        assert!(changed);
+        assert!(!working_threads.borrow().contains_key(&7));
+    }
+
+    #[test]
+    fn markdown_links_render_label_without_raw_url_suffix() {
+        let markup = chat_text_markup("See [docs](https://example.com) now.");
+
+        assert_eq!(markup, "See <u>docs</u> now.");
+    }
+
+    #[test]
+    fn markdown_renderer_handles_ordered_lists_and_code_fences() {
+        let markup =
+            chat_text_markup("1. Run `cargo test`\n2. Inspect\n\n```rust\nlet ok = true;\n```");
+
+        assert_eq!(
+            markup,
+            "1. Run <span font_family=\"monospace\" foreground=\"#f2f5f8\">cargo test</span>\n2. Inspect\n<span font_family=\"monospace\" foreground=\"#f2f5f8\">let ok = true;</span>"
+        );
     }
 
     #[test]
@@ -14710,11 +15022,11 @@ fix it
 
         assert_eq!(
             inline_event_chip_label(&file_event, false),
-            "Edited docs/superpowers/plans/2026-07-03-manual-skill-tool-calls.md"
+            "2026-07-03-manual-skill-tool-calls.md"
         );
         assert_eq!(
             inline_event_chip_label(&file_event, true),
-            "Edited docs/superpowers/plans/2026-07-03-manual-skill-tool-calls.md"
+            "2026-07-03-manual-skill-tool-calls.md"
         );
         assert_eq!(
             inline_event_chip_label(&command_event, false),
@@ -14752,15 +15064,41 @@ fix it
             inline_event_type_css_class(&skill_event),
             "chat-inline-event-skill"
         );
-        assert!(command_markup.contains("foreground=\"#93c5fd\""));
-        assert!(command_markup.contains("font_family=\"Commit Mono\""));
-        assert!(command_markup.contains(">⌘</span>"));
-        assert!(command_markup.contains(">Ran</span>"));
-        assert!(command_markup.contains("foreground=\"#e7e7e7\">cargo test"));
-        assert!(skill_markup.contains("foreground=\"#fcd34d\""));
-        assert!(skill_markup.contains(">◆</span>"));
-        assert!(skill_markup.contains(">Read</span>"));
-        assert!(skill_markup.contains("foreground=\"#e7e7e7\">superpowers:test-driven-development"));
+        assert_eq!(inline_event_action_label(&command_event), "Ran");
+        assert_eq!(inline_event_action_label(&skill_event), "Read");
+        assert_eq!(command_markup, "cargo test");
+        assert_eq!(skill_markup, "superpowers:test-driven-development");
+    }
+
+    #[test]
+    fn inline_file_event_chip_text_is_filename_only() {
+        let event = CodexInlineEvent {
+            kind: CodexInlineEventKind::Tool,
+            title: "Edited crates/core/src/codex_tui.rs".to_owned(),
+            subtitle: Some("+12 -3".to_owned()),
+            body: None,
+            path: Some(PathBuf::from("crates/core/src/codex_tui.rs")),
+            status: CodexInlineEventStatus::Complete,
+        };
+
+        assert_eq!(inline_event_action_label(&event), "Edited");
+        assert_eq!(inline_event_chip_label(&event, false), "codex_tui.rs");
+        assert_eq!(inline_event_chip_markup(&event, false), "codex_tui.rs");
+    }
+
+    #[test]
+    fn inline_event_header_renders_action_label_outside_file_chip() {
+        let source = include_str!("session_surface.rs");
+        let start = source.find("fn inline_event_widget(").expect("widget exists");
+        let end = source[start..]
+            .find("fn set_inline_event_body_widget(")
+            .map(|offset| start + offset)
+            .expect("body helper follows widget");
+        let widget_source = &source[start..end];
+
+        assert!(widget_source.contains("action_label.add_css_class(\"chat-inline-event-action\")"));
+        assert!(widget_source.contains("header.append(&action_label);"));
+        assert!(widget_source.contains("header.append(&chip);"));
     }
 
     #[test]
@@ -14784,7 +15122,7 @@ fix it
             inline_event_type_css_class(&event),
             "chat-inline-event-command"
         );
-        assert!(inline_event_chip_markup(&event, false).contains("foreground=\"#e7e7e7\">pnpm"));
+        assert!(inline_event_chip_markup(&event, false).contains("pnpm"));
     }
 
     #[test]
@@ -17511,7 +17849,7 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
 
         assert!(markup.contains("<b>&lt;danger&gt;</b>"));
         assert!(markup.contains("<u>docs</u>"));
-        assert!(markup.contains("https://example.com?a=1&amp;b=2"));
+        assert!(!markup.contains("https://example.com"));
         assert!(!markup.contains("<danger>"));
         assert!(!markup.contains("a=1&b=2"));
     }

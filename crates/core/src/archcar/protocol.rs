@@ -698,6 +698,43 @@ mod tests {
             serde_json::from_str::<ArchcarEvent>(&serde_json::to_string(&event).unwrap()).unwrap(),
             event
         );
+
+        for visible_input in [Some("visible run tests".to_owned()), None] {
+            let queued = QueuedArchcarInput {
+                id: 7,
+                thread_id: 42,
+                input: "run tests".to_owned(),
+                visible_input: visible_input.clone(),
+                kind: ArchcarInputKind::User,
+                session_kind: SessionKind::Codex,
+                created_at: "2026-07-23T12:00:00Z".to_owned(),
+                updated_at: "2026-07-23T12:00:01Z".to_owned(),
+            };
+            let json = serde_json::to_string(&queued).unwrap();
+            assert_eq!(
+                serde_json::from_str::<QueuedArchcarInput>(&json).unwrap(),
+                queued
+            );
+
+            let response = ArchcarResponse::QueuedChatInput {
+                input: queued.clone(),
+            };
+            let json = serde_json::to_string(&response).unwrap();
+            assert_eq!(
+                serde_json::from_str::<ArchcarResponse>(&json).unwrap(),
+                response
+            );
+
+            let list = ArchcarResponse::QueuedChatInputs {
+                thread_id: 42,
+                inputs: vec![queued],
+            };
+            let json = serde_json::to_string(&list).unwrap();
+            assert_eq!(
+                serde_json::from_str::<ArchcarResponse>(&json).unwrap(),
+                list
+            );
+        }
     }
 
     #[test]

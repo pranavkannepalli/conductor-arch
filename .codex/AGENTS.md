@@ -1,17 +1,19 @@
 # Codex Agent Instructions
 
-## Read This Every Time
+## Startup Context
 
-Before touching code or docs in this repository, read these files in order:
+Before touching code or docs in this repository, read `progress.md`. It is the
+short current-state source.
 
-1. `docs/conductor-gui-mvp-handoff.md`
-2. `progress.md`
-3. `docs/mvp-scope.md`
-4. `docs/manual-testing-checklist.md`
-5. `docs/archductor-docs-parity-map.md`
-6. `README.md`
+Load other docs only when the task needs them:
 
-Also keep the official Conductor docs in mind as the parity baseline:
+- Product scope or feature priority: `docs/conductor-gui-mvp-handoff.md` and
+  `docs/mvp-scope.md`
+- Manual release/app verification: `docs/manual-testing-checklist.md`
+- Upstream Conductor parity: `docs/archductor-docs-parity-map.md`
+- User-facing install, workflow, or configuration docs: `README.md`
+
+Use official Conductor docs as the parity baseline when working on parity:
 
 - `https://www.conductor.build/docs/concepts/workspaces-and-branches`
 - `https://www.conductor.build/docs/concepts/workflow`
@@ -23,8 +25,8 @@ Also keep the official Conductor docs in mind as the parity baseline:
 - `https://www.conductor.build/docs/reference/diff-viewer`
 - `https://www.conductor.build/docs/reference/checks`
 
-Treat `docs/conductor-gui-mvp-handoff.md` as the source of truth for the
-corrected MVP. The old direction over-indexed on CLI/backend work. The product
+Treat `docs/conductor-gui-mvp-handoff.md` as the source of truth when MVP scope
+is relevant. The old direction over-indexed on CLI/backend work. The product
 goal is a GUI-first Archductor desktop app that matches the upstream Conductor
 workflow first. Better-than-Archductor features come only after an explicit
 product decision.

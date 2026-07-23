@@ -26,7 +26,8 @@ fn main() -> Result<()> {
 
     let commands = DevCommands {
         archcar: CommandSpec::new(required_env("ARCHDUCTOR_ARCHCAR_BIN")?, [] as [&str; 0]),
-        gtk: CommandSpec::new(required_env("ARCHDUCTOR_GTK_BIN")?, [] as [&str; 0]),
+        gtk: CommandSpec::new(required_env("ARCHDUCTOR_GTK_BIN")?, [] as [&str; 0])
+            .detached_stdio(),
     };
     let mut session = DevSession::start(commands)?;
     println!(

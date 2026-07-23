@@ -182,21 +182,21 @@ paths and known rough edges.
 - Release packaging still needs full manual validation on target distros before
   public launch.
 
-## Agent Reading Order
+## Agent Context Policy
 
-Coding agents should read these durable docs before changing behavior or docs:
+Coding agents should read `.codex/AGENTS.md` or `claude/CLAUDE.md`, depending on
+agent, then this `progress.md` file. Load the larger durable docs only when the
+task needs that context:
 
-1. `.codex/AGENTS.md` or `claude/CLAUDE.md`, depending on agent.
-2. `docs/conductor-gui-mvp-handoff.md`
-3. `progress.md`
-4. `docs/mvp-scope.md`
-5. `docs/manual-testing-checklist.md`
-6. `docs/archductor-docs-parity-map.md`
-7. `README.md`
+- Product scope or feature priority: `docs/conductor-gui-mvp-handoff.md` and
+  `docs/mvp-scope.md`
+- Manual release/app verification: `docs/manual-testing-checklist.md`
+- Upstream Conductor parity: `docs/archductor-docs-parity-map.md`
+- User-facing install, workflow, or configuration docs: `README.md`
 
-Old one-off implementation plans and specs were pruned from `docs/superpowers`
-because they were dated task artifacts, not current product or agent
-instructions.
+Old one-off implementation specs remain in `docs/superpowers/specs` only as
+historical task artifacts. Do not read dated plans/specs for routine startup
+context.
 
 ## Verification Standard
 

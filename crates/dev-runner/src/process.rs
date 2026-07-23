@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 pub struct CommandSpec {
     program: OsString,
     args: Vec<OsString>,
+    inherit_stdio: bool,
 }
 
 impl CommandSpec {
@@ -22,7 +23,13 @@ impl CommandSpec {
         Self {
             program: program.into(),
             args: args.into_iter().map(Into::into).collect(),
+            inherit_stdio: true,
         }
+    }
+
+    pub fn detached_stdio(mut self) -> Self {
+        self.inherit_stdio = false;
+        self
     }
 }
 
@@ -41,6 +48,12 @@ impl OwnedChild {
         let mut command = Command::new(&spec.program);
         command.args(&spec.args);
         archductor_core::platform::configure_new_process_group(&mut command);
+        if !spec.inherit_stdio {
+            command
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+        }
         let child = command
             .spawn()
             .with_context(|| format!("failed to start {}", spec.program.to_string_lossy()))?;
@@ -171,5 +184,12 @@ mod tests {
         session.shutdown().unwrap();
         assert!(!archductor_core::platform::process_alive(archcar_pid));
         assert!(!archductor_core::platform::process_alive(session.gtk_pid()));
+    }
+
+    #[test]
+    fn gtk_command_can_detach_stdio_without_disabling_process_group_shutdown() {
+        let spec = CommandSpec::new("archductor-gtk", [] as [&str; 0]).detached_stdio();
+
+        assert!(!spec.inherit_stdio);
     }
 }

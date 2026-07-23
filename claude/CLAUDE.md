@@ -1,17 +1,19 @@
 # Claude Agent Instructions
 
-## Read This First
+## Startup Context
 
-Before touching code or docs in this repository, read:
+Before touching code or docs in this repository, read `progress.md`. It is the
+short current-state source.
 
-1. `docs/conductor-gui-mvp-handoff.md`
-2. `progress.md`
-3. `docs/mvp-scope.md`
-4. `docs/manual-testing-checklist.md`
-5. `docs/archductor-docs-parity-map.md`
-6. `README.md`
+Load other docs only when the task needs them:
 
-Use official Conductor behavior as the parity baseline:
+- Product scope or feature priority: `docs/conductor-gui-mvp-handoff.md` and
+  `docs/mvp-scope.md`
+- Manual release/app verification: `docs/manual-testing-checklist.md`
+- Upstream Conductor parity: `docs/archductor-docs-parity-map.md`
+- User-facing install, workflow, or configuration docs: `README.md`
+
+Use official Conductor behavior as the parity baseline when working on parity:
 
 - `https://www.conductor.build/docs/concepts/workspaces-and-branches`
 - `https://www.conductor.build/docs/concepts/workflow`

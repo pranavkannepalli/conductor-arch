@@ -1247,6 +1247,8 @@ impl WorkspaceStore {
         let db_path = path.as_ref().to_path_buf();
         let conn = Connection::open(&db_path)
             .with_context(|| format!("open database {}", db_path.display()))?;
+        conn.execute_batch("PRAGMA foreign_keys = ON")
+            .with_context(|| format!("enable foreign keys for {}", db_path.display()))?;
         let store = Self {
             conn,
             db_path,
@@ -3970,7 +3972,13 @@ impl WorkspaceStore {
         );
 
         let sections = if settings.customization.naming.pr_body_sections.is_empty() {
-            vec!["Summary".to_owned(), "Tests".to_owned(), "Risk".to_owned()]
+            vec![
+                "Summary".to_owned(),
+                "What Changed".to_owned(),
+                "Why".to_owned(),
+                "User Impact".to_owned(),
+                "Validation".to_owned(),
+            ]
         } else {
             settings.customization.naming.pr_body_sections
         };
@@ -3987,8 +3995,17 @@ impl WorkspaceStore {
                     changed_files_text,
                     session_summary
                 ));
-            } else if normalized.contains("test") || normalized.contains("verification") {
+            } else if normalized.contains("changed") {
+                body.push_str(&format!("{changed_files_text}\n"));
+            } else if normalized.contains("test")
+                || normalized.contains("verification")
+                || normalized.contains("validation")
+            {
                 body.push_str("- TODO: Add checks/tests run before creating the PR.\n");
+            } else if normalized.contains("impact") {
+                body.push_str("- TODO: Describe customer-visible behavior changes.\n");
+            } else if normalized.contains("why") {
+                body.push_str("- TODO: Explain the product reason or root cause.\n");
             } else if normalized.contains("risk") {
                 body.push_str("- TODO: Note migration, data, rollout, or UX risk.\n");
             } else {
@@ -6477,7 +6494,7 @@ mutation($threadId: ID!) {{
                    WHEN NOT EXISTS (SELECT 1 FROM chat_queued_inputs WHERE id = ?1) THEN ?1
                    ELSE COALESCE((SELECT MIN(id) FROM chat_queued_inputs), ?1) - 1
                  END",
-            params![input.id, input.thread_id],
+            params![input.id],
             |row| row.get::<_, i64>(0),
         )?;
         let now = timestamp();
@@ -12023,6 +12040,85 @@ branch_prefix = "team"
             .claim_next_queued_chat_input(thread.id)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn deleting_chat_thread_cascades_queued_inputs() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+        let queued = store
+            .enqueue_chat_input(
+                thread.id,
+                "run tests",
+                Some("visible run tests"),
+                ArchcarInputKind::User,
+                SessionKind::Codex,
+            )
+            .unwrap();
+
+        store
+            .conn
+            .execute("DELETE FROM chat_threads WHERE id = ?1", [thread.id])
+            .unwrap();
+
+        assert!(store
+            .get_queued_chat_input_optional(queued.id)
+            .unwrap()
+            .is_none());
+        assert!(store.list_queued_chat_thread_ids().unwrap().is_empty());
+    }
+
+    #[test]
+    fn requeue_claimed_chat_input_front_restores_after_delivery_failure() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+        let first = store
+            .enqueue_chat_input(
+                thread.id,
+                "first",
+                Some("visible first"),
+                ArchcarInputKind::User,
+                SessionKind::Codex,
+            )
+            .unwrap();
+        let second = store
+            .enqueue_chat_input(
+                thread.id,
+                "second",
+                None,
+                ArchcarInputKind::ReviewPrompt,
+                SessionKind::Codex,
+            )
+            .unwrap();
+        let claimed = store
+            .claim_next_queued_chat_input(thread.id)
+            .unwrap()
+            .expect("input should be claimed for provider delivery");
+
+        assert_eq!(claimed.id, first.id);
+        assert_eq!(
+            store
+                .peek_next_queued_chat_input(thread.id)
+                .unwrap()
+                .unwrap()
+                .id,
+            second.id
+        );
+
+        store
+            .requeue_claimed_chat_input_front(&claimed)
+            .expect("claimed input should be restored when delivery fails");
+
+        let queued = store.list_queued_chat_inputs(thread.id).unwrap();
+        assert_eq!(queued.len(), 2);
+        assert_eq!(queued[0].input, "first");
+        assert_eq!(queued[0].visible_input.as_deref(), Some("visible first"));
+        assert_eq!(queued[0].input_kind, ArchcarInputKind::User);
+        assert_eq!(queued[1].id, second.id);
     }
 
     #[test]
@@ -20184,7 +20280,6 @@ exit 1
             r#"
 [customization.naming]
 pr_title_template = "{workspace}: {branch} ({changed_files_count})"
-pr_body_sections = ["Summary", "Tests", "Risk"]
 "#,
         )
         .unwrap();
@@ -20236,9 +20331,15 @@ pr_body_sections = ["Summary", "Tests", "Risk"]
         let template = store.render_pull_request_template("berlin").unwrap();
 
         assert_eq!(template.title, "berlin: lc/berlin (1)");
-        assert!(template.body.contains("## Summary"));
-        assert!(template.body.contains("## Tests"));
-        assert!(template.body.contains("## Risk"));
+        for heading in [
+            "## Summary",
+            "## What Changed",
+            "## Why",
+            "## User Impact",
+            "## Validation",
+        ] {
+            assert!(template.body.contains(heading), "missing {heading}");
+        }
         assert!(template.body.contains("- README.md"));
         assert!(template
             .body

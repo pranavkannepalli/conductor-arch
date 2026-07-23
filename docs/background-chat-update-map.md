@@ -75,11 +75,13 @@ from the selected chat surface bridge.
 
 Archcar owns queued input durability and delivery. Queue rows live in
 `chat_queued_inputs`; both CLI and GTK write to Archcar queue requests and read
-the same SQLite-backed queue. Archcar deletes a row only after the matching
-ready session accepts the input command. `ChatQueueUpdated` is emitted whenever
-the queue changes, and GTK refreshes its local composer cache from that event.
-The selected chat surface also reconciles queue add/remove/list responses so
-optimistic GTK rows are quickly replaced by durable Archcar queue ids.
+the same SQLite-backed queue. `claim_next_queued_chat_input()` removes the FIFO
+row before provider delivery; if delivery fails, Archcar requeues the claimed
+input at the front or surfaces the restore failure so recovery can preserve the
+queued input instead of silently dropping it. `ChatQueueUpdated` is emitted
+whenever the queue changes, and GTK refreshes its local composer cache from that
+event. The selected chat surface also reconciles queue add/remove/list responses
+so optimistic GTK rows are quickly replaced by durable Archcar queue ids.
 
 The GTK runner owns hidden-chat UI state that must continue while the user is looking
 elsewhere:

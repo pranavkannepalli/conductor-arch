@@ -290,7 +290,8 @@ The runner emits narrow events only:
 - `WorkspaceReviewChanged` after turn completion triggers a background
   pull-request state refresh
 
-It scans only queued thread ids from `AppState`, loads queue candidates in a
+It obtains queued thread ids from SQLite through
+`WorkspaceStore::list_queued_chat_thread_ids()`, loads queue candidates in a
 background job, and sends one queued input when the hidden thread is managed,
 idle, and ready.
 
