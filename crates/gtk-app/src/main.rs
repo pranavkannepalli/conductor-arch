@@ -55,7 +55,6 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
-use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use toast::{ToastManager, ToastMessage};
 
@@ -798,7 +797,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         let refresh_hub = refresh_hub.clone();
         let db_path = paths.database_path.clone();
         let state = app_state.clone();
-        app_state.subscribe(move |event, _snapshot| {
+        app_state.subscribe(move |event, snapshot| {
             if let AppStateEvent::RefreshRequested(refresh_event) = event {
                 refresh_hub.refresh_event(refresh_event.clone());
             }
@@ -811,6 +810,11 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
                     state.clone(),
                     vec![workspace.clone()],
                 );
+            }
+            if let AppStateEvent::WindowFocusChanged { focused: true } = event {
+                if let Some(workspace) = snapshot.selected_workspace.clone() {
+                    spawn_git_review_sample_now(db_path.clone(), state.clone(), vec![workspace]);
+                }
             }
         })
     };
@@ -1225,8 +1229,10 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
         let toast_on_focus = toast_manager.clone();
         window.connect_is_active_notify(move |window| {
             if !window.is_active() {
+                state_on_focus.note_window_focus(false);
                 return;
             }
+            state_on_focus.note_window_focus(true);
             spawn_runtime_reconciliation(
                 db_path_on_focus.clone(),
                 hub_on_focus.clone(),
@@ -1242,13 +1248,6 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
                 toast_on_focus.clone(),
                 "workspace lifecycle recovery",
             );
-            if let Some(workspace) = state_on_focus.selected_workspace() {
-                spawn_git_review_sample_now(
-                    db_path_on_focus.clone(),
-                    state_on_focus.clone(),
-                    vec![workspace],
-                );
-            }
         });
     }
 
@@ -1296,111 +1295,6 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
                     for event in events {
                         state.request_refresh(event);
                     }
-                },
-            );
-            glib::ControlFlow::Continue
-        });
-    }
-
-    {
-        let db_path_git_review = app_state.workspace_database_path();
-        let state_git_review = app_state.clone();
-        let sampler = Arc::new(Mutex::new(
-            background_sync::WorkspaceGitReviewSampler::default(),
-        ));
-        let scheduler_in_flight = Rc::new(Cell::new(false));
-        let started_at = Instant::now();
-        // PER-190: Git review metadata can change outside focused workspaces;
-        // this recurring sampler owns lightweight refresh discovery until the
-        // background sync loop grows push-based repository change notifications.
-        glib::timeout_add_seconds_local(2, move || {
-            if scheduler_in_flight.get() {
-                return glib::ControlFlow::Continue;
-            }
-            scheduler_in_flight.set(true);
-            let now_secs = started_at.elapsed().as_secs();
-            let selected = state_git_review.selected_workspace();
-            let db_path_for_schedule = db_path_git_review.clone();
-            let sampler_for_schedule = Arc::clone(&sampler);
-            let scheduler_done = Rc::clone(&scheduler_in_flight);
-            let db_path_for_sample = db_path_git_review.clone();
-            let state_for_sample = state_git_review.clone();
-            let sampler_for_sample = Arc::clone(&sampler);
-            archcar_async::spawn_background_job(
-                move || {
-                    let candidates = background_sync::load_workspace_git_review_candidates(
-                        &db_path_for_schedule,
-                        selected.as_deref(),
-                    )?;
-                    let mut sampler = sampler_for_schedule
-                        .lock()
-                        .expect("git review sampler mutex poisoned");
-                    let due = sampler.due_workspaces(now_secs, &candidates);
-                    sampler.mark_started(now_secs, &due);
-                    Ok::<_, anyhow::Error>(due)
-                },
-                move |result| {
-                    scheduler_done.set(false);
-                    let due = match result {
-                        Ok(due) => due,
-                        Err(err) => {
-                            tracing::warn!(error = %err, "gtk git review schedule failed");
-                            return;
-                        }
-                    };
-                    if due.is_empty() {
-                        return;
-                    }
-                    let due_for_error = due.clone();
-                    let state_for_result = state_for_sample.clone();
-                    archcar_async::spawn_background_job(
-                        move || {
-                            background_sync::sample_workspace_git_review_state(
-                                &db_path_for_sample,
-                                &due,
-                            )
-                        },
-                        move |result| {
-                            if let Ok(mut sampler) = sampler_for_sample.lock() {
-                                sampler.mark_finished();
-                            }
-                            match result {
-                                Ok(samples) => {
-                                    for sample in samples {
-                                        let workspace = sample.workspace.clone();
-                                        let changed = state_for_result
-                                            .set_workspace_git_review_snapshot(
-                                                workspace.clone(),
-                                                state::WorkspaceGitReviewUiSnapshot {
-                                                    pull_request: sample.pull_request,
-                                                    readiness: sample.readiness,
-                                                    summary: sample.summary,
-                                                },
-                                            );
-                                        if changed {
-                                            state_for_result.request_refresh(
-                                                RefreshEvent::WorkspaceGitReviewChanged {
-                                                    workspace,
-                                                },
-                                            );
-                                        }
-                                    }
-                                }
-                                Err(err) => {
-                                    tracing::warn!(error = %err, "gtk git review sampler failed");
-                                    for workspace in due_for_error {
-                                        state_for_result.mark_workspace_git_review_refreshing(
-                                            workspace.clone(),
-                                            false,
-                                        );
-                                        state_for_result.request_refresh(
-                                            RefreshEvent::WorkspaceGitReviewChanged { workspace },
-                                        );
-                                    }
-                                }
-                            }
-                        },
-                    );
                 },
             );
             glib::ControlFlow::Continue
@@ -2911,6 +2805,29 @@ mod tests {
         assert!(region.contains("snapshot.checks_failed"));
         assert!(region.contains("Checks failed."));
         assert!(!region.contains("let _ = snapshot.notify_check_fail"));
+    }
+
+    #[test]
+    fn git_review_updates_are_event_driven_without_recurring_sampler() {
+        let source = include_str!("main.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("main source should contain production code");
+
+        assert!(
+            !production_source.contains("WorkspaceGitReviewSampler::default()"),
+            "GitHub review UI state must not be refreshed by a recurring sampler"
+        );
+        assert!(
+            production_source.contains("WorkspaceSelectionChanged")
+                && production_source.contains("spawn_git_review_sample_now("),
+            "workspace selection should trigger an immediate GitHub review sample"
+        );
+        assert!(
+            production_source.contains("WindowFocusChanged { focused: true }"),
+            "window focus should be the explicit recovery event for focused GitHub review state"
+        );
     }
 
     #[test]

@@ -1171,11 +1171,13 @@ fn ws_center_panel(
             let workspace_name = current_workspace_name.borrow().clone();
             match event {
                 RefreshEvent::WorkspaceChatLifecycleChanged { workspace }
+                | RefreshEvent::WorkspaceChatMessagesChanged { workspace, .. }
+                | RefreshEvent::ChatMessageAppended { workspace, .. }
+                | RefreshEvent::ChatMessageUpdated { workspace, .. }
+                | RefreshEvent::ChatTimelineTailChanged { workspace, .. }
+                | RefreshEvent::ChatSessionStatusChanged { workspace, .. }
                     if workspace != &workspace_name =>
                 {
-                    return;
-                }
-                RefreshEvent::WorkspaceChatMessagesChanged { .. } => {
                     return;
                 }
                 _ => {}
@@ -10134,7 +10136,7 @@ mod tests {
     }
 
     #[test]
-    fn chat_tab_refresh_ignores_message_events() {
+    fn chat_tab_refresh_uses_chat_state_events() {
         let source = include_str!("workspace_command_center.rs");
         let start = source
             .find("refresh_hub.set_workspace_chat_tabs(move |event| {")
@@ -10150,13 +10152,16 @@ mod tests {
             "lifecycle events should remain filtered to the visible workspace"
         );
         assert!(
-            handler_region.contains("workspace != &workspace_name"),
+            handler_region.contains("if workspace != &workspace_name"),
             "chat tab refreshes for other workspaces must not rebuild visible tabs"
         );
         assert!(
-            handler_region.contains("RefreshEvent::WorkspaceChatMessagesChanged { .. }")
-                && handler_region.contains("return;"),
-            "message events should not rebuild chat tabs"
+            handler_region.contains("RefreshEvent::WorkspaceChatMessagesChanged { workspace, .. }"),
+            "message/chat state events should refresh the visible chat tab indicators"
+        );
+        assert!(
+            handler_region.contains("RefreshEvent::ChatSessionStatusChanged { workspace, .. }"),
+            "session status events should refresh the visible chat tab indicators"
         );
     }
 

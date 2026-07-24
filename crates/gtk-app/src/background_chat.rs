@@ -21,7 +21,7 @@ use crate::archcar_async::{
     clear_archcar_ready, note_archcar_ready, spawn_background_job, AsyncArchcarBridge,
     AsyncArchcarMessage, AsyncArchcarResponse,
 };
-use crate::background_sync::provider_events_have_active_work;
+use crate::background_sync::{provider_events_have_active_work, sample_workspace_git_review_state};
 use crate::refresh::RefreshEvent;
 use crate::state::{AppState, QueuedChatInputDraft};
 
@@ -661,11 +661,27 @@ fn refresh_pull_request_after_background_turn(
             let store = WorkspaceStore::open_app(&db_path)?;
             let thread = store.get_chat_thread_record(thread_id)?;
             let workspace = store.get_workspace_record(thread.workspace_id)?.name;
-            let _ = store.refresh_pull_request_state(&workspace)?;
-            anyhow::Ok(workspace)
+            drop(store);
+            let samples =
+                sample_workspace_git_review_state(&db_path, std::slice::from_ref(&workspace))?;
+            anyhow::Ok((workspace, samples.into_iter().next()))
         },
         move |result| match result {
-            Ok(workspace) => {
+            Ok((workspace, Some(sample))) => {
+                let changed = app_state.set_workspace_git_review_snapshot(
+                    workspace.clone(),
+                    crate::state::WorkspaceGitReviewUiSnapshot {
+                        pull_request: sample.pull_request,
+                        readiness: sample.readiness,
+                        summary: sample.summary,
+                    },
+                );
+                if changed {
+                    app_state
+                        .request_refresh(RefreshEvent::WorkspaceGitReviewChanged { workspace });
+                }
+            }
+            Ok((workspace, None)) => {
                 app_state.request_refresh(RefreshEvent::WorkspaceGitReviewChanged { workspace });
             }
             Err(err) => {

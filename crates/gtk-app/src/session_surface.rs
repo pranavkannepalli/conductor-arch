@@ -120,7 +120,10 @@ pub(crate) enum ChatRefreshKind {
 
 pub(crate) fn chat_refresh_kind_for_event(event: &RefreshEvent) -> ChatRefreshKind {
     match event {
-        RefreshEvent::WorkspaceChatMessagesChanged { thread_id, .. } => ChatRefreshKind::Messages {
+        RefreshEvent::WorkspaceChatMessagesChanged { thread_id, .. }
+        | RefreshEvent::ChatMessageAppended { thread_id, .. }
+        | RefreshEvent::ChatMessageUpdated { thread_id, .. }
+        | RefreshEvent::ChatTimelineTailChanged { thread_id, .. } => ChatRefreshKind::Messages {
             thread_id: *thread_id,
         },
         RefreshEvent::WorkspaceChatLifecycleChanged { .. } => ChatRefreshKind::ThreadNav,

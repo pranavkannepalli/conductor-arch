@@ -508,11 +508,14 @@ impl RefreshHub {
             | RefreshEvent::ChatMessageUpdated { .. }
             | RefreshEvent::ChatTimelineTailChanged { .. } => {
                 self.refresh_workspace_event(WorkspaceRefreshTarget::ChatSurface, &event);
+                self.refresh_workspace_event(WorkspaceRefreshTarget::ChatTabs, &event);
             }
             RefreshEvent::ChatComposerChanged { .. }
             | RefreshEvent::ChatQueueChanged { .. }
-            | RefreshEvent::ChatTabChanged { .. }
-            | RefreshEvent::ChatSessionStatusChanged { .. } => {}
+            | RefreshEvent::ChatTabChanged { .. } => {}
+            RefreshEvent::ChatSessionStatusChanged { .. } => {
+                self.refresh_workspace_event(WorkspaceRefreshTarget::ChatTabs, &event);
+            }
             RefreshEvent::RightPanelFileListChanged { .. } => self.run_event(
                 RefreshMetricTarget::RightPanelFileList,
                 &self.right_panel_file_list,
@@ -739,7 +742,22 @@ mod tests {
             thread_id: 7,
         });
 
-        assert_eq!(counts.values(), (0, 0, 0, 0, 0, 1, 0, 0, 0, 0));
+        assert_eq!(counts.values(), (0, 0, 0, 0, 0, 1, 1, 0, 0, 0));
+    }
+
+    #[test]
+    fn chat_session_status_event_updates_chat_tabs_without_shell_rebuild() {
+        let hub = RefreshHub::default();
+        let counts = RefreshCounts::default();
+        counts.install(&hub);
+
+        hub.refresh_event(RefreshEvent::ChatSessionStatusChanged {
+            workspace: "demo".to_owned(),
+            thread_id: 7,
+            session_id: 11,
+        });
+
+        assert_eq!(counts.values(), (0, 0, 0, 0, 0, 0, 1, 0, 0, 0));
     }
 
     #[test]
@@ -862,9 +880,9 @@ mod tests {
         });
 
         let metrics = hub.refresh_metrics_snapshot();
-        assert_eq!(metrics.total, 1);
+        assert_eq!(metrics.total, 2);
         assert_eq!(metrics.workspace_chat_surface, 1);
-        assert_eq!(metrics.workspace_chat_tabs, 0);
+        assert_eq!(metrics.workspace_chat_tabs, 1);
         assert_eq!(metrics.workspace_shell, 0);
     }
 

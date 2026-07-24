@@ -140,6 +140,7 @@ pub struct WorkspaceGitReviewUiSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppStateEvent {
     WorkspaceSelectionChanged { workspace: Option<String> },
+    WindowFocusChanged { focused: bool },
     WorkspaceTabChanged { tab: WorkspaceTab },
     ChatThreadSelectionChanged { thread_id: Option<i64> },
     ComposerQueueChanged { thread_id: i64 },
@@ -240,6 +241,10 @@ impl AppState {
 
     pub fn request_refresh(&self, event: crate::refresh::RefreshEvent) {
         self.emit(AppStateEvent::RefreshRequested(event));
+    }
+
+    pub fn note_window_focus(&self, focused: bool) {
+        self.emit(AppStateEvent::WindowFocusChanged { focused });
     }
 
     pub fn selected_workspace(&self) -> Option<String> {
