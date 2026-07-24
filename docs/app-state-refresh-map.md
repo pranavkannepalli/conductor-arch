@@ -21,8 +21,8 @@ The speed model is:
 - emit narrow `AppStateEvent`s for local UI changes
 - route durable changes through typed `RefreshEvent`s
 - reload durable data off the GTK thread where possible
-- avoid `RefreshScope::All` for routine updates
-- update chat messages, chat tabs, runtime, review, and workspace nav rows
+- keep full refresh behind the explicit debug refresh flag
+- update chat messages, chat tabs, runtime, review, right-panel children, and workspace nav rows
   independently instead of rebuilding the whole workspace page
 
 ## Primary Files
@@ -87,41 +87,26 @@ Subscriptions are RAII handles; dropping the handle removes the watcher.
 `RefreshHub` is the durable-state fanout layer. It does not own data. It calls
 registered page/surface callbacks.
 
-Typed events:
+The current detailed before/after map lives in
+`docs/gtk-refresh-refactor-map.md`. The short version:
 
-- `Manual`
-- `ProjectInventoryChanged`
-- `SettingsChanged`
-- `WorkspaceSelectionChanged`
-- `WorkspaceInventoryChanged`
-- `WorkspaceMetadataChanged`
-- `WorkspaceRuntimeChanged`
-- `WorkspaceReviewChanged`
-- `WorkspaceChatLifecycleChanged`
-- `WorkspaceChatMessagesChanged`
-- `TerminalChanged`
+- `RefreshScope::All`, `RefreshScope::Workspace`,
+  `WorkspaceRefreshTarget::Shell`, and `run_event_or_shell` are removed from
+  routine refresh paths.
+- full refresh exists only as `debug_full_refresh()` behind
+  `ARCHDUCTOR_GTK_DEBUG_FULL_REFRESH`
+- workspace mount refresh remains only for selection, inventory, lifecycle, and
+  settings mount changes
+- chat message/tail changes route to chat surface only
+- chat lifecycle changes route to chat tabs only
+- runtime/terminal changes route to runtime only
+- review changes route to review only
+- workspace metadata/diff changes route to row-level nav handlers
+- right-panel file-list and diff-preview changes route to right-panel child
+  handlers
 
-Granular workspace targets:
-
-- shell/full workspace
-- chat surface
-- chat tabs
-- runtime
-- review
-- workspace nav row
-
-Important routing:
-
-- chat message changes update only chat surface and chat tabs
-- chat lifecycle changes update sidebar, dashboard, history, chat tabs, and
-  chat surface
-- runtime/terminal changes update sidebar, dashboard, history, and runtime
-- review changes update dashboard, history, and review
-- metadata changes update only the workspace nav row
-- `Manual` maps to `RefreshScope::All`
-
-Tests in `refresh.rs` lock in the intended fanout and assert routine sources do
-not call `RefreshScope::All`.
+Tests in `refresh.rs` lock in the fanout and assert routine sources do not call
+the removed broad refresh states.
 
 ## Update Flows
 
@@ -172,7 +157,7 @@ updates the visible row label/meta in place.
 Archive/delete/discard/remove paths call `remove_workspace_from_navigation` so
 selected workspace and history stacks cannot point at removed workspace names.
 Then they emit `WorkspaceInventoryChanged` for sidebar/dashboard/history and
-the workspace shell.
+the workspace mount.
 
 ### Chat Thread Creation
 
@@ -201,8 +186,8 @@ and push, merge source branch, fix blockers, latest check output, PR summary,
 PR review, failing checks, continue after merge, and open review comments.
 
 Prompt-stage actions that need immediate chat UI refresh publish
-`WorkspaceChatLifecycleChanged`. This updates the chat surface and chat tabs
-through chat routing instead of rebuilding the full workspace shell.
+`WorkspaceChatLifecycleChanged`. This updates chat tabs through chat routing
+instead of rebuilding the full workspace shell.
 
 `session_surface.rs` consumes `take_pending_chat_prompt` when the chat surface
 is built/refreshed and inserts the text into the composer on the GTK idle loop.
@@ -322,13 +307,13 @@ This path does not mutate `AppState`.
   reentrant `RefCell` panics.
 - `RefreshHub` separates local UI events from durable reloads.
 - Typed refresh events prevent broad page rebuilds.
-- `RefreshScope::All` is reserved for explicit manual refresh; tests guard
-  routine code against using it.
-- Workspace refresh is split into shell, chat surface, chat tabs, runtime,
-  review, and nav row.
+- full refresh exists only as a debug path gated by
+  `ARCHDUCTOR_GTK_DEBUG_FULL_REFRESH`
+- Workspace refresh is split into mount refresh, chat surface, chat tabs,
+  runtime, review, nav row, and right-panel child handlers.
 - Chat message refresh never falls back to full workspace shell rebuild.
-- Chat lifecycle refresh updates summaries/tabs/surface without touching
-  projects.
+- Chat lifecycle refresh updates chat tabs without touching projects,
+  sidebar/dashboard/history, or the workspace shell.
 - Chat session callbacks and PR prompt staging publish
   `WorkspaceChatLifecycleChanged` instead of manually refreshing
   sidebar/dashboard/history or the full workspace shell.
@@ -365,10 +350,10 @@ This path does not mutate `AppState`.
   consumption overwrite earlier text.
 - `RefreshHub` intentionally has no shared error channel; pages own load/store
   errors and render failures locally.
-- Some non-chat workspace content actions still use the full workspace shell
-  refresh because there is no narrower target yet. Current examples are file
-  save, non-metadata branch actions, checkpoint create/restore, linked
-  directory changes, and sibling conflict copy.
+- Some new narrow events are placeholders until their mounted child handlers are
+  wired. Current examples include header/status/branch, composer/queue,
+  review-comment, todo, terminal-buffer, runtime-process, and settings-section
+  events.
 - Some fallback timers remain because not every producer emits reliable typed
   refresh events yet.
 
@@ -391,7 +376,7 @@ Notable protections:
 - pending chat queues migrate to real thread ids
 - workspace create progress marks optimistic phases
 - typed refresh fanout counts are asserted
-- routine sources are forbidden from using `RefreshScope::All`
+- routine sources are forbidden from using broad refresh scopes
 - chat session callbacks and PR prompt staging are guarded against direct
   sidebar/dashboard/history triples or workspace-shell rebuilds
 - chat message refresh loads timelines off the GTK thread
