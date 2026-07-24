@@ -1,6 +1,6 @@
 # Progress
 
-Current as of 2026-07-22.
+Current as of 2026-07-24.
 
 ## Current State
 
@@ -127,6 +127,10 @@ paths and known rough edges.
 - GTK refreshes use typed events for routine runtime, review, workspace
   inventory, terminal, and chat changes; `RefreshScope::All` is reserved for
   explicit manual refresh and startup reconciliation.
+- GTK refreshes support scoped RAII listeners for payload-owned row updates.
+  Sidebar workspace diff stats use exact-workspace
+  `WorkspaceDiffStatsChanged { workspace, additions, deletions }` listeners and
+  no longer wake workspace nav-row/sidebar/shell handlers.
 - GTK background sync samples persisted running chat markers off the main timer
   callback, coalesces lifecycle refreshes by workspace, and avoids loading
   hidden full chat timelines for off-focus work.
@@ -212,6 +216,16 @@ Before calling behavior done, name:
 If one layer is skipped, say exactly why.
 
 ## Recent Verification
+
+GTK scoped refresh listener validation on 2026-07-24:
+
+- Passed `cargo test -p archductor-gtk workspace_diff_stats_subscription`.
+- Passed `cargo test -p archductor-gtk refresh --no-fail-fast`.
+- Passed `cargo test -p archductor-gtk sidebar --no-fail-fast`.
+- Passed `cargo fmt --all -- --check`.
+- Passed `cargo clippy -p archductor-gtk --all-targets -- -D warnings`.
+- CLI smoke not applicable; this slice changes only GTK refresh routing and
+  docs.
 
 Claude Code Archcar parity written verification on 2026-07-16:
 

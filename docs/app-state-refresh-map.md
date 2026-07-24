@@ -152,7 +152,10 @@ current workspace and updates the status label without rebuilding the page.
 
 Renames call `rename_workspace_in_navigation` and emit
 `WorkspaceMetadataChanged`. The sidebar has a `workspace_nav_row` handler that
-updates the visible row label/meta in place.
+updates the visible row label/meta in place. Workspace diff stats use per-row
+`RefreshHub::on_workspace_diff_stats` subscriptions keyed by workspace name, so
+`WorkspaceDiffStatsChanged { workspace, additions, deletions }` updates only the
+mounted row that owns that workspace and does not wake the nav-row handler.
 
 Archive/delete/discard/remove paths call `remove_workspace_from_navigation` so
 selected workspace and history stacks cannot point at removed workspace names.
