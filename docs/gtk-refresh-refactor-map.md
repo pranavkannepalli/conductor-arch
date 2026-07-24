@@ -23,6 +23,119 @@ update the smallest mounted element that owns the changed data. Mount rebuilds
 remain only for selection, inventory, lifecycle, settings, and explicit debug
 recovery.
 
+## Big Handle Breakdown
+
+`RefreshScope::All`
+
+- `RefreshHub::debug_full_refresh()`
+
+`RefreshScope::Workspace`
+
+- `RefreshHub::set_workspace_mount()`
+- `RefreshHub::refresh_workspace_mount()`
+- `RefreshEvent::WorkspaceSelectionChanged`
+- `RefreshEvent::WorkspaceInventoryChanged`
+- `RefreshEvent::WorkspaceLifecycleChanged`
+- `RefreshEvent::SettingsChanged`
+
+`WorkspaceRefreshTarget::Shell`
+
+- `RefreshHub::set_workspace_mount()`
+- `RefreshHub::refresh_workspace_mount()`
+
+`run_event_or_shell`
+
+- `run_event` for chat surface
+- `run_event` for chat tabs
+- `run_event` for runtime
+- `run_event` for review
+- no shell fallback when a small handler is missing
+
+`RefreshEvent::Manual`
+
+- `RefreshHub::debug_full_refresh()`
+
+`RefreshEvent::WorkspaceMetadataChanged`
+
+- `RefreshEvent::WorkspaceHeaderChanged { workspace }`
+- `RefreshEvent::WorkspaceStatusChanged { workspace }`
+- `RefreshEvent::WorkspaceDiffStatsChanged { workspace, additions, deletions }`
+- `RefreshEvent::WorkspaceBranchChanged { workspace }`
+- `RefreshEvent::WorkspaceLifecycleChanged { workspace }`
+- `RefreshEvent::WorkspaceMetadataChanged { old_workspace, workspace, branch }`
+
+`RefreshEvent::WorkspaceRuntimeChanged`
+
+- `RefreshEvent::WorkspaceRuntimeChanged { workspace }`
+- `RefreshEvent::RuntimeProcessChanged { workspace, process_id }`
+
+`RefreshEvent::WorkspaceReviewChanged`
+
+- `RefreshEvent::WorkspaceReviewChanged { workspace }`
+- `RefreshEvent::ReviewCommentsChanged { workspace }`
+
+`RefreshEvent::WorkspaceGitReviewChanged`
+
+- `RefreshEvent::WorkspaceGitReviewChanged { workspace }`
+- workspace nav row handler
+- workspace review handler
+
+`RefreshEvent::WorkspaceChatLifecycleChanged`
+
+- `RefreshEvent::WorkspaceChatLifecycleChanged { workspace }`
+- `RefreshEvent::ChatTabChanged { workspace, thread_id }`
+- `RefreshEvent::ChatSessionStatusChanged { workspace, thread_id, session_id }`
+
+`RefreshEvent::WorkspaceChatMessagesChanged`
+
+- `RefreshEvent::WorkspaceChatMessagesChanged { workspace, thread_id }`
+- `RefreshEvent::ChatMessageAppended { workspace, thread_id, message_id }`
+- `RefreshEvent::ChatMessageUpdated { workspace, thread_id, message_id }`
+- `RefreshEvent::ChatTimelineTailChanged { workspace, thread_id }`
+
+`RefreshEvent::TerminalChanged`
+
+- `RefreshEvent::TerminalChanged { workspace }`
+- `RefreshEvent::TerminalBufferChanged { workspace, terminal_id }`
+- `RefreshEvent::RuntimeProcessChanged { workspace, process_id }`
+
+Whole sidebar/dashboard/history refresh for runtime/chat/review child changes
+
+- workspace nav row handler
+- sidebar row additions label
+- sidebar row deletions label
+- future dashboard card handlers
+- future history row handlers
+- future runtime badge/count handlers
+- future chat badge/count handlers
+- future review badge/count handlers
+
+Whole right-panel refresh for child changes
+
+- `RefreshEvent::RightPanelFileListChanged { workspace }`
+- `RefreshEvent::RightPanelSelectedFileChanged { workspace, path }`
+- `RefreshEvent::RightPanelDiffPreviewChanged { workspace, path }`
+- `set_right_panel_file_list`
+- `set_right_panel_diff_preview`
+
+Whole chat surface refresh for child changes
+
+- chat message append
+- chat message update
+- chat timeline tail change
+- chat composer change
+- chat queue change
+- chat tab change
+- chat session status change
+
+Other broad or not-yet-split panel refreshes
+
+- `RefreshEvent::ReviewCommentsChanged { workspace }`
+- `RefreshEvent::TodosChanged { workspace }`
+- `RefreshEvent::TerminalBufferChanged { workspace, terminal_id }`
+- `RefreshEvent::RuntimeProcessChanged { workspace, process_id }`
+- `RefreshEvent::SettingsSectionChanged { scope, section }`
+
 ## Files Changed
 
 | File | Change |
