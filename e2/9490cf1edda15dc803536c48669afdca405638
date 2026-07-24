@@ -1,0 +1,35 @@
+crates/core/src/provider_adapters/claude_stream.rs
+  s_8551a3fcc67847::t_c935551475a6f3 2951-2985,3003-3021
+  s_8551a3fcc67847::t_ea5c63d227ed1f 1357-1397,3022
+  s_8551a3fcc67847::t_763d1b0280569d 2935,2937
+  s_8551a3fcc67847::t_5990eb8bfdd1a5 2986-3002
+  s_8551a3fcc67847::t_def7fc3a695e96 814-815
+  s_8551a3fcc67847::t_cfa79fa9f9777a 1398
+  s_8551a3fcc67847::t_7716a1e8df82bc 2950
+  s_8551a3fcc67847::t_f7533a273b5c68 3023
+crates/core/src/provider_adapters/codex_app_server.rs
+  s_8551a3fcc67847::t_71701de456cfbc 2115,2151-2183,2185-2223,2242-2243
+  s_8551a3fcc67847::t_70bb59838a7d35 1566-1576,1581-1610
+  s_8551a3fcc67847::t_6204fc4cc48410 1047-1048,1080,1161
+  s_8551a3fcc67847::t_d6095f920977a5 1577-1580
+  s_8551a3fcc67847::t_89662db5baba54 2116-2150,2184,2224-2241
+  s_8551a3fcc67847::t_67336b486749a8 2244
+docs/codex-claude-archductor-event-map.md
+  s_8551a3fcc67847::t_2e8c27577a97b1 62-64,71-73,101-104,110-112,138,140-147,162-163,166-170
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "e29490cf1edda15dc803536c48669afdca405638",
+  "prompts": {},
+  "sessions": {
+    "s_8551a3fcc67847": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f9285-fae7-7613-88a4-cb990b7b1575",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
