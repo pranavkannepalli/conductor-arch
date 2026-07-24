@@ -524,6 +524,8 @@ impl RefreshHub {
 mod tests {
     use super::*;
     use std::cell::Cell;
+    use std::fs;
+    use std::path::{Path, PathBuf};
 
     #[derive(Default)]
     struct RefreshCounts {
@@ -834,31 +836,39 @@ mod tests {
 
     #[test]
     fn routine_sources_do_not_use_refresh_all() {
-        for (path, source) in [
-            ("main.rs", include_str!("main.rs")),
-            ("sidebar.rs", include_str!("sidebar.rs")),
-            (
-                "workspace_command_center.rs",
-                include_str!("workspace_command_center.rs"),
-            ),
-            ("projects.rs", include_str!("projects.rs")),
-        ] {
+        let mut paths = Vec::new();
+        collect_rust_sources(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut paths,
+        );
+        paths.sort();
+
+        for path in paths {
+            let source = fs::read_to_string(&path)
+                .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
             let production_source = source
                 .split("#[cfg(test)]")
                 .next()
                 .expect("source should contain production code");
-            assert!(
-                !production_source.contains("RefreshScope::All"),
-                "{path} contains a routine RefreshScope::All call"
-            );
-            assert!(
-                !production_source.contains("RefreshScope::Workspace"),
-                "{path} contains a routine RefreshScope::Workspace call"
-            );
-            assert!(
-                !production_source.contains("set_workspace("),
-                "{path} contains the obsolete workspace shell setter"
-            );
+            let relative_path = path
+                .strip_prefix(env!("CARGO_MANIFEST_DIR"))
+                .unwrap_or(&path)
+                .display();
+            for forbidden in [
+                concat!("RefreshScope", "::All"),
+                concat!("RefreshScope", "::Workspace"),
+                concat!("WorkspaceRefreshTarget", "::Shell"),
+                concat!("RefreshEvent", "::Manual"),
+                concat!("set_workspace", "("),
+                concat!("set_workspace", "_shell"),
+                concat!("run_event", "_or_shell"),
+                concat!("refresh_workspace", "(WorkspaceRefreshTarget"),
+            ] {
+                assert!(
+                    !production_source.contains(forbidden),
+                    "{relative_path} contains obsolete broad refresh handler `{forbidden}`"
+                );
+            }
         }
 
         let refresh_source = include_str!("refresh.rs")
@@ -868,5 +878,19 @@ mod tests {
         assert!(!refresh_source.contains(concat!("run_event", "_or_shell")));
         assert!(!refresh_source.contains(concat!("WorkspaceRefreshTarget", "::Shell")));
         assert!(refresh_source.contains("ARCHDUCTOR_GTK_DEBUG_FULL_REFRESH"));
+    }
+
+    fn collect_rust_sources(dir: &Path, paths: &mut Vec<PathBuf>) {
+        for entry in fs::read_dir(dir).unwrap_or_else(|err| {
+            panic!("failed to read source directory {}: {err}", dir.display())
+        }) {
+            let entry = entry.expect("source directory entry should be readable");
+            let path = entry.path();
+            if path.is_dir() {
+                collect_rust_sources(&path, paths);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                paths.push(path);
+            }
+        }
     }
 }

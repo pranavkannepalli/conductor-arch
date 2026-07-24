@@ -10075,7 +10075,7 @@ mod tests {
         let chat_region = &source[start..end];
 
         assert!(
-            !chat_region.contains("RefreshScope::Workspace"),
+            !chat_region.contains(concat!("RefreshScope", "::Workspace")),
             "chat tab region must not rebuild the workspace shell"
         );
     }
@@ -10259,7 +10259,8 @@ mod tests",
         let prompt_button_region = &source[start..end];
 
         assert!(
-            !prompt_button_region.contains("refresh_hub.refresh(RefreshScope::Workspace)"),
+            !prompt_button_region
+                .contains(concat!("refresh_hub.refresh(RefreshScope", "::Workspace)")),
             "PR prompt buttons should not rebuild the whole workspace shell"
         );
         assert!(
