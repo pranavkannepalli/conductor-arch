@@ -494,6 +494,9 @@ pub(crate) fn build_app_sidebar(
                                     name: Rc::clone(&workspace_name),
                                     name_label: row.name_label.clone(),
                                     meta_label: row.meta_label.clone(),
+                                    additions_label: row.additions_label.clone(),
+                                    deletions_label: row.deletions_label.clone(),
+                                    branch: ws.branch.clone(),
                                     status: ws.status.clone(),
                                     updated_at: ws.updated_at.clone(),
                                 },
@@ -554,35 +557,48 @@ pub(crate) fn build_app_sidebar(
     {
         let names = Rc::clone(&names);
         let workspace_rows = Rc::clone(&workspace_rows);
-        refresh_hub.set_workspace_nav_row(move |event| {
-            let RefreshEvent::WorkspaceMetadataChanged {
+        refresh_hub.set_workspace_nav_row(move |event| match event {
+            RefreshEvent::WorkspaceMetadataChanged {
                 old_workspace,
                 workspace,
                 branch,
-            } = event
-            else {
-                return;
-            };
-
-            let row = { workspace_rows.borrow_mut().remove(old_workspace) };
-            if let Some(row) = row {
-                row.name_label.set_text(&title_case_workspace(workspace));
-                if let Some(branch) = branch {
-                    row.meta_label.set_text(&workspace_row_meta_text(
-                        branch,
-                        &row.status,
-                        &row.updated_at,
-                    ));
+            } => {
+                let row = { workspace_rows.borrow_mut().remove(old_workspace) };
+                if let Some(mut row) = row {
+                    row.name_label.set_text(&title_case_workspace(workspace));
+                    if let Some(branch) = branch {
+                        row.branch = branch.clone();
+                        row.meta_label.set_text(&workspace_row_meta_text(
+                            branch,
+                            &row.status,
+                            &row.updated_at,
+                        ));
+                    }
+                    *row.name.borrow_mut() = workspace.clone();
+                    workspace_rows.borrow_mut().insert(workspace.clone(), row);
                 }
-                *row.name.borrow_mut() = workspace.clone();
-                workspace_rows.borrow_mut().insert(workspace.clone(), row);
-            }
 
-            for name in names.borrow_mut().values() {
-                if name.borrow().as_str() == old_workspace {
-                    *name.borrow_mut() = workspace.clone();
+                for name in names.borrow_mut().values() {
+                    if name.borrow().as_str() == old_workspace {
+                        *name.borrow_mut() = workspace.clone();
+                    }
                 }
             }
+            RefreshEvent::WorkspaceDiffStatsChanged {
+                workspace,
+                additions,
+                deletions,
+            } => {
+                if let Some(row) = workspace_rows.borrow().get(workspace) {
+                    if let Some(label) = row.additions_label.as_ref() {
+                        label.set_text(&format!("+ {additions}"));
+                    }
+                    if let Some(label) = row.deletions_label.as_ref() {
+                        label.set_text(&format!("- {deletions}"));
+                    }
+                }
+            }
+            _ => {}
         });
     }
 
@@ -843,6 +859,9 @@ struct SidebarWorkspaceRow {
     name: Rc<RefCell<String>>,
     name_label: Label,
     meta_label: Label,
+    additions_label: Option<Label>,
+    deletions_label: Option<Label>,
+    branch: String,
     status: String,
     updated_at: String,
 }
@@ -870,6 +889,8 @@ struct BuiltWorkspaceRow {
     row: ListBoxRow,
     name_label: Label,
     meta_label: Label,
+    additions_label: Option<Label>,
+    deletions_label: Option<Label>,
 }
 
 fn build_workspace_row(
@@ -927,8 +948,14 @@ fn build_workspace_row(
         let failed = Label::new(Some("Failed"));
         failed.add_css_class("status-error");
         trailing_box.append(&failed);
-    } else {
-        trailing_box.append(&workspace_diff_stats(diff_additions, diff_deletions));
+    }
+    let mut additions_label = None;
+    let mut deletions_label = None;
+    if status != "creating" && status != "failed" {
+        let stats = workspace_diff_stats(diff_additions, diff_deletions);
+        additions_label = Some(stats.additions_label.clone());
+        deletions_label = Some(stats.deletions_label.clone());
+        trailing_box.append(&stats.widget);
     }
     row_box.append(&trailing_box);
 
@@ -941,6 +968,8 @@ fn build_workspace_row(
         row,
         name_label,
         meta_label,
+        additions_label,
+        deletions_label,
     }
 }
 
@@ -961,7 +990,13 @@ fn workspace_row_meta_text(branch: &str, status: &str, updated_at: &str) -> Stri
     meta_parts.join(" · ")
 }
 
-fn workspace_diff_stats(additions: usize, deletions: usize) -> GBox {
+struct WorkspaceDiffStatsLabels {
+    widget: GBox,
+    additions_label: Label,
+    deletions_label: Label,
+}
+
+fn workspace_diff_stats(additions: usize, deletions: usize) -> WorkspaceDiffStatsLabels {
     let stats = GBox::new(Orientation::Horizontal, 5);
     stats.add_css_class("workspace-row-diff-stats");
     stats.set_halign(Align::End);
@@ -976,7 +1011,11 @@ fn workspace_diff_stats(additions: usize, deletions: usize) -> GBox {
     deletions_label.set_xalign(1.0);
     stats.append(&deletions_label);
 
-    stats
+    WorkspaceDiffStatsLabels {
+        widget: stats,
+        additions_label,
+        deletions_label,
+    }
 }
 
 fn attach_workspace_row_context_menu(

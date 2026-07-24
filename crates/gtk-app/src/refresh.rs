@@ -3,17 +3,14 @@ use std::rc::Rc;
 
 #[derive(Clone, Copy, Debug)]
 pub enum RefreshScope {
-    All,
     Sidebar,
     Dashboard,
     Projects,
     History,
-    Workspace,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WorkspaceRefreshTarget {
-    Shell,
+enum WorkspaceRefreshTarget {
     ChatSurface,
     ChatTabs,
     Runtime,
@@ -22,11 +19,27 @@ pub enum WorkspaceRefreshTarget {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RefreshEvent {
-    Manual,
     ProjectInventoryChanged,
     SettingsChanged,
     WorkspaceSelectionChanged,
     WorkspaceInventoryChanged,
+    WorkspaceHeaderChanged {
+        workspace: String,
+    },
+    WorkspaceStatusChanged {
+        workspace: String,
+    },
+    WorkspaceDiffStatsChanged {
+        workspace: String,
+        additions: u64,
+        deletions: u64,
+    },
+    WorkspaceBranchChanged {
+        workspace: String,
+    },
+    WorkspaceLifecycleChanged {
+        workspace: String,
+    },
     WorkspaceMetadataChanged {
         old_workspace: String,
         workspace: String,
@@ -48,6 +61,64 @@ pub enum RefreshEvent {
         workspace: String,
         thread_id: i64,
     },
+    ChatMessageAppended {
+        workspace: String,
+        thread_id: i64,
+        message_id: i64,
+    },
+    ChatMessageUpdated {
+        workspace: String,
+        thread_id: i64,
+        message_id: i64,
+    },
+    ChatTimelineTailChanged {
+        workspace: String,
+        thread_id: i64,
+    },
+    ChatComposerChanged {
+        target: String,
+    },
+    ChatQueueChanged {
+        target: String,
+    },
+    ChatTabChanged {
+        workspace: String,
+        thread_id: i64,
+    },
+    ChatSessionStatusChanged {
+        workspace: String,
+        thread_id: i64,
+        session_id: i64,
+    },
+    RightPanelFileListChanged {
+        workspace: String,
+    },
+    RightPanelSelectedFileChanged {
+        workspace: String,
+        path: String,
+    },
+    RightPanelDiffPreviewChanged {
+        workspace: String,
+        path: String,
+    },
+    ReviewCommentsChanged {
+        workspace: String,
+    },
+    TodosChanged {
+        workspace: String,
+    },
+    TerminalBufferChanged {
+        workspace: String,
+        terminal_id: i64,
+    },
+    RuntimeProcessChanged {
+        workspace: String,
+        process_id: i64,
+    },
+    SettingsSectionChanged {
+        scope: String,
+        section: String,
+    },
     TerminalChanged {
         workspace: String,
     },
@@ -68,6 +139,8 @@ enum RefreshMetricTarget {
     WorkspaceRuntime,
     WorkspaceReview,
     WorkspaceNavRow,
+    RightPanelFileList,
+    RightPanelDiffPreview,
 }
 
 impl RefreshMetricTarget {
@@ -83,6 +156,8 @@ impl RefreshMetricTarget {
             Self::WorkspaceRuntime => "workspace_runtime",
             Self::WorkspaceReview => "workspace_review",
             Self::WorkspaceNavRow => "workspace_nav_row",
+            Self::RightPanelFileList => "right_panel_file_list",
+            Self::RightPanelDiffPreview => "right_panel_diff_preview",
         }
     }
 }
@@ -100,6 +175,8 @@ struct RefreshMetricSnapshot {
     workspace_runtime: u64,
     workspace_review: u64,
     workspace_nav_row: u64,
+    right_panel_file_list: u64,
+    right_panel_diff_preview: u64,
 }
 
 #[derive(Default)]
@@ -116,6 +193,8 @@ struct RefreshMetrics {
     workspace_runtime: Cell<u64>,
     workspace_review: Cell<u64>,
     workspace_nav_row: Cell<u64>,
+    right_panel_file_list: Cell<u64>,
+    right_panel_diff_preview: Cell<u64>,
 }
 
 impl RefreshMetrics {
@@ -144,6 +223,12 @@ impl RefreshMetrics {
             RefreshMetricTarget::WorkspaceNavRow => {
                 self.workspace_nav_row.set(self.workspace_nav_row.get() + 1)
             }
+            RefreshMetricTarget::RightPanelFileList => self
+                .right_panel_file_list
+                .set(self.right_panel_file_list.get() + 1),
+            RefreshMetricTarget::RightPanelDiffPreview => self
+                .right_panel_diff_preview
+                .set(self.right_panel_diff_preview.get() + 1),
         }
         if self.enabled() {
             let snapshot = self.snapshot();
@@ -160,6 +245,8 @@ impl RefreshMetrics {
                 workspace_runtime = snapshot.workspace_runtime,
                 workspace_review = snapshot.workspace_review,
                 workspace_nav_row = snapshot.workspace_nav_row,
+                right_panel_file_list = snapshot.right_panel_file_list,
+                right_panel_diff_preview = snapshot.right_panel_diff_preview,
                 "gtk refresh metric"
             );
         }
@@ -187,6 +274,8 @@ impl RefreshMetrics {
             workspace_runtime: self.workspace_runtime.get(),
             workspace_review: self.workspace_review.get(),
             workspace_nav_row: self.workspace_nav_row.get(),
+            right_panel_file_list: self.right_panel_file_list.get(),
+            right_panel_diff_preview: self.right_panel_diff_preview.get(),
         }
     }
 }
@@ -209,6 +298,8 @@ pub struct RefreshHub {
     workspace_runtime: Rc<RefCell<Option<RefreshEventHandler>>>,
     workspace_review: Rc<RefCell<Option<RefreshEventHandler>>>,
     workspace_nav_row: Rc<RefCell<Option<RefreshEventHandler>>>,
+    right_panel_file_list: Rc<RefCell<Option<RefreshEventHandler>>>,
+    right_panel_diff_preview: Rc<RefCell<Option<RefreshEventHandler>>>,
     metrics: Rc<RefreshMetrics>,
 }
 
@@ -229,11 +320,7 @@ impl RefreshHub {
         *self.history.borrow_mut() = Some(Rc::new(handler));
     }
 
-    pub fn set_workspace(&self, handler: impl Fn() + 'static) {
-        self.set_workspace_shell(handler);
-    }
-
-    pub fn set_workspace_shell(&self, handler: impl Fn() + 'static) {
+    pub fn set_workspace_mount(&self, handler: impl Fn() + 'static) {
         *self.workspace_shell.borrow_mut() = Some(Rc::new(handler));
     }
 
@@ -257,9 +344,16 @@ impl RefreshHub {
         *self.workspace_nav_row.borrow_mut() = Some(Rc::new(handler));
     }
 
+    pub fn set_right_panel_file_list(&self, handler: impl Fn(&RefreshEvent) + 'static) {
+        *self.right_panel_file_list.borrow_mut() = Some(Rc::new(handler));
+    }
+
+    pub fn set_right_panel_diff_preview(&self, handler: impl Fn(&RefreshEvent) + 'static) {
+        *self.right_panel_diff_preview.borrow_mut() = Some(Rc::new(handler));
+    }
+
     pub fn refresh_event(&self, event: RefreshEvent) {
         match event {
-            RefreshEvent::Manual => self.refresh(RefreshScope::All),
             RefreshEvent::ProjectInventoryChanged => {
                 self.refresh(RefreshScope::Projects);
                 self.refresh(RefreshScope::Sidebar);
@@ -267,19 +361,29 @@ impl RefreshHub {
             }
             RefreshEvent::SettingsChanged => {
                 self.refresh(RefreshScope::Projects);
-                self.refresh_workspace(WorkspaceRefreshTarget::Shell);
+                self.refresh_workspace_mount();
             }
             RefreshEvent::WorkspaceSelectionChanged => {
                 self.refresh(RefreshScope::Sidebar);
-                self.refresh_workspace(WorkspaceRefreshTarget::Shell);
+                self.refresh_workspace_mount();
             }
             RefreshEvent::WorkspaceInventoryChanged => {
                 self.refresh(RefreshScope::Sidebar);
                 self.refresh(RefreshScope::Dashboard);
                 self.refresh(RefreshScope::History);
-                self.refresh_workspace(WorkspaceRefreshTarget::Shell);
+                self.refresh_workspace_mount();
             }
-            RefreshEvent::WorkspaceMetadataChanged { .. } => {
+            RefreshEvent::WorkspaceLifecycleChanged { .. } => {
+                self.refresh(RefreshScope::Sidebar);
+                self.refresh(RefreshScope::Dashboard);
+                self.refresh(RefreshScope::History);
+                self.refresh_workspace_mount();
+            }
+            RefreshEvent::WorkspaceHeaderChanged { .. }
+            | RefreshEvent::WorkspaceStatusChanged { .. }
+            | RefreshEvent::WorkspaceDiffStatsChanged { .. }
+            | RefreshEvent::WorkspaceBranchChanged { .. }
+            | RefreshEvent::WorkspaceMetadataChanged { .. } => {
                 self.run_event(
                     RefreshMetricTarget::WorkspaceNavRow,
                     &self.workspace_nav_row,
@@ -287,20 +391,12 @@ impl RefreshHub {
                 );
             }
             RefreshEvent::WorkspaceRuntimeChanged { .. } | RefreshEvent::TerminalChanged { .. } => {
-                self.refresh(RefreshScope::Sidebar);
-                self.refresh(RefreshScope::Dashboard);
-                self.refresh(RefreshScope::History);
                 self.refresh_workspace_event(WorkspaceRefreshTarget::Runtime, &event);
             }
             RefreshEvent::WorkspaceChatLifecycleChanged { .. } => {
-                self.refresh(RefreshScope::Sidebar);
-                self.refresh(RefreshScope::Dashboard);
-                self.refresh(RefreshScope::History);
                 self.refresh_workspace_event(WorkspaceRefreshTarget::ChatTabs, &event);
             }
             RefreshEvent::WorkspaceReviewChanged { .. } => {
-                self.refresh(RefreshScope::Dashboard);
-                self.refresh(RefreshScope::History);
                 self.refresh_workspace_event(WorkspaceRefreshTarget::Review, &event);
             }
             RefreshEvent::WorkspaceGitReviewChanged { .. } => {
@@ -311,41 +407,37 @@ impl RefreshHub {
                     &event,
                 );
             }
-            RefreshEvent::WorkspaceChatMessagesChanged { .. } => {
+            RefreshEvent::WorkspaceChatMessagesChanged { .. }
+            | RefreshEvent::ChatMessageAppended { .. }
+            | RefreshEvent::ChatMessageUpdated { .. }
+            | RefreshEvent::ChatTimelineTailChanged { .. } => {
                 self.refresh_workspace_event(WorkspaceRefreshTarget::ChatSurface, &event);
             }
+            RefreshEvent::ChatComposerChanged { .. }
+            | RefreshEvent::ChatQueueChanged { .. }
+            | RefreshEvent::ChatTabChanged { .. }
+            | RefreshEvent::ChatSessionStatusChanged { .. } => {}
+            RefreshEvent::RightPanelFileListChanged { .. } => self.run_event(
+                RefreshMetricTarget::RightPanelFileList,
+                &self.right_panel_file_list,
+                &event,
+            ),
+            RefreshEvent::RightPanelSelectedFileChanged { .. }
+            | RefreshEvent::RightPanelDiffPreviewChanged { .. } => self.run_event(
+                RefreshMetricTarget::RightPanelDiffPreview,
+                &self.right_panel_diff_preview,
+                &event,
+            ),
+            RefreshEvent::ReviewCommentsChanged { .. }
+            | RefreshEvent::TodosChanged { .. }
+            | RefreshEvent::TerminalBufferChanged { .. }
+            | RefreshEvent::RuntimeProcessChanged { .. }
+            | RefreshEvent::SettingsSectionChanged { .. } => {}
         }
     }
 
-    pub fn refresh_workspace(&self, target: WorkspaceRefreshTarget) {
-        match target {
-            WorkspaceRefreshTarget::Shell => {
-                self.run(RefreshMetricTarget::WorkspaceShell, &self.workspace_shell)
-            }
-            WorkspaceRefreshTarget::ChatSurface => self.run_event(
-                RefreshMetricTarget::WorkspaceChatSurface,
-                &self.workspace_chat_surface,
-                &RefreshEvent::Manual,
-            ),
-            WorkspaceRefreshTarget::ChatTabs => self.run_event_or_shell(
-                RefreshMetricTarget::WorkspaceChatTabs,
-                &self.workspace_chat_tabs,
-                &RefreshEvent::Manual,
-                &self.workspace_shell,
-            ),
-            WorkspaceRefreshTarget::Runtime => self.run_event_or_shell(
-                RefreshMetricTarget::WorkspaceRuntime,
-                &self.workspace_runtime,
-                &RefreshEvent::Manual,
-                &self.workspace_shell,
-            ),
-            WorkspaceRefreshTarget::Review => self.run_event_or_shell(
-                RefreshMetricTarget::WorkspaceReview,
-                &self.workspace_review,
-                &RefreshEvent::Manual,
-                &self.workspace_shell,
-            ),
-        }
+    pub fn refresh_workspace_mount(&self) {
+        self.run(RefreshMetricTarget::WorkspaceShell, &self.workspace_shell);
     }
 
     fn refresh_workspace_event(&self, target: WorkspaceRefreshTarget, event: &RefreshEvent) {
@@ -355,45 +447,45 @@ impl RefreshHub {
                 &self.workspace_chat_surface,
                 event,
             ),
-            WorkspaceRefreshTarget::ChatTabs => self.run_event_or_shell(
+            WorkspaceRefreshTarget::ChatTabs => self.run_event(
                 RefreshMetricTarget::WorkspaceChatTabs,
                 &self.workspace_chat_tabs,
                 event,
-                &self.workspace_shell,
             ),
-            WorkspaceRefreshTarget::Runtime => self.run_event_or_shell(
+            WorkspaceRefreshTarget::Runtime => self.run_event(
                 RefreshMetricTarget::WorkspaceRuntime,
                 &self.workspace_runtime,
                 event,
-                &self.workspace_shell,
             ),
-            WorkspaceRefreshTarget::Review => self.run_event_or_shell(
+            WorkspaceRefreshTarget::Review => self.run_event(
                 RefreshMetricTarget::WorkspaceReview,
                 &self.workspace_review,
                 event,
-                &self.workspace_shell,
             ),
-            _ => self.refresh_workspace(target),
         }
     }
 
     pub fn refresh(&self, scope: RefreshScope) {
         match scope {
-            RefreshScope::All => {
-                self.run(RefreshMetricTarget::Sidebar, &self.sidebar);
-                self.run(RefreshMetricTarget::Dashboard, &self.dashboard);
-                self.run(RefreshMetricTarget::Projects, &self.projects);
-                self.run(RefreshMetricTarget::History, &self.history);
-                self.run(RefreshMetricTarget::WorkspaceShell, &self.workspace_shell);
-            }
             RefreshScope::Sidebar => self.run(RefreshMetricTarget::Sidebar, &self.sidebar),
             RefreshScope::Dashboard => self.run(RefreshMetricTarget::Dashboard, &self.dashboard),
             RefreshScope::Projects => self.run(RefreshMetricTarget::Projects, &self.projects),
             RefreshScope::History => self.run(RefreshMetricTarget::History, &self.history),
-            RefreshScope::Workspace => {
-                self.run(RefreshMetricTarget::WorkspaceShell, &self.workspace_shell)
-            }
         }
+    }
+
+    pub fn debug_full_refresh(&self) {
+        if !archductor_core::env_flags::enabled("ARCHDUCTOR_GTK_DEBUG_FULL_REFRESH") {
+            tracing::debug!(
+                "ignored full GTK refresh because ARCHDUCTOR_GTK_DEBUG_FULL_REFRESH is disabled"
+            );
+            return;
+        }
+        self.run(RefreshMetricTarget::Sidebar, &self.sidebar);
+        self.run(RefreshMetricTarget::Dashboard, &self.dashboard);
+        self.run(RefreshMetricTarget::Projects, &self.projects);
+        self.run(RefreshMetricTarget::History, &self.history);
+        self.run(RefreshMetricTarget::WorkspaceShell, &self.workspace_shell);
     }
 
     fn run(&self, target: RefreshMetricTarget, slot: &Rc<RefCell<Option<RefreshHandler>>>) {
@@ -401,22 +493,6 @@ impl RefreshHub {
         if let Some(handler) = handler {
             self.metrics.record(target);
             handler();
-        }
-    }
-
-    fn run_event_or_shell(
-        &self,
-        target: RefreshMetricTarget,
-        slot: &Rc<RefCell<Option<RefreshEventHandler>>>,
-        event: &RefreshEvent,
-        shell: &Rc<RefCell<Option<RefreshHandler>>>,
-    ) {
-        let handler = slot.borrow().as_ref().cloned();
-        if let Some(handler) = handler {
-            self.metrics.record(target);
-            handler(event);
-        } else {
-            self.run(RefreshMetricTarget::WorkspaceShell, shell);
         }
     }
 
@@ -478,7 +554,7 @@ mod tests {
             hub.set_history(move || history.set(history.get() + 1));
 
             let workspace = Rc::clone(&self.workspace);
-            hub.set_workspace(move || workspace.set(workspace.get() + 1));
+            hub.set_workspace_mount(move || workspace.set(workspace.get() + 1));
 
             let workspace_chat_surface = Rc::clone(&self.workspace_chat_surface);
             hub.set_workspace_chat_surface(move |_| {
@@ -520,11 +596,11 @@ mod tests {
     fn refresh_handler_can_replace_same_scope_without_refcell_panic() {
         let hub = RefreshHub::default();
         let hub_for_handler = hub.clone();
-        hub.set_workspace(move || {
-            hub_for_handler.set_workspace(|| {});
+        hub.set_workspace_mount(move || {
+            hub_for_handler.set_workspace_mount(|| {});
         });
 
-        hub.refresh(RefreshScope::Workspace);
+        hub.refresh_workspace_mount();
     }
 
     #[test]
@@ -537,7 +613,7 @@ mod tests {
             workspace: "demo".to_owned(),
         });
 
-        assert_eq!(counts.values(), (1, 1, 0, 1, 0, 0, 0, 1, 0, 0));
+        assert_eq!(counts.values(), (0, 0, 0, 0, 0, 0, 0, 1, 0, 0));
     }
 
     #[test]
@@ -599,7 +675,7 @@ mod tests {
             workspace: "demo".to_owned(),
         });
 
-        assert_eq!(counts.values(), (1, 1, 0, 1, 0, 0, 1, 0, 0, 0));
+        assert_eq!(counts.values(), (0, 0, 0, 0, 0, 0, 1, 0, 0, 0));
     }
 
     #[test]
@@ -613,10 +689,10 @@ mod tests {
         });
 
         let metrics = hub.refresh_metrics_snapshot();
-        assert_eq!(metrics.total, 4);
-        assert_eq!(metrics.sidebar, 1);
-        assert_eq!(metrics.dashboard, 1);
-        assert_eq!(metrics.history, 1);
+        assert_eq!(metrics.total, 1);
+        assert_eq!(metrics.sidebar, 0);
+        assert_eq!(metrics.dashboard, 0);
+        assert_eq!(metrics.history, 0);
         assert_eq!(metrics.workspace_chat_surface, 0);
         assert_eq!(metrics.workspace_chat_tabs, 1);
     }
@@ -665,7 +741,7 @@ mod tests {
             workspace: "demo".to_owned(),
         });
 
-        assert_eq!(counts.values(), (0, 1, 0, 1, 0, 0, 0, 0, 1, 0));
+        assert_eq!(counts.values(), (0, 0, 0, 0, 0, 0, 0, 0, 1, 0));
     }
 
     #[test]
@@ -682,11 +758,38 @@ mod tests {
     }
 
     #[test]
-    fn unregistered_granular_workspace_handlers_fall_back_to_shell() {
+    fn right_panel_diff_preview_event_updates_only_right_panel_child() {
+        let hub = RefreshHub::default();
+        let counts = RefreshCounts::default();
+        counts.install(&hub);
+        let right_panel_count = Rc::new(Cell::new(0));
+        let right_panel_count_for_handler = Rc::clone(&right_panel_count);
+        hub.set_right_panel_diff_preview(move |_| {
+            right_panel_count_for_handler.set(right_panel_count_for_handler.get() + 1);
+        });
+
+        hub.refresh_event(RefreshEvent::RightPanelDiffPreviewChanged {
+            workspace: "demo".to_owned(),
+            path: "src/main.rs".to_owned(),
+        });
+
+        assert_eq!(right_panel_count.get(), 1);
+        assert_eq!(counts.values(), (0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
+        let metrics = hub.refresh_metrics_snapshot();
+        assert_eq!(metrics.total, 1);
+        assert_eq!(metrics.right_panel_diff_preview, 1);
+        assert_eq!(metrics.workspace_shell, 0);
+        assert_eq!(metrics.workspace_chat_surface, 0);
+    }
+
+    #[test]
+    fn unregistered_granular_workspace_handlers_do_not_fall_back_to_shell() {
         let hub = RefreshHub::default();
         let shell_count = Rc::new(Cell::new(0));
         let shell_count_for_handler = Rc::clone(&shell_count);
-        hub.set_workspace(move || shell_count_for_handler.set(shell_count_for_handler.get() + 1));
+        hub.set_workspace_mount(move || {
+            shell_count_for_handler.set(shell_count_for_handler.get() + 1)
+        });
 
         hub.refresh_event(RefreshEvent::WorkspaceRuntimeChanged {
             workspace: "demo".to_owned(),
@@ -698,7 +801,7 @@ mod tests {
             workspace: "demo".to_owned(),
         });
 
-        assert_eq!(shell_count.get(), 3);
+        assert_eq!(shell_count.get(), 0);
     }
 
     #[test]
@@ -706,7 +809,9 @@ mod tests {
         let hub = RefreshHub::default();
         let shell_count = Rc::new(Cell::new(0));
         let shell_count_for_handler = Rc::clone(&shell_count);
-        hub.set_workspace(move || shell_count_for_handler.set(shell_count_for_handler.get() + 1));
+        hub.set_workspace_mount(move || {
+            shell_count_for_handler.set(shell_count_for_handler.get() + 1)
+        });
 
         hub.refresh_event(RefreshEvent::WorkspaceChatMessagesChanged {
             workspace: "demo".to_owned(),
@@ -730,6 +835,7 @@ mod tests {
     #[test]
     fn routine_sources_do_not_use_refresh_all() {
         for (path, source) in [
+            ("main.rs", include_str!("main.rs")),
             ("sidebar.rs", include_str!("sidebar.rs")),
             (
                 "workspace_command_center.rs",
@@ -737,15 +843,30 @@ mod tests {
             ),
             ("projects.rs", include_str!("projects.rs")),
         ] {
+            let production_source = source
+                .split("#[cfg(test)]")
+                .next()
+                .expect("source should contain production code");
             assert!(
-                !source.contains("RefreshScope::All"),
+                !production_source.contains("RefreshScope::All"),
                 "{path} contains a routine RefreshScope::All call"
+            );
+            assert!(
+                !production_source.contains("RefreshScope::Workspace"),
+                "{path} contains a routine RefreshScope::Workspace call"
+            );
+            assert!(
+                !production_source.contains("set_workspace("),
+                "{path} contains the obsolete workspace shell setter"
             );
         }
 
-        let main_source = include_str!("main.rs");
-        assert_eq!(main_source.matches("RefreshScope::All").count(), 2);
-        assert!(main_source.contains("Some(ShortcutAction::Refresh)"));
-        assert!(main_source.contains("PaletteTarget::Refresh =>"));
+        let refresh_source = include_str!("refresh.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("refresh source should contain production code");
+        assert!(!refresh_source.contains(concat!("run_event", "_or_shell")));
+        assert!(!refresh_source.contains(concat!("WorkspaceRefreshTarget", "::Shell")));
+        assert!(refresh_source.contains("ARCHDUCTOR_GTK_DEBUG_FULL_REFRESH"));
     }
 }

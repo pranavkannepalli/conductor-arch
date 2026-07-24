@@ -121,7 +121,7 @@ fn clone_external_thread_selection_controller(
     controller.borrow().as_ref().cloned()
 }
 
-use crate::refresh::{RefreshEvent, RefreshHub, RefreshScope};
+use crate::refresh::{RefreshEvent, RefreshHub};
 use crate::state::{
     AppState, AppStateEvent, ChatUiPhase, ChatUiTarget, QueuedChatInputDraft,
     WorkspaceRightPanelTab, WorkspaceTab, WorkspaceUiPhase,
@@ -2935,8 +2935,7 @@ fn workspace_files_panel(
 
     let file_list = GBox::new(Orientation::Vertical, 4);
     file_list.append(&detail_row("Files", "Loading files..."));
-    let workspace_path_for_files = ws.path.clone();
-    spawn_background_job(move || list_workspace_files(&workspace_path_for_files), {
+    let reload_file_list: Rc<dyn Fn()> = Rc::new({
         let file_list = file_list.clone();
         let current_file = current_file.clone();
         let selected_file = selected_file.clone();
@@ -2947,27 +2946,107 @@ fn workspace_files_panel(
         let db_path_open = db_path.to_path_buf();
         let workspace_name = ws.name.clone();
         let mode_stack = mode_stack.clone();
-        move |files: Vec<String>| {
-            clear_box_children(&file_list);
-            if files.is_empty() {
-                file_list.append(&detail_row("Files", "No visible files."));
-            } else {
-                for relative in files {
-                    append_workspace_file_open_button(
-                        &file_list,
-                        relative,
-                        selected_file.clone(),
-                        current_file.clone(),
-                        edit_buffer.clone(),
-                        diff_buffer.clone(),
-                        preview_buffer.clone(),
-                        workspace_path.clone(),
-                        db_path_open.clone(),
-                        workspace_name.clone(),
-                        mode_stack.clone(),
-                    );
+        move || {
+            let workspace_path_for_files = workspace_path.clone();
+            spawn_background_job(move || list_workspace_files(&workspace_path_for_files), {
+                let file_list = file_list.clone();
+                let current_file = current_file.clone();
+                let selected_file = selected_file.clone();
+                let edit_buffer = edit_buffer.clone();
+                let diff_buffer = diff_buffer.clone();
+                let preview_buffer = preview_buffer.clone();
+                let workspace_path = workspace_path.clone();
+                let db_path_open = db_path_open.clone();
+                let workspace_name = workspace_name.clone();
+                let mode_stack = mode_stack.clone();
+                move |files: Vec<String>| {
+                    clear_box_children(&file_list);
+                    if files.is_empty() {
+                        file_list.append(&detail_row("Files", "No visible files."));
+                    } else {
+                        for relative in files {
+                            append_workspace_file_open_button(
+                                &file_list,
+                                relative,
+                                selected_file.clone(),
+                                current_file.clone(),
+                                edit_buffer.clone(),
+                                diff_buffer.clone(),
+                                preview_buffer.clone(),
+                                workspace_path.clone(),
+                                db_path_open.clone(),
+                                workspace_name.clone(),
+                                mode_stack.clone(),
+                            );
+                        }
+                    }
                 }
+            });
+        }
+    });
+    reload_file_list();
+
+    refresh_hub.set_right_panel_file_list({
+        let reload_file_list = reload_file_list.clone();
+        let workspace_name = ws.name.clone();
+        move |event| {
+            if matches!(
+                event,
+                RefreshEvent::RightPanelFileListChanged { workspace }
+                    if workspace == &workspace_name
+            ) {
+                reload_file_list();
             }
+        }
+    });
+
+    refresh_hub.set_right_panel_diff_preview({
+        let selected_file = selected_file.clone();
+        let edit_buffer = edit_view.buffer();
+        let diff_buffer = diff_view.buffer();
+        let preview_buffer = preview_view.buffer();
+        let workspace_path = ws.path.clone();
+        let db_path = db_path.to_path_buf();
+        let workspace_name = ws.name.clone();
+        move |event| {
+            let Some(relative_path) = (match event {
+                RefreshEvent::RightPanelSelectedFileChanged { workspace, path }
+                | RefreshEvent::RightPanelDiffPreviewChanged { workspace, path }
+                    if workspace == &workspace_name =>
+                {
+                    Some(path.clone())
+                }
+                _ => None,
+            }) else {
+                return;
+            };
+            let selected_file_apply = selected_file.clone();
+            let edit_buffer_apply = edit_buffer.clone();
+            let preview_buffer_apply = preview_buffer.clone();
+            let diff_buffer_apply = diff_buffer.clone();
+            let workspace_path = workspace_path.clone();
+            let db_path = db_path.clone();
+            let workspace_name = workspace_name.clone();
+            spawn_background_job(
+                move || {
+                    load_workspace_file_snapshot(
+                        workspace_path,
+                        db_path,
+                        workspace_name,
+                        relative_path,
+                    )
+                },
+                move |snapshot| {
+                    if selected_file_apply.borrow().as_deref()
+                        != Some(snapshot.relative_path.as_str())
+                    {
+                        return;
+                    }
+                    edit_buffer_apply.set_text(&snapshot.contents);
+                    preview_buffer_apply.set_text(&snapshot.contents);
+                    diff_buffer_apply.set_text(&snapshot.diff_text);
+                },
+            );
         }
     });
 
@@ -3027,6 +3106,7 @@ fn workspace_files_panel(
     let selected_file_save = selected_file;
     let edit_buffer_save = edit_view.buffer();
     let workspace_path_save = ws.path.clone();
+    let workspace_name_save = ws.name.clone();
     let feedback_save = feedback.clone();
     let toast_save = toast_overlay;
     save_btn.connect_clicked(move |_| {
@@ -3048,7 +3128,10 @@ fn workspace_files_panel(
                     &format!("Saved {}.", relative_path),
                     true,
                 );
-                refresh_hub.refresh(RefreshScope::Workspace);
+                refresh_hub.refresh_event(RefreshEvent::RightPanelDiffPreviewChanged {
+                    workspace: workspace_name_save.clone(),
+                    path: relative_path,
+                });
             }
             Err(err) => apply_action_feedback(
                 &feedback_save,
@@ -4119,7 +4202,9 @@ fn workspace_branch_panel(
                             },
                         );
                     }
-                    refresh_after_action.refresh(RefreshScope::Workspace);
+                    refresh_after_action.refresh_event(RefreshEvent::WorkspaceBranchChanged {
+                        workspace: workspace_for_action.clone(),
+                    });
                 }
                 Err(err) => apply_action_feedback(
                     &feedback_for_action,
@@ -4275,7 +4360,9 @@ fn workspace_checkpoint_panel(
                     true,
                 );
                 message_for_create.set_text("");
-                refresh_after_create.refresh(RefreshScope::Workspace);
+                refresh_after_create.refresh_event(RefreshEvent::WorkspaceStatusChanged {
+                    workspace: workspace_for_create.clone(),
+                });
             }
             Err(err) => apply_action_feedback(
                 &feedback_for_create,
@@ -4345,7 +4432,11 @@ fn workspace_checkpoint_panel(
                         &format!("Restored checkpoint #{}", cp.id),
                         true,
                     );
-                    refresh_after_restore.refresh(RefreshScope::Workspace);
+                    refresh_after_restore.refresh_event(RefreshEvent::WorkspaceDiffStatsChanged {
+                        workspace: workspace_for_restore.clone(),
+                        additions: 0,
+                        deletions: 0,
+                    });
                 }
                 Err(err) => {
                     apply_action_feedback(
@@ -4678,7 +4769,9 @@ fn linked_directories_panel(
             Ok(_) => {
                 buffer_for_link
                     .set_text(&linked_directories_text(&db_for_link, &workspace_for_link));
-                hub_for_link.refresh(RefreshScope::Workspace);
+                hub_for_link.refresh_event(RefreshEvent::RightPanelFileListChanged {
+                    workspace: workspace_for_link.clone(),
+                });
             }
             Err(err) => {
                 let message = format!("Could not link directory: {err:#}\n");
@@ -4710,7 +4803,9 @@ fn linked_directories_panel(
                     &db_for_unlink,
                     &workspace_for_unlink,
                 ));
-                hub_for_unlink.refresh(RefreshScope::Workspace);
+                hub_for_unlink.refresh_event(RefreshEvent::RightPanelFileListChanged {
+                    workspace: workspace_for_unlink.clone(),
+                });
             }
             Err(err) => {
                 let message = format!("Could not unlink directory: {err:#}\n");
@@ -7816,6 +7911,7 @@ fn workspace_conflict_resolution_panel(
             let feedback_for_copy_all = feedback_for_copy_all.clone();
             let refresh_after_copy_all = refresh_after_copy_all.clone();
             let toast_for_copy_all = toast_for_copy_all.clone();
+            let destination_workspace_for_event = destination_workspace.clone();
             spawn_background_job(
                 move || {
                     run_conflict_copy_all_action(
@@ -7847,14 +7943,22 @@ fn workspace_conflict_resolution_panel(
                             );
                         }
                         (_, true) => {
-                            refresh_after_copy_all.refresh(RefreshScope::Workspace);
+                            refresh_after_copy_all.refresh_event(
+                                RefreshEvent::RightPanelFileListChanged {
+                                    workspace: destination_workspace_for_event.clone(),
+                                },
+                            );
                             feedback_for_copy_all.set_text(&format!(
                                 "Copied {} conflicting file(s) from {}.",
                                 result.copied, result.source
                             ));
                         }
                         (_, false) => {
-                            refresh_after_copy_all.refresh(RefreshScope::Workspace);
+                            refresh_after_copy_all.refresh_event(
+                                RefreshEvent::RightPanelFileListChanged {
+                                    workspace: destination_workspace_for_event.clone(),
+                                },
+                            );
                             surface_label_error(
                                 &feedback_for_copy_all,
                                 &toast_for_copy_all,
@@ -7944,7 +8048,9 @@ fn workspace_conflict_resolution_panel(
                                 feedback_for_copy.set_text(&format!(
                                     "Copied {file_for_copy} from {source_workspace} into {destination_workspace}"
                                 ));
-                                refresh_after_copy.refresh(RefreshScope::Workspace);
+                                refresh_after_copy.refresh_event(RefreshEvent::RightPanelFileListChanged {
+                                    workspace: destination_workspace,
+                                });
                             }
                             Err(err) => surface_label_error(
                                 &feedback_for_copy,

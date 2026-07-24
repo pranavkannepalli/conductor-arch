@@ -1018,7 +1018,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     );
 
     refresh_hub.set_dashboard(refresh_dashboard.clone());
-    refresh_hub.set_workspace(refresh_workspace_detail.clone());
+    refresh_hub.set_workspace_mount(refresh_workspace_detail.clone());
     refresh_hub.set_projects({
         let refresh_projects = refresh_projects.clone();
         let refresh_settings = refresh_settings.clone();
@@ -1444,7 +1444,7 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
             );
             match action {
                 Some(ShortcutAction::Refresh) => {
-                    hub_kb.refresh(RefreshScope::All);
+                    hub_kb.debug_full_refresh();
                     return gtk::glib::Propagation::Stop;
                 }
                 Some(ShortcutAction::ToggleSidebar) => {
@@ -1687,17 +1687,18 @@ fn apply_palette_target(
             refresh_hub.refresh(RefreshScope::Sidebar);
             refresh_workspace();
         }
-        PaletteTarget::Refresh => refresh_hub.refresh(RefreshScope::All),
+        PaletteTarget::Refresh => refresh_hub.debug_full_refresh(),
         PaletteTarget::ToggleSidebar => split.set_show_sidebar(!split.shows_sidebar()),
         PaletteTarget::RunCommand(cmd) => {
             if let Some(workspace) = state.selected_workspace() {
                 let db_path = state.workspace_database_path();
                 let refresh_hub = refresh_hub.clone();
                 let toast_manager = toast_manager.clone();
+                let workspace_for_command = workspace.clone();
                 archcar_async::spawn_background_job(
                     move || {
                         WorkspaceStore::open_app(db_path)
-                            .and_then(|store| store.terminal_command(&workspace, &cmd))
+                            .and_then(|store| store.terminal_command(&workspace_for_command, &cmd))
                             .map_err(|err| format!("{err:#}"))
                     },
                     move |result| {
@@ -1706,7 +1707,7 @@ fn apply_palette_target(
                                 "Terminal command failed: {err}"
                             )));
                         }
-                        refresh_hub.refresh(RefreshScope::Workspace);
+                        refresh_hub.refresh_event(RefreshEvent::TerminalChanged { workspace });
                     },
                 );
             }
@@ -3018,7 +3019,7 @@ mod tests {
         assert!(region.contains("if let Err(err) = result"));
         assert!(region.contains("ToastMessage::warning"));
         assert!(region.contains("Terminal command failed"));
-        assert!(region.contains("refresh_hub.refresh(RefreshScope::Workspace)"));
+        assert!(region.contains("refresh_hub.refresh_event(RefreshEvent::TerminalChanged"));
     }
 
     fn init_repo(path: PathBuf) -> PathBuf {
