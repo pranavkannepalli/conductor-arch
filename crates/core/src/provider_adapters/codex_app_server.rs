@@ -1044,7 +1044,8 @@ impl CodexProviderEventDraft {
     pub fn into_provider_event_draft(self, context: ProviderEventContext) -> ProviderEventDraft {
         let raw_json = serde_json::from_str(&self.raw_json)
             .unwrap_or_else(|_| Value::String(self.raw_json.clone()));
-        let kind = codex_category_to_provider_kind(self.category);
+        let (kind, provider_subtype) =
+            codex_canonical_kind_and_subtype(self.category, &self.name, &self.payload);
         let phase = if is_mcp_startup_status_event(&self.name) {
             codex_mcp_startup_status_phase(&self.payload)
         } else {
@@ -1076,6 +1077,7 @@ impl CodexProviderEventDraft {
                     "/params/message/id",
                     "/params/toolCall/id",
                     "/params/tool_call/id",
+                    "/params/callId",
                     "/result/item/id",
                     "/result/message/id",
                 ],
@@ -1156,7 +1158,7 @@ impl CodexProviderEventDraft {
             process_id: context.process_id,
             phase,
             kind,
-            provider_subtype: Some(self.name.clone()),
+            provider_subtype,
             provider_sequence: number_at_any(
                 &self.payload,
                 &[
@@ -1559,6 +1561,51 @@ pub fn classify_codex_method(
 
 fn has_any(tokens: &[&str], needles: &[&str]) -> bool {
     needles.iter().any(|needle| tokens.contains(needle))
+}
+
+fn codex_canonical_kind_and_subtype(
+    category: CodexProviderEventCategory,
+    name: &str,
+    payload: &Value,
+) -> (ProviderEventKind, Option<String>) {
+    if let Some(tool_name) = codex_dynamic_tool_name(name, payload) {
+        if let Some((kind, subtype)) = codex_local_tool_action_kind_and_subtype(&tool_name) {
+            return (kind, Some(subtype.to_owned()));
+        }
+    }
+
+    (
+        codex_category_to_provider_kind(category),
+        Some(name.to_owned()),
+    )
+}
+
+fn codex_dynamic_tool_name(name: &str, payload: &Value) -> Option<String> {
+    let is_dynamic_thread_item =
+        string_at_any(payload, &["/params/item/type"]).as_deref() == Some("dynamicToolCall");
+    let is_dynamic_tool_request = name == "item/tool/call";
+    if !(is_dynamic_thread_item || is_dynamic_tool_request) {
+        return None;
+    }
+
+    string_at_any(payload, &["/params/item/tool", "/params/tool"])
+}
+
+fn codex_local_tool_action_kind_and_subtype(
+    tool_name: &str,
+) -> Option<(ProviderEventKind, &'static str)> {
+    let normalized = tool_name.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "bash" | "shell" | "exec" | "exec_command" => {
+            Some((ProviderEventKind::CommandProcess, "command"))
+        }
+        "read" | "ls" | "glob" | "grep" => Some((ProviderEventKind::FileSystem, "read")),
+        "edit" | "multiedit" | "notebookedit" | "apply_patch" | "patch" => {
+            Some((ProviderEventKind::FileSystem, "edit"))
+        }
+        "write" | "create" => Some((ProviderEventKind::FileSystem, "write")),
+        _ => None,
+    }
 }
 
 fn codex_category_to_provider_kind(category: CodexProviderEventCategory) -> ProviderEventKind {
@@ -2062,6 +2109,136 @@ mod tests {
             assert_eq!(event.provider_thread_id.as_deref(), Some("thr_1"));
             assert_eq!(event.provider_turn_id.as_deref(), Some("turn_1"));
             assert_eq!(event.normalized_payload["body"], body);
+        }
+    }
+
+    #[test]
+    fn dynamic_tool_calls_map_local_tool_names_to_action_kinds() {
+        let cases = [
+            (
+                "Bash",
+                r#"{"command":"cargo test"}"#,
+                crate::provider_events::ProviderEventKind::CommandProcess,
+                "command",
+            ),
+            (
+                "Read",
+                r#"{"path":"src/main.rs"}"#,
+                crate::provider_events::ProviderEventKind::FileSystem,
+                "read",
+            ),
+            (
+                "Edit",
+                r#"{"path":"src/main.rs","old_string":"a","new_string":"b"}"#,
+                crate::provider_events::ProviderEventKind::FileSystem,
+                "edit",
+            ),
+            (
+                "MultiEdit",
+                r#"{"path":"src/main.rs","edits":[]}"#,
+                crate::provider_events::ProviderEventKind::FileSystem,
+                "edit",
+            ),
+            (
+                "Write",
+                r#"{"path":"src/main.rs","content":"x"}"#,
+                crate::provider_events::ProviderEventKind::FileSystem,
+                "write",
+            ),
+        ];
+
+        for (tool_name, arguments, expected_kind, expected_subtype) in cases {
+            let arguments_value: serde_json::Value = serde_json::from_str(arguments).unwrap();
+            let raw = serde_json::json!({
+                "method": "item/completed",
+                "params": {
+                    "threadId": "thr_1",
+                    "turnId": "turn_1",
+                    "item": {
+                        "type": "dynamicToolCall",
+                        "id": "tool_1",
+                        "tool": tool_name,
+                        "arguments": arguments_value,
+                        "status": "completed",
+                    },
+                },
+            })
+            .to_string();
+            let event = parse_jsonl_message(&raw, 1)
+                .unwrap()
+                .to_provider_event_draft()
+                .into_provider_event_draft(crate::provider_events::ProviderEventContext {
+                    workspace_id: Some(1),
+                    chat_thread_id: Some(7),
+                    process_id: Some(9),
+                    occurred_at_ms: 42,
+                    schema_version: 1,
+                    adapter_version: "codex-app-server-test".to_owned(),
+                });
+
+            assert_eq!(event.kind, expected_kind, "{tool_name}");
+            assert_eq!(
+                event.provider_subtype.as_deref(),
+                Some(expected_subtype),
+                "{tool_name}"
+            );
+        }
+    }
+
+    #[test]
+    fn dynamic_tool_call_requests_map_local_tool_names_to_action_kinds() {
+        let cases = [
+            (
+                "Bash",
+                serde_json::json!({"command": "cargo test"}),
+                crate::provider_events::ProviderEventKind::CommandProcess,
+                "command",
+            ),
+            (
+                "Read",
+                serde_json::json!({"path": "src/main.rs"}),
+                crate::provider_events::ProviderEventKind::FileSystem,
+                "read",
+            ),
+            (
+                "Edit",
+                serde_json::json!({"path": "src/main.rs", "old_string": "a", "new_string": "b"}),
+                crate::provider_events::ProviderEventKind::FileSystem,
+                "edit",
+            ),
+        ];
+
+        for (tool_name, arguments, expected_kind, expected_subtype) in cases {
+            let raw = serde_json::json!({
+                "id": 9,
+                "method": "item/tool/call",
+                "params": {
+                    "callId": "call_1",
+                    "threadId": "thr_1",
+                    "turnId": "turn_1",
+                    "tool": tool_name,
+                    "arguments": arguments,
+                },
+            })
+            .to_string();
+            let event = parse_jsonl_message(&raw, 1)
+                .unwrap()
+                .to_provider_event_draft()
+                .into_provider_event_draft(crate::provider_events::ProviderEventContext {
+                    workspace_id: Some(1),
+                    chat_thread_id: Some(7),
+                    process_id: Some(9),
+                    occurred_at_ms: 42,
+                    schema_version: 1,
+                    adapter_version: "codex-app-server-test".to_owned(),
+                });
+
+            assert_eq!(event.kind, expected_kind, "{tool_name}");
+            assert_eq!(
+                event.provider_subtype.as_deref(),
+                Some(expected_subtype),
+                "{tool_name}"
+            );
         }
     }
 

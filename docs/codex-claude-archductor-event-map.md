@@ -59,18 +59,18 @@ Current Codex mappings:
 | `item.type = fileChange` | `item/fileChange/{phase}` | `DiffFileChange` | `FileDiff` |
 | method/name contains `file`, `path`, `directory` | original method/name | `FileSystem` | usually `FileRead` |
 | method/name contains `patch`, `edit`, `change` | original method/name | `DiffFileChange` | `FileDiff` |
-| `item.type = dynamicToolCall` | `item/dynamicToolCall/{phase}` | `Tool` | `NativeTool` |
+| `item.type = dynamicToolCall` with local tool name `Bash`/`Read`/`Edit`/`Write` | `item/dynamicToolCall/{phase}` | `CommandProcess` or `FileSystem` | `Command`, `FileRead`, `FilePatch`, or `FileWrite` |
+| `item/tool/call` with local tool name `Bash`/`Read`/`Edit` | `item/tool/call` | `CommandProcess` or `FileSystem` | `Command`, `FileRead`, or `FilePatch` |
+| `item.type = dynamicToolCall` with unknown tool name | `item/dynamicToolCall/{phase}` | `Tool` | `NativeTool` |
 | `item.type = mcpToolCall` | `item/mcpToolCall/{phase}` | `Mcp` or `Tool` depending method tokens | `McpTool` or `NativeTool` |
 
 Codex status:
 
 - `commandExecution` already maps to ran-command semantics.
 - `fileChange` already maps to turn-level file diff semantics.
-- Dynamic/native tool calls named `Read`, `Edit`, or `Bash` currently stay
-  generic because classification only sees `dynamicToolCall`, not the tool
-  name or arguments.
-- If Codex emits read/edit/ran as `dynamicToolCall`, Archductor will render them
-  as generic tool cards instead of canonical read/edit/ran action cards.
+- Dynamic/native tool calls named `Bash`, `Read`, `Edit`, `MultiEdit`, `Write`,
+  or related local file/search names are promoted before persistence.
+- Unknown dynamic tools remain generic tool cards.
 
 ## Claude Stream-JSON Flow
 
@@ -98,18 +98,18 @@ Current Claude mappings:
 | `content_block_delta` with `input_json_delta` | `ToolInputDelta` | `Tool` | `NativeTool` |
 | `content_block_stop` for a tracked tool block | `ToolResult` | `Tool` | `NativeTool` |
 | top-level/user `tool_result` | `ToolResult` or `DeferredResult` | `Tool` | `NativeTool` |
-| `Bash` tool name | preserved in payload | still `Tool` | `NativeTool` |
-| `Read` tool name | preserved in payload | still `Tool` | `NativeTool` |
-| `Edit` tool name | preserved in payload | still `Tool` | `NativeTool` |
+| `Bash` tool name | preserved in payload | `CommandProcess` | `Command` |
+| `Read` tool name | preserved in payload | `FileSystem` | `FileRead` |
+| `Edit` tool name | preserved in payload | `FileSystem` | `FilePatch` |
+| `Write` tool name | preserved in payload | `FileSystem` | `FileWrite` |
 
 Claude status:
 
 - Tool identity tracking is good: block index, tool-use ID, and tool name are
   preserved.
-- Canonical classification is too coarse: `claude_kind_to_provider_kind` only
-  sees `ClaudeProviderEventKind`, so all tool names become generic `Tool`.
-- Because the canonical kind is generic, `Bash`, `Read`, and `Edit` do not reach
-  the projection as ran/read/edit.
+- Canonical classification now promotes known local tool names before falling
+  back to generic `Tool`.
+- Unknown tool names still render as native tool cards.
 
 ## Correctness Target
 
@@ -135,17 +135,16 @@ MCP tools should remain `ProviderEventKind::Mcp`.
 
 Do not fix this in GTK. GTK should consume the shared projection.
 
-Best fix points:
+The adapter fixes are now in core:
 
-- Codex: in `CodexProviderEventDraft::into_provider_event_draft`, derive the
-  canonical kind/subtype from `params.item.type`, `params.item.tool`, and
-  `params.item.arguments` before building `ProviderEventDraft`.
-- Claude: in `ClaudeProviderEventDraft::into_provider_event_draft`, choose the
-  canonical kind/subtype using `self.kind`, `self.tool_name`, and raw tool input.
-  `claude_kind_to_provider_kind` can remain the fallback for non-tool events.
-- Projection: leave `provider_projection_category` alone unless the product
-  language changes. It already maps command/file-system/file-diff kinds into
-  the right UI categories.
+- Codex derives canonical kind/subtype from `params.item.tool` for
+  `dynamicToolCall` thread items and from `params.tool` for `item/tool/call`
+  requests before building `ProviderEventDraft`.
+- Claude chooses canonical kind/subtype using `self.kind` and `self.tool_name`.
+  `claude_kind_to_provider_kind` remains the fallback for non-tool and unknown
+  tool events.
+- Projection remains unchanged; it already maps command/file-system/file-diff
+  kinds into the right UI categories.
 
 Regression tests should cover canonical conversion for each provider:
 
@@ -160,12 +159,14 @@ Regression tests should cover canonical conversion for each provider:
 
 ## Bottom Line
 
-The shared projection is ready for read/edit/ran. The current mismatch is in
-provider adapter classification:
+The shared projection and provider adapter classification are ready for
+read/edit/ran:
 
 - Codex structured `commandExecution` and `fileChange` are mapped.
-- Codex dynamic tool calls are not mapped by native tool name.
-- Claude preserves native tool names but still maps every tool event to generic
-  `Tool`.
+- Codex dynamic tool calls are mapped by native tool name for local
+  command/read/edit/write tools.
+- Claude preserves native tool names and maps known local tool names to
+  command/read/edit/write semantics.
+- Unknown tools and MCP tools remain generic/native or MCP cards.
 
 This is the branch-sized work if we dedicate a branch to provider event mapping.

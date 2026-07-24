@@ -811,7 +811,8 @@ impl ClaudeProviderEventDraft {
     }
 
     pub fn into_provider_event_draft(self, context: ProviderEventContext) -> ProviderEventDraft {
-        let kind = claude_kind_to_provider_kind(self.kind);
+        let (kind, provider_subtype) =
+            claude_canonical_kind_and_subtype(self.kind, self.tool_name.as_deref(), self.subtype);
         let phase = claude_phase_for(self.kind, &self.raw_json);
         let provider_event_id = self.provider_event_id.clone();
         let provider_item_id = match self.kind {
@@ -848,11 +849,6 @@ impl ClaudeProviderEventDraft {
         let stream_delta = (phase == ProviderEventPhase::Delta)
             .then(|| self.content_delta.clone())
             .flatten();
-        let provider_subtype = self
-            .subtype
-            .clone()
-            .or_else(|| Some(format!("{:?}", self.kind).to_ascii_lowercase()));
-
         ProviderEventDraft {
             provider: self.provider,
             provider_event_id,
@@ -1356,6 +1352,48 @@ fn claude_system_hook_event(value: &Value) -> bool {
         || string_at(value, &["hook_event"]).is_some()
         || string_at(value, &["hook_name"]).is_some()
         || string_at(value, &["hook_event_name"]).is_some()
+}
+
+fn claude_canonical_kind_and_subtype(
+    kind: ClaudeProviderEventKind,
+    tool_name: Option<&str>,
+    subtype: Option<String>,
+) -> (ProviderEventKind, Option<String>) {
+    if matches!(
+        kind,
+        ClaudeProviderEventKind::ToolUse
+            | ClaudeProviderEventKind::ToolInputDelta
+            | ClaudeProviderEventKind::ToolResult
+            | ClaudeProviderEventKind::DeferredResult
+    ) {
+        if let Some((provider_kind, provider_subtype)) =
+            claude_local_tool_action_kind_and_subtype(tool_name)
+        {
+            return (provider_kind, Some(provider_subtype.to_owned()));
+        }
+    }
+
+    (
+        claude_kind_to_provider_kind(kind),
+        subtype.or_else(|| Some(format!("{kind:?}").to_ascii_lowercase())),
+    )
+}
+
+fn claude_local_tool_action_kind_and_subtype(
+    tool_name: Option<&str>,
+) -> Option<(ProviderEventKind, &'static str)> {
+    let normalized = tool_name?.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "bash" | "shell" | "exec" | "exec_command" => {
+            Some((ProviderEventKind::CommandProcess, "command"))
+        }
+        "read" | "ls" | "glob" | "grep" => Some((ProviderEventKind::FileSystem, "read")),
+        "edit" | "multiedit" | "notebookedit" | "apply_patch" | "patch" => {
+            Some((ProviderEventKind::FileSystem, "edit"))
+        }
+        "write" | "create" => Some((ProviderEventKind::FileSystem, "write")),
+        _ => None,
+    }
 }
 
 fn claude_kind_to_provider_kind(kind: ClaudeProviderEventKind) -> ProviderEventKind {
@@ -2894,8 +2932,9 @@ mod tests {
 
         assert_eq!(
             canonical.kind,
-            crate::provider_events::ProviderEventKind::Tool
+            crate::provider_events::ProviderEventKind::CommandProcess
         );
+        assert_eq!(canonical.provider_subtype.as_deref(), Some("command"));
         assert_eq!(
             canonical.phase,
             crate::provider_events::ProviderEventPhase::Delta
@@ -2906,6 +2945,80 @@ mod tests {
             canonical.normalized_payload["body"],
             r#"{"command":"cargo test"}"#
         );
+    }
+
+    #[test]
+    fn canonical_conversion_maps_local_tool_names_to_action_kinds() {
+        let cases = [
+            (
+                "Bash",
+                r#"{"command":"cargo test"}"#,
+                crate::provider_events::ProviderEventKind::CommandProcess,
+                "command",
+            ),
+            (
+                "Read",
+                r#"{"file_path":"src/main.rs"}"#,
+                crate::provider_events::ProviderEventKind::FileSystem,
+                "read",
+            ),
+            (
+                "Edit",
+                r#"{"file_path":"src/main.rs","old_string":"a","new_string":"b"}"#,
+                crate::provider_events::ProviderEventKind::FileSystem,
+                "edit",
+            ),
+            (
+                "MultiEdit",
+                r#"{"file_path":"src/main.rs","edits":[]}"#,
+                crate::provider_events::ProviderEventKind::FileSystem,
+                "edit",
+            ),
+            (
+                "Write",
+                r#"{"file_path":"src/main.rs","content":"x"}"#,
+                crate::provider_events::ProviderEventKind::FileSystem,
+                "write",
+            ),
+        ];
+
+        for (tool_name, input_json, expected_kind, expected_subtype) in cases {
+            let input_value: serde_json::Value = serde_json::from_str(input_json).unwrap();
+            let input = serde_json::json!({
+                "type": "stream_event",
+                "uuid": "u1",
+                "session_id": "s1",
+                "event": {
+                    "type": "content_block_start",
+                    "index": 1,
+                    "content_block": {
+                        "type": "tool_use",
+                        "id": "tool_1",
+                        "name": tool_name,
+                        "input": input_value,
+                    },
+                },
+            })
+            .to_string();
+            let events = parse_claude_stream_json_lines(&input).unwrap();
+            let canonical = events[0].clone().into_provider_event_draft(
+                crate::provider_events::ProviderEventContext {
+                    workspace_id: Some(1),
+                    chat_thread_id: Some(7),
+                    process_id: Some(9),
+                    occurred_at_ms: 42,
+                    schema_version: 1,
+                    adapter_version: "claude-stream-json-test".to_owned(),
+                },
+            );
+
+            assert_eq!(canonical.kind, expected_kind, "{tool_name}");
+            assert_eq!(
+                canonical.provider_subtype.as_deref(),
+                Some(expected_subtype),
+                "{tool_name}"
+            );
+        }
     }
 
     #[test]
