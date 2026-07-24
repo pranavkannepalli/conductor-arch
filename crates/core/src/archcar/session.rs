@@ -230,7 +230,7 @@ impl ManagedSessionConnection {
                 Ok(())
             }
             Self::Reattached { pid, .. } => {
-                terminate_process(*pid);
+                stop_reattached_process(*pid);
                 Ok(())
             }
         }
@@ -3126,10 +3126,57 @@ fn terminal_process_alive(process_id: u32) -> bool {
     crate::platform::process_alive(process_id)
 }
 
-pub(crate) fn terminate_process(process_id: u32) {
+fn stop_reattached_process(process_id: u32) {
+    if !terminal_process_alive(process_id) {
+        return;
+    }
+    request_process_stop(process_id);
+    if wait_for_process_exit(process_id, Duration::from_secs(3)) {
+        return;
+    }
+    force_process_stop(process_id);
+    if wait_for_process_exit(process_id, Duration::from_millis(500)) {
+        return;
+    }
+    hard_kill_process(process_id);
+}
+
+fn wait_for_process_exit(process_id: u32, timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if !terminal_process_alive(process_id) {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    !terminal_process_alive(process_id)
+}
+
+fn request_process_stop(process_id: u32) {
+    if crate::platform::terminate_process_group(process_id, false).unwrap_or(false) {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        let _ = std::process::Command::new("kill")
+            .arg("-TERM")
+            .arg(process_id.to_string())
+            .status();
+    }
+    #[cfg(windows)]
+    {
+        let _ = crate::platform::terminate_process_tree(process_id, false);
+    }
+}
+
+fn force_process_stop(process_id: u32) {
     if crate::platform::terminate_process_group(process_id, true).unwrap_or(false) {
         return;
     }
+    hard_kill_process(process_id);
+}
+
+fn hard_kill_process(process_id: u32) {
     #[cfg(unix)]
     {
         let _ = std::process::Command::new("kill")
@@ -3137,6 +3184,14 @@ pub(crate) fn terminate_process(process_id: u32) {
             .arg(process_id.to_string())
             .status();
     }
+    #[cfg(windows)]
+    {
+        let _ = crate::platform::terminate_process_tree(process_id, true);
+    }
+}
+
+pub(crate) fn terminate_process(process_id: u32) {
+    force_process_stop(process_id);
 }
 
 fn terminal_device_path_for_pid(process_id: u32) -> Result<PathBuf> {
@@ -3196,6 +3251,41 @@ mod tests {
         assert!(should_persist_provider_native_event(
             ProviderEventKind::AssistantOutput
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reattached_stop_sends_sigterm_before_force_kill() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("term.marker");
+        let script = format!(
+            "trap 'echo term > {}; exit 0' TERM; while :; do sleep 1; done",
+            marker.display()
+        );
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let write = fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/null")
+            .unwrap();
+        let mut session = ManagedSessionConnection::Reattached {
+            write,
+            output: Arc::new(Mutex::new(String::new())),
+            read_cursor: 0,
+            pid: child.id(),
+        };
+
+        thread::sleep(Duration::from_millis(100));
+        session.stop().unwrap();
+        let _ = child.wait();
+
+        assert_eq!(fs::read_to_string(marker).unwrap(), "term\n");
     }
 
     #[test]

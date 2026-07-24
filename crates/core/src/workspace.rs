@@ -3824,8 +3824,10 @@ impl WorkspaceStore {
 
     pub fn diff_stats_against_base(&self, name: &str) -> Result<(usize, usize)> {
         let workspace = self.get_by_name(name)?;
-        let base_ref = workspace_merge_diff_base_ref(&workspace);
-        workspace_diff_stats_against_ref(&workspace, &base_ref)
+        let base_ref = workspace_base_ref(&workspace);
+        let base_commit =
+            workspace_merge_base_ref(&workspace, base_ref).unwrap_or_else(|| base_ref.to_owned());
+        workspace_diff_stats_against_resolved_ref(&workspace, &base_commit)
     }
 
     pub fn workspace_base_ref(&self, name: &str) -> Result<String> {
@@ -9148,13 +9150,11 @@ fn hunk_unsupported_reason(diff: &str) -> Option<String> {
     None
 }
 
-fn workspace_diff_stats_against_ref(
+fn workspace_diff_stats_against_resolved_ref(
     workspace: &Workspace,
-    base_ref: &str,
+    base_commit: &str,
 ) -> Result<(usize, usize)> {
-    let base_commit =
-        workspace_merge_base_ref(workspace, base_ref).unwrap_or_else(|| base_ref.to_owned());
-    let diff = git_output_dynamic(&workspace.path, &["diff", "--numstat", &base_commit, "--"])?;
+    let diff = git_output_dynamic(&workspace.path, &["diff", "--numstat", base_commit, "--"])?;
     let mut additions = 0;
     let mut deletions = 0;
     for summary in parse_diff_numstat(&diff) {
@@ -9225,15 +9225,6 @@ fn workspace_base_ref(workspace: &Workspace) -> &str {
     } else {
         workspace.base_ref.as_str()
     }
-}
-
-fn workspace_merge_diff_base_ref(workspace: &Workspace) -> String {
-    let base_ref = workspace_base_ref(workspace);
-    git_output_dynamic(&workspace.path, &["merge-base", "HEAD", base_ref])
-        .ok()
-        .map(|output| output.trim().to_owned())
-        .filter(|output| !output.is_empty())
-        .unwrap_or_else(|| base_ref.to_owned())
 }
 
 fn merge_diff_summaries(summaries: Vec<DiffFileSummary>) -> Vec<DiffFileSummary> {
@@ -18307,6 +18298,26 @@ general = "Keep changes focused."
             .find(|line| line.workspace.name == "berlin")
             .unwrap();
         assert_eq!((line.diff_additions, line.diff_deletions), (3, 1));
+    }
+
+    #[test]
+    fn diff_stats_against_base_reuses_resolved_merge_base() {
+        let source = include_str!("workspace.rs")
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap();
+        let start = source
+            .find("pub fn diff_stats_against_base")
+            .expect("diff stats function exists");
+        let end = source[start..]
+            .find("pub fn workspace_base_ref")
+            .map(|offset| start + offset)
+            .expect("workspace_base_ref follows diff stats");
+        let diff_stats_region = &source[start..end];
+
+        assert!(diff_stats_region.contains("workspace_merge_base_ref("));
+        assert!(!diff_stats_region.contains("workspace_merge_diff_base_ref("));
+        assert!(!source.contains("fn workspace_merge_diff_base_ref("));
     }
 
     #[test]

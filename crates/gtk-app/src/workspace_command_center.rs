@@ -1825,7 +1825,7 @@ fn ready_chat_provider_for_new_thread(
 }
 
 fn session_kind_for_chat_provider(provider: &str) -> SessionKind {
-    match provider {
+    match provider.to_ascii_lowercase().as_str() {
         "claude" => SessionKind::Claude,
         "shell" => SessionKind::Shell,
         _ => SessionKind::Codex,
@@ -5790,7 +5790,7 @@ fn workspace_pr_primary_action(
 
     match snapshot.status.as_ref().map(|status| status.kind) {
         Some(PullRequestStateKind::MergeBlocked) => Some(WorkspacePrTopAction {
-            label: "Merge",
+            label: "Resolve",
             tooltip: "Queue a prompt to resolve merge blockers",
             css_class: "ws-pr-status-failed",
             kind: WorkspacePrTopActionKind::MergeConflicts,
@@ -5903,11 +5903,7 @@ fn queue_prompt_to_selected_archcar_chat(
 }
 
 fn session_kind_from_provider(provider: &str) -> SessionKind {
-    match provider.to_ascii_lowercase().as_str() {
-        "claude" => SessionKind::Claude,
-        "shell" => SessionKind::Shell,
-        _ => SessionKind::Codex,
-    }
+    session_kind_for_chat_provider(provider)
 }
 
 fn connect_create_pr_prompt_button(
@@ -6222,7 +6218,7 @@ fn pull_request_is_merge_blocked(
 fn github_merge_state_is_blocked(value: &str) -> bool {
     matches!(
         value.to_ascii_uppercase().as_str(),
-        "BLOCKED" | "CONFLICTING" | "DIRTY" | "UNKNOWN"
+        "BLOCKED" | "CONFLICTING" | "DIRTY"
     )
 }
 
@@ -10155,6 +10151,40 @@ mod tests {
     }
 
     #[test]
+    fn unknown_github_merge_state_is_pending_not_blocked() {
+        assert!(!github_merge_state_is_blocked("UNKNOWN"));
+        assert!(github_merge_state_is_blocked("BLOCKED"));
+        assert!(github_merge_state_is_blocked("CONFLICTING"));
+        assert!(github_merge_state_is_blocked("DIRTY"));
+    }
+
+    #[test]
+    fn pr_status_snapshot_uses_app_state_cache_not_git_summary() {
+        let source = include_str!("workspace_command_center.rs");
+        let start = source
+            .find("fn workspace_pr_status_snapshot")
+            .expect("PR status snapshot helper exists");
+        let end = source[start..]
+            .find("#[derive(Clone, Copy, Debug, PartialEq, Eq)]")
+            .map(|offset| start + offset)
+            .expect("PR action enum follows snapshot helper");
+        let helper = &source[start..end];
+
+        assert!(
+            !helper.contains("checks_summary("),
+            "PR status render must use cached background review state instead of running git"
+        );
+    }
+
+    #[test]
+    fn provider_session_kind_mapping_is_shared_and_case_insensitive() {
+        assert_eq!(session_kind_from_provider("CLAUDE"), SessionKind::Claude);
+        assert_eq!(session_kind_from_provider("SHELL"), SessionKind::Shell);
+        assert_eq!(session_kind_from_provider("codex"), SessionKind::Codex);
+        assert_eq!(session_kind_from_provider("unknown"), SessionKind::Codex);
+    }
+
+    #[test]
     fn pr_primary_action_switches_by_workspace_state() {
         let no_pr = WorkspacePrStatusSnapshot {
             pr: None,
@@ -10291,6 +10321,10 @@ mod tests {
         assert_eq!(
             workspace_pr_primary_action(&conflict).unwrap().kind,
             WorkspacePrTopActionKind::MergeConflicts
+        );
+        assert_eq!(
+            workspace_pr_primary_action(&conflict).unwrap().label,
+            "Resolve"
         );
         assert_eq!(
             workspace_pr_primary_action(&conflict).unwrap().css_class,

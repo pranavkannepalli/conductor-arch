@@ -660,7 +660,6 @@ pub fn agent_session_panel(
     root.set_vexpand(true);
     root.set_hexpand(true);
     let current_workspace_name = Rc::new(RefCell::new(_workspace_name.to_owned()));
-    let current_branch_name = Rc::new(RefCell::new(branch_name.to_owned()));
 
     if include_header {
         root.append(&session_header_row(
@@ -1436,12 +1435,10 @@ pub fn agent_session_panel(
     });
 
     let refresh_chat_surface_for_view = refresh_chat_surface.clone();
-    let refresh_for_metadata = refresh.clone();
 
     let refresh_view = {
         let database_path = database_path.clone();
         let current_workspace_name = current_workspace_name.clone();
-        let current_branch_name = current_branch_name.clone();
         let messages = messages.clone();
         let scroll = scroll.clone();
         let thread_row = thread_row.clone();
@@ -1456,8 +1453,6 @@ pub fn agent_session_panel(
         let reasoning_mode = reasoning_mode.clone();
         let provider_model_btn = provider_model_btn.clone();
         let provider_model_choices = provider_model_choices.clone();
-        let active_sessions = active_sessions.clone();
-        let last_output = last_output.clone();
         let app_state = app_state.clone();
         let app_state_for_thread_select = app_state.clone();
         let codex_startup_states = codex_startup_states.clone();
@@ -1479,7 +1474,6 @@ pub fn agent_session_panel(
         let sync_live_controls = sync_live_controls.clone();
         let refresh_queue_overlay = refresh_queue_overlay.clone();
         let eager_start_chat_agent = eager_start_chat_agent.clone();
-        let refresh_for_metadata = refresh_for_metadata.clone();
         let open_file = open_file.clone();
         Rc::new(move || {
             let mut outcome = ChatRefreshOutcome::default();
@@ -1871,7 +1865,7 @@ pub fn agent_session_panel(
             let current = record_state.borrow();
             let selected_thread_id = *selected_thread.borrow();
             match (selected_thread_id, active_record) {
-                (Some(thread_id), maybe_process_id) => {
+                (Some(thread_id), _) => {
                     let thread_exists = thread_state
                         .borrow()
                         .iter()
@@ -1908,20 +1902,6 @@ pub fn agent_session_panel(
                         restore_chat_scroll_after_refresh(&scroll, chat_scroll);
                         return;
                     }
-                    let record = maybe_process_id
-                        .and_then(|process_id| {
-                            current
-                                .iter()
-                                .find(|record| record.id == process_id)
-                                .cloned()
-                        })
-                        .or_else(|| {
-                            current
-                                .iter()
-                                .filter(|record| record.chat_thread_id == Some(thread_id))
-                                .max_by_key(|record| record.id)
-                                .cloned()
-                        });
                     let startup_state = if managed_harness_for_kind(current_kind).is_some() {
                         codex_startup_state_for_thread(
                             thread_id,
@@ -1932,8 +1912,6 @@ pub fn agent_session_panel(
                     } else {
                         CodexStartupState::Idle
                     };
-                    let mut working_elapsed =
-                        working_elapsed_for_thread(&working_threads, thread_id);
                     if let Some(harness) = managed_harness_for_kind(current_kind) {
                         let descriptor = harness.descriptor();
                         if thread_has_live_managed_session(&current, thread_id, descriptor)
@@ -1959,330 +1937,95 @@ pub fn agent_session_panel(
                             );
                         }
                     }
-                    let runtime_summary = record.as_ref().map(|record| {
-                        let attached_sessions = active_sessions
-                            .borrow()
-                            .iter()
-                            .copied()
-                            .collect::<HashSet<_>>();
-                        let attached = attached_sessions.contains(&record.id);
-                        let last_seen = last_output.borrow().get(&record.id).copied();
-                        let runtime_state = session_runtime_state(
-                            record,
-                            if record.status == ProcessStatus::Running {
-                                last_seen
-                            } else {
-                                None
-                            },
-                            attached,
-                        );
-                        format!(
-                            "{}  Status: {}  State: {}",
-                            session_kind_name(current_kind),
-                            record.status.as_str(),
-                            runtime_state,
-                        )
-                    });
                     match live_chat_source() {
                         LiveChatSource::StructuredStore => {
-                            let snapshot = match load_chat_timeline_snapshot(
-                                app_state.paths.clone(),
-                                workspace.clone(),
-                                thread_id,
-                            ) {
-                                Ok(snapshot) => snapshot,
-                                Err(err) => {
-                                    error!(workspace = %workspace, thread_id, error = %err, "chat refresh_view failed to load thread timeline");
-                                    let message = format!("Load chat timeline failed: {err}");
-                                    toast_manager.error(message.clone());
-                                    let label = Label::new(Some(&message));
-                                    label.add_css_class("chat-agent-text");
-                                    label.set_selectable(true);
-                                    label.set_wrap(true);
-                                    label.set_xalign(0.0);
-                                    clear_box(&messages);
-                                    *last_timeline_render_state.borrow_mut() = None;
-                                    *last_render_signature.borrow_mut() = None;
-                                    apply_context_usage_state(&context_usage, None);
-                                    append_chat_refresh_row(&messages, &label);
-                                    restore_chat_scroll_after_refresh(&scroll, chat_scroll);
-                                    return;
-                                }
-                            };
-                            app_state.replace_queued_chat_inputs(
-                                thread_id,
-                                snapshot
-                                    .queued_inputs
-                                    .iter()
-                                    .map(queued_chat_draft_from_archcar_input)
-                                    .collect(),
-                            );
-                            let thread_messages = snapshot.thread_messages;
-                            let thread_events = snapshot.thread_events;
-                            let provider_events = snapshot.provider_events;
-                            let transcript_display = snapshot.transcript_display;
-                            let submitted_user_inputs = submitted_user_input_texts_for_thread(
-                                thread_id,
-                                pending_archcar_inputs.as_ref(),
-                                inflight_archcar_actions.as_ref(),
-                                &thread_messages,
-                            );
-                            let render_legacy_inline_events =
-                                render_legacy_inline_events_for_thread(
-                                    &thread_events,
-                                    &transcript_display,
-                                );
-                            debug!(
-                                workspace = %workspace,
-                                thread_id,
-                                thread_message_count = thread_messages.len(),
-                                thread_timeline_count = thread_messages.len() + thread_events.len() + provider_events.len(),
-                                render_legacy_inline_events,
-                                "chat refresh_view loaded persisted chat timeline"
-                            );
-                            if reconcile_thread_working_from_provider_events(
-                                working_threads.as_ref(),
-                                thread_id,
-                                &provider_events,
-                            ) {
-                                clear_inflight_user_sends_for_thread(
-                                    inflight_archcar_actions.as_ref(),
-                                    thread_id,
-                                );
-                                working_elapsed =
-                                    working_elapsed_for_thread(&working_threads, thread_id);
-                                outcome.messages_changed = true;
-                            }
-                            if !thread_messages.is_empty()
-                                || !thread_events.is_empty()
-                                || !provider_events.is_empty()
-                            {
-                                let provider_projection =
-                                    provider_projection_from_records(&provider_events);
-                                if let Some(metadata_update) =
-                                    apply_provider_projection_agent_metadata(
-                                        &database_path,
+                            let paths_for_job = app_state.paths.clone();
+                            let workspace_for_job = workspace.clone();
+                            let app_state_for_result = app_state.clone();
+                            let messages_for_result = messages.clone();
+                            let scroll_for_result = scroll.clone();
+                            let context_usage_for_result = context_usage.clone();
+                            let pending_archcar_inputs_for_result = pending_archcar_inputs.clone();
+                            let inflight_archcar_actions_for_result =
+                                inflight_archcar_actions.clone();
+                            let last_timeline_render_state_for_result =
+                                last_timeline_render_state.clone();
+                            let last_render_signature_for_result = last_render_signature.clone();
+                            let toast_manager_for_result = toast_manager.clone();
+                            let working_threads_for_result = working_threads.clone();
+                            let open_file_for_result = open_file.clone();
+                            spawn_background_job(
+                                move || {
+                                    load_chat_timeline_snapshot(
+                                        paths_for_job,
+                                        workspace_for_job,
                                         thread_id,
-                                        &provider_projection.items,
                                     )
-                                {
-                                    let changes = apply_agent_metadata_ui_update(
-                                        &app_state,
-                                        current_workspace_name.as_ref(),
-                                        current_branch_name.as_ref(),
-                                        thread_state.as_ref(),
-                                        metadata_update.clone(),
-                                    );
-                                    outcome.workspace_name_changed |= changes.workspace_changed;
-                                    outcome.branch_changed |= changes.branch_changed;
-                                    outcome.thread_title_changed |= changes.chat_title_changed;
-                                    let metadata_workspace_changed =
-                                        outcome.workspace_name_changed || outcome.branch_changed;
-                                    if metadata_workspace_changed {
-                                        if let Some(external_chat_tabs) =
-                                            external_chat_tabs.as_ref()
-                                        {
-                                            (external_chat_tabs.on_workspace_metadata_changed)(
-                                                &metadata_update,
+                                },
+                                move |result| {
+                                    let snapshot = match result {
+                                        Ok(snapshot) => snapshot,
+                                        Err(message) => {
+                                            error!(workspace = %workspace, thread_id, error = %message, "chat refresh_view failed to load thread timeline");
+                                            let message =
+                                                format!("Load chat timeline failed: {message}");
+                                            toast_manager_for_result.error(message.clone());
+                                            let label = Label::new(Some(&message));
+                                            label.add_css_class("chat-agent-text");
+                                            label.set_selectable(true);
+                                            label.set_wrap(true);
+                                            label.set_xalign(0.0);
+                                            clear_box(&messages_for_result);
+                                            *last_timeline_render_state_for_result.borrow_mut() =
+                                                None;
+                                            *last_render_signature_for_result.borrow_mut() = None;
+                                            apply_context_usage_state(
+                                                &context_usage_for_result,
+                                                None,
                                             );
-                                        }
-                                        refresh_for_metadata();
-                                    }
-                                    if outcome.thread_title_changed {
-                                        if let Some(external_chat_tabs) =
-                                            external_chat_tabs.as_ref()
-                                        {
-                                            (external_chat_tabs.on_threads_changed)(
-                                                thread_state.borrow().clone(),
-                                                *selected_thread.borrow(),
+                                            append_chat_refresh_row(&messages_for_result, &label);
+                                            restore_chat_scroll_after_refresh(
+                                                &scroll_for_result,
+                                                chat_scroll,
                                             );
+                                            return;
                                         }
-                                    }
-                                }
-                                let status_banner =
-                                    chat_status_banner_kind(&startup_state, working_elapsed, true);
-                                let signature = chat_render_signature(
-                                    current_kind,
-                                    Some(thread_id),
-                                    active_record,
-                                    startup_state.clone(),
-                                    working_elapsed_seconds_for_signature(working_elapsed),
-                                    &current,
-                                    &thread_state.borrow(),
-                                    &thread_messages,
-                                    &thread_events,
-                                    &provider_events,
-                                    &submitted_user_inputs,
-                                    &transcript_display,
-                                    "timeline",
-                                    runtime_summary.clone(),
-                                );
-                                if chat_render_is_unchanged(
-                                    last_render_signature.as_ref(),
-                                    signature,
-                                ) {
-                                    update_existing_working_indicator(&messages, working_elapsed);
-                                    debug!(?outcome, "chat refresh_view outcome");
-                                    return;
-                                }
-                                let timeline = chat_structured_items_for_render(
-                                    thread_messages.clone(),
-                                    thread_events,
-                                    provider_projection.items,
-                                    Vec::new(),
-                                    submitted_user_inputs,
-                                    working_elapsed,
-                                );
-                                let timeline_leading_rows =
-                                    usize::from(status_banner != ChatStatusBannerKind::None);
-                                let next_timeline_state =
-                                    chat_timeline_render_state_with_leading_rows(
+                                    };
+                                    app_state_for_result.replace_queued_chat_inputs(
                                         thread_id,
-                                        &transcript_display,
-                                        &timeline,
-                                        timeline_leading_rows,
+                                        snapshot
+                                            .queued_inputs
+                                            .iter()
+                                            .map(queued_chat_draft_from_archcar_input)
+                                            .collect(),
                                     );
-                                let previous_timeline_state =
-                                    last_timeline_render_state.borrow().clone();
-                                let previous_timeline_leading_rows = previous_timeline_state
-                                    .as_ref()
-                                    .map_or(0, |state| state.leading_rows);
-                                let mut plan = chat_timeline_refresh_plan(
-                                    previous_timeline_state.as_ref(),
-                                    &next_timeline_state,
-                                );
-                                if status_banner != ChatStatusBannerKind::None {
-                                    plan = ChatTimelineRefreshPlan::RebuildMessages;
-                                }
-                                outcome.messages_changed =
-                                    !matches!(plan, ChatTimelineRefreshPlan::Skip);
-                                apply_context_usage_state(
-                                    &context_usage,
-                                    latest_context_usage_from_messages(&thread_messages),
-                                );
-                                match plan {
-                                    ChatTimelineRefreshPlan::Skip => {
-                                        debug!(?outcome, "chat refresh_view outcome");
-                                        restore_chat_scroll_after_refresh(&scroll, chat_scroll);
-                                        return;
-                                    }
-                                    ChatTimelineRefreshPlan::Append { start } => {
-                                        append_chat_timeline_items(
-                                            &messages,
-                                            &timeline[start..],
-                                            &transcript_display,
-                                            render_legacy_inline_events,
-                                            open_file.clone(),
-                                        );
-                                    }
-                                    ChatTimelineRefreshPlan::ReplaceBeforeTrailingWorkingIndicator {
-                                        start,
-                                    } => {
-                                        replace_chat_timeline_items_before_trailing_working_indicator(
-                                            &messages,
-                                            previous_timeline_leading_rows + start,
-                                            &timeline[start..timeline.len().saturating_sub(1)],
-                                            &transcript_display,
-                                            render_legacy_inline_events,
-                                            open_file.clone(),
-                                        );
-                                        update_existing_working_indicator(
-                                            &messages,
-                                            working_elapsed,
-                                        );
-                                    }
-                                    ChatTimelineRefreshPlan::RebuildFrom { start } => {
-                                        remove_box_children_from(
-                                            &messages,
-                                            previous_timeline_leading_rows + start,
-                                        );
-                                        append_chat_timeline_items(
-                                            &messages,
-                                            &timeline[start..],
-                                            &transcript_display,
-                                            render_legacy_inline_events,
-                                            open_file.clone(),
-                                        );
-                                    }
-                                    ChatTimelineRefreshPlan::RebuildMessages => {
-                                        clear_box(&messages);
-                                        append_chat_status_banner(
-                                            &messages,
-                                            status_banner,
-                                            &startup_state,
-                                            working_elapsed,
-                                        );
-                                        append_chat_timeline_items(
-                                            &messages,
-                                            &timeline,
-                                            &transcript_display,
-                                            render_legacy_inline_events,
-                                            open_file.clone(),
-                                        );
-                                    }
-                                }
-                                *last_timeline_render_state.borrow_mut() =
-                                    Some(next_timeline_state);
-                                debug!(?outcome, "chat refresh_view outcome");
-                                restore_chat_scroll_after_refresh(&scroll, chat_scroll);
-                                return;
-                            }
+                                    debug!(
+                                        workspace = %workspace,
+                                        thread_id,
+                                        thread_message_count = snapshot.thread_messages.len(),
+                                        thread_timeline_count = snapshot.thread_messages.len()
+                                            + snapshot.thread_events.len()
+                                            + snapshot.provider_events.len(),
+                                        "chat refresh_view loaded persisted chat timeline"
+                                    );
+                                    render_chat_timeline_snapshot(
+                                        thread_id,
+                                        snapshot,
+                                        &messages_for_result,
+                                        &context_usage_for_result,
+                                        pending_archcar_inputs_for_result.as_ref(),
+                                        inflight_archcar_actions_for_result.as_ref(),
+                                        last_timeline_render_state_for_result.as_ref(),
+                                        working_threads_for_result.as_ref(),
+                                        &scroll_for_result,
+                                        chat_scroll,
+                                        open_file_for_result.clone(),
+                                    );
+                                },
+                            );
+                            return;
                         }
                     }
-
-                    let submitted_user_inputs = submitted_user_input_texts_for_thread(
-                        thread_id,
-                        pending_archcar_inputs.as_ref(),
-                        inflight_archcar_actions.as_ref(),
-                        &[],
-                    );
-                    let status_banner = chat_status_banner_kind(
-                        &startup_state,
-                        working_elapsed,
-                        !submitted_user_inputs.is_empty(),
-                    );
-                    let signature = chat_render_signature(
-                        current_kind,
-                        Some(thread_id),
-                        active_record,
-                        startup_state.clone(),
-                        working_elapsed_seconds_for_signature(working_elapsed),
-                        &current,
-                        &thread_state.borrow(),
-                        &[],
-                        &[],
-                        &[],
-                        &submitted_user_inputs,
-                        "structured",
-                        "empty",
-                        runtime_summary.clone(),
-                    );
-                    if chat_render_is_unchanged(last_render_signature.as_ref(), signature) {
-                        update_existing_working_indicator(&messages, working_elapsed);
-                        return;
-                    }
-                    outcome.messages_changed = true;
-                    clear_box(&messages);
-                    *last_timeline_render_state.borrow_mut() =
-                        Some(chat_timeline_render_state(thread_id, "structured", &[]));
-                    apply_context_usage_state(&context_usage, None);
-                    append_chat_status_banner(
-                        &messages,
-                        status_banner,
-                        &startup_state,
-                        working_elapsed,
-                    );
-                    if submitted_user_inputs.is_empty() {
-                        append_empty_chat_placeholder(&messages);
-                    } else {
-                        for input in submitted_user_inputs {
-                            append_chat_refresh_row(&messages, &chat_user_bubble(&input));
-                        }
-                    }
-                    if let Some(elapsed) = working_elapsed {
-                        append_chat_refresh_row(&messages, &working_indicator_widget(elapsed));
-                    }
-                    restore_chat_scroll_after_refresh(&scroll, chat_scroll);
                 }
                 (None, _) => {
                     let pending_chat_phase = app_state.selected_chat_target().and_then(|target| {
@@ -7250,15 +6993,16 @@ fn inline_event_code_rows_widget(text: &str, force_diff: bool) -> Widget {
     rows.add_css_class("chat-inline-event-code-rows");
     rows.set_hexpand(true);
 
+    let mut lines = text.lines();
     let mut line_count = 0usize;
-    for line in text.lines().take(INLINE_EVENT_CODE_MAX_LINES) {
+    for line in lines.by_ref().take(INLINE_EVENT_CODE_MAX_LINES) {
         rows.append(&inline_event_code_row_widget(line, force_diff));
         line_count += 1;
     }
 
-    let total_lines = text.lines().count();
-    if total_lines > line_count {
-        rows.append(&inline_event_code_omitted_row(total_lines - line_count));
+    let omitted_lines = lines.count();
+    if omitted_lines > 0 {
+        rows.append(&inline_event_code_omitted_row(omitted_lines));
     } else if line_count == 0 {
         rows.append(&inline_event_code_row_widget("", force_diff));
     }
@@ -20225,6 +19969,28 @@ Schema confirms the app moved CRM around businesses.";
         assert!(
             callback_region.contains("spawn_background_job("),
             "message timeline DB loads must not run synchronously in GTK refresh callbacks"
+        );
+    }
+
+    #[test]
+    fn structured_store_refresh_loads_timeline_in_background() {
+        let source = include_str!("session_surface.rs");
+        let start = source
+            .find("LiveChatSource::StructuredStore =>")
+            .expect("structured store refresh branch exists");
+        let end = source[start..]
+            .find("LiveChatSource::LegacySessionLog =>")
+            .map(|offset| start + offset)
+            .expect("legacy branch follows structured store branch");
+        let branch_region = &source[start..end];
+
+        assert!(
+            branch_region.contains("spawn_background_job("),
+            "structured store refresh must not load chat timelines synchronously on the GTK thread"
+        );
+        assert!(
+            !branch_region.contains("match load_chat_timeline_snapshot("),
+            "structured store refresh should resume UI updates after the background timeline load"
         );
     }
 

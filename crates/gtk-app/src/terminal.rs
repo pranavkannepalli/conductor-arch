@@ -135,11 +135,24 @@ impl TerminalGridSurface {
 
         let area_for_buffer = drawing_area.clone();
         let model_for_buffer = model.clone();
+        let last_buffer_len = Rc::new(RefCell::new(0usize));
+        let last_buffer_len_for_buffer = last_buffer_len.clone();
         buffer.connect_changed(move |buffer| {
             let text = buffer
                 .text(&buffer.start_iter(), &buffer.end_iter(), false)
                 .to_string();
-            model_for_buffer.borrow_mut().set_bytes(text.as_bytes());
+            let mut last_len = last_buffer_len_for_buffer.borrow_mut();
+            if text.len() >= *last_len {
+                let appended = &text[*last_len..];
+                if !appended.is_empty() {
+                    model_for_buffer
+                        .borrow_mut()
+                        .feed_bytes(appended.as_bytes());
+                }
+            } else {
+                model_for_buffer.borrow_mut().set_bytes(text.as_bytes());
+            }
+            *last_len = text.len();
             area_for_buffer.queue_draw();
         });
         buffer.set_text(text);
@@ -4017,6 +4030,28 @@ mod tests {
             rendered,
             "[terminal scrollback trimmed]\ntwo\nthree\nfour\n"
         );
+    }
+
+    #[test]
+    fn terminal_buffer_changes_feed_only_appended_bytes() {
+        let source = include_str!("terminal.rs");
+        let start = source
+            .find("buffer.connect_changed")
+            .expect("buffer change handler exists");
+        let end = source[start..]
+            .find("buffer.set_text(text)")
+            .map(|offset| start + offset)
+            .expect("initial buffer population follows change handler");
+        let handler = &source[start..end];
+
+        assert!(handler.contains("last_buffer_len"));
+        let append_feed = handler
+            .find("feed_bytes(appended.as_bytes())")
+            .expect("appended text should be fed incrementally");
+        let reset_fallback = handler
+            .find("set_bytes(text.as_bytes())")
+            .expect("non-append changes should still reset the model");
+        assert!(append_feed < reset_fallback);
     }
 
     #[test]

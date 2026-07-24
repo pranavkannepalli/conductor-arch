@@ -857,6 +857,16 @@ mod tests {
     }
 
     #[test]
+    fn request_kind_maps_session_messages_to_chat_snapshot_thread() {
+        let request = ArchcarRequest::GetSessionMessages { thread_id: 42 };
+
+        assert_eq!(
+            request_kind(&request),
+            AsyncArchcarRequestKind::GetChatSnapshot { thread_id: 42 }
+        );
+    }
+
+    #[test]
     fn request_kind_preserves_set_session_model_metadata() {
         let request = ArchcarRequest::SetSessionModel {
             session_id: 9,

@@ -684,6 +684,10 @@ fn queue_chat_input(
             managed_harness_for_kind(session_kind).is_some(),
             "queued chat input is only supported for managed Codex and Claude sessions"
         );
+        anyhow::ensure!(
+            kind != crate::archcar::protocol::ArchcarInputKind::RawTerminal,
+            "raw terminal input cannot be queued"
+        );
         store.enqueue_chat_input(
             thread_id,
             &input,
@@ -721,14 +725,23 @@ fn drain_queued_input_for_thread(state: &Arc<Mutex<ServerState>>, thread_id: i64
             return;
         }
     };
-    let session_kind = match store.peek_next_queued_chat_input(thread_id) {
-        Ok(Some(queued)) => queued.session_kind,
+    let queued = match store.peek_next_queued_chat_input(thread_id) {
+        Ok(Some(queued)) => queued,
         Ok(None) => return,
         Err(err) => {
             warn!(thread_id, error = %format!("{err:#}"), "archcar could not read queued chat input");
             return;
         }
     };
+    if queued.input_kind == crate::archcar::protocol::ArchcarInputKind::RawTerminal {
+        warn!(
+            thread_id,
+            queue_id = queued.id,
+            "archcar rejected raw terminal input from managed chat queue"
+        );
+        return;
+    }
+    let session_kind = queued.session_kind;
 
     let handle = ready_session_handle_for_thread(state, thread_id, session_kind)
         .or_else(|| restore_ready_session_handle_for_queue(state, &store, thread_id, session_kind));
@@ -737,7 +750,7 @@ fn drain_queued_input_for_thread(state: &Arc<Mutex<ServerState>>, thread_id: i64
     };
     if let Err(err) = validate_send_input_delivery(
         &handle,
-        &crate::archcar::protocol::ArchcarInputKind::User,
+        &queued.input_kind,
         crate::archcar::protocol::ArchcarInputDelivery::Auto,
     ) {
         warn!(thread_id, error = %format!("{err:#}"), "archcar queued chat input waited for session readiness");
@@ -2005,6 +2018,35 @@ mod tests {
         store
             .append_chat_message(thread.id, "user", "fix auth", "user_send")
             .unwrap();
+        let process = store
+            .record_session_process_for_thread(
+                "berlin",
+                thread.id,
+                &store.session_launch("berlin", SessionKind::Codex).unwrap(),
+                std::process::id(),
+            )
+            .unwrap();
+        store
+            .append_chat_event(
+                thread.id,
+                process.id,
+                &crate::codex_tui::CodexTranscriptEvent::Tool {
+                    title: "Cargo".to_owned(),
+                    body: "cargo test".to_owned(),
+                },
+            )
+            .unwrap();
+        ProviderEventStore::new(&db_path)
+            .upsert_event(&provider_event(
+                thread.id,
+                "assistant-1",
+                ProviderEventKind::AssistantOutput,
+                ProviderEventPhase::Completed,
+                "assistant_message",
+                "Assistant",
+                "tests passed",
+            ))
+            .unwrap();
         store
             .enqueue_chat_input(
                 thread.id,
@@ -2014,6 +2056,27 @@ mod tests {
                 SessionKind::Codex,
             )
             .unwrap();
+        let snapshot = crate::archcar::session::SessionSnapshot {
+            session_id: process.id,
+            thread_id: thread.id,
+            workspace: "berlin".to_owned(),
+            kind: SessionKind::Codex,
+            pid: process.pid,
+            status: ProcessStatus::Running,
+            runtime_state: crate::session_state::AgentSessionState::WaitingForInput,
+            ready: true,
+            capabilities: None,
+            screen: String::new(),
+        };
+        let (command_tx, _command_rx) = mpsc::channel();
+        let mut sessions = HashMap::new();
+        sessions.insert(
+            snapshot.session_id,
+            crate::archcar::session::SessionHandle {
+                snapshot: Arc::new(Mutex::new(snapshot)),
+                command_tx,
+            },
+        );
         let state = Arc::new(Mutex::new(ServerState {
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
@@ -2021,7 +2084,7 @@ mod tests {
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
-            sessions: HashMap::new(),
+            sessions,
             subscribers: Vec::new(),
         }));
 
@@ -2038,13 +2101,93 @@ mod tests {
         assert_eq!(snapshot.thread_id, thread.id);
         assert_eq!(snapshot.messages.len(), 1);
         assert_eq!(snapshot.messages[0].content, "fix auth");
-        assert!(snapshot.events.is_empty());
-        assert!(snapshot.provider_events.is_empty());
+        assert_eq!(snapshot.events.len(), 1);
+        assert_eq!(snapshot.events[0].thread_id, thread.id);
+        assert_eq!(snapshot.events[0].process_id, Some(process.id));
+        assert_eq!(snapshot.events[0].kind, "tool");
+        assert_eq!(snapshot.events[0].body, "cargo test");
+        assert_eq!(snapshot.provider_events.len(), 1);
+        assert_eq!(snapshot.provider_events[0].chat_thread_id, Some(thread.id));
+        assert_eq!(
+            snapshot.provider_events[0].kind,
+            ProviderEventKind::AssistantOutput
+        );
         assert_eq!(snapshot.queued_inputs.len(), 1);
         assert_eq!(snapshot.queued_inputs[0].input, "run tests");
         assert_eq!(
             snapshot.queued_inputs[0].visible_input.as_deref(),
             Some("run visible tests")
+        );
+        let live_session = snapshot
+            .live_session
+            .expect("live session should be projected");
+        assert_eq!(live_session.session_id, process.id);
+        assert_eq!(
+            live_session.runtime_state,
+            crate::session_state::AgentSessionState::WaitingForInput
+        );
+        assert!(live_session.ready);
+    }
+
+    #[test]
+    fn queued_raw_terminal_input_is_rejected_before_claim() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let store = seeded_workspace_store(&db_path, &temp.path().join("logs"), temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+        let queued = store
+            .enqueue_chat_input(
+                thread.id,
+                "pwd\n",
+                None,
+                ArchcarInputKind::RawTerminal,
+                SessionKind::Codex,
+            )
+            .unwrap();
+        let snapshot = crate::archcar::session::SessionSnapshot {
+            session_id: 9,
+            thread_id: thread.id,
+            workspace: "berlin".to_owned(),
+            kind: SessionKind::Codex,
+            pid: 12345,
+            status: ProcessStatus::Running,
+            runtime_state: crate::session_state::AgentSessionState::WaitingForInput,
+            ready: true,
+            capabilities: None,
+            screen: String::new(),
+        };
+        let (command_tx, command_rx) = mpsc::channel();
+        let mut sessions = HashMap::new();
+        sessions.insert(
+            snapshot.session_id,
+            crate::archcar::session::SessionHandle {
+                snapshot: Arc::new(Mutex::new(snapshot)),
+                command_tx,
+            },
+        );
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir: temp.path().join("logs"),
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            sessions,
+            subscribers: Vec::new(),
+        }));
+
+        drain_queued_input_for_thread(&state, thread.id);
+
+        assert!(command_rx.try_recv().is_err());
+        assert_eq!(
+            store
+                .peek_next_queued_chat_input(thread.id)
+                .unwrap()
+                .unwrap()
+                .id,
+            queued.id
         );
     }
 

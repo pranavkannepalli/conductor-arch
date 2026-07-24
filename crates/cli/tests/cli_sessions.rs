@@ -135,7 +135,7 @@ fn cli_archcar_shell_accepts_raw_terminal_pwd_and_stops() {
         .success()
         .stdout(contains("ok"));
 
-    let workspace_path = workspace_parent.join("berlin");
+    let workspace_path = workspace_parent.join("berlin").canonicalize().unwrap();
     wait_for_archcar_screen_contains(temp.path(), session_id, workspace_path.to_str().unwrap());
 
     app(temp.path())
