@@ -4247,18 +4247,20 @@ fn install_archcar_wake(root: &GBox, bridge: &AsyncArchcarBridge, refresh_view: 
             gtk::glib::timeout_add_local_once(
                 Duration::from_millis(CHAT_REFRESH_WAKE_DELAY_MS),
                 move || {
-                    clear_chat_refresh_wake_pending(wake_pending.as_ref());
-                    if root_ref.upgrade().is_none() {
-                        CHAT_WAKE_REGISTRY.with(|registry| {
-                            registry.borrow_mut().remove(&wake_id);
-                        });
-                        return;
-                    }
-                    let refresh = CHAT_WAKE_REGISTRY
-                        .with(|registry| registry.borrow().get(&wake_id).cloned());
-                    if let Some(refresh) = refresh {
-                        refresh();
-                    }
+                    guarded_gtk_callback((), || {
+                        clear_chat_refresh_wake_pending(wake_pending.as_ref());
+                        if root_ref.upgrade().is_none() {
+                            CHAT_WAKE_REGISTRY.with(|registry| {
+                                registry.borrow_mut().remove(&wake_id);
+                            });
+                            return;
+                        }
+                        let refresh = CHAT_WAKE_REGISTRY
+                            .with(|registry| registry.borrow().get(&wake_id).cloned());
+                        if let Some(refresh) = refresh {
+                            refresh();
+                        }
+                    });
                 },
             );
         });
@@ -18173,6 +18175,23 @@ diff --git a/docs/harness-smoke-note.md b/docs/harness-smoke-note.md
         assert_eq!(
             CHAT_REFRESH_WAKE_DELAY_MS, 32,
             "selected chat Archcar events should reflect in the UI within a frame-ish delay"
+        );
+    }
+
+    #[test]
+    fn archcar_wake_timeout_callback_is_panic_guarded() {
+        let source = include_str!("session_surface.rs");
+        let start = source
+            .find("fn install_archcar_wake(")
+            .expect("install_archcar_wake should exist");
+        let end = source[start..]
+            .find("fn mark_chat_refresh_wake_pending(")
+            .expect("wake helper should follow install_archcar_wake");
+        let body = &source[start..start + end];
+
+        assert!(
+            body.contains("guarded_gtk_callback((), ||"),
+            "Archcar wake callbacks must recover panics before returning to GLib"
         );
     }
 
