@@ -390,7 +390,7 @@ impl ProviderEventDraft {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProviderEventRecord {
     pub id: i64,
     pub identity_key: String,

@@ -78,6 +78,74 @@ fn cli_starts_and_logs_real_shell_session() {
         .stdout(contains("cli-session:berlin:"));
 }
 
+#[cfg(unix)]
+#[test]
+fn cli_archcar_shell_accepts_raw_terminal_pwd_and_stops() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo_path = init_repo(temp.path().join("demo"));
+    let workspace_parent = temp.path().join("workspaces/demo");
+
+    app(temp.path())
+        .args([
+            "repo",
+            "add",
+            repo_path.to_str().unwrap(),
+            "--name",
+            "demo",
+            "--default-branch",
+            "main",
+            "--workspace-parent",
+            workspace_parent.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    app(temp.path())
+        .args([
+            "workspace",
+            "create",
+            "demo",
+            "--name",
+            "berlin",
+            "--branch",
+            "lc/berlin",
+            "--base",
+            "main",
+        ])
+        .assert()
+        .success();
+
+    app(temp.path())
+        .env("SHELL", "/bin/sh")
+        .args(["archcar", "spawn", "berlin", "--kind", "shell"])
+        .assert()
+        .success()
+        .stdout(contains("Shell session for berlin"));
+    let session_id = wait_for_running_session(temp.path(), "berlin");
+
+    app(temp.path())
+        .args([
+            "archcar",
+            "send",
+            &session_id.to_string(),
+            "--kind",
+            "raw-terminal",
+            "pwd\n",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("ok"));
+
+    let workspace_path = workspace_parent.join("berlin").canonicalize().unwrap();
+    wait_for_archcar_screen_contains(temp.path(), session_id, workspace_path.to_str().unwrap());
+
+    app(temp.path())
+        .args(["archcar", "kill", &session_id.to_string()])
+        .assert()
+        .success()
+        .stdout(contains("ok"));
+    wait_for_session_exit(temp.path(), session_id);
+}
+
 #[test]
 fn cli_exports_and_imports_repository_settings() {
     let temp = tempfile::tempdir().unwrap();
@@ -1018,6 +1086,37 @@ fn wait_for_file_lines(path: &Path, expected: usize) {
     );
 }
 
+fn wait_for_running_session(root: &Path, workspace: &str) -> i64 {
+    for _ in 0..100 {
+        if let Some(session) = WorkspaceStore::open(app_database_path(root))
+            .ok()
+            .and_then(|store| store.list_sessions(workspace).ok())
+            .into_iter()
+            .flatten()
+            .find(|session| session.status == archductor_core::workspace::ProcessStatus::Running)
+        {
+            return session.id;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!("timed out waiting for running session in workspace {workspace}");
+}
+
+fn wait_for_archcar_screen_contains(root: &Path, session_id: i64, needle: &str) {
+    for _ in 0..100 {
+        let output = app(root)
+            .args(["archcar", "screen", &session_id.to_string()])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if output.status.success() && stdout.contains(needle) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!("timed out waiting for session {session_id} screen to contain {needle:?}");
+}
+
 fn wait_for_visible_user_messages(
     root: &Path,
     thread_id: i64,
@@ -1041,7 +1140,7 @@ fn wait_for_visible_user_messages(
 }
 
 fn wait_for_session_exit(root: &Path, session_id: i64) {
-    for _ in 0..100 {
+    for _ in 0..300 {
         if WorkspaceStore::open(app_database_path(root))
             .and_then(|store| store.get_process_record(session_id))
             .map(|process| process.status != archductor_core::workspace::ProcessStatus::Running)

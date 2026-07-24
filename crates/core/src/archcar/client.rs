@@ -371,6 +371,7 @@ fn request_retry_safe_after_response_loss(request: &ArchcarRequest) -> bool {
         ArchcarRequest::GetSessionStatus { .. }
             | ArchcarRequest::GetSessionScreen { .. }
             | ArchcarRequest::GetSessionMessages { .. }
+            | ArchcarRequest::GetChatSnapshot { .. }
             | ArchcarRequest::ResizeSession { .. }
             | ArchcarRequest::SetSessionModel { .. }
             | ArchcarRequest::SetSessionEffort { .. }

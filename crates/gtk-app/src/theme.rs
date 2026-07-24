@@ -2589,6 +2589,63 @@ button.chat-inline-event-expander label {
     line-height: 1.25;
     padding: 0 2px;
 }
+.chat-inline-event-code,
+.chat-inline-event-terminal {
+    background-color: #0d1117;
+    border: 1px solid #30363d;
+    border-radius: 5px;
+}
+.chat-inline-event-code viewport,
+.chat-inline-event-terminal viewport {
+    background-color: #0d1117;
+}
+.chat-inline-event-code-rows {
+    background-color: #0d1117;
+}
+.chat-inline-event-code-row {
+    min-height: 18px;
+}
+.chat-inline-event-code-row-context {
+    background-color: #0d1117;
+    color: #c9d1d9;
+}
+.chat-inline-event-code-row-added {
+    background-color: #10281a;
+    color: #d6f5df;
+}
+.chat-inline-event-code-row-removed {
+    background-color: #2a1111;
+    color: #f5d6d6;
+}
+.chat-inline-event-code-row-hunk {
+    background-color: #111d2f;
+    color: #8db7e8;
+}
+.chat-inline-event-code-row-meta {
+    background-color: #161b22;
+    color: #8b949e;
+}
+.chat-inline-event-code-gutter {
+    border-right: 1px solid #30363d;
+    color: #6e7681;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-size: 10px;
+    min-width: 42px;
+    padding: 0 8px;
+}
+.chat-inline-event-code-sign {
+    color: #8b949e;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-size: 10px;
+    min-width: 18px;
+    padding: 0 4px;
+}
+.chat-inline-event-code-text {
+    color: inherit;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", monospace;
+    font-size: 10px;
+    padding: 0 8px;
+}
 .chat-inline-event-loading {
     color: #b6c7e8;
 }

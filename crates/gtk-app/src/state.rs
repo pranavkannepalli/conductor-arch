@@ -1,11 +1,11 @@
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 
 use archductor_core::archcar::protocol::ArchcarInputKind;
 use archductor_core::paths::AppPaths;
-use archductor_core::workspace::SessionKind;
+use archductor_core::workspace::{ChecksSummary, PullRequest, PullRequestReadiness, SessionKind};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NavigationEntry {
@@ -83,6 +83,8 @@ pub struct AppStateSnapshot {
     editing_queued_chat_inputs: HashMap<i64, EditingQueuedChatInput>,
     workspace_phases: HashMap<String, WorkspaceUiPhase>,
     chat_phases: HashMap<ChatUiTarget, ChatUiPhase>,
+    git_review_snapshots: HashMap<String, WorkspaceGitReviewUiSnapshot>,
+    refreshing_git_review_workspaces: HashSet<String>,
     next_pending_chat_id: u64,
     navigation_back: Vec<NavigationEntry>,
     navigation_forward: Vec<NavigationEntry>,
@@ -129,6 +131,13 @@ pub enum ChatUiPhase {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceGitReviewUiSnapshot {
+    pub pull_request: Option<PullRequest>,
+    pub readiness: Option<PullRequestReadiness>,
+    pub summary: Option<ChecksSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppStateEvent {
     WorkspaceSelectionChanged { workspace: Option<String> },
     WorkspaceTabChanged { tab: WorkspaceTab },
@@ -137,6 +146,7 @@ pub enum AppStateEvent {
     ComposerTargetQueueChanged { target: ChatUiTarget },
     WorkspacePhaseChanged { workspace: String },
     ChatPhaseChanged { target: ChatUiTarget },
+    WorkspaceGitReviewStateChanged { workspace: String },
     AgentSessionSelectionChanged { session_id: Option<i64> },
     StagedReviewPromptChanged,
     RefreshRequested(crate::refresh::RefreshEvent),
@@ -191,6 +201,8 @@ impl AppState {
                 editing_queued_chat_inputs: HashMap::new(),
                 workspace_phases: HashMap::new(),
                 chat_phases: HashMap::new(),
+                git_review_snapshots: HashMap::new(),
+                refreshing_git_review_workspaces: HashSet::new(),
                 next_pending_chat_id: 1,
                 navigation_back: Vec::new(),
                 navigation_forward: Vec::new(),
@@ -731,6 +743,55 @@ impl AppState {
         self.inner.borrow().chat_phases.get(target).cloned()
     }
 
+    pub fn mark_workspace_git_review_refreshing(&self, workspace: String, refreshing: bool) {
+        let changed = {
+            let mut state = self.inner.borrow_mut();
+            if refreshing {
+                state
+                    .refreshing_git_review_workspaces
+                    .insert(workspace.clone())
+            } else {
+                state.refreshing_git_review_workspaces.remove(&workspace)
+            }
+        };
+        if changed {
+            self.emit(AppStateEvent::WorkspaceGitReviewStateChanged { workspace });
+        }
+    }
+
+    pub fn set_workspace_git_review_snapshot(
+        &self,
+        workspace: String,
+        snapshot: WorkspaceGitReviewUiSnapshot,
+    ) {
+        {
+            let mut state = self.inner.borrow_mut();
+            state.refreshing_git_review_workspaces.remove(&workspace);
+            state
+                .git_review_snapshots
+                .insert(workspace.clone(), snapshot);
+        }
+        self.emit(AppStateEvent::WorkspaceGitReviewStateChanged { workspace });
+    }
+
+    pub fn workspace_git_review_snapshot(
+        &self,
+        workspace: &str,
+    ) -> Option<WorkspaceGitReviewUiSnapshot> {
+        self.inner
+            .borrow()
+            .git_review_snapshots
+            .get(workspace)
+            .cloned()
+    }
+
+    pub fn workspace_git_review_refreshing(&self, workspace: &str) -> bool {
+        self.inner
+            .borrow()
+            .refreshing_git_review_workspaces
+            .contains(workspace)
+    }
+
     pub fn set_active_page(&self, page: AppPage) {
         self.inner.borrow_mut().active_page = page;
     }
@@ -1050,6 +1111,33 @@ mod tests {
 
         assert_eq!(state.queued_chat_inputs_count(42), 1);
         assert_eq!(state.selected_chat_thread(), Some(42));
+    }
+
+    #[test]
+    fn app_state_tracks_workspace_git_review_refreshing_until_snapshot_arrives() {
+        let state = AppState::new(
+            AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            WorkspaceTab::Checks,
+            AppPage::Workspace,
+        );
+
+        state.mark_workspace_git_review_refreshing("berlin".to_owned(), true);
+
+        assert!(state.workspace_git_review_refreshing("berlin"));
+        assert_eq!(state.workspace_git_review_snapshot("berlin"), None);
+
+        state.set_workspace_git_review_snapshot(
+            "berlin".to_owned(),
+            WorkspaceGitReviewUiSnapshot {
+                pull_request: None,
+                readiness: None,
+                summary: None,
+            },
+        );
+
+        assert!(!state.workspace_git_review_refreshing("berlin"));
+        assert!(state.workspace_git_review_snapshot("berlin").is_some());
     }
 
     #[test]

@@ -130,6 +130,8 @@ pub fn terminate_process_group(pid: u32, force: bool) -> std::io::Result<bool> {
     Command::new("kill")
         .arg(signal)
         .arg(format!("-{pid}"))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .map(|status| status.success())
 }

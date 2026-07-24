@@ -95,6 +95,9 @@ pub struct PullRequestReviewThread {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PullRequestReadiness {
+    pub state: Option<String>,
+    pub merge_state_status: Option<String>,
+    pub mergeable: Option<String>,
     pub review_decision: Option<String>,
     pub latest_reviews: Vec<PullRequestReviewEntry>,
     pub comments: Vec<PullRequestCommentEntry>,
@@ -226,6 +229,9 @@ pub(crate) fn parse_pull_request_readiness(output: &str) -> Result<PullRequestRe
         }
     }
     Ok(PullRequestReadiness {
+        state: json_string(&value, "state"),
+        merge_state_status: json_string(&value, "mergeStateStatus"),
+        mergeable: json_string(&value, "mergeable"),
         review_decision: json_string(&value, "reviewDecision"),
         latest_reviews,
         comments,
@@ -554,6 +560,15 @@ pub(crate) fn format_pull_request_readiness(
     readiness: &PullRequestReadiness,
 ) -> String {
     let mut out = format!("PR readiness for workspace {name}.\n");
+    if let Some(state) = readiness.state.as_deref() {
+        out.push_str(&format!("State: {state}\n"));
+    }
+    if let Some(merge_state) = readiness.merge_state_status.as_deref() {
+        out.push_str(&format!("Merge state: {merge_state}\n"));
+    }
+    if let Some(mergeable) = readiness.mergeable.as_deref() {
+        out.push_str(&format!("Mergeable: {mergeable}\n"));
+    }
     out.push_str(&format!(
         "Review decision: {}\n",
         readiness.review_decision.as_deref().unwrap_or("UNKNOWN")

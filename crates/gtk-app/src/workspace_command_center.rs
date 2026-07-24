@@ -1,14 +1,15 @@
 use crate::file_component::OpenWorkspaceFile;
 use adw::ToastOverlay;
 use archductor_core::agent_tools::launchable_provider_key;
+use archductor_core::archcar::client::ArchcarClient;
 use archductor_core::archcar::protocol::{ArchcarInputKind, ArchcarRequest};
 use archductor_core::doctor::SetupReadiness;
 use archductor_core::paths::AppPaths;
 use archductor_core::settings::PromptKind;
 use archductor_core::workspace::{
-    ChatThreadRecord, DiffFileSummary, ProcessRecord, ProcessStatus, PullRequest,
-    PullRequestCheckRun, PullRequestReviewThread, ReviewComment, SessionKind, Workspace,
-    WorkspaceStore, WorkspaceTimelineEvent,
+    ChatThreadRecord, DiffFileSummary, MergePullRequestResult, ProcessRecord, ProcessStatus,
+    PullRequest, PullRequestCheckRun, PullRequestReviewThread, ReviewComment, SessionKind,
+    Workspace, WorkspaceStore, WorkspaceTimelineEvent,
 };
 use gtk::prelude::*;
 use gtk::{
@@ -122,12 +123,12 @@ fn clone_external_thread_selection_controller(
 
 use crate::refresh::{RefreshEvent, RefreshHub, RefreshScope};
 use crate::state::{
-    AppState, AppStateEvent, ChatUiPhase, ChatUiTarget, WorkspaceRightPanelTab, WorkspaceTab,
-    WorkspaceUiPhase,
+    AppState, AppStateEvent, ChatUiPhase, ChatUiTarget, QueuedChatInputDraft,
+    WorkspaceRightPanelTab, WorkspaceTab, WorkspaceUiPhase,
 };
 use crate::toast::{show_toast as emit_toast, surface_label_error, ToastManager, ToastMessage};
 use crate::{
-    archcar_async::{spawn_archcar_request, spawn_background_job},
+    archcar_async::spawn_background_job,
     buttons::{compact_text_button, menu_text_button, text_button},
     cli_binary, detail_row, history, session_surface, shell_quote, spawn_terminal_command,
     terminal, title_case_workspace,
@@ -1170,9 +1171,11 @@ fn ws_center_panel(
             let workspace_name = current_workspace_name.borrow().clone();
             match event {
                 RefreshEvent::WorkspaceChatLifecycleChanged { workspace }
-                | RefreshEvent::WorkspaceChatMessagesChanged { workspace, .. }
                     if workspace != &workspace_name =>
                 {
+                    return;
+                }
+                RefreshEvent::WorkspaceChatMessagesChanged { .. } => {
                     return;
                 }
                 _ => {}
@@ -1822,7 +1825,7 @@ fn ready_chat_provider_for_new_thread(
 }
 
 fn session_kind_for_chat_provider(provider: &str) -> SessionKind {
-    match provider {
+    match provider.to_ascii_lowercase().as_str() {
         "claude" => SessionKind::Claude,
         "shell" => SessionKind::Shell,
         _ => SessionKind::Codex,
@@ -1937,23 +1940,34 @@ fn close_workspace_chat_thread(
     thread_id: i64,
     archcar_paths: AppPaths,
 ) {
-    let Ok(store) = WorkspaceStore::open_app(db_path) else {
-        return;
-    };
-    let records = store.list_thread_processes(thread_id).unwrap_or_default();
-    let _ = store.close_chat_thread(thread_id);
-    for record in records
-        .into_iter()
-        .filter(|record| record.status == ProcessStatus::Running)
-    {
-        spawn_archcar_request(
-            archcar_paths.clone(),
-            ArchcarRequest::KillSession {
-                session_id: record.id,
-            },
-        );
-        let _ = store.stop_session_process(workspace_name, record.id);
-    }
+    let db_path = db_path.to_path_buf();
+    let workspace_name = workspace_name.to_owned();
+    spawn_background_job(
+        move || {
+            let Ok(store) = WorkspaceStore::open_app(db_path) else {
+                return;
+            };
+            let records = store.list_thread_processes(thread_id).unwrap_or_default();
+            let running_records = records
+                .into_iter()
+                .filter(|record| record.status == ProcessStatus::Running)
+                .collect::<Vec<_>>();
+            let client = ArchcarClient::from_paths(&archcar_paths);
+            for record in &running_records {
+                let _ = client.send(ArchcarRequest::InterruptTurn {
+                    session_id: record.id,
+                });
+            }
+            let _ = store.close_chat_thread(thread_id);
+            for record in running_records {
+                let _ = client.send(ArchcarRequest::KillSession {
+                    session_id: record.id,
+                });
+                let _ = store.stop_session_process(&workspace_name, record.id);
+            }
+        },
+        |_| {},
+    );
 }
 
 fn guarded_gtk_callback<T, F>(fallback: T, callback: F) -> T
@@ -2091,50 +2105,30 @@ fn ws_simple_file_list(_db_path: &Path, ws: &Workspace, open_file: Rc<dyn Fn(&st
     list.add_css_class("ws-file-list");
     list.set_selection_mode(gtk::SelectionMode::Single);
 
-    let mut files = list_workspace_files(&ws.path);
-    files.sort();
-
     let rows: Rc<RefCell<Vec<FileTreeRow>>> = Rc::new(RefCell::new(Vec::new()));
-    let mut dir_children: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    let mut file_children: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-
-    for path in &files {
-        let path_ref = std::path::Path::new(path);
-        let mut parent_key = String::new();
-        if let Some(parent) = path_ref.parent() {
-            for component in parent.components() {
-                let name = component.as_os_str().to_string_lossy().into_owned();
-                let next_key = tree_join_path(&parent_key, &name);
-                dir_children
-                    .entry(parent_key.clone())
-                    .or_default()
-                    .insert(name);
-                parent_key = next_key;
-            }
+    let collapsed_dirs: Rc<RefCell<HashSet<String>>> = Rc::new(RefCell::new(HashSet::new()));
+    let workspace_path = ws.path.clone();
+    spawn_background_job(move || list_workspace_files(&workspace_path), {
+        let list = list.clone();
+        let rows = rows.clone();
+        let collapsed_dirs = collapsed_dirs.clone();
+        move |mut files: Vec<String>| {
+            files.sort();
+            clear_list_box(&list);
+            rows.borrow_mut().clear();
+            let (dir_children, file_children) = file_tree_maps(&files);
+            *collapsed_dirs.borrow_mut() = initial_collapsed_dirs(&dir_children);
+            append_file_tree_rows(
+                &list,
+                &rows,
+                &collapsed_dirs,
+                &dir_children,
+                &file_children,
+                "",
+                0,
+            );
         }
-        let file_name = path_ref
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(path.as_str())
-            .to_owned();
-        file_children
-            .entry(parent_key)
-            .or_default()
-            .insert(file_name);
-    }
-
-    let collapsed_dirs: Rc<RefCell<HashSet<String>>> =
-        Rc::new(RefCell::new(initial_collapsed_dirs(&dir_children)));
-
-    append_file_tree_rows(
-        &list,
-        &rows,
-        &collapsed_dirs,
-        &dir_children,
-        &file_children,
-        "",
-        0,
-    );
+    });
 
     let rows_for_select = rows.clone();
     list.connect_row_selected(move |_, row| {
@@ -2160,6 +2154,47 @@ fn ws_simple_file_list(_db_path: &Path, ws: &Workspace, open_file: Rc<dyn Fn(&st
     panel.append(&scroll);
 
     panel
+}
+
+fn clear_list_box(list: &ListBox) {
+    while let Some(child) = list.first_child() {
+        list.remove(&child);
+    }
+}
+
+fn file_tree_maps(
+    files: &[String],
+) -> (
+    BTreeMap<String, BTreeSet<String>>,
+    BTreeMap<String, BTreeSet<String>>,
+) {
+    let mut dir_children: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut file_children: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for path in files {
+        let path_ref = std::path::Path::new(path);
+        let mut parent_key = String::new();
+        if let Some(parent) = path_ref.parent() {
+            for component in parent.components() {
+                let name = component.as_os_str().to_string_lossy().into_owned();
+                let next_key = tree_join_path(&parent_key, &name);
+                dir_children
+                    .entry(parent_key.clone())
+                    .or_default()
+                    .insert(name);
+                parent_key = next_key;
+            }
+        }
+        let file_name = path_ref
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(path.as_str())
+            .to_owned();
+        file_children
+            .entry(parent_key)
+            .or_default()
+            .insert(file_name);
+    }
+    (dir_children, file_children)
 }
 
 fn tree_join_path(parent: &str, child: &str) -> String {
@@ -2597,21 +2632,12 @@ fn workspace_prompt_tab_view(
     heading.set_xalign(0.0);
     panel.append(&heading);
 
-    let prompt_view = TextView::new();
-    prompt_view.set_editable(false);
-    prompt_view.set_monospace(true);
-    prompt_view.set_wrap_mode(WrapMode::WordChar);
-    prompt_view.set_vexpand(true);
-    prompt_view.add_css_class("ws-run-output");
-    prompt_view
-        .buffer()
-        .set_text(&format!("$ cat <<'PROMPT'\n{}\nPROMPT\n", prompt.trim()));
-    let prompt_scroll = ScrolledWindow::new();
-    prompt_scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
-    prompt_scroll.set_vexpand(true);
-    prompt_scroll.set_child(Some(&prompt_view));
+    let prompt_scroll = terminal::read_only_terminal_grid(
+        &format!("$ cat <<'PROMPT'\n{}\nPROMPT\n", prompt.trim()),
+        &terminal::TerminalPreferences::default(),
+    );
     let prompt_overlay = gtk::Overlay::new();
-    prompt_overlay.set_child(Some(&prompt_scroll));
+    prompt_overlay.set_child(Some(prompt_scroll.widget()));
 
     let modal = GBox::new(Orientation::Vertical, 6);
     modal.add_css_class("ws-prompt-modal");
@@ -2690,27 +2716,19 @@ fn workspace_terminal_tab_view(
     command_row.append(&clear_btn);
     panel.append(&command_row);
 
-    let output_view = TextView::new();
-    output_view.set_editable(false);
-    output_view.set_monospace(true);
-    output_view.set_vexpand(true);
-    output_view.add_css_class("ws-run-output");
     let initial_terminal_state = run_console_states
         .borrow()
         .get(workspace_name)
         .and_then(|state| state.terminal_by_name(tab_name).cloned())
         .unwrap_or_else(|| WorkspaceRunConsoleTerminalState::new(1));
     command_entry.set_text(&initial_terminal_state.draft);
-    output_view
-        .buffer()
-        .set_text(initial_terminal_state.display_text());
-    let output_scroll = ScrolledWindow::new();
-    output_scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
-    output_scroll.set_vexpand(true);
-    output_scroll.set_child(Some(&output_view));
-    panel.append(&output_scroll);
+    let output_surface = terminal::read_only_terminal_grid(
+        initial_terminal_state.display_text(),
+        &terminal::TerminalPreferences::default(),
+    );
+    panel.append(output_surface.widget());
 
-    let buffer = output_view.buffer();
+    let buffer = output_surface.buffer();
     let state_for_change = run_console_states.clone();
     let workspace_for_change = workspace_name.to_owned();
     let tab_for_change = tab_name.to_owned();
@@ -2916,68 +2934,42 @@ fn workspace_files_panel(
     panel.append(&action_row);
 
     let file_list = GBox::new(Orientation::Vertical, 4);
-    let files = list_workspace_files(&ws.path);
-    if files.is_empty() {
-        file_list.append(&detail_row("Files", "No visible files."));
-    } else {
-        for relative in files {
-            let open_btn = flat_button(&relative);
-            open_btn.set_hexpand(true);
-            open_btn.set_halign(Align::Fill);
-            let current_file_open = current_file.clone();
-            let selected_file_open = selected_file.clone();
-            let edit_buffer = edit_view.buffer();
-            let diff_buffer = diff_view.buffer();
-            let preview_buffer = preview_view.buffer();
-            let workspace_path = ws.path.clone();
-            let db_path_open = db_path.to_path_buf();
-            let workspace_name = ws.name.clone();
-            let relative_path = relative.clone();
-            let mode_stack_open = mode_stack.clone();
-            open_btn.connect_clicked(move |_| {
-                *selected_file_open.borrow_mut() = Some(relative_path.clone());
-                current_file_open.set_text(&relative_path);
-                edit_buffer.set_text("Loading file...");
-                preview_buffer.set_text("Loading file...");
-                diff_buffer.set_text("Loading diff...");
-                let selected_file_apply = selected_file_open.clone();
-                let edit_buffer_apply = edit_buffer.clone();
-                let preview_buffer_apply = preview_buffer.clone();
-                let diff_buffer_apply = diff_buffer.clone();
-                let mode_stack_apply = mode_stack_open.clone();
-                let workspace_path = workspace_path.clone();
-                let db_path_open = db_path_open.clone();
-                let workspace_name = workspace_name.clone();
-                let relative_path = relative_path.clone();
-                spawn_background_job(
-                    move || {
-                        load_workspace_file_snapshot(
-                            workspace_path,
-                            db_path_open,
-                            workspace_name,
-                            relative_path,
-                        )
-                    },
-                    move |snapshot| {
-                        if selected_file_apply.borrow().as_deref()
-                            != Some(snapshot.relative_path.as_str())
-                        {
-                            return;
-                        }
-                        edit_buffer_apply.set_text(&snapshot.contents);
-                        preview_buffer_apply.set_text(&snapshot.contents);
-                        diff_buffer_apply.set_text(&snapshot.diff_text);
-                        if snapshot.relative_path.ends_with(".md") {
-                            mode_stack_apply.set_visible_child_name("preview");
-                        } else {
-                            mode_stack_apply.set_visible_child_name("edit");
-                        }
-                    },
-                );
-            });
-            file_list.append(&open_btn);
+    file_list.append(&detail_row("Files", "Loading files..."));
+    let workspace_path_for_files = ws.path.clone();
+    spawn_background_job(move || list_workspace_files(&workspace_path_for_files), {
+        let file_list = file_list.clone();
+        let current_file = current_file.clone();
+        let selected_file = selected_file.clone();
+        let edit_buffer = edit_view.buffer();
+        let diff_buffer = diff_view.buffer();
+        let preview_buffer = preview_view.buffer();
+        let workspace_path = ws.path.clone();
+        let db_path_open = db_path.to_path_buf();
+        let workspace_name = ws.name.clone();
+        let mode_stack = mode_stack.clone();
+        move |files: Vec<String>| {
+            clear_box_children(&file_list);
+            if files.is_empty() {
+                file_list.append(&detail_row("Files", "No visible files."));
+            } else {
+                for relative in files {
+                    append_workspace_file_open_button(
+                        &file_list,
+                        relative,
+                        selected_file.clone(),
+                        current_file.clone(),
+                        edit_buffer.clone(),
+                        diff_buffer.clone(),
+                        preview_buffer.clone(),
+                        workspace_path.clone(),
+                        db_path_open.clone(),
+                        workspace_name.clone(),
+                        mode_stack.clone(),
+                    );
+                }
+            }
         }
-    }
+    });
 
     let file_scroll = ScrolledWindow::new();
     file_scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
@@ -3068,6 +3060,67 @@ fn workspace_files_panel(
     });
 
     panel
+}
+
+fn clear_box_children(container: &GBox) {
+    while let Some(child) = container.first_child() {
+        container.remove(&child);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_workspace_file_open_button(
+    file_list: &GBox,
+    relative: String,
+    selected_file: Rc<RefCell<Option<String>>>,
+    current_file: Label,
+    edit_buffer: gtk::TextBuffer,
+    diff_buffer: gtk::TextBuffer,
+    preview_buffer: gtk::TextBuffer,
+    workspace_path: PathBuf,
+    db_path: PathBuf,
+    workspace_name: String,
+    mode_stack: Stack,
+) {
+    let open_btn = flat_button(&relative);
+    open_btn.set_hexpand(true);
+    open_btn.set_halign(Align::Fill);
+    open_btn.connect_clicked(move |_| {
+        *selected_file.borrow_mut() = Some(relative.clone());
+        current_file.set_text(&relative);
+        edit_buffer.set_text("Loading file...");
+        preview_buffer.set_text("Loading file...");
+        diff_buffer.set_text("Loading diff...");
+        let selected_file_apply = selected_file.clone();
+        let edit_buffer_apply = edit_buffer.clone();
+        let preview_buffer_apply = preview_buffer.clone();
+        let diff_buffer_apply = diff_buffer.clone();
+        let mode_stack_apply = mode_stack.clone();
+        let workspace_path = workspace_path.clone();
+        let db_path = db_path.clone();
+        let workspace_name = workspace_name.clone();
+        let relative_path = relative.clone();
+        spawn_background_job(
+            move || {
+                load_workspace_file_snapshot(workspace_path, db_path, workspace_name, relative_path)
+            },
+            move |snapshot| {
+                if selected_file_apply.borrow().as_deref() != Some(snapshot.relative_path.as_str())
+                {
+                    return;
+                }
+                edit_buffer_apply.set_text(&snapshot.contents);
+                preview_buffer_apply.set_text(&snapshot.contents);
+                diff_buffer_apply.set_text(&snapshot.diff_text);
+                if snapshot.relative_path.ends_with(".md") {
+                    mode_stack_apply.set_visible_child_name("preview");
+                } else {
+                    mode_stack_apply.set_visible_child_name("edit");
+                }
+            },
+        );
+    });
+    file_list.append(&open_btn);
 }
 
 fn list_workspace_files(root: &Path) -> Vec<String> {
@@ -5586,6 +5639,7 @@ pub(crate) enum PullRequestStateKind {
     Pending,
     Ready,
     Failed,
+    MergeBlocked,
     Merged,
 }
 
@@ -5603,6 +5657,7 @@ impl PullRequestStatusSummary {
             PullRequestStateKind::Pending
             | PullRequestStateKind::Ready
             | PullRequestStateKind::Failed
+            | PullRequestStateKind::MergeBlocked
             | PullRequestStateKind::Merged => Some(self.label.as_str()),
         }
     }
@@ -5613,6 +5668,7 @@ impl PullRequestStatusSummary {
             PullRequestStateKind::Pending
             | PullRequestStateKind::Ready
             | PullRequestStateKind::Failed
+            | PullRequestStateKind::MergeBlocked
             | PullRequestStateKind::Merged => Some(self.css_class),
         }
     }
@@ -5623,6 +5679,8 @@ struct WorkspacePrStatusSnapshot {
     pr: Option<PullRequest>,
     status: Option<PullRequestStatusSummary>,
     summary: Option<archductor_core::workspace::ChecksSummary>,
+    refreshing: bool,
+    has_review_snapshot: bool,
 }
 
 pub(crate) fn pull_request_status_summary(
@@ -5639,6 +5697,13 @@ pub(crate) fn pull_request_status_summary(
     }
 
     if let Some(readiness) = readiness {
+        if pull_request_is_merge_blocked(readiness) {
+            return PullRequestStatusSummary {
+                label: "merge blocked".to_owned(),
+                css_class: "ws-pr-status-failed",
+                kind: PullRequestStateKind::MergeBlocked,
+            };
+        }
         if pull_request_is_failed(readiness) {
             return PullRequestStatusSummary {
                 label: "checks failed".to_owned(),
@@ -5689,16 +5754,41 @@ pub(crate) fn workspace_pull_request_status_summary(
 fn workspace_pr_status_snapshot(
     store: &WorkspaceStore,
     workspace_name: &str,
+    state: &AppState,
 ) -> WorkspacePrStatusSnapshot {
+    let refreshing = state.workspace_git_review_refreshing(workspace_name);
+    if let Some(cached) = state.workspace_git_review_snapshot(workspace_name) {
+        let pr = cached.pull_request.or_else(|| {
+            cached
+                .summary
+                .as_ref()
+                .and_then(|summary| summary.pull_request.clone())
+        });
+        let status = pr.as_ref().map(|pr| match cached.summary.as_ref() {
+            Some(summary) => pull_request_status_summary(pr, cached.readiness.as_ref(), summary),
+            None => {
+                pull_request_status_summary_without_checks_summary(pr, cached.readiness.as_ref())
+            }
+        });
+        return WorkspacePrStatusSnapshot {
+            pr,
+            status,
+            summary: cached.summary,
+            refreshing,
+            has_review_snapshot: true,
+        };
+    }
+
     let pr = store.pull_request(workspace_name).ok().flatten();
-    let summary = store.checks_summary(workspace_name).ok();
     let status = pr
         .as_ref()
-        .map(|pr| workspace_pull_request_status_summary(store, workspace_name, pr));
+        .map(|pr| pull_request_status_summary_without_checks_summary(pr, None));
     WorkspacePrStatusSnapshot {
         pr,
         status,
-        summary,
+        summary: None,
+        refreshing,
+        has_review_snapshot: false,
     }
 }
 
@@ -5707,9 +5797,10 @@ enum WorkspacePrTopActionKind {
     CreatePr,
     CommitAndPush,
     Push,
-    MergeSourceBranch,
+    Rebase,
+    MergeConflicts,
     MergePr,
-    FixBlocked,
+    FixErrors,
     ViewPr,
 }
 
@@ -5724,16 +5815,12 @@ struct WorkspacePrTopAction {
 fn workspace_pr_primary_action(
     snapshot: &WorkspacePrStatusSnapshot,
 ) -> Option<WorkspacePrTopAction> {
-    let has_conflicts = snapshot
-        .summary
-        .as_ref()
-        .is_some_and(|summary| !summary.conflicting_workspaces.is_empty());
-    if has_conflicts {
+    if snapshot.pr.is_none() {
         return Some(WorkspacePrTopAction {
-            label: "Resolve Conflicts",
-            tooltip: "Queue a prompt to resolve workspace conflicts",
-            css_class: "ws-pr-status-failed",
-            kind: WorkspacePrTopActionKind::FixBlocked,
+            label: "Create PR",
+            tooltip: "Queue a prompt to commit, push, and create a pull request",
+            css_class: "ws-pr-status-missing",
+            kind: WorkspacePrTopActionKind::CreatePr,
         });
     }
 
@@ -5751,43 +5838,46 @@ fn workspace_pr_primary_action(
         });
     }
 
+    let needs_push = snapshot
+        .summary
+        .as_ref()
+        .and_then(|summary| summary.branch_push_state.as_ref())
+        .is_some_and(|push| push.ahead > 0 && push.behind == 0);
+    if needs_push {
+        return Some(WorkspacePrTopAction {
+            label: "Push",
+            tooltip: "Push the workspace branch",
+            css_class: "ws-pr-status-muted",
+            kind: WorkspacePrTopActionKind::Push,
+        });
+    }
+
+    let branch_state = snapshot
+        .summary
+        .as_ref()
+        .and_then(|summary| summary.branch_push_state.as_ref());
     let source_branch_ahead = snapshot
         .summary
         .as_ref()
         .map(|summary| summary.source_branch_ahead)
         .unwrap_or_default();
-    if source_branch_ahead > 0 {
+    let needs_rebase = branch_state.is_some_and(|push| push.behind > 0) || source_branch_ahead > 0;
+    if needs_rebase {
         return Some(WorkspacePrTopAction {
-            label: "Merge",
-            tooltip: "Ask the current chat to merge the source branch into this workspace",
+            label: "Rebase",
+            tooltip: "Queue a prompt to rebase this branch",
             css_class: "ws-pr-status-pending",
-            kind: WorkspacePrTopActionKind::MergeSourceBranch,
-        });
-    }
-
-    let needs_push = snapshot
-        .summary
-        .as_ref()
-        .and_then(|summary| summary.branch_push_state.as_ref())
-        .is_some_and(|push| push.ahead > 0);
-    if needs_push {
-        if snapshot.pr.is_some() {
-            return Some(WorkspacePrTopAction {
-                label: "Push Branch",
-                tooltip: "Push the workspace branch",
-                css_class: "ws-pr-status-muted",
-                kind: WorkspacePrTopActionKind::Push,
-            });
-        }
-        return Some(WorkspacePrTopAction {
-            label: "Create PR",
-            tooltip: "Ask the current chat to create a pull request",
-            css_class: "ws-pr-status-missing",
-            kind: WorkspacePrTopActionKind::CreatePr,
+            kind: WorkspacePrTopActionKind::Rebase,
         });
     }
 
     match snapshot.status.as_ref().map(|status| status.kind) {
+        Some(PullRequestStateKind::MergeBlocked) => Some(WorkspacePrTopAction {
+            label: "Resolve",
+            tooltip: "Queue a prompt to resolve merge blockers",
+            css_class: "ws-pr-status-failed",
+            kind: WorkspacePrTopActionKind::MergeConflicts,
+        }),
         Some(PullRequestStateKind::Ready) => Some(WorkspacePrTopAction {
             label: "Merge PR",
             tooltip: "Merge the ready pull request",
@@ -5795,10 +5885,10 @@ fn workspace_pr_primary_action(
             kind: WorkspacePrTopActionKind::MergePr,
         }),
         Some(PullRequestStateKind::Failed) => Some(WorkspacePrTopAction {
-            label: "Fix Checks",
+            label: "Fix errors",
             tooltip: "Queue a prompt to fix failing checks",
             css_class: "ws-pr-status-failed",
-            kind: WorkspacePrTopActionKind::FixBlocked,
+            kind: WorkspacePrTopActionKind::FixErrors,
         }),
         Some(PullRequestStateKind::Merged) => Some(WorkspacePrTopAction {
             label: "Merged",
@@ -5833,15 +5923,79 @@ fn refresh_workspace_chat_lifecycle(refresh_hub: &RefreshHub, workspace_name: &s
 }
 
 fn stage_prompt_for_chat(
+    db_path: &Path,
     state: &AppState,
     refresh_hub: &RefreshHub,
     workspace_name: &str,
     prompt: String,
 ) {
     let workspace_name = current_workspace_action_target(state, workspace_name);
-    state.queue_pending_chat_prompt(prompt);
+    if !queue_prompt_to_selected_archcar_chat(db_path, state, &workspace_name, &prompt) {
+        state.queue_pending_chat_prompt(prompt);
+    }
     state.set_active_workspace_tab(WorkspaceTab::Chats);
     refresh_workspace_chat_lifecycle(refresh_hub, &workspace_name);
+}
+
+fn queue_prompt_to_selected_archcar_chat(
+    db_path: &Path,
+    state: &AppState,
+    workspace_name: &str,
+    prompt: &str,
+) -> bool {
+    let Some((thread_id, request, draft)) =
+        selected_archcar_chat_queue_request(db_path, state, workspace_name, prompt)
+    else {
+        return false;
+    };
+    state.queue_chat_input(thread_id, draft);
+    crate::archcar_async::spawn_archcar_request(state.paths.clone(), request);
+    true
+}
+
+fn selected_archcar_chat_queue_request(
+    db_path: &Path,
+    state: &AppState,
+    workspace_name: &str,
+    prompt: &str,
+) -> Option<(i64, ArchcarRequest, QueuedChatInputDraft)> {
+    let prompt = prompt.trim();
+    if prompt.is_empty() {
+        return None;
+    }
+    let thread_id = state.selected_chat_thread()?;
+    let Ok(store) = WorkspaceStore::open_app(db_path) else {
+        return None;
+    };
+    let Ok(thread) = store.get_chat_thread_record(thread_id) else {
+        return None;
+    };
+    let Ok(workspace) = store.get_workspace_record(thread.workspace_id) else {
+        return None;
+    };
+    if workspace.name != workspace_name {
+        return None;
+    }
+    let session_kind = session_kind_from_provider(&thread.provider);
+    let request = ArchcarRequest::QueueChatInput {
+        thread_id,
+        input: prompt.to_owned(),
+        visible_input: None,
+        kind: ArchcarInputKind::User,
+        session_kind,
+    };
+    let draft = QueuedChatInputDraft {
+        id: None,
+        input: prompt.to_owned(),
+        visible_input: None,
+        kind: ArchcarInputKind::User,
+        session_kind,
+    };
+    Some((thread_id, request, draft))
+}
+
+fn session_kind_from_provider(provider: &str) -> SessionKind {
+    session_kind_for_chat_provider(provider)
 }
 
 fn connect_create_pr_prompt_button(
@@ -5854,7 +6008,7 @@ fn connect_create_pr_prompt_button(
     button.connect_clicked(move |_| {
         let workspace_name = current_workspace_action_target(&state, &workspace_name);
         let prompt = workspace_create_pr_chat_prompt(&db_path, &workspace_name);
-        stage_prompt_for_chat(&state, &refresh_hub, &workspace_name, prompt);
+        stage_prompt_for_chat(&db_path, &state, &refresh_hub, &workspace_name, prompt);
     });
 }
 
@@ -5868,7 +6022,7 @@ fn connect_commit_and_push_prompt_button(
     button.connect_clicked(move |_| {
         let workspace_name = current_workspace_action_target(&state, &workspace_name);
         let prompt = workspace_commit_and_push_chat_prompt(&db_path, &workspace_name);
-        stage_prompt_for_chat(&state, &refresh_hub, &workspace_name, prompt);
+        stage_prompt_for_chat(&db_path, &state, &refresh_hub, &workspace_name, prompt);
     });
 }
 
@@ -5882,7 +6036,7 @@ fn connect_merge_source_branch_prompt_button(
     button.connect_clicked(move |_| {
         let workspace_name = current_workspace_action_target(&state, &workspace_name);
         let prompt = workspace_merge_source_branch_chat_prompt(&db_path, &workspace_name);
-        stage_prompt_for_chat(&state, &refresh_hub, &workspace_name, prompt);
+        stage_prompt_for_chat(&db_path, &state, &refresh_hub, &workspace_name, prompt);
     });
 }
 
@@ -5929,19 +6083,53 @@ fn connect_merge_pr_button(
     let workspace_for_merge = workspace_name.to_owned();
     let feedback_for_merge = feedback.clone();
     let toast_for_merge = toast_overlay.clone();
-    button.connect_clicked(move |_| {
-        let result = WorkspaceStore::open_app(db_for_merge.clone()).and_then(|store| {
-            store.merge_and_maybe_archive_pull_request(&workspace_for_merge, Some("squash"))
-        });
-        let refresh_event = pull_request_merge_refresh_event(&workspace_for_merge, &result);
-        apply_action_feedback(
-            &feedback_for_merge,
-            &toast_for_merge,
-            &pull_request_merge_and_archive_feedback(result),
-            true,
+    button.connect_clicked(move |button| {
+        button.set_sensitive(false);
+        let button = button.clone();
+        let db_for_merge = db_for_merge.clone();
+        let workspace_for_merge = workspace_for_merge.clone();
+        let workspace_for_result = workspace_for_merge.clone();
+        let feedback_for_merge = feedback_for_merge.clone();
+        let toast_for_merge = toast_for_merge.clone();
+        let refresh_hub = refresh_hub.clone();
+        spawn_background_job(
+            move || {
+                run_merge_pull_request_action(
+                    db_for_merge,
+                    workspace_for_merge,
+                    Some("squash".to_owned()),
+                )
+            },
+            move |result| {
+                button.set_sensitive(true);
+                let refresh_event =
+                    pull_request_merge_refresh_event(&workspace_for_result, &result);
+                apply_action_feedback(
+                    &feedback_for_merge,
+                    &toast_for_merge,
+                    &pull_request_merge_and_archive_feedback(result),
+                    true,
+                );
+                refresh_hub.refresh_event(refresh_event);
+            },
         );
-        refresh_hub.refresh_event(refresh_event);
     });
+}
+
+fn run_merge_pull_request_action(
+    db_path: PathBuf,
+    workspace: String,
+    method: Option<String>,
+) -> anyhow::Result<MergePullRequestResult> {
+    WorkspaceStore::open_app(db_path)
+        .and_then(|store| store.merge_and_maybe_archive_pull_request(&workspace, method.as_deref()))
+}
+
+fn run_refresh_pull_request_action(
+    db_path: PathBuf,
+    workspace: String,
+) -> anyhow::Result<Option<PullRequest>> {
+    WorkspaceStore::open_app(db_path).and_then(|store| store.refresh_pull_request_state(&workspace))
 }
 
 fn workspace_pr_status_panel(
@@ -5952,7 +6140,7 @@ fn workspace_pr_status_panel(
     refresh_hub: RefreshHub,
     toast_overlay: &ToastOverlay,
 ) -> GBox {
-    let snapshot = workspace_pr_status_snapshot(store, workspace_name);
+    let snapshot = workspace_pr_status_snapshot(store, workspace_name, state);
     let action = workspace_pr_primary_action(&snapshot);
     let panel = GBox::new(Orientation::Horizontal, 8);
     panel.add_css_class("ws-pr-compact-panel");
@@ -5963,7 +6151,21 @@ fn workspace_pr_status_panel(
             .map(|action| action.css_class)
             .unwrap_or("ws-pr-status-muted"),
     );
+    if let Some(pr) = snapshot.pr.as_ref() {
+        let chip = secondary_button(&pull_request_chip_label(pr.number));
+        chip.add_css_class("ws-pr-chip");
+        chip.set_tooltip_text(Some(&pull_request_chip_tooltip(pr.number)));
+        let url = pr.url.clone();
+        chip.connect_clicked(move |_| open_external_url(&url));
+        panel.append(&chip);
+    }
+    if workspace_pr_status_is_loading(&snapshot) {
+        let spinner = Spinner::new();
+        spinner.start();
+        panel.append(&spinner);
+    }
     let title = Label::new(Some(match action {
+        _ if workspace_pr_status_is_loading(&snapshot) => "Updating review state...",
         Some(action) => workspace_pr_status_title(&snapshot, action),
         None => "No changes",
     }));
@@ -6000,7 +6202,7 @@ fn workspace_pr_status_panel(
             state.clone(),
             refresh_hub.clone(),
         ),
-        WorkspacePrTopActionKind::MergeSourceBranch => connect_merge_source_branch_prompt_button(
+        WorkspacePrTopActionKind::Rebase => connect_merge_source_branch_prompt_button(
             &primary_btn,
             db_path.to_path_buf(),
             workspace_name.to_owned(),
@@ -6024,14 +6226,16 @@ fn workspace_pr_status_panel(
             toast_overlay,
             refresh_hub.clone(),
         ),
-        WorkspacePrTopActionKind::FixBlocked => connect_fix_blocked_prompt_button(
-            &primary_btn,
-            db_path.to_path_buf(),
-            workspace_name.to_owned(),
-            state.clone(),
-            &feedback,
-            toast_overlay,
-        ),
+        WorkspacePrTopActionKind::MergeConflicts | WorkspacePrTopActionKind::FixErrors => {
+            connect_fix_blocked_prompt_button(
+                &primary_btn,
+                db_path.to_path_buf(),
+                workspace_name.to_owned(),
+                state.clone(),
+                &feedback,
+                toast_overlay,
+            )
+        }
         WorkspacePrTopActionKind::ViewPr => {
             if let Some(pr) = snapshot.pr.as_ref() {
                 let url = pr.url.clone();
@@ -6044,6 +6248,14 @@ fn workspace_pr_status_panel(
     panel
 }
 
+fn pull_request_chip_label(number: i64) -> String {
+    format!("#{number}")
+}
+
+fn pull_request_chip_tooltip(number: i64) -> String {
+    format!("Open pull request #{number}")
+}
+
 fn workspace_pr_status_title(
     snapshot: &WorkspacePrStatusSnapshot,
     action: WorkspacePrTopAction,
@@ -6051,9 +6263,11 @@ fn workspace_pr_status_title(
     match action.kind {
         WorkspacePrTopActionKind::CommitAndPush => return "Commit and push branch",
         WorkspacePrTopActionKind::Push => return "Push branch",
-        WorkspacePrTopActionKind::MergeSourceBranch => return "Merge source branch",
+        WorkspacePrTopActionKind::Rebase => return "Rebase branch",
         WorkspacePrTopActionKind::CreatePr => return "No pull request yet",
-        WorkspacePrTopActionKind::FixBlocked if action.css_class == "ws-pr-status-failed" => {
+        WorkspacePrTopActionKind::MergeConflicts | WorkspacePrTopActionKind::FixErrors
+            if action.css_class == "ws-pr-status-failed" =>
+        {
             return "Blocked";
         }
         _ => {}
@@ -6062,10 +6276,15 @@ fn workspace_pr_status_title(
         Some(PullRequestStateKind::Pending) => "Checks pending",
         Some(PullRequestStateKind::Ready) => "Ready to merge",
         Some(PullRequestStateKind::Failed) => "Checks failed",
+        Some(PullRequestStateKind::MergeBlocked) => "Merge blocked",
         Some(PullRequestStateKind::Merged) => "Pull request merged",
         Some(PullRequestStateKind::Open) => "Pull request open",
         None => "No pull request yet",
     }
+}
+
+fn workspace_pr_status_is_loading(snapshot: &WorkspacePrStatusSnapshot) -> bool {
+    snapshot.refreshing || (snapshot.pr.is_some() && !snapshot.has_review_snapshot)
 }
 
 fn pull_request_status_summary_without_checks_summary(
@@ -6081,6 +6300,13 @@ fn pull_request_status_summary_without_checks_summary(
     }
 
     if let Some(readiness) = readiness {
+        if pull_request_is_merge_blocked(readiness) {
+            return PullRequestStatusSummary {
+                label: "merge blocked".to_owned(),
+                css_class: "ws-pr-status-failed",
+                kind: PullRequestStateKind::MergeBlocked,
+            };
+        }
         if pull_request_is_failed(readiness) {
             return PullRequestStatusSummary {
                 label: "checks failed".to_owned(),
@@ -6110,6 +6336,33 @@ fn pull_request_is_failed(readiness: &archductor_core::workspace::PullRequestRea
             .deployments
             .iter()
             .any(|deployment| deployment.is_failure())
+}
+
+fn pull_request_is_merge_blocked(
+    readiness: &archductor_core::workspace::PullRequestReadiness,
+) -> bool {
+    readiness
+        .merge_state_status
+        .as_deref()
+        .is_some_and(github_merge_state_is_blocked)
+        || readiness
+            .mergeable
+            .as_deref()
+            .is_some_and(github_mergeable_is_blocked)
+}
+
+fn github_merge_state_is_blocked(value: &str) -> bool {
+    matches!(
+        value.to_ascii_uppercase().as_str(),
+        "BLOCKED" | "CONFLICTING" | "DIRTY"
+    )
+}
+
+fn github_mergeable_is_blocked(value: &str) -> bool {
+    matches!(
+        value.to_ascii_uppercase().as_str(),
+        "CONFLICTING" | "NO" | "FALSE"
+    )
 }
 
 fn pull_request_is_pending(readiness: &archductor_core::workspace::PullRequestReadiness) -> bool {
@@ -6187,7 +6440,7 @@ fn workspace_create_pr_chat_prompt_from_parts(
 ) -> String {
     let mut prompt = format!(
         "Create a GitHub pull request for workspace {name}.\n\n\
-         Push the branch if needed. Write a clear PR title and full PR body, then create the PR. \
+         Push the branch if needed. Use `gh pr create` with a clear PR title and full PR body. \
          Include a concise summary and testing/verification section in the body."
     );
     if let Some(repo_prompt) = repo_prompt
@@ -6225,9 +6478,9 @@ fn workspace_merge_source_branch_chat_prompt(db_path: &Path, name: &str) -> Stri
         .and_then(|store| store.workspace_base_ref(name))
         .unwrap_or_else(|_| "the source branch".to_owned());
     let mut prompt = format!(
-        "Merge {source} into workspace {name} before creating a pull request.\n\n\
-         Fetch the latest source branch if needed, merge it into the workspace branch, resolve \
-         conflicts carefully, run the relevant verification, then report the merge result and any \
+        "Rebase workspace {name} onto {source} before continuing review.\n\n\
+         Fetch the latest source branch if needed, rebase the workspace branch, resolve \
+         conflicts carefully, run the relevant verification, then report the rebase result and any \
          remaining blockers."
     );
     append_configured_prompt(
@@ -6623,6 +6876,15 @@ fn check_status_icon(key: &str, val: &str) -> (&'static str, &'static str) {
     }
 }
 
+fn run_push_branch_action(db_path: PathBuf, workspace: String) -> anyhow::Result<String> {
+    WorkspaceStore::open_app(db_path).and_then(|store| store.push_branch(&workspace))
+}
+
+fn run_force_push_branch_action(db_path: PathBuf, workspace: String) -> anyhow::Result<String> {
+    WorkspaceStore::open_app(db_path)
+        .and_then(|store| store.force_push_branch_with_lease(&workspace))
+}
+
 fn connect_push_branch_button(
     push_btn: &Button,
     db_path: &Path,
@@ -6634,26 +6896,36 @@ fn connect_push_branch_button(
     let workspace_for_push = name.to_owned();
     let feedback_for_push = feedback.clone();
     let toast_for_push = toast_overlay.clone();
-    push_btn.connect_clicked(move |_| {
-        match WorkspaceStore::open_app(db_for_push.clone())
-            .and_then(|store| store.push_branch(&workspace_for_push))
-        {
-            Ok(output) => {
-                let message = output
-                    .lines()
-                    .map(str::trim)
-                    .find(|line| !line.is_empty())
-                    .map(|line| format!("Pushed branch: {line}"))
-                    .unwrap_or_else(|| "Pushed branch.".to_owned());
-                apply_action_feedback(&feedback_for_push, &toast_for_push, &message, true);
-            }
-            Err(err) => apply_action_feedback(
-                &feedback_for_push,
-                &toast_for_push,
-                &push_branch_error_feedback(&err),
-                true,
-            ),
-        }
+    push_btn.connect_clicked(move |button| {
+        button.set_sensitive(false);
+        let button = button.clone();
+        let db_for_push = db_for_push.clone();
+        let workspace_for_push = workspace_for_push.clone();
+        let feedback_for_push = feedback_for_push.clone();
+        let toast_for_push = toast_for_push.clone();
+        spawn_background_job(
+            move || run_push_branch_action(db_for_push, workspace_for_push),
+            move |result| {
+                button.set_sensitive(true);
+                match result {
+                    Ok(output) => {
+                        let message = output
+                            .lines()
+                            .map(str::trim)
+                            .find(|line| !line.is_empty())
+                            .map(|line| format!("Pushed branch: {line}"))
+                            .unwrap_or_else(|| "Pushed branch.".to_owned());
+                        apply_action_feedback(&feedback_for_push, &toast_for_push, &message, true);
+                    }
+                    Err(err) => apply_action_feedback(
+                        &feedback_for_push,
+                        &toast_for_push,
+                        &push_branch_error_feedback(&err),
+                        true,
+                    ),
+                }
+            },
+        );
     });
 }
 
@@ -6684,38 +6956,42 @@ fn connect_force_push_button(
             return;
         }
         force_push_btn_for_click.set_sensitive(false);
-        match WorkspaceStore::open_app(db_for_force_push.clone())
-            .and_then(|store| store.force_push_branch_with_lease(&workspace_for_force_push))
-        {
-            Ok(output) => {
-                *force_confirmed_for_click.borrow_mut() = false;
-                force_push_btn_for_click.set_sensitive(true);
-                force_push_btn_for_click.set_label("Force Push");
-                let message = output
-                    .lines()
-                    .map(str::trim)
-                    .find(|line| !line.is_empty())
-                    .map(|line| format!("Force pushed with lease: {line}"))
-                    .unwrap_or_else(|| "Force pushed with lease.".to_owned());
-                apply_action_feedback(
-                    &feedback_for_force_push,
-                    &toast_for_force_push,
-                    &message,
-                    true,
-                );
-            }
-            Err(err) => {
-                *force_confirmed_for_click.borrow_mut() = false;
-                force_push_btn_for_click.set_sensitive(true);
-                force_push_btn_for_click.set_label("Force Push");
-                apply_action_feedback(
-                    &feedback_for_force_push,
-                    &toast_for_force_push,
-                    &push_branch_error_feedback(&err),
-                    true,
-                );
-            }
-        }
+        let db_for_force_push = db_for_force_push.clone();
+        let workspace_for_force_push = workspace_for_force_push.clone();
+        let feedback_for_force_push = feedback_for_force_push.clone();
+        let toast_for_force_push = toast_for_force_push.clone();
+        let force_confirmed_for_result = force_confirmed_for_click.clone();
+        let force_push_btn_for_result = force_push_btn_for_click.clone();
+        spawn_background_job(
+            move || run_force_push_branch_action(db_for_force_push, workspace_for_force_push),
+            move |result| {
+                *force_confirmed_for_result.borrow_mut() = false;
+                force_push_btn_for_result.set_sensitive(true);
+                force_push_btn_for_result.set_label("Force Push");
+                match result {
+                    Ok(output) => {
+                        let message = output
+                            .lines()
+                            .map(str::trim)
+                            .find(|line| !line.is_empty())
+                            .map(|line| format!("Force pushed with lease: {line}"))
+                            .unwrap_or_else(|| "Force pushed with lease.".to_owned());
+                        apply_action_feedback(
+                            &feedback_for_force_push,
+                            &toast_for_force_push,
+                            &message,
+                            true,
+                        );
+                    }
+                    Err(err) => apply_action_feedback(
+                        &feedback_for_force_push,
+                        &toast_for_force_push,
+                        &push_branch_error_feedback(&err),
+                        true,
+                    ),
+                }
+            },
+        );
     });
 }
 
@@ -7011,21 +7287,38 @@ fn workspace_checks_panel(
                     let refresh_after = refresh_hub.clone();
                     let feedback_for_refresh = feedback.clone();
                     let toast_for_refresh = toast_overlay.clone();
-                    refresh_btn.connect_clicked(move |_| {
-                        let result =
-                            WorkspaceStore::open_app(db_for_refresh.clone()).and_then(|store| {
-                                store.refresh_pull_request_state(&workspace_for_refresh)
-                            });
-                        let message = pull_request_refresh_feedback(result);
-                        apply_action_feedback(
-                            &feedback_for_refresh,
-                            &toast_for_refresh,
-                            &message,
-                            true,
+                    refresh_btn.connect_clicked(move |button| {
+                        button.set_sensitive(false);
+                        let button = button.clone();
+                        let db_for_refresh = db_for_refresh.clone();
+                        let workspace_for_refresh = workspace_for_refresh.clone();
+                        let workspace_for_event = workspace_for_refresh.clone();
+                        let feedback_for_refresh = feedback_for_refresh.clone();
+                        let toast_for_refresh = toast_for_refresh.clone();
+                        let refresh_after = refresh_after.clone();
+                        spawn_background_job(
+                            move || {
+                                run_refresh_pull_request_action(
+                                    db_for_refresh,
+                                    workspace_for_refresh,
+                                )
+                            },
+                            move |result| {
+                                button.set_sensitive(true);
+                                let message = pull_request_refresh_feedback(result);
+                                apply_action_feedback(
+                                    &feedback_for_refresh,
+                                    &toast_for_refresh,
+                                    &message,
+                                    true,
+                                );
+                                refresh_after.refresh_event(
+                                    RefreshEvent::WorkspaceGitReviewChanged {
+                                        workspace: workspace_for_event,
+                                    },
+                                );
+                            },
                         );
-                        refresh_after.refresh_event(RefreshEvent::WorkspaceReviewChanged {
-                            workspace: workspace_for_refresh.clone(),
-                        });
                     });
 
                     top_row.append(&summary_btn);
@@ -7052,27 +7345,42 @@ fn workspace_checks_panel(
                     let feedback_for_merge = feedback.clone();
                     let toast_for_merge = toast_overlay.clone();
                     let merge_method_for_merge = merge_method.clone();
-                    merge_btn.connect_clicked(move |_| {
+                    merge_btn.connect_clicked(move |button| {
                         let method = merge_method_for_merge
                             .active_id()
                             .map(|method| method.to_string())
                             .unwrap_or_else(|| "squash".to_owned());
-                        let result =
-                            WorkspaceStore::open_app(db_for_merge.clone()).and_then(|store| {
-                                store.merge_and_maybe_archive_pull_request(
-                                    &workspace_for_merge,
-                                    Some(&method),
+                        button.set_sensitive(false);
+                        let button = button.clone();
+                        let db_for_merge = db_for_merge.clone();
+                        let workspace_for_merge = workspace_for_merge.clone();
+                        let workspace_for_result = workspace_for_merge.clone();
+                        let refresh_after_merge = refresh_after_merge.clone();
+                        let feedback_for_merge = feedback_for_merge.clone();
+                        let toast_for_merge = toast_for_merge.clone();
+                        spawn_background_job(
+                            move || {
+                                run_merge_pull_request_action(
+                                    db_for_merge,
+                                    workspace_for_merge,
+                                    Some(method),
                                 )
-                            });
-                        let refresh_event =
-                            pull_request_merge_refresh_event(&workspace_for_merge, &result);
-                        apply_action_feedback(
-                            &feedback_for_merge,
-                            &toast_for_merge,
-                            &pull_request_merge_and_archive_feedback(result),
-                            true,
+                            },
+                            move |result| {
+                                button.set_sensitive(true);
+                                let refresh_event = pull_request_merge_refresh_event(
+                                    &workspace_for_result,
+                                    &result,
+                                );
+                                apply_action_feedback(
+                                    &feedback_for_merge,
+                                    &toast_for_merge,
+                                    &pull_request_merge_and_archive_feedback(result),
+                                    true,
+                                );
+                                refresh_after_merge.refresh_event(refresh_event);
+                            },
                         );
-                        refresh_after_merge.refresh_event(refresh_event);
                     });
 
                     let db_for_stage = db_path.to_path_buf();
@@ -7107,21 +7415,38 @@ fn workspace_checks_panel(
                     let refresh_after = refresh_hub.clone();
                     let feedback_for_refresh = feedback.clone();
                     let toast_for_refresh = toast_overlay.clone();
-                    refresh_btn.connect_clicked(move |_| {
-                        let result =
-                            WorkspaceStore::open_app(db_for_refresh.clone()).and_then(|store| {
-                                store.refresh_pull_request_state(&workspace_for_refresh)
-                            });
-                        let message = pull_request_refresh_feedback(result);
-                        apply_action_feedback(
-                            &feedback_for_refresh,
-                            &toast_for_refresh,
-                            &message,
-                            true,
+                    refresh_btn.connect_clicked(move |button| {
+                        button.set_sensitive(false);
+                        let button = button.clone();
+                        let db_for_refresh = db_for_refresh.clone();
+                        let workspace_for_refresh = workspace_for_refresh.clone();
+                        let workspace_for_event = workspace_for_refresh.clone();
+                        let feedback_for_refresh = feedback_for_refresh.clone();
+                        let toast_for_refresh = toast_for_refresh.clone();
+                        let refresh_after = refresh_after.clone();
+                        spawn_background_job(
+                            move || {
+                                run_refresh_pull_request_action(
+                                    db_for_refresh,
+                                    workspace_for_refresh,
+                                )
+                            },
+                            move |result| {
+                                button.set_sensitive(true);
+                                let message = pull_request_refresh_feedback(result);
+                                apply_action_feedback(
+                                    &feedback_for_refresh,
+                                    &toast_for_refresh,
+                                    &message,
+                                    true,
+                                );
+                                refresh_after.refresh_event(
+                                    RefreshEvent::WorkspaceGitReviewChanged {
+                                        workspace: workspace_for_event,
+                                    },
+                                );
+                            },
                         );
-                        refresh_after.refresh_event(RefreshEvent::WorkspaceReviewChanged {
-                            workspace: workspace_for_refresh.clone(),
-                        });
                     });
 
                     merge_row.append(&merge_method);
@@ -7131,7 +7456,7 @@ fn workspace_checks_panel(
                     actions.append(&merge_row);
                     actions.append(&top_row);
                 }
-                PullRequestStateKind::Failed => {
+                PullRequestStateKind::Failed | PullRequestStateKind::MergeBlocked => {
                     let top_row = make_action_row();
                     let fix_btn = text_button(action_labels[0]);
                     fix_btn.add_css_class("suggested-action");
@@ -7197,21 +7522,38 @@ fn workspace_checks_panel(
                     let refresh_after = refresh_hub.clone();
                     let feedback_for_refresh = feedback.clone();
                     let toast_for_refresh = toast_overlay.clone();
-                    refresh_btn.connect_clicked(move |_| {
-                        let result =
-                            WorkspaceStore::open_app(db_for_refresh.clone()).and_then(|store| {
-                                store.refresh_pull_request_state(&workspace_for_refresh)
-                            });
-                        let message = pull_request_refresh_feedback(result);
-                        apply_action_feedback(
-                            &feedback_for_refresh,
-                            &toast_for_refresh,
-                            &message,
-                            true,
+                    refresh_btn.connect_clicked(move |button| {
+                        button.set_sensitive(false);
+                        let button = button.clone();
+                        let db_for_refresh = db_for_refresh.clone();
+                        let workspace_for_refresh = workspace_for_refresh.clone();
+                        let workspace_for_event = workspace_for_refresh.clone();
+                        let feedback_for_refresh = feedback_for_refresh.clone();
+                        let toast_for_refresh = toast_for_refresh.clone();
+                        let refresh_after = refresh_after.clone();
+                        spawn_background_job(
+                            move || {
+                                run_refresh_pull_request_action(
+                                    db_for_refresh,
+                                    workspace_for_refresh,
+                                )
+                            },
+                            move |result| {
+                                button.set_sensitive(true);
+                                let message = pull_request_refresh_feedback(result);
+                                apply_action_feedback(
+                                    &feedback_for_refresh,
+                                    &toast_for_refresh,
+                                    &message,
+                                    true,
+                                );
+                                refresh_after.refresh_event(
+                                    RefreshEvent::WorkspaceGitReviewChanged {
+                                        workspace: workspace_for_event,
+                                    },
+                                );
+                            },
                         );
-                        refresh_after.refresh_event(RefreshEvent::WorkspaceReviewChanged {
-                            workspace: workspace_for_refresh.clone(),
-                        });
                     });
 
                     top_row.append(&fix_btn);
@@ -7317,6 +7659,7 @@ fn pull_request_action_labels(kind: Option<PullRequestStateKind>) -> Vec<&'stati
         Some(PullRequestStateKind::Pending) => vec!["PR summary", "Reviews", "Refresh"],
         Some(PullRequestStateKind::Ready) => vec!["Merge", "PR summary", "Refresh"],
         Some(PullRequestStateKind::Failed) => vec!["Fix checks", "PR summary", "Refresh"],
+        Some(PullRequestStateKind::MergeBlocked) => vec!["Merge", "PR summary", "Refresh"],
         Some(PullRequestStateKind::Merged) => vec!["Continue", "Archive"],
     }
 }
@@ -7425,36 +7768,35 @@ fn workspace_conflict_resolution_panel(
         let diff_buffer_for_diff_all = diff_preview.buffer();
         let db_for_diff_all = db_path.to_path_buf();
         let toast_for_diff_all = toast_manager.clone();
-        diff_all_btn.connect_clicked(move |_| {
-            let mut sections = Vec::new();
-            for file in &files_for_diff_all {
-                let file_path = Path::new(file).to_path_buf();
-                match WorkspaceStore::open_app(db_for_diff_all.clone()).and_then(|store| {
-                    store.unified_diff(&source_workspace_for_diff_all, Some(file_path.as_path()))
-                }) {
-                    Ok(output) => {
-                        sections.push(format!(
-                            "# {}:{}\n{}\n",
-                            source_workspace_for_diff_all,
-                            file_path.display(),
-                            output
-                        ));
-                    }
-                    Err(err) => {
-                        surface_label_error(
+        diff_all_btn.connect_clicked(move |button| {
+            button.set_sensitive(false);
+            let button = button.clone();
+            let files_for_diff_all = files_for_diff_all.clone();
+            let source_workspace_for_diff_all = source_workspace_for_diff_all.clone();
+            let db_for_diff_all = db_for_diff_all.clone();
+            let feedback_for_diff_all = feedback_for_diff_all.clone();
+            let diff_buffer_for_diff_all = diff_buffer_for_diff_all.clone();
+            let toast_for_diff_all = toast_for_diff_all.clone();
+            spawn_background_job(
+                move || {
+                    run_conflict_diff_all_action(
+                        db_for_diff_all,
+                        source_workspace_for_diff_all,
+                        files_for_diff_all,
+                    )
+                },
+                move |result| {
+                    button.set_sensitive(true);
+                    match result {
+                        Ok(output) => diff_buffer_for_diff_all.set_text(&output),
+                        Err(err) => surface_label_error(
                             &feedback_for_diff_all,
                             &toast_for_diff_all,
-                            format!("Could not read diff for {file}: {err:#}"),
-                        );
-                        return;
+                            format!("Could not read conflict diffs: {err:#}"),
+                        ),
                     }
-                }
-            }
-            if sections.is_empty() {
-                diff_buffer_for_diff_all.set_text("No conflicting files to diff.");
-            } else {
-                diff_buffer_for_diff_all.set_text(&sections.join("\n"));
-            }
+                },
+            );
         });
         let copy_all_btn = secondary_button("Copy all from sibling");
         let files_for_copy_all = files.clone();
@@ -7464,60 +7806,70 @@ fn workspace_conflict_resolution_panel(
         let feedback_for_copy_all = conflict_feedback.clone();
         let refresh_after_copy_all = refresh_hub.clone();
         let toast_for_copy_all = toast_manager.clone();
-        copy_all_btn.connect_clicked(move |_| {
-            let mut copied = 0usize;
-            let mut failures = Vec::new();
-            for file in &files_for_copy_all {
-                let result = WorkspaceStore::open_app(db_for_copy_all.clone()).and_then(|store| {
-                    store.copy_conflict_file_from_workspace(
-                        &destination_workspace,
-                        &source_workspace,
-                        file,
+        copy_all_btn.connect_clicked(move |button| {
+            button.set_sensitive(false);
+            let button = button.clone();
+            let files_for_copy_all = files_for_copy_all.clone();
+            let source_workspace = source_workspace.clone();
+            let destination_workspace = destination_workspace.clone();
+            let db_for_copy_all = db_for_copy_all.clone();
+            let feedback_for_copy_all = feedback_for_copy_all.clone();
+            let refresh_after_copy_all = refresh_after_copy_all.clone();
+            let toast_for_copy_all = toast_for_copy_all.clone();
+            spawn_background_job(
+                move || {
+                    run_conflict_copy_all_action(
+                        db_for_copy_all,
+                        destination_workspace,
+                        source_workspace,
+                        files_for_copy_all,
                     )
-                });
-                match result {
-                    Ok(()) => copied += 1,
-                    Err(err) => failures.push(format!("{file}: {err:#}")),
-                }
-            }
-            match (copied, failures.is_empty()) {
-                (0, true) => {
-                    surface_label_error(
-                        &feedback_for_copy_all,
-                        &toast_for_copy_all,
-                        format!("No files available to copy from {source_workspace}."),
-                    );
-                }
-                (0, false) => {
-                    surface_label_error(
-                        &feedback_for_copy_all,
-                        &toast_for_copy_all,
-                        format!(
-                            "Failed to copy files from {source_workspace}: {}",
-                            failures.join("; ")
-                        ),
-                    );
-                }
-                (_, true) => {
-                    refresh_after_copy_all.refresh(RefreshScope::Workspace);
-                    feedback_for_copy_all.set_text(&format!(
-                        "Copied {} conflicting file(s) from {source_workspace}.",
-                        copied
-                    ));
-                }
-                (_, false) => {
-                    refresh_after_copy_all.refresh(RefreshScope::Workspace);
-                    surface_label_error(
-                        &feedback_for_copy_all,
-                        &toast_for_copy_all,
-                        format!(
-                            "Copied {copied} file(s) from {source_workspace}, but {} failed: {}",
-                            failures.len(),
-                            failures.join("; ")
-                        ),
-                    );
-                }
-            }
+                },
+                move |result| {
+                    button.set_sensitive(true);
+                    match (result.copied, result.failures.is_empty()) {
+                        (0, true) => {
+                            surface_label_error(
+                                &feedback_for_copy_all,
+                                &toast_for_copy_all,
+                                format!("No files available to copy from {}.", result.source),
+                            );
+                        }
+                        (0, false) => {
+                            surface_label_error(
+                                &feedback_for_copy_all,
+                                &toast_for_copy_all,
+                                format!(
+                                    "Failed to copy files from {}: {}",
+                                    result.source,
+                                    result.failures.join("; ")
+                                ),
+                            );
+                        }
+                        (_, true) => {
+                            refresh_after_copy_all.refresh(RefreshScope::Workspace);
+                            feedback_for_copy_all.set_text(&format!(
+                                "Copied {} conflicting file(s) from {}.",
+                                result.copied, result.source
+                            ));
+                        }
+                        (_, false) => {
+                            refresh_after_copy_all.refresh(RefreshScope::Workspace);
+                            surface_label_error(
+                                &feedback_for_copy_all,
+                                &toast_for_copy_all,
+                                format!(
+                                    "Copied {} file(s) from {}, but {} failed: {}",
+                                    result.copied,
+                                    result.source,
+                                    result.failures.len(),
+                                    result.failures.join("; ")
+                                ),
+                            );
+                        }
+                    }
+                },
+            );
         });
 
         action_row.append(&copy_all_btn);
@@ -7536,25 +7888,26 @@ fn workspace_conflict_resolution_panel(
             let source_workspace_for_diff = conflict_workspace.clone();
             let file_for_diff = Path::new(&file).to_path_buf();
             let diff_buffer = diff_preview.buffer();
-            diff_btn.connect_clicked(move |_| {
-                let output = WorkspaceStore::open_app(db_for_diff.clone())
-                    .and_then(|store| {
-                        store
-                            .unified_diff(&source_workspace_for_diff, Some(file_for_diff.as_path()))
-                    })
-                    .unwrap_or_else(|err| {
-                        format!(
-                            "Could not read diff for {}: {err:#}",
-                            file_for_diff.display()
+            diff_btn.connect_clicked(move |button| {
+                button.set_sensitive(false);
+                let button = button.clone();
+                let db_for_diff = db_for_diff.clone();
+                let source_workspace_for_diff = source_workspace_for_diff.clone();
+                let file_for_diff = file_for_diff.clone();
+                let diff_buffer = diff_buffer.clone();
+                spawn_background_job(
+                    move || {
+                        run_conflict_diff_action(
+                            db_for_diff,
+                            source_workspace_for_diff,
+                            file_for_diff,
                         )
-                    });
-                let formatted = format!(
-                    "# {}:{}\n{}",
-                    source_workspace_for_diff,
-                    file_for_diff.display(),
-                    output
+                    },
+                    move |formatted| {
+                        button.set_sensitive(true);
+                        diff_buffer.set_text(&formatted);
+                    },
                 );
-                diff_buffer.set_text(&formatted);
             });
 
             let copy_btn = secondary_button("Copy from sibling");
@@ -7565,29 +7918,42 @@ fn workspace_conflict_resolution_panel(
             let feedback_for_copy = conflict_feedback.clone();
             let refresh_after_copy = refresh_hub.clone();
             let toast_for_copy = toast_manager.clone();
-            copy_btn.connect_clicked(move |_| {
-                let result = WorkspaceStore::open_app(db_for_copy.clone()).and_then(|store| {
-                    store.copy_conflict_file_from_workspace(
-                        &destination_workspace,
-                        &source_workspace,
-                        &file_for_copy,
-                    )
-                });
-                match result {
-                    Ok(()) => {
-                        feedback_for_copy.set_text(&format!(
-                            "Copied {file_for_copy} from {source_workspace} into {destination_workspace}"
-                        ));
-                        refresh_after_copy.refresh(RefreshScope::Workspace);
-                    }
-                    Err(err) => {
-                        surface_label_error(
-                            &feedback_for_copy,
-                            &toast_for_copy,
-                            format!("Could not copy {file_for_copy}: {err:#}"),
-                        );
-                    }
-                }
+            copy_btn.connect_clicked(move |button| {
+                button.set_sensitive(false);
+                let button = button.clone();
+                let db_for_copy = db_for_copy.clone();
+                let destination_workspace = destination_workspace.clone();
+                let source_workspace = source_workspace.clone();
+                let file_for_copy = file_for_copy.clone();
+                let feedback_for_copy = feedback_for_copy.clone();
+                let refresh_after_copy = refresh_after_copy.clone();
+                let toast_for_copy = toast_for_copy.clone();
+                spawn_background_job(
+                    move || {
+                        run_conflict_copy_action(
+                            db_for_copy,
+                            destination_workspace,
+                            source_workspace,
+                            file_for_copy,
+                        )
+                    },
+                    move |result| {
+                        button.set_sensitive(true);
+                        match result {
+                            Ok((destination_workspace, source_workspace, file_for_copy)) => {
+                                feedback_for_copy.set_text(&format!(
+                                    "Copied {file_for_copy} from {source_workspace} into {destination_workspace}"
+                                ));
+                                refresh_after_copy.refresh(RefreshScope::Workspace);
+                            }
+                            Err(err) => surface_label_error(
+                                &feedback_for_copy,
+                                &toast_for_copy,
+                                format!("Could not copy file from sibling: {err:#}"),
+                            ),
+                        }
+                    },
+                );
             });
 
             file_row.append(&file_label);
@@ -7602,6 +7968,93 @@ fn workspace_conflict_resolution_panel(
     panel.append(&conflict_feedback);
     panel.append(&diff_container);
     panel
+}
+
+struct ConflictCopyAllResult {
+    source: String,
+    copied: usize,
+    failures: Vec<String>,
+}
+
+fn run_conflict_diff_all_action(
+    db_path: PathBuf,
+    source_workspace: String,
+    files: Vec<String>,
+) -> anyhow::Result<String> {
+    let store = WorkspaceStore::open_app(db_path)?;
+    let mut sections = Vec::new();
+    for file in files {
+        let file_path = Path::new(&file).to_path_buf();
+        let output = store.unified_diff(&source_workspace, Some(file_path.as_path()))?;
+        sections.push(format!(
+            "# {}:{}\n{}\n",
+            source_workspace,
+            file_path.display(),
+            output
+        ));
+    }
+    if sections.is_empty() {
+        Ok("No conflicting files to diff.".to_owned())
+    } else {
+        Ok(sections.join("\n"))
+    }
+}
+
+fn run_conflict_copy_all_action(
+    db_path: PathBuf,
+    destination_workspace: String,
+    source_workspace: String,
+    files: Vec<String>,
+) -> ConflictCopyAllResult {
+    let mut copied = 0usize;
+    let mut failures = Vec::new();
+    match WorkspaceStore::open_app(db_path) {
+        Ok(store) => {
+            for file in files {
+                match store.copy_conflict_file_from_workspace(
+                    &destination_workspace,
+                    &source_workspace,
+                    &file,
+                ) {
+                    Ok(()) => copied += 1,
+                    Err(err) => failures.push(format!("{file}: {err:#}")),
+                }
+            }
+        }
+        Err(err) => failures.push(format!("open workspace store: {err:#}")),
+    }
+    ConflictCopyAllResult {
+        source: source_workspace,
+        copied,
+        failures,
+    }
+}
+
+fn run_conflict_diff_action(
+    db_path: PathBuf,
+    source_workspace: String,
+    file_path: PathBuf,
+) -> String {
+    let output = WorkspaceStore::open_app(db_path)
+        .and_then(|store| store.unified_diff(&source_workspace, Some(file_path.as_path())))
+        .unwrap_or_else(|err| format!("Could not read diff for {}: {err:#}", file_path.display()));
+    format!("# {}:{}\n{}", source_workspace, file_path.display(), output)
+}
+
+fn run_conflict_copy_action(
+    db_path: PathBuf,
+    destination_workspace: String,
+    source_workspace: String,
+    file_for_copy: String,
+) -> anyhow::Result<(String, String, String)> {
+    WorkspaceStore::open_app(db_path).and_then(|store| {
+        store.copy_conflict_file_from_workspace(
+            &destination_workspace,
+            &source_workspace,
+            &file_for_copy,
+        )
+    })?;
+    Ok((destination_workspace, source_workspace, file_for_copy))
 }
 
 fn pull_request_create_feedback(result: anyhow::Result<String>) -> String {
@@ -7671,7 +8124,7 @@ fn pull_request_merge_refresh_event(
     {
         RefreshEvent::WorkspaceInventoryChanged
     } else {
-        RefreshEvent::WorkspaceReviewChanged {
+        RefreshEvent::WorkspaceGitReviewChanged {
             workspace: workspace.to_owned(),
         }
     }
@@ -8669,6 +9122,95 @@ mod tests {
         assert_eq!(state.staged_review_prompt(), None);
     }
 
+    #[test]
+    fn pull_request_chip_model_is_compact_and_clickable() {
+        assert_eq!(pull_request_chip_label(42), "#42");
+        assert_eq!(pull_request_chip_tooltip(42), "Open pull request #42");
+    }
+
+    #[test]
+    fn top_bar_prompt_delivery_falls_back_to_composer_without_selected_chat() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        WorkspaceStore::open_app(&db_path).unwrap();
+        let state = AppState::new(
+            archductor_core::paths::AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            WorkspaceTab::Chats,
+            crate::AppPage::Workspace,
+        );
+
+        let queued =
+            selected_archcar_chat_queue_request(&db_path, &state, "berlin", "Commit and push");
+
+        assert!(queued.is_none());
+        assert_eq!(state.take_pending_chat_prompt(), None);
+    }
+
+    #[test]
+    fn top_bar_prompt_delivery_queues_selected_chat_input() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        WorkspaceStore::open_app(&db_path).unwrap();
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO repositories (
+                id, name, root_path, default_branch, remote_name, workspace_parent_path, created_at, updated_at
+             ) VALUES (1, 'repo', ?1, 'main', 'origin', ?2, 'now', 'now')",
+            rusqlite::params![
+                temp.path().join("repo").display().to_string(),
+                temp.path().join("workspaces").display().to_string()
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO workspaces (
+                id, repository_id, name, path, branch, base_ref, port_base, status, created_at, updated_at
+             ) VALUES (1, 1, 'berlin', ?1, 'feature/berlin', 'main', 3000, 'active', 'now', 'now')",
+            [temp.path().join("workspaces/berlin").display().to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO chat_threads (
+                id, workspace_id, provider, title, status, created_at, updated_at
+             ) VALUES (7, 1, 'codex', 'New Chat', 'active', 'now', 'now')",
+            [],
+        )
+        .unwrap();
+        let state = AppState::new(
+            archductor_core::paths::AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            WorkspaceTab::Chats,
+            crate::AppPage::Workspace,
+        );
+        state.set_selected_chat_thread(Some(7));
+
+        let queued =
+            selected_archcar_chat_queue_request(&db_path, &state, "berlin", "Commit and push");
+
+        let Some((thread_id, request, draft)) = queued else {
+            panic!("selected chat should produce an archcar queue request");
+        };
+        assert_eq!(thread_id, 7);
+        assert_eq!(state.take_pending_chat_prompt(), None);
+        assert_eq!(draft.id, None);
+        assert_eq!(draft.input, "Commit and push");
+        assert_eq!(draft.kind, ArchcarInputKind::User);
+        assert_eq!(draft.session_kind, SessionKind::Codex);
+        assert_eq!(
+            request,
+            ArchcarRequest::QueueChatInput {
+                thread_id: 7,
+                input: "Commit and push".to_owned(),
+                visible_input: None,
+                kind: ArchcarInputKind::User,
+                session_kind: SessionKind::Codex,
+            }
+        );
+        let store = WorkspaceStore::open_app(&db_path).unwrap();
+        assert!(store.list_queued_chat_inputs(7).unwrap().is_empty());
+    }
+
     fn test_checks_summary(
         changed_files: usize,
         branch_push_state: Option<archductor_core::workspace::BranchPushState>,
@@ -9486,7 +10028,7 @@ mod tests {
     }
 
     #[test]
-    fn chat_tab_refresh_ignores_message_events_for_other_workspaces() {
+    fn chat_tab_refresh_ignores_message_events() {
         let source = include_str!("workspace_command_center.rs");
         let start = source
             .find("refresh_hub.set_workspace_chat_tabs(move |event| {")
@@ -9498,16 +10040,17 @@ mod tests {
         let handler_region = &source[start..end];
 
         assert!(
-            handler_region.contains("RefreshEvent::WorkspaceChatMessagesChanged { workspace, .. }"),
-            "message events should be filtered to the visible workspace before refreshing chat tabs"
-        );
-        assert!(
             handler_region.contains("RefreshEvent::WorkspaceChatLifecycleChanged { workspace }"),
             "lifecycle events should remain filtered to the visible workspace"
         );
         assert!(
             handler_region.contains("workspace != &workspace_name"),
             "chat tab refreshes for other workspaces must not rebuild visible tabs"
+        );
+        assert!(
+            handler_region.contains("RefreshEvent::WorkspaceChatMessagesChanged { .. }")
+                && handler_region.contains("return;"),
+            "message events should not rebuild chat tabs"
         );
     }
 
@@ -9541,7 +10084,11 @@ mod tests {
     fn chat_session_refresh_callbacks_publish_chat_lifecycle_events() {
         let source = include_str!("workspace_command_center.rs");
         let production = source
-            .split("#[cfg(test)]")
+            .split(
+                "
+#[cfg(test)]
+mod tests",
+            )
             .next()
             .expect("production source exists");
         let callback_regions = [
@@ -9629,7 +10176,11 @@ mod tests {
     fn plus_tab_buttons_use_extra_small_text_button_state() {
         let source = include_str!("workspace_command_center.rs");
         let production = source
-            .split("#[cfg(test)]")
+            .split(
+                "
+#[cfg(test)]
+mod tests",
+            )
             .next()
             .expect("production source exists");
 
@@ -9652,7 +10203,11 @@ mod tests {
     fn chat_tab_snapshot_reuses_open_workspace_store_for_nav() {
         let source = include_str!("workspace_command_center.rs");
         let production = source
-            .split("#[cfg(test)]")
+            .split(
+                "
+#[cfg(test)]
+mod tests",
+            )
             .next()
             .expect("production source exists");
         let start = production
@@ -9673,7 +10228,11 @@ mod tests {
     fn workspace_file_open_and_reload_load_snapshots_in_background() {
         let source = include_str!("workspace_command_center.rs");
         let production = source
-            .split("#[cfg(test)]")
+            .split(
+                "
+#[cfg(test)]
+mod tests",
+            )
             .next()
             .expect("production source exists");
         for (name, start_needle, end_needle) in [
@@ -9711,6 +10270,116 @@ mod tests {
     }
 
     #[test]
+    fn workspace_file_lists_load_in_background() {
+        let source = include_str!("workspace_command_center.rs");
+        let production = source
+            .split(
+                "
+#[cfg(test)]
+mod tests",
+            )
+            .next()
+            .expect("production source exists");
+
+        for (name, start_needle, end_needle) in [
+            (
+                "workspace file tree",
+                "fn ws_simple_file_list(",
+                "fn tree_join_path(",
+            ),
+            (
+                "workspace files panel list",
+                "fn workspace_files_panel(",
+                "let file_scroll = ScrolledWindow::new();",
+            ),
+        ] {
+            let start = production.find(start_needle).expect(name);
+            let end = production[start..]
+                .find(end_needle)
+                .map(|offset| start + offset)
+                .expect(name);
+            let region = &production[start..end];
+
+            assert!(
+                region.contains("spawn_background_job("),
+                "{name} must scan workspace files off the GTK thread"
+            );
+            assert!(
+                !region.contains("list_workspace_files(&ws.path)"),
+                "{name} must not recursively scan files during GTK render"
+            );
+        }
+    }
+
+    #[test]
+    fn git_review_action_buttons_spawn_background_work() {
+        let source = include_str!("workspace_command_center.rs");
+        let production = source
+            .split(
+                "
+#[cfg(test)]
+mod tests",
+            )
+            .next()
+            .expect("production source exists");
+
+        for (name, start_needle, end_needle, forbidden) in [
+            (
+                "push branch",
+                "push_btn.connect_clicked",
+                "fn connect_force_push_button(",
+                "store.push_branch(",
+            ),
+            (
+                "force push branch",
+                "force_push_btn.connect_clicked",
+                "fn workspace_check_runner_panel(",
+                "store.force_push_branch_with_lease(",
+            ),
+            (
+                "PR refresh",
+                "refresh_btn.connect_clicked",
+                "top_row.append(&summary_btn);",
+                "store.refresh_pull_request_state(",
+            ),
+            (
+                "PR merge",
+                "merge_btn.connect_clicked",
+                "let db_for_stage = db_path.to_path_buf();",
+                "store.merge_and_maybe_archive_pull_request(",
+            ),
+            (
+                "conflict diff all",
+                "diff_all_btn.connect_clicked",
+                "let copy_all_btn = secondary_button(\"Copy all from sibling\");",
+                "store.unified_diff(",
+            ),
+            (
+                "conflict copy all",
+                "copy_all_btn.connect_clicked",
+                "action_row.append(&copy_all_btn);",
+                "store.copy_conflict_file_from_workspace(",
+            ),
+        ] {
+            let start = production.find(start_needle).expect(name);
+            let end = production[start..]
+                .find(end_needle)
+                .map(|offset| start + offset)
+                .expect(name);
+            let region = &production[start..end];
+
+            assert!(
+                region.contains("spawn_background_job("),
+                "{name} must run git/gh/file work off the GTK thread"
+            );
+            assert!(
+                !region.contains(forbidden),
+                "{name} must not call blocking core work directly in the GTK handler"
+            );
+        }
+    }
+
+    #[test]
     fn chat_tab_reopen_close_and_add_do_not_emit_duplicate_refresh_events() {
         let source = include_str!("workspace_command_center.rs");
         for (name, start_needle, end_needle) in [
@@ -9743,6 +10412,32 @@ mod tests {
                 "{name} chat tab handler should not emit duplicate refresh hub events"
             );
         }
+    }
+
+    #[test]
+    fn closing_chat_tab_interrupts_running_turn_before_closing_thread() {
+        let source = include_str!("workspace_command_center.rs");
+        let start = source.find("fn close_workspace_chat_thread(").unwrap();
+        let end = source[start..]
+            .find("fn guarded_gtk_callback")
+            .map(|offset| start + offset)
+            .unwrap();
+        let region = &source[start..end];
+
+        let interrupt = region
+            .find("ArchcarRequest::InterruptTurn")
+            .expect("closing a chat tab must request an active-turn interrupt");
+        let close = region
+            .find("store.close_chat_thread(thread_id)")
+            .expect("closing a chat tab must close the thread");
+        let kill = region
+            .find("ArchcarRequest::KillSession")
+            .expect("closing a chat tab must still stop the running session");
+
+        assert!(
+            interrupt < close && close < kill,
+            "chat tab close should interrupt the active turn, then close the thread, then stop the session"
+        );
     }
 
     #[test]
@@ -9930,30 +10625,64 @@ mod tests {
     }
 
     #[test]
+    fn unknown_github_merge_state_is_pending_not_blocked() {
+        assert!(!github_merge_state_is_blocked("UNKNOWN"));
+        assert!(github_merge_state_is_blocked("BLOCKED"));
+        assert!(github_merge_state_is_blocked("CONFLICTING"));
+        assert!(github_merge_state_is_blocked("DIRTY"));
+    }
+
+    #[test]
+    fn pr_status_snapshot_uses_app_state_cache_not_git_summary() {
+        let source = include_str!("workspace_command_center.rs");
+        let start = source
+            .find("fn workspace_pr_status_snapshot")
+            .expect("PR status snapshot helper exists");
+        let end = source[start..]
+            .find("#[derive(Clone, Copy, Debug, PartialEq, Eq)]")
+            .map(|offset| start + offset)
+            .expect("PR action enum follows snapshot helper");
+        let helper = &source[start..end];
+
+        assert!(
+            !helper.contains(".checks_summary("),
+            "PR status render must use cached background review state instead of running git"
+        );
+    }
+
+    #[test]
+    fn provider_session_kind_mapping_is_shared_and_case_insensitive() {
+        assert_eq!(session_kind_from_provider("CLAUDE"), SessionKind::Claude);
+        assert_eq!(session_kind_from_provider("SHELL"), SessionKind::Shell);
+        assert_eq!(session_kind_from_provider("codex"), SessionKind::Codex);
+        assert_eq!(session_kind_from_provider("unknown"), SessionKind::Codex);
+    }
+
+    #[test]
     fn pr_primary_action_switches_by_workspace_state() {
         let no_pr = WorkspacePrStatusSnapshot {
             pr: None,
             status: None,
             summary: Some(test_checks_summary(0, None, Vec::new())),
+            refreshing: false,
+            has_review_snapshot: true,
         };
-        assert_eq!(workspace_pr_primary_action_label(&no_pr), None);
-        assert!(workspace_pr_primary_action(&no_pr).is_none());
+        assert_eq!(workspace_pr_primary_action_label(&no_pr), Some("Create PR"));
 
         let dirty = WorkspacePrStatusSnapshot {
             pr: None,
             status: None,
             summary: Some(test_checks_summary(3, None, Vec::new())),
+            refreshing: false,
+            has_review_snapshot: true,
         };
-        assert_eq!(
-            workspace_pr_primary_action_label(&dirty),
-            Some("Commit and Push")
-        );
+        assert_eq!(workspace_pr_primary_action_label(&dirty), Some("Create PR"));
         let dirty_action = workspace_pr_primary_action(&dirty).unwrap();
         assert_eq!(
             workspace_pr_status_title(&dirty, dirty_action),
-            "Commit and push branch"
+            "No pull request yet"
         );
-        assert_eq!(dirty_action.css_class, "ws-pr-status-muted");
+        assert_eq!(dirty_action.css_class, "ws-pr-status-missing");
 
         let needs_push = WorkspacePrStatusSnapshot {
             pr: None,
@@ -9967,6 +10696,8 @@ mod tests {
                 }),
                 Vec::new(),
             )),
+            refreshing: false,
+            has_review_snapshot: true,
         };
         assert_eq!(
             workspace_pr_primary_action_label(&needs_push),
@@ -9980,30 +10711,29 @@ mod tests {
         let mut source_ahead_summary = test_checks_summary(
             0,
             Some(archductor_core::workspace::BranchPushState {
-                ahead: 2,
-                behind: 0,
+                ahead: 0,
+                behind: 2,
                 has_upstream: true,
             }),
             Vec::new(),
         );
         source_ahead_summary.source_branch_ahead = 1;
         let source_ahead = WorkspacePrStatusSnapshot {
-            pr: None,
+            pr: Some(test_pull_request("OPEN")),
             status: None,
             summary: Some(source_ahead_summary),
+            refreshing: false,
+            has_review_snapshot: true,
         };
         assert_eq!(
             workspace_pr_primary_action_label(&source_ahead),
-            Some("Merge")
+            Some("Rebase")
         );
         let source_ahead_action = workspace_pr_primary_action(&source_ahead).unwrap();
-        assert_eq!(
-            source_ahead_action.kind,
-            WorkspacePrTopActionKind::MergeSourceBranch
-        );
+        assert_eq!(source_ahead_action.kind, WorkspacePrTopActionKind::Rebase);
         assert_eq!(
             workspace_pr_status_title(&source_ahead, source_ahead_action),
-            "Merge source branch"
+            "Rebase branch"
         );
 
         let clean_without_upstream = WorkspacePrStatusSnapshot {
@@ -10018,10 +10748,12 @@ mod tests {
                 }),
                 Vec::new(),
             )),
+            refreshing: false,
+            has_review_snapshot: true,
         };
         assert_eq!(
             workspace_pr_primary_action_label(&clean_without_upstream),
-            None
+            Some("Create PR")
         );
 
         let snapshot = WorkspacePrStatusSnapshot {
@@ -10032,6 +10764,8 @@ mod tests {
                 kind: PullRequestStateKind::Ready,
             }),
             summary: Some(test_checks_summary(0, None, Vec::new())),
+            refreshing: false,
+            has_review_snapshot: true,
         };
 
         assert_eq!(
@@ -10051,10 +10785,12 @@ mod tests {
                 kind: PullRequestStateKind::Failed,
             }),
             summary: Some(test_checks_summary(0, None, Vec::new())),
+            refreshing: false,
+            has_review_snapshot: true,
         };
         assert_eq!(
             workspace_pr_primary_action_label(&blocked),
-            Some("Fix Checks")
+            Some("Fix errors")
         );
         assert_eq!(
             workspace_pr_primary_action(&blocked).unwrap().css_class,
@@ -10064,19 +10800,21 @@ mod tests {
         let conflict = WorkspacePrStatusSnapshot {
             pr: Some(test_pull_request("OPEN")),
             status: Some(PullRequestStatusSummary {
-                label: "ready to merge".to_owned(),
-                css_class: "ws-pr-status-ready",
-                kind: PullRequestStateKind::Ready,
+                label: "merge blocked".to_owned(),
+                css_class: "ws-pr-status-failed",
+                kind: PullRequestStateKind::MergeBlocked,
             }),
-            summary: Some(test_checks_summary(
-                0,
-                None,
-                vec![("paris".to_owned(), vec!["src/main.rs".to_owned()])],
-            )),
+            summary: Some(test_checks_summary(0, None, Vec::new())),
+            refreshing: false,
+            has_review_snapshot: true,
         };
         assert_eq!(
             workspace_pr_primary_action(&conflict).unwrap().kind,
-            WorkspacePrTopActionKind::FixBlocked
+            WorkspacePrTopActionKind::MergeConflicts
+        );
+        assert_eq!(
+            workspace_pr_primary_action(&conflict).unwrap().label,
+            "Resolve"
         );
         assert_eq!(
             workspace_pr_primary_action(&conflict).unwrap().css_class,
@@ -10091,6 +10829,8 @@ mod tests {
                 kind: PullRequestStateKind::Merged,
             }),
             summary: Some(test_checks_summary(0, None, Vec::new())),
+            refreshing: false,
+            has_review_snapshot: true,
         };
         assert_eq!(workspace_pr_primary_action_label(&merged), Some("Merged"));
         assert_eq!(
@@ -10113,6 +10853,9 @@ mod tests {
                 updated_at: "now".to_owned(),
             },
             Some(&archductor_core::workspace::PullRequestReadiness {
+                state: None,
+                merge_state_status: None,
+                mergeable: None,
                 review_decision: None,
                 latest_reviews: Vec::new(),
                 comments: Vec::new(),
@@ -10192,6 +10935,56 @@ mod tests {
             Some("  printf 'ok'  ".to_owned())
         );
         assert_eq!(normalize_terminal_input_for_send("   \n"), None);
+    }
+
+    #[test]
+    fn run_configure_panes_use_terminal_style_without_input_controller() {
+        let source = include_str!("workspace_command_center.rs");
+        let start = source.find("fn workspace_prompt_tab_view(").unwrap();
+        let end = source[start..]
+            .find("fn workspace_prompt_queue_button_label")
+            .map(|offset| start + offset)
+            .unwrap();
+        let region = &source[start..end];
+
+        assert!(region.contains("terminal::read_only_terminal_grid"));
+        assert!(!region.contains("EventControllerKey"));
+        assert!(!region.contains("Entry::new()"));
+    }
+
+    #[test]
+    fn run_console_terminal_tabs_use_shared_terminal_component() {
+        let source = include_str!("workspace_command_center.rs");
+        let start = source.find("fn workspace_terminal_tab_view(").unwrap();
+        let end = source[start..]
+            .find("fn run_console_terminal_key")
+            .map(|offset| start + offset)
+            .unwrap();
+        let region = &source[start..end];
+
+        assert!(region.contains("terminal::read_only_terminal_grid"));
+        assert!(!region.contains("TextView::new()"));
+    }
+
+    #[test]
+    fn workspace_surfaces_use_shared_embedded_terminal_panel() {
+        let source = include_str!("workspace_command_center.rs");
+        let production = source
+            .split(
+                "
+#[cfg(test)]
+mod tests",
+            )
+            .next()
+            .expect("production source exists");
+
+        assert!(production.contains("terminal::embedded_terminal_panel("));
+        assert_eq!(
+            production
+                .matches("terminal::embedded_terminal_panel(")
+                .count(),
+            2
+        );
     }
 
     #[test]
@@ -10359,7 +11152,7 @@ mod tests {
         });
         assert_eq!(
             pull_request_merge_refresh_event("berlin", &not_archived),
-            RefreshEvent::WorkspaceReviewChanged {
+            RefreshEvent::WorkspaceGitReviewChanged {
                 workspace: "berlin".to_owned()
             }
         );
@@ -10368,7 +11161,7 @@ mod tests {
             Err(anyhow::anyhow!("merge failed"));
         assert_eq!(
             pull_request_merge_refresh_event("berlin", &failed),
-            RefreshEvent::WorkspaceReviewChanged {
+            RefreshEvent::WorkspaceGitReviewChanged {
                 workspace: "berlin".to_owned()
             }
         );
@@ -10472,6 +11265,9 @@ mod tests {
                 updated_at: "now".to_owned(),
             },
             Some(&archductor_core::workspace::PullRequestReadiness {
+                state: None,
+                merge_state_status: None,
+                mergeable: None,
                 review_decision: None,
                 latest_reviews: Vec::new(),
                 comments: Vec::new(),
@@ -10579,6 +11375,9 @@ mod tests {
             updated_at: "now".to_owned(),
         };
         let readiness = archductor_core::workspace::PullRequestReadiness {
+            state: None,
+            merge_state_status: None,
+            mergeable: None,
             review_decision: None,
             latest_reviews: Vec::new(),
             comments: Vec::new(),
@@ -10613,6 +11412,9 @@ mod tests {
                 updated_at: "now".to_owned(),
             },
             Some(&archductor_core::workspace::PullRequestReadiness {
+                state: None,
+                merge_state_status: None,
+                mergeable: None,
                 review_decision: Some("CHANGES_REQUESTED".to_owned()),
                 latest_reviews: Vec::new(),
                 comments: Vec::new(),
@@ -10874,7 +11676,11 @@ mod tests {
     fn workspace_action_rename_uses_metadata_refresh() {
         let source = include_str!("workspace_command_center.rs");
         let production_source = source
-            .split("#[cfg(test)]")
+            .split(
+                "
+#[cfg(test)]
+mod tests",
+            )
             .next()
             .expect("workspace command center source should contain production code");
 
@@ -10888,7 +11694,11 @@ mod tests {
     fn branch_checkout_and_rename_publish_metadata_refresh_with_branch() {
         let source = include_str!("workspace_command_center.rs");
         let production_source = source
-            .split("#[cfg(test)]")
+            .split(
+                "
+#[cfg(test)]
+mod tests",
+            )
             .next()
             .expect("workspace command center source should contain production code");
         let branch_panel = production_source
@@ -10905,7 +11715,11 @@ mod tests {
     fn workspace_lifecycle_actions_use_current_selected_workspace_name() {
         let source = include_str!("workspace_command_center.rs");
         let production_source = source
-            .split("#[cfg(test)]")
+            .split(
+                "
+#[cfg(test)]
+mod tests",
+            )
             .next()
             .expect("workspace command center source should contain production code");
         let action_handler = production_source
@@ -10946,7 +11760,11 @@ mod tests {
     fn chat_tab_refresh_drops_selected_thread_borrow_before_callback_runs() {
         let source = include_str!("workspace_command_center.rs");
         let production_source = source
-            .split("#[cfg(test)]")
+            .split(
+                "
+#[cfg(test)]
+mod tests",
+            )
             .next()
             .expect("workspace command center source should contain production code");
 

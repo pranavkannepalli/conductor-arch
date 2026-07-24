@@ -666,7 +666,7 @@ fn refresh_pull_request_after_background_turn(
         },
         move |result| match result {
             Ok(workspace) => {
-                app_state.request_refresh(RefreshEvent::WorkspaceReviewChanged { workspace });
+                app_state.request_refresh(RefreshEvent::WorkspaceGitReviewChanged { workspace });
             }
             Err(err) => {
                 debug!(thread_id, error = %err, "background PR refresh skipped");

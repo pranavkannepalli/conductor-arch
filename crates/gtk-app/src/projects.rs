@@ -198,9 +198,9 @@ pub(crate) fn build_projects_page(
     let repo_name_add = repo_name_entry.clone();
     let repo_entry_after_add = repo_entry.clone();
     let toast_add = toast_manager.clone();
-    add_repo_btn.connect_clicked(move |_| {
+    add_repo_btn.connect_clicked(move |button| {
         let path = repo_path_add.text().trim().to_owned();
-        let name = repo_name_add.text().trim().to_owned();
+        let explicit_name = optional_entry_text(&repo_name_add);
         if path.is_empty() {
             surface_label_error(
                 &repo_result_add,
@@ -209,93 +209,87 @@ pub(crate) fn build_projects_page(
             );
             return;
         }
-        match RepositoryStore::open(db_path_repo.clone()).and_then(|store| {
-            store.add(AddRepository {
-                name: (!name.is_empty()).then_some(name),
-                root_path: PathBuf::from(path),
-                default_branch: None,
-                remote_name: "origin".to_owned(),
-                workspace_parent_path: None,
-            })
-        }) {
-            Ok(repo) => {
-                repo_entry_after_add.set_text(&repo.name);
-                repo_result_add.set_text(&format!(
-                    "Added {}. Base branch: {}. Workspace parent: {}",
-                    repo.name,
-                    repo.default_branch,
-                    repo.workspace_parent_path.display()
-                ));
-                refresh_after_repo();
-            }
-            Err(err) => {
-                surface_label_error(&repo_result_add, &toast_add, format!("Add failed: {err:#}"))
-            }
-        }
+        repo_result_add.set_text("Adding local repository...");
+        button.set_sensitive(false);
+        let button = button.clone();
+        let db_path_repo = db_path_repo.clone();
+        let repo_entry_after_add = repo_entry_after_add.clone();
+        let repo_result_add = repo_result_add.clone();
+        let toast_add = toast_add.clone();
+        let refresh_after_repo = refresh_after_repo.clone();
+        spawn_background_job(
+            move || add_repository_from_path(&db_path_repo, &path, explicit_name),
+            move |result| {
+                button.set_sensitive(true);
+                match result {
+                    Ok(repo) => {
+                        repo_entry_after_add.set_text(&repo.name);
+                        repo_result_add.set_text(&format!(
+                            "Added {}. Base branch: {}. Workspace parent: {}",
+                            repo.name,
+                            repo.default_branch,
+                            repo.workspace_parent_path.display()
+                        ));
+                        refresh_after_repo();
+                    }
+                    Err(err) => surface_label_error(
+                        &repo_result_add,
+                        &toast_add,
+                        format!("Add failed: {err:#}"),
+                    ),
+                }
+            },
+        );
     });
 
     let db_path_clone = paths.database_path.clone();
     let refresh_after_clone = refresh.clone();
     let repo_entry_after_clone = repo_entry.clone();
     let toast_clone = toast_manager.clone();
+    let clone_repo_btn_for_click = clone_repo_btn.clone();
     clone_repo_btn.connect_clicked(move |_| {
         let url = repo_path_entry.text().trim().to_owned();
-        let explicit_name = repo_name_entry.text().trim().to_owned();
+        let explicit_name = optional_entry_text(&repo_name_entry);
         if url.is_empty() {
             surface_label_error(&repo_result, &toast_clone, "Git URL is required.");
             return;
         }
-        let name = if explicit_name.is_empty() {
-            repo_name_from_url(&url)
-        } else {
-            explicit_name
-        };
-        let clone_path = default_clone_parent().join(&name);
+
+        let clone_name = explicit_name
+            .clone()
+            .unwrap_or_else(|| repo_name_from_url(&url));
+        let clone_path = default_clone_parent().join(&clone_name);
         repo_result.set_text(&format!("Cloning {} into {}...", url, clone_path.display()));
-        if let Some(parent) = clone_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let clone_result = if clone_path.exists() {
-            Ok(())
-        } else {
-            std::process::Command::new("git")
-                .args(["clone", &url])
-                .arg(&clone_path)
-                .status()
-                .map(|status| {
-                    if status.success() {
-                        Ok(())
-                    } else {
-                        Err(anyhow::anyhow!("git clone exited with {status}"))
+        clone_repo_btn_for_click.set_sensitive(false);
+        let db_path_clone = db_path_clone.clone();
+        let repo_entry_after_clone = repo_entry_after_clone.clone();
+        let repo_result = repo_result.clone();
+        let toast_clone = toast_clone.clone();
+        let refresh_after_clone = refresh_after_clone.clone();
+        let clone_repo_btn = clone_repo_btn_for_click.clone();
+        spawn_background_job(
+            move || clone_repository_into_default_parent(&db_path_clone, &url, explicit_name),
+            move |result| {
+                clone_repo_btn.set_sensitive(true);
+                match result {
+                    Ok(repo) => {
+                        repo_entry_after_clone.set_text(&repo.name);
+                        repo_result.set_text(&format!(
+                            "Cloned and added {}. Base branch: {}. Workspace parent: {}",
+                            repo.name,
+                            repo.default_branch,
+                            repo.workspace_parent_path.display()
+                        ));
+                        refresh_after_clone();
                     }
-                })
-                .unwrap_or_else(|err| Err(err.into()))
-        };
-        match clone_result.and_then(|_| {
-            RepositoryStore::open(db_path_clone.clone()).and_then(|store| {
-                store.add(AddRepository {
-                    name: Some(name),
-                    root_path: clone_path,
-                    default_branch: None,
-                    remote_name: "origin".to_owned(),
-                    workspace_parent_path: None,
-                })
-            })
-        }) {
-            Ok(repo) => {
-                repo_entry_after_clone.set_text(&repo.name);
-                repo_result.set_text(&format!(
-                    "Cloned and added {}. Base branch: {}. Workspace parent: {}",
-                    repo.name,
-                    repo.default_branch,
-                    repo.workspace_parent_path.display()
-                ));
-                refresh_after_clone();
-            }
-            Err(err) => {
-                surface_label_error(&repo_result, &toast_clone, format!("Clone failed: {err:#}"))
-            }
-        }
+                    Err(err) => surface_label_error(
+                        &repo_result,
+                        &toast_clone,
+                        format!("Clone failed: {err:#}"),
+                    ),
+                }
+            },
+        );
     });
 
     let quick_add_refresh: Rc<dyn Fn()> = Rc::new({
@@ -746,21 +740,20 @@ pub(crate) fn show_create_workspace_dialog(
             if !repo_name.is_empty() {
                 let desired_key = (repo_name.clone(), source.clone());
                 if loaded_source_choices.borrow().as_ref() != Some(&desired_key) {
-                    if let Ok(repo_root) = repository_root(&database_path, &repo_name) {
-                        match source.as_str() {
-                            "branch" => {
-                                load_branch_choices(&repo_root, &branch_select);
-                            }
-                            "github_issue" => {
-                                load_github_issue_choices(&repo_root, &github_issue_select);
-                            }
-                            "github_pr" => {
-                                load_github_pr_choices(&repo_root, &github_pr_select);
-                            }
-                            _ => {}
-                        }
+                    if matches!(source.as_str(), "branch" | "github_issue" | "github_pr") {
+                        spawn_workspace_source_choice_load(
+                            source.clone(),
+                            repo_name.clone(),
+                            repository_root(&database_path, &repo_name),
+                            branch_select.clone(),
+                            github_issue_select.clone(),
+                            github_pr_select.clone(),
+                            loaded_source_choices.clone(),
+                            None,
+                        );
+                    } else {
+                        *loaded_source_choices.borrow_mut() = Some(desired_key);
                     }
-                    *loaded_source_choices.borrow_mut() = Some(desired_key);
                 }
             }
 
@@ -1049,6 +1042,53 @@ fn repository_root(db_path: &PathBuf, name: &str) -> anyhow::Result<PathBuf> {
         .find(|repo| repo.name == name)
         .map(|repo| repo.root_path)
         .ok_or_else(|| anyhow::anyhow!("repository {name} not found"))
+}
+
+fn spawn_workspace_source_choice_load(
+    source: String,
+    repo_name: String,
+    repo_root: anyhow::Result<PathBuf>,
+    branch_select: ComboBoxText,
+    github_issue_select: ComboBoxText,
+    github_pr_select: ComboBoxText,
+    loaded_source_choices: Rc<RefCell<Option<(String, String)>>>,
+    toast_manager: Option<ToastManager>,
+) {
+    let source_for_job = source.clone();
+    let repo_name_for_job = repo_name.clone();
+    spawn_background_job(
+        move || {
+            let rows = repo_root.and_then(|root| match source_for_job.as_str() {
+                "branch" => load_branch_choice_rows(&root),
+                "github_issue" => load_github_issue_choice_rows(&root),
+                "github_pr" => load_github_pr_choice_rows(&root),
+                _ => Ok(Vec::new()),
+            });
+            (repo_name_for_job, source_for_job, rows)
+        },
+        move |(repo_name, source, result)| match result {
+            Ok(rows) => {
+                *loaded_source_choices.borrow_mut() = Some((repo_name, source.clone()));
+                match source.as_str() {
+                    "branch" => apply_combo_rows(&branch_select, rows),
+                    "github_issue" => apply_combo_rows(&github_issue_select, rows),
+                    "github_pr" => apply_combo_rows(&github_pr_select, rows),
+                    _ => {}
+                }
+            }
+            Err(err) => {
+                match source.as_str() {
+                    "branch" => clear_combo_text(&branch_select),
+                    "github_issue" => clear_combo_text(&github_issue_select),
+                    "github_pr" => clear_combo_text(&github_pr_select),
+                    _ => {}
+                }
+                if let Some(toast_manager) = toast_manager {
+                    toast_manager.error(format!("Load {source} choices failed: {err:#}"));
+                }
+            }
+        },
+    );
 }
 
 fn spawn_workspace_create_with_navigation<P, C>(
@@ -1623,20 +1663,35 @@ fn show_open_project_dialog(
     let actions = dialog_actions(&dialog, "Open Project");
     let confirm = actions.1.clone();
     let dialog_for_confirm = dialog.clone();
+    let confirm_for_click = confirm.clone();
     confirm.connect_clicked(move |_| {
         let path = folder_path_entry.text().trim().to_owned();
         let explicit_name = optional_entry_text(&folder_name_entry);
-        match add_repository_from_path(&database_path, &path, explicit_name) {
-            Ok(_) => {
-                refresh();
-                dialog_for_confirm.close();
-            }
-            Err(err) => surface_label_error(
-                &feedback,
-                &toast_manager,
-                format!("Open project failed: {err:#}"),
-            ),
-        }
+        feedback.set_text("Opening project...");
+        confirm_for_click.set_sensitive(false);
+        let button = confirm_for_click.clone();
+        let database_path = database_path.clone();
+        let refresh = refresh.clone();
+        let dialog_for_confirm = dialog_for_confirm.clone();
+        let feedback = feedback.clone();
+        let toast_manager = toast_manager.clone();
+        spawn_background_job(
+            move || add_repository_from_path(&database_path, &path, explicit_name),
+            move |result| {
+                button.set_sensitive(true);
+                match result {
+                    Ok(_) => {
+                        refresh();
+                        dialog_for_confirm.close();
+                    }
+                    Err(err) => surface_label_error(
+                        &feedback,
+                        &toast_manager,
+                        format!("Open project failed: {err:#}"),
+                    ),
+                }
+            },
+        );
     });
     body.append(&actions.0);
     dialog.set_child(Some(&body));
@@ -1706,43 +1761,55 @@ fn show_github_project_dialog(
         let selected_repos = selected_repos.clone();
         let feedback = feedback.clone();
         let toast_manager = toast_manager.clone();
-        load_github_btn.connect_clicked(move |_| match load_github_repo_choices() {
-            Ok(repos) if repos.is_empty() => {
-                surface_label_error(
-                    &feedback,
-                    &toast_manager,
-                    "No GitHub repos returned by gh repo list.",
-                );
-            }
-            Ok(repos) => {
-                clear_list(&repo_list);
-                *selected_repos.borrow_mut() = repos.clone();
-                for repo in repos {
-                    let row = ListBoxRow::new();
-                    row.add_css_class("project-repo-row");
-                    let row_box = GBox::new(Orientation::Vertical, 2);
-                    row_box.set_margin_top(9);
-                    row_box.set_margin_bottom(9);
-                    row_box.set_margin_start(10);
-                    row_box.set_margin_end(10);
-                    let label = Label::new(Some(&repo.label));
-                    label.add_css_class("card-title");
-                    label.set_xalign(0.0);
-                    let url = Label::new(Some(&repo.url));
-                    url.add_css_class("card-meta");
-                    url.set_xalign(0.0);
-                    row_box.append(&label);
-                    row_box.append(&url);
-                    row.set_child(Some(&row_box));
-                    append_revealed_row(&repo_list, &row);
+        load_github_btn.connect_clicked(move |button| {
+            feedback.set_text("Loading GitHub repos...");
+            button.set_sensitive(false);
+            let button = button.clone();
+            let repo_list = repo_list.clone();
+            let selected_repos = selected_repos.clone();
+            let feedback = feedback.clone();
+            let toast_manager = toast_manager.clone();
+            spawn_background_job(load_github_repo_choices, move |result| {
+                button.set_sensitive(true);
+                match result {
+                    Ok(repos) if repos.is_empty() => {
+                        surface_label_error(
+                            &feedback,
+                            &toast_manager,
+                            "No GitHub repos returned by gh repo list.",
+                        );
+                    }
+                    Ok(repos) => {
+                        clear_list(&repo_list);
+                        *selected_repos.borrow_mut() = repos.clone();
+                        for repo in repos {
+                            let row = ListBoxRow::new();
+                            row.add_css_class("project-repo-row");
+                            let row_box = GBox::new(Orientation::Vertical, 2);
+                            row_box.set_margin_top(9);
+                            row_box.set_margin_bottom(9);
+                            row_box.set_margin_start(10);
+                            row_box.set_margin_end(10);
+                            let label = Label::new(Some(&repo.label));
+                            label.add_css_class("card-title");
+                            label.set_xalign(0.0);
+                            let url = Label::new(Some(&repo.url));
+                            url.add_css_class("card-meta");
+                            url.set_xalign(0.0);
+                            row_box.append(&label);
+                            row_box.append(&url);
+                            row.set_child(Some(&row_box));
+                            append_revealed_row(&repo_list, &row);
+                        }
+                        feedback.set_text("Loaded GitHub repos.");
+                    }
+                    Err(err) => surface_label_error(
+                        &feedback,
+                        &toast_manager,
+                        format!("GitHub repo load failed: {err:#}"),
+                    ),
                 }
-                feedback.set_text("Loaded GitHub repos.");
-            }
-            Err(err) => surface_label_error(
-                &feedback,
-                &toast_manager,
-                format!("GitHub repo load failed: {err:#}"),
-            ),
+            });
         });
     }
 
@@ -1750,19 +1817,39 @@ fn show_github_project_dialog(
     let confirm = actions.1.clone();
     let dialog_for_confirm = dialog.clone();
     let toast_manager = toast_manager.clone();
+    let confirm_for_click = confirm.clone();
     confirm.connect_clicked(move |_| {
         let url = clone_url_entry.text().trim().to_owned();
         let explicit_name = optional_entry_text(&clone_name_entry);
-
-        match clone_repository_into_default_parent(&database_path, &url, explicit_name) {
-            Ok(_) => {
-                refresh();
-                dialog_for_confirm.close();
-            }
-            Err(err) => {
-                surface_label_error(&feedback, &toast_manager, format!("Clone failed: {err:#}"))
-            }
+        if url.is_empty() {
+            surface_label_error(&feedback, &toast_manager, "Git URL is required.");
+            return;
         }
+        feedback.set_text("Cloning repository...");
+        confirm_for_click.set_sensitive(false);
+        let button = confirm_for_click.clone();
+        let database_path = database_path.clone();
+        let refresh = refresh.clone();
+        let dialog_for_confirm = dialog_for_confirm.clone();
+        let feedback = feedback.clone();
+        let toast_manager = toast_manager.clone();
+        spawn_background_job(
+            move || clone_repository_into_default_parent(&database_path, &url, explicit_name),
+            move |result| {
+                button.set_sensitive(true);
+                match result {
+                    Ok(_) => {
+                        refresh();
+                        dialog_for_confirm.close();
+                    }
+                    Err(err) => surface_label_error(
+                        &feedback,
+                        &toast_manager,
+                        format!("Clone failed: {err:#}"),
+                    ),
+                }
+            },
+        );
     });
     body.append(&actions.0);
     dialog.set_child(Some(&body));
@@ -1840,21 +1927,35 @@ fn show_quick_start_dialog(
     let actions = dialog_actions(&dialog, "Create");
     let confirm = actions.1.clone();
     let dialog_for_confirm = dialog.clone();
-    confirm.connect_clicked(move |_| {
+    confirm.connect_clicked(move |button| {
         let parent = new_parent_entry.text().trim().to_owned();
         let name = new_name_entry.text().trim().to_owned();
         let template = selected_template.borrow().clone();
-        match create_repository_from_template(&database_path, &parent, &name, &template) {
-            Ok(_) => {
-                refresh();
-                dialog_for_confirm.close();
-            }
-            Err(err) => surface_label_error(
-                &feedback,
-                &toast_manager,
-                format!("Quick start failed: {err:#}"),
-            ),
-        }
+        feedback.set_text("Creating repository...");
+        button.set_sensitive(false);
+        let button = button.clone();
+        let database_path = database_path.clone();
+        let refresh = refresh.clone();
+        let dialog_for_confirm = dialog_for_confirm.clone();
+        let feedback = feedback.clone();
+        let toast_manager = toast_manager.clone();
+        spawn_background_job(
+            move || create_repository_from_template(&database_path, &parent, &name, &template),
+            move |result| {
+                button.set_sensitive(true);
+                match result {
+                    Ok(_) => {
+                        refresh();
+                        dialog_for_confirm.close();
+                    }
+                    Err(err) => surface_label_error(
+                        &feedback,
+                        &toast_manager,
+                        format!("Quick start failed: {err:#}"),
+                    ),
+                }
+            },
+        );
     });
     body.append(&actions.0);
     dialog.set_child(Some(&body));
@@ -2054,14 +2155,6 @@ fn load_branch_choice_rows(repo_root: &Path) -> anyhow::Result<Vec<(String, Stri
         .collect())
 }
 
-fn load_branch_choices(repo_root: &Path, combo: &ComboBoxText) {
-    if let Ok(rows) = load_branch_choice_rows(repo_root) {
-        apply_combo_rows(combo, rows);
-    } else {
-        clear_combo_text(combo);
-    }
-}
-
 fn parse_github_numbered_stateful_choices(raw: &str) -> Vec<GithubNumberedChoice> {
     archductor_core::workspace::parse_github_numbered_stateful_choices(raw)
         .into_iter()
@@ -2132,14 +2225,6 @@ fn load_github_issue_choice_rows(repo_root: &Path) -> anyhow::Result<Vec<(String
         .collect())
 }
 
-fn load_github_issue_choices(repo_root: &Path, combo: &ComboBoxText) {
-    if let Ok(rows) = load_github_issue_choice_rows(repo_root) {
-        apply_combo_rows(combo, rows);
-    } else {
-        clear_combo_text(combo);
-    }
-}
-
 fn load_github_pr_choice_rows(repo_root: &Path) -> anyhow::Result<Vec<(String, String)>> {
     let output = Command::new("gh")
         .current_dir(repo_root)
@@ -2167,14 +2252,6 @@ fn load_github_pr_choice_rows(repo_root: &Path) -> anyhow::Result<Vec<(String, S
         .into_iter()
         .map(|choice| (choice.value, choice.label))
         .collect())
-}
-
-fn load_github_pr_choices(repo_root: &Path, combo: &ComboBoxText) {
-    if let Ok(rows) = load_github_pr_choice_rows(repo_root) {
-        apply_combo_rows(combo, rows);
-    } else {
-        clear_combo_text(combo);
-    }
 }
 
 fn new_project_templates() -> Vec<NewProjectTemplate> {
@@ -2438,6 +2515,88 @@ mod tests {
         assert!(
             pr_handler.contains("Some(desired_key)"),
             "github pr async refresh must mark loaded choices before combo changes fire"
+        );
+    }
+
+    #[test]
+    fn source_choice_auto_loads_spawn_background_loads() {
+        let source = include_str!("projects.rs");
+        let region = source
+            .split("let refresh_modal_copy: Rc<dyn Fn()>")
+            .nth(1)
+            .and_then(|rest| rest.split("branch_refresh_btn.connect_clicked").next())
+            .expect("source modal refresh copy block exists");
+
+        assert!(
+            region.contains("spawn_workspace_source_choice_load("),
+            "auto-loading branch/issues/PR choices can call git/gh and must not block GTK"
+        );
+        assert!(
+            !region.contains("load_branch_choices(")
+                && !region.contains("load_github_issue_choices(")
+                && !region.contains("load_github_pr_choices("),
+            "source modal auto-load must not call sync git/gh loaders on the GTK thread"
+        );
+    }
+
+    #[test]
+    fn project_onboarding_process_actions_spawn_background_jobs() {
+        let source = include_str!("projects.rs");
+        let github_load = source
+            .split("load_github_btn.connect_clicked")
+            .nth(1)
+            .and_then(|rest| {
+                rest.split("let actions = dialog_actions(&dialog, \"Clone\");")
+                    .next()
+            })
+            .expect("GitHub load handler exists");
+        assert!(
+            github_load.contains("spawn_background_job("),
+            "gh repo list must not run on the GTK thread"
+        );
+        assert!(
+            !github_load.contains("match load_github_repo_choices()"),
+            "GitHub repo loader must run inside the background job"
+        );
+
+        let github_clone = source
+            .split("confirm.connect_clicked(move |_| {")
+            .nth(2)
+            .and_then(|rest| rest.split("body.append(&actions.0);").next())
+            .expect("GitHub clone confirm handler exists");
+        assert!(
+            github_clone.contains("spawn_background_job("),
+            "git clone must not run on the GTK thread"
+        );
+
+        let quick_start = source
+            .split("fn show_quick_start_dialog")
+            .nth(1)
+            .and_then(|rest| rest.split("fn project_template_card").next())
+            .expect("quick start dialog exists");
+        assert!(
+            quick_start.contains("spawn_background_job("),
+            "cargo new/git init quick start must not run on the GTK thread"
+        );
+
+        let inline_clone = source
+            .split("clone_repo_btn.connect_clicked")
+            .nth(1)
+            .and_then(|rest| rest.split("let quick_add_refresh").next())
+            .expect("inline clone handler exists");
+        assert!(
+            inline_clone.contains("spawn_background_job("),
+            "inline git clone must not run on the GTK thread"
+        );
+
+        let inline_add = source
+            .split("add_repo_btn.connect_clicked")
+            .nth(1)
+            .and_then(|rest| rest.split("let db_path_clone").next())
+            .expect("inline local add handler exists");
+        assert!(
+            inline_add.contains("spawn_background_job("),
+            "inline local repo add runs git probes and must not block GTK"
         );
     }
 

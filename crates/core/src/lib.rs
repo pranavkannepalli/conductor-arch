@@ -87,4 +87,29 @@ mod pty_tests {
         assert!(size.contains("33 111"));
         session.stop().unwrap();
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn pty_stop_sends_sigterm_before_force_kill() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("term.marker");
+        let script = format!(
+            "trap 'echo term > {}; exit 0' TERM; while :; do sleep 1; done",
+            marker.display()
+        );
+        let mut session = crate::pty::PtySession::spawn(
+            PathBuf::from("/bin/sh"),
+            vec!["-c".to_owned(), script],
+            temp.path(),
+            Vec::new(),
+            24,
+            80,
+        )
+        .unwrap();
+
+        std::thread::sleep(Duration::from_millis(100));
+        session.stop().unwrap();
+
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "term\n");
+    }
 }

@@ -63,6 +63,9 @@ pub enum AsyncArchcarRequestKind {
     GetSessionStatus {
         session_id: i64,
     },
+    GetChatSnapshot {
+        thread_id: i64,
+    },
     QueueChatInput {
         thread_id: i64,
         input: String,
@@ -295,6 +298,10 @@ impl AsyncArchcarBridge {
 
     pub fn get_session_status(&self, session_id: i64) -> Option<u64> {
         self.submit(ArchcarRequest::GetSessionStatus { session_id })
+    }
+
+    pub fn get_chat_snapshot(&self, thread_id: i64) -> Option<u64> {
+        self.submit(ArchcarRequest::GetChatSnapshot { thread_id })
     }
 
     pub fn queue_chat_input(
@@ -668,10 +675,13 @@ fn request_kind(request: &ArchcarRequest) -> AsyncArchcarRequestKind {
             }
         }
         ArchcarRequest::GetSessionMessages { thread_id } => {
-            AsyncArchcarRequestKind::GetSessionStatus {
-                session_id: *thread_id,
+            AsyncArchcarRequestKind::GetChatSnapshot {
+                thread_id: *thread_id,
             }
         }
+        ArchcarRequest::GetChatSnapshot { thread_id } => AsyncArchcarRequestKind::GetChatSnapshot {
+            thread_id: *thread_id,
+        },
         ArchcarRequest::QueueChatInput {
             thread_id,
             input,
@@ -833,6 +843,26 @@ mod tests {
                 kind: ArchcarInputKind::User,
                 delivery: ArchcarInputDelivery::Immediate,
             }
+        );
+    }
+
+    #[test]
+    fn request_kind_preserves_chat_snapshot_thread() {
+        let request = ArchcarRequest::GetChatSnapshot { thread_id: 42 };
+
+        assert_eq!(
+            request_kind(&request),
+            AsyncArchcarRequestKind::GetChatSnapshot { thread_id: 42 }
+        );
+    }
+
+    #[test]
+    fn request_kind_maps_session_messages_to_chat_snapshot_thread() {
+        let request = ArchcarRequest::GetSessionMessages { thread_id: 42 };
+
+        assert_eq!(
+            request_kind(&request),
+            AsyncArchcarRequestKind::GetChatSnapshot { thread_id: 42 }
         );
     }
 

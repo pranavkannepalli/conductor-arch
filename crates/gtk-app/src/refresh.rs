@@ -38,6 +38,9 @@ pub enum RefreshEvent {
     WorkspaceReviewChanged {
         workspace: String,
     },
+    WorkspaceGitReviewChanged {
+        workspace: String,
+    },
     WorkspaceChatLifecycleChanged {
         workspace: String,
     },
@@ -294,20 +297,24 @@ impl RefreshHub {
                 self.refresh(RefreshScope::Dashboard);
                 self.refresh(RefreshScope::History);
                 self.refresh_workspace_event(WorkspaceRefreshTarget::ChatTabs, &event);
-                self.refresh_workspace_event(WorkspaceRefreshTarget::ChatSurface, &event);
             }
             RefreshEvent::WorkspaceReviewChanged { .. } => {
                 self.refresh(RefreshScope::Dashboard);
                 self.refresh(RefreshScope::History);
                 self.refresh_workspace_event(WorkspaceRefreshTarget::Review, &event);
             }
-            RefreshEvent::WorkspaceChatMessagesChanged { .. } => {
-                self.refresh_workspace_event(WorkspaceRefreshTarget::ChatSurface, &event);
+            RefreshEvent::WorkspaceGitReviewChanged { .. } => {
+                self.refresh(RefreshScope::Sidebar);
+                self.refresh(RefreshScope::Dashboard);
+                self.refresh_workspace_event(WorkspaceRefreshTarget::Review, &event);
                 self.run_event(
-                    RefreshMetricTarget::WorkspaceChatTabs,
-                    &self.workspace_chat_tabs,
+                    RefreshMetricTarget::WorkspaceNavRow,
+                    &self.workspace_nav_row,
                     &event,
                 );
+            }
+            RefreshEvent::WorkspaceChatMessagesChanged { .. } => {
+                self.refresh_workspace_event(WorkspaceRefreshTarget::ChatSurface, &event);
             }
         }
     }
@@ -536,7 +543,7 @@ mod tests {
     }
 
     #[test]
-    fn chat_message_refresh_event_updates_chat_surface_and_tabs_only() {
+    fn chat_message_refresh_event_updates_chat_surface_only() {
         let hub = RefreshHub::default();
         let counts = RefreshCounts::default();
         counts.install(&hub);
@@ -547,7 +554,7 @@ mod tests {
             thread_id: 7,
         });
 
-        assert_eq!(counts.values(), (0, 0, 0, 0, 0, 1, 1, 0, 0, 0));
+        assert_eq!(counts.values(), (0, 0, 0, 0, 0, 1, 0, 0, 0, 0));
     }
 
     #[test]
@@ -566,7 +573,7 @@ mod tests {
     }
 
     #[test]
-    fn refresh_metrics_count_chat_message_surface_and_tab_refreshes() {
+    fn refresh_metrics_count_chat_message_surface_only() {
         let hub = RefreshHub::default();
         let counts = RefreshCounts::default();
         counts.install(&hub);
@@ -577,9 +584,9 @@ mod tests {
         });
 
         let metrics = hub.refresh_metrics_snapshot();
-        assert_eq!(metrics.total, 2);
+        assert_eq!(metrics.total, 1);
         assert_eq!(metrics.workspace_chat_surface, 1);
-        assert_eq!(metrics.workspace_chat_tabs, 1);
+        assert_eq!(metrics.workspace_chat_tabs, 0);
         assert_eq!(metrics.workspace_shell, 0);
     }
 
@@ -594,7 +601,7 @@ mod tests {
             workspace: "demo".to_owned(),
         });
 
-        assert_eq!(counts.values(), (1, 1, 0, 1, 0, 1, 1, 0, 0, 0));
+        assert_eq!(counts.values(), (1, 1, 0, 1, 0, 0, 1, 0, 0, 0));
     }
 
     #[test]
@@ -608,11 +615,11 @@ mod tests {
         });
 
         let metrics = hub.refresh_metrics_snapshot();
-        assert_eq!(metrics.total, 5);
+        assert_eq!(metrics.total, 4);
         assert_eq!(metrics.sidebar, 1);
         assert_eq!(metrics.dashboard, 1);
         assert_eq!(metrics.history, 1);
-        assert_eq!(metrics.workspace_chat_surface, 1);
+        assert_eq!(metrics.workspace_chat_surface, 0);
         assert_eq!(metrics.workspace_chat_tabs, 1);
     }
 
@@ -634,7 +641,7 @@ mod tests {
     }
 
     #[test]
-    fn chat_lifecycle_event_is_passed_to_chat_surface_handler() {
+    fn chat_lifecycle_event_skips_chat_surface_handler() {
         let hub = RefreshHub::default();
         let seen = Rc::new(RefCell::new(None));
         let seen_for_handler = Rc::clone(&seen);
@@ -647,7 +654,7 @@ mod tests {
         };
         hub.refresh_event(event.clone());
 
-        assert_eq!(*seen.borrow(), Some(event));
+        assert_eq!(*seen.borrow(), None);
     }
 
     #[test]
@@ -661,6 +668,19 @@ mod tests {
         });
 
         assert_eq!(counts.values(), (0, 1, 0, 1, 0, 0, 0, 0, 1, 0));
+    }
+
+    #[test]
+    fn git_review_refresh_event_updates_review_nav_and_summaries_without_shell_rebuild() {
+        let hub = RefreshHub::default();
+        let counts = RefreshCounts::default();
+        counts.install(&hub);
+
+        hub.refresh_event(RefreshEvent::WorkspaceGitReviewChanged {
+            workspace: "demo".to_owned(),
+        });
+
+        assert_eq!(counts.values(), (1, 1, 0, 0, 0, 0, 0, 0, 1, 1));
     }
 
     #[test]

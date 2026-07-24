@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 archductor-core = { path = "../core" }
+alacritty_terminal = "0.26.0"
 gtk = { package = "gtk4", version = "0.11", features = ["v4_6"] }
 adw = { package = "libadwaita", version = "0.9", features = ["v1_4"] }
 glib = "0.22"

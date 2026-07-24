@@ -3,9 +3,10 @@ use serde::{Deserialize, Serialize};
 use crate::archcar::harness_contract::HarnessDescriptor;
 use crate::archcar::harness_contract::{ProviderInteractionDraft, ProviderInteractionResolution};
 use crate::codex_tui::{CodexContextUsage, CodexInlineEvent};
+use crate::provider_events::ProviderEventRecord;
 use crate::provider_interactions::ProviderInteractionRecord;
 use crate::session_state::AgentSessionState;
-use crate::workspace::{SessionHarnessOptions, SessionKind};
+use crate::workspace::{ChatEventRecord, ChatMessageRecord, SessionHarnessOptions, SessionKind};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RpcEnvelope<T> {
@@ -19,6 +20,7 @@ pub enum ArchcarInputKind {
     User,
     ReviewPrompt,
     ControlCommand,
+    RawTerminal,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -101,6 +103,9 @@ pub enum ArchcarRequest {
     GetSessionMessages {
         thread_id: i64,
     },
+    GetChatSnapshot {
+        thread_id: i64,
+    },
     QueueChatInput {
         thread_id: i64,
         input: String,
@@ -171,6 +176,9 @@ pub enum ArchcarResponse {
     SessionMessages {
         thread_id: i64,
         messages: Vec<ArchcarMessage>,
+    },
+    ChatSnapshot {
+        snapshot: ArchcarChatSnapshot,
     },
     QueuedChatInput {
         input: QueuedArchcarInput,
@@ -255,6 +263,27 @@ pub struct QueuedArchcarInput {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchcarChatSnapshot {
+    pub thread_id: i64,
+    pub messages: Vec<ChatMessageRecord>,
+    pub events: Vec<ChatEventRecord>,
+    pub provider_events: Vec<ProviderEventRecord>,
+    pub queued_inputs: Vec<QueuedArchcarInput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_session: Option<ArchcarChatLiveSession>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchcarChatLiveSession {
+    pub session_id: i64,
+    pub status: String,
+    pub runtime_state: AgentSessionState,
+    pub ready: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<SessionHarnessCapabilities>,
+}
+
 pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
     match request {
         ArchcarRequest::EnsureWorkspaceDefaultSession {
@@ -330,6 +359,9 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         }
         ArchcarRequest::GetSessionMessages { thread_id } => {
             format!("get_session_messages thread_id={thread_id}")
+        }
+        ArchcarRequest::GetChatSnapshot { thread_id } => {
+            format!("get_chat_snapshot thread_id={thread_id}")
         }
         ArchcarRequest::QueueChatInput {
             thread_id,
@@ -442,6 +474,15 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
             "session_messages thread_id={thread_id} count={}",
             messages.len()
         ),
+        ArchcarResponse::ChatSnapshot { snapshot } => format!(
+            "chat_snapshot thread_id={} messages={} events={} provider_events={} queued_inputs={} live_session={}",
+            snapshot.thread_id,
+            snapshot.messages.len(),
+            snapshot.events.len(),
+            snapshot.provider_events.len(),
+            snapshot.queued_inputs.len(),
+            snapshot.live_session.is_some()
+        ),
         ArchcarResponse::QueuedChatInput { input } => {
             format!("queued_chat_input id={} thread_id={}", input.id, input.thread_id)
         }
@@ -544,6 +585,7 @@ fn input_kind_label(kind: &ArchcarInputKind) -> &'static str {
         ArchcarInputKind::User => "user",
         ArchcarInputKind::ReviewPrompt => "review_prompt",
         ArchcarInputKind::ControlCommand => "control_command",
+        ArchcarInputKind::RawTerminal => "raw_terminal",
     }
 }
 

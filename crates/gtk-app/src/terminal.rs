@@ -1,3 +1,9 @@
+use alacritty_terminal::event::VoidListener;
+use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::index::{Column, Line};
+use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::{Config as AlacrittyConfig, Term, TermMode};
+use alacritty_terminal::vte::ansi::Processor as VteProcessor;
 use anyhow::Context;
 use archductor_core::archcar::protocol::{ArchcarInputKind, ArchcarRequest};
 use archductor_core::workspace::{
@@ -7,8 +13,9 @@ use archductor_core::workspace::{
 use futures_channel::oneshot;
 use gtk::prelude::*;
 use gtk::{
-    Box as GBox, Button, ComboBoxText, CssProvider, Entry, Label, ListBox, Orientation,
-    ScrolledWindow, TextBuffer, TextView, STYLE_PROVIDER_PRIORITY_APPLICATION,
+    Box as GBox, Button, ComboBoxText, CssProvider, DrawingArea, Entry, EventControllerKey, Label,
+    ListBox, Orientation, ScrolledWindow, TextBuffer, TextView,
+    STYLE_PROVIDER_PRIORITY_APPLICATION,
 };
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -73,6 +80,604 @@ pub(crate) struct TerminalRefreshOutcome {
 }
 
 type RefreshTerminalSurface = Rc<dyn Fn() -> TerminalRefreshOutcome>;
+
+#[derive(Clone)]
+pub(crate) struct TerminalGridSurface {
+    widget: ScrolledWindow,
+    buffer: TextBuffer,
+    model: Rc<RefCell<TerminalEmulatorModel>>,
+    drawing_area: DrawingArea,
+}
+
+impl TerminalGridSurface {
+    fn new(text: &str, preferences: &TerminalPreferences, interactive: bool) -> Self {
+        let rows = 24;
+        let cols = 80;
+        let model = Rc::new(RefCell::new(TerminalEmulatorModel::new(
+            rows,
+            cols,
+            preferences.scrollback_lines,
+        )));
+        let buffer = TextBuffer::new(None);
+        let drawing_area = DrawingArea::new();
+        drawing_area.set_focusable(interactive);
+        drawing_area.set_hexpand(true);
+        drawing_area.set_vexpand(true);
+        drawing_area.set_content_width((cols as i32) * TERMINAL_CELL_WIDTH);
+        update_terminal_grid_content_height(&drawing_area, &model.borrow());
+        drawing_area.add_css_class("history-view");
+        drawing_area.add_css_class("terminal-transcript-dark");
+        drawing_area.add_css_class("terminal-grid-view");
+        apply_terminal_widget_preferences(&drawing_area, preferences);
+
+        let model_for_draw = model.clone();
+        let font_family = terminal_font_family(preferences);
+        let font_size = terminal_font_size(preferences);
+        drawing_area.set_draw_func(move |_, context, width, height| {
+            draw_terminal_grid(
+                context,
+                width,
+                height,
+                &model_for_draw.borrow(),
+                &font_family,
+                font_size,
+            );
+        });
+
+        let model_for_resize = model.clone();
+        drawing_area.connect_resize(move |area, width, height| {
+            let (rows, cols) = terminal_size_from_pixels(width, height);
+            model_for_resize
+                .borrow_mut()
+                .resize(rows as usize, cols as usize);
+            update_terminal_grid_content_height(area, &model_for_resize.borrow());
+            area.queue_draw();
+        });
+
+        let area_for_buffer = drawing_area.clone();
+        let model_for_buffer = model.clone();
+        let last_buffer_len = Rc::new(RefCell::new(0usize));
+        let last_buffer_len_for_buffer = last_buffer_len.clone();
+        buffer.connect_changed(move |buffer| {
+            let text = buffer
+                .text(&buffer.start_iter(), &buffer.end_iter(), false)
+                .to_string();
+            let mut last_len = last_buffer_len_for_buffer.borrow_mut();
+            if text.len() >= *last_len {
+                let appended = &text[*last_len..];
+                if !appended.is_empty() {
+                    model_for_buffer
+                        .borrow_mut()
+                        .feed_bytes(appended.as_bytes());
+                }
+            } else {
+                model_for_buffer.borrow_mut().set_bytes(text.as_bytes());
+            }
+            *last_len = text.len();
+            update_terminal_grid_content_height(&area_for_buffer, &model_for_buffer.borrow());
+            area_for_buffer.queue_draw();
+        });
+        buffer.set_text(text);
+
+        let scroll = ScrolledWindow::new();
+        scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+        scroll.set_vexpand(true);
+        scroll.set_child(Some(&drawing_area));
+
+        Self {
+            widget: scroll,
+            buffer,
+            model,
+            drawing_area,
+        }
+    }
+
+    pub(crate) fn widget(&self) -> &ScrolledWindow {
+        &self.widget
+    }
+
+    pub(crate) fn buffer(&self) -> TextBuffer {
+        self.buffer.clone()
+    }
+
+    fn area(&self) -> DrawingArea {
+        self.drawing_area.clone()
+    }
+
+    fn bracketed_paste(&self) -> bool {
+        self.model.borrow().bracketed_paste()
+    }
+
+    fn clear_visible(&self) {
+        self.buffer.set_text("");
+        self.model.borrow_mut().clear_visible();
+        self.drawing_area.queue_draw();
+    }
+}
+
+pub(crate) fn read_only_terminal_grid(
+    text: &str,
+    preferences: &TerminalPreferences,
+) -> TerminalGridSurface {
+    TerminalGridSurface::new(text, preferences, false)
+}
+
+fn interactive_terminal_grid(text: &str, preferences: &TerminalPreferences) -> TerminalGridSurface {
+    TerminalGridSurface::new(text, preferences, true)
+}
+
+const TERMINAL_CELL_WIDTH: i32 = 8;
+const TERMINAL_CELL_HEIGHT: i32 = 20;
+const TERMINAL_PADDING_X: f64 = 10.0;
+const TERMINAL_PADDING_Y: f64 = 18.0;
+
+#[derive(Debug, Clone, Copy)]
+struct TerminalDimensions {
+    rows: usize,
+    cols: usize,
+}
+
+impl Dimensions for TerminalDimensions {
+    fn columns(&self) -> usize {
+        self.cols
+    }
+
+    fn screen_lines(&self) -> usize {
+        self.rows
+    }
+
+    fn total_lines(&self) -> usize {
+        self.rows
+    }
+}
+
+pub(crate) struct TerminalEmulatorModel {
+    term: Term<VoidListener>,
+    processor: VteProcessor,
+    rows: usize,
+    cols: usize,
+    scrollback_lines: usize,
+}
+
+impl TerminalEmulatorModel {
+    pub(crate) fn new(rows: usize, cols: usize, scrollback_lines: usize) -> Self {
+        let rows = rows.max(1);
+        let cols = cols.max(2);
+        let config = AlacrittyConfig {
+            scrolling_history: scrollback_lines,
+            ..Default::default()
+        };
+        let dimensions = TerminalDimensions { rows, cols };
+        Self {
+            term: Term::new(config, &dimensions, VoidListener),
+            processor: VteProcessor::new(),
+            rows,
+            cols,
+            scrollback_lines,
+        }
+    }
+
+    pub(crate) fn feed_bytes(&mut self, bytes: &[u8]) {
+        self.processor.advance(&mut self.term, bytes);
+    }
+
+    fn set_bytes(&mut self, bytes: &[u8]) {
+        let rows = self.rows;
+        let cols = self.cols;
+        let scrollback = self.scrollback_lines;
+        *self = Self::new(rows, cols, scrollback);
+        self.feed_bytes(bytes);
+    }
+
+    pub(crate) fn clear_visible(&mut self) {
+        let rows = self.rows;
+        let cols = self.cols;
+        let scrollback = self.scrollback_lines;
+        *self = Self::new(rows, cols, scrollback);
+    }
+
+    fn resize(&mut self, rows: usize, cols: usize) {
+        let rows = rows.max(1);
+        let cols = cols.max(2);
+        if rows == self.rows && cols == self.cols {
+            return;
+        }
+        self.rows = rows;
+        self.cols = cols;
+        self.term.resize(TerminalDimensions { rows, cols });
+    }
+
+    fn bracketed_paste(&self) -> bool {
+        self.term.mode().contains(TermMode::BRACKETED_PASTE)
+    }
+
+    pub(crate) fn visible_text(&self) -> String {
+        self.visible_lines()
+            .into_iter()
+            .map(|line| line.trim_end().to_owned())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn visible_lines(&self) -> Vec<String> {
+        let display_offset = self.term.grid().display_offset() as i32;
+        let mut lines = Vec::with_capacity(self.rows);
+        for row in 0..self.rows {
+            let line = Line(row as i32 - display_offset);
+            let mut text = String::with_capacity(self.cols);
+            for col in 0..self.cols {
+                let cell = &self.term.grid()[line][Column(col)];
+                if cell
+                    .flags
+                    .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                {
+                    continue;
+                }
+                text.push(cell.c);
+                for c in cell.zerowidth().into_iter().flatten() {
+                    text.push(*c);
+                }
+            }
+            lines.push(text);
+        }
+        lines
+    }
+
+    fn scrollable_line_count(&self) -> usize {
+        self.term.grid().total_lines().max(self.rows)
+    }
+
+    fn scrollable_lines(&self) -> Vec<String> {
+        (0..self.scrollable_line_count())
+            .map(|row| self.scrollable_line(row))
+            .collect()
+    }
+
+    fn scrollable_line(&self, row: usize) -> String {
+        let total_lines = self.scrollable_line_count();
+        let history_lines = total_lines.saturating_sub(self.rows);
+        let line = Line(row as i32 - history_lines as i32);
+        let mut text = String::with_capacity(self.cols);
+        for col in 0..self.cols {
+            let cell = &self.term.grid()[line][Column(col)];
+            if cell
+                .flags
+                .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+            {
+                continue;
+            }
+            text.push(cell.c);
+            for c in cell.zerowidth().into_iter().flatten() {
+                text.push(*c);
+            }
+        }
+        text
+    }
+
+    fn scrollable_line_range_for_clip(&self, clip_top: f64, clip_bottom: f64) -> (usize, usize) {
+        let total_lines = self.scrollable_line_count();
+        let first = ((clip_top - TERMINAL_PADDING_Y) / TERMINAL_CELL_HEIGHT as f64)
+            .floor()
+            .max(0.0) as usize;
+        let last = ((clip_bottom - TERMINAL_PADDING_Y) / TERMINAL_CELL_HEIGHT as f64)
+            .ceil()
+            .max(0.0) as usize
+            + 1;
+        (first.min(total_lines), last.min(total_lines))
+    }
+
+    fn clipped_scrollable_lines(&self, clip_top: f64, clip_bottom: f64) -> Vec<(usize, String)> {
+        let (first, last) = self.scrollable_line_range_for_clip(clip_top, clip_bottom);
+        let mut lines = Vec::with_capacity(last.saturating_sub(first));
+        for row in first..last {
+            lines.push((row, self.scrollable_line(row)));
+        }
+        lines
+    }
+
+    fn cursor_position(&self) -> Option<(usize, usize)> {
+        let cursor = self.term.grid().cursor.point;
+        let history_lines = self.scrollable_line_count().saturating_sub(self.rows);
+        let line = cursor.line.0 + history_lines as i32;
+        (line >= 0).then_some((line as usize, cursor.column.0))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TerminalNamedKey {
+    Enter,
+    Backspace,
+    Tab,
+    Escape,
+    ArrowUp,
+    ArrowDown,
+    ArrowRight,
+    ArrowLeft,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    Delete,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TerminalKeyEvent {
+    text: Option<String>,
+    named: Option<TerminalNamedKey>,
+    ctrl: bool,
+    alt: bool,
+}
+
+impl TerminalKeyEvent {
+    pub(crate) fn named(named: TerminalNamedKey) -> Self {
+        Self {
+            text: None,
+            named: Some(named),
+            ctrl: false,
+            alt: false,
+        }
+    }
+
+    pub(crate) fn control(ch: char) -> Self {
+        Self {
+            text: Some(ch.to_string()),
+            named: None,
+            ctrl: true,
+            alt: false,
+        }
+    }
+
+    pub(crate) fn alt_text(text: &str) -> Self {
+        Self {
+            text: Some(text.to_owned()),
+            named: None,
+            ctrl: false,
+            alt: true,
+        }
+    }
+}
+
+pub(crate) fn encode_terminal_key_event(event: TerminalKeyEvent) -> Option<Vec<u8>> {
+    let mut output = Vec::new();
+    if event.alt {
+        output.push(0x1b);
+    }
+    if event.ctrl {
+        let ch = event.text.as_deref()?.chars().next()?.to_ascii_lowercase();
+        let byte = match ch {
+            'a'..='z' => ch as u8 - b'a' + 1,
+            '[' => 0x1b,
+            '\\' => 0x1c,
+            ']' => 0x1d,
+            '^' => 0x1e,
+            '_' => 0x1f,
+            '?' => 0x7f,
+            _ => return None,
+        };
+        output.push(byte);
+        return Some(output);
+    }
+    if let Some(named) = event.named {
+        output.extend_from_slice(match named {
+            TerminalNamedKey::Enter => b"\r",
+            TerminalNamedKey::Backspace => b"\x7f",
+            TerminalNamedKey::Tab => b"\t",
+            TerminalNamedKey::Escape => b"\x1b",
+            TerminalNamedKey::ArrowUp => b"\x1b[A",
+            TerminalNamedKey::ArrowDown => b"\x1b[B",
+            TerminalNamedKey::ArrowRight => b"\x1b[C",
+            TerminalNamedKey::ArrowLeft => b"\x1b[D",
+            TerminalNamedKey::Home => b"\x1b[H",
+            TerminalNamedKey::End => b"\x1b[F",
+            TerminalNamedKey::PageUp => b"\x1b[5~",
+            TerminalNamedKey::PageDown => b"\x1b[6~",
+            TerminalNamedKey::Delete => b"\x1b[3~",
+        });
+        return Some(output);
+    }
+    output.extend_from_slice(event.text?.as_bytes());
+    Some(output)
+}
+
+pub(crate) fn encode_terminal_paste(text: &str, bracketed: bool) -> Vec<u8> {
+    if bracketed {
+        format!("\x1b[200~{text}\x1b[201~").into_bytes()
+    } else {
+        text.as_bytes().to_vec()
+    }
+}
+
+fn draw_terminal_grid(
+    context: &gtk::cairo::Context,
+    width: i32,
+    height: i32,
+    model: &TerminalEmulatorModel,
+    font_family: &str,
+    font_size: f64,
+) {
+    context.set_source_rgb(0.035, 0.043, 0.052);
+    context.rectangle(0.0, 0.0, width as f64, height as f64);
+    let _ = context.fill();
+
+    context.select_font_face(
+        font_family,
+        gtk::cairo::FontSlant::Normal,
+        gtk::cairo::FontWeight::Normal,
+    );
+    context.set_font_size(font_size);
+    context.set_source_rgb(0.86, 0.89, 0.92);
+
+    let (_, clip_top, _, clip_bottom) =
+        context
+            .clip_extents()
+            .unwrap_or((0.0, 0.0, width as f64, height as f64));
+    for (index, line) in model.clipped_scrollable_lines(clip_top, clip_bottom) {
+        let baseline = TERMINAL_PADDING_Y + (index as f64 * TERMINAL_CELL_HEIGHT as f64);
+        if baseline > height as f64 + TERMINAL_CELL_HEIGHT as f64 {
+            break;
+        }
+        context.move_to(TERMINAL_PADDING_X, baseline);
+        let _ = context.show_text(line.trim_end());
+    }
+
+    if let Some((row, col)) = model.cursor_position() {
+        let x = TERMINAL_PADDING_X + col as f64 * TERMINAL_CELL_WIDTH as f64;
+        let y = 4.0 + row as f64 * TERMINAL_CELL_HEIGHT as f64;
+        context.set_source_rgba(0.86, 0.89, 0.92, 0.35);
+        context.rectangle(
+            x,
+            y,
+            TERMINAL_CELL_WIDTH as f64,
+            TERMINAL_CELL_HEIGHT as f64,
+        );
+        let _ = context.fill();
+    }
+}
+
+fn update_terminal_grid_content_height(area: &DrawingArea, model: &TerminalEmulatorModel) {
+    area.set_content_height(terminal_grid_content_height(model.scrollable_line_count()));
+}
+
+fn terminal_grid_content_height(lines: usize) -> i32 {
+    ((lines.max(1) as i32) * TERMINAL_CELL_HEIGHT) + (TERMINAL_PADDING_Y as i32 * 2)
+}
+
+fn install_terminal_input_controller(
+    surface: &TerminalGridSurface,
+    database_path: PathBuf,
+    workspace_name: String,
+    toast_manager: ToastManager,
+) {
+    let key_controller = EventControllerKey::new();
+    let surface_for_key = surface.clone();
+    key_controller.connect_key_pressed(move |controller, keyval, _keycode, state| {
+        let ctrl = state.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+        let name = keyval
+            .name()
+            .map(|name| name.to_string())
+            .unwrap_or_default();
+        if ctrl && name.eq_ignore_ascii_case("v") {
+            if let Some(widget) = controller.widget() {
+                let clipboard = widget.clipboard();
+                let db = database_path.clone();
+                let workspace = workspace_name.clone();
+                let toast = toast_manager.clone();
+                let bracketed = surface_for_key.bracketed_paste();
+                glib::spawn_future_local(async move {
+                    match clipboard.read_text_future().await {
+                        Ok(Some(text)) if !text.is_empty() => {
+                            send_terminal_raw_input(
+                                db,
+                                workspace,
+                                encode_terminal_paste(text.as_str(), bracketed),
+                                toast,
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(err) => toast.error(format!("Terminal paste failed: {err}")),
+                    }
+                });
+            }
+            return gtk::glib::Propagation::Stop;
+        }
+
+        let Some(event) = terminal_key_event_from_gtk(keyval, state) else {
+            return gtk::glib::Propagation::Proceed;
+        };
+        let Some(bytes) = encode_terminal_key_event(event) else {
+            return gtk::glib::Propagation::Proceed;
+        };
+        send_terminal_raw_input(
+            database_path.clone(),
+            workspace_name.clone(),
+            bytes,
+            toast_manager.clone(),
+        );
+        gtk::glib::Propagation::Stop
+    });
+    surface.area().add_controller(key_controller);
+}
+
+fn terminal_key_event_from_gtk(
+    keyval: gtk::gdk::Key,
+    state: gtk::gdk::ModifierType,
+) -> Option<TerminalKeyEvent> {
+    let ctrl = state.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+    let alt = state.contains(gtk::gdk::ModifierType::ALT_MASK)
+        || state.contains(gtk::gdk::ModifierType::META_MASK);
+    let name = keyval
+        .name()
+        .map(|name| name.to_string())
+        .unwrap_or_default();
+    let named = match name.as_str() {
+        "Return" | "ISO_Enter" | "KP_Enter" => Some(TerminalNamedKey::Enter),
+        "BackSpace" => Some(TerminalNamedKey::Backspace),
+        "Tab" | "ISO_Left_Tab" => Some(TerminalNamedKey::Tab),
+        "Escape" => Some(TerminalNamedKey::Escape),
+        "Up" => Some(TerminalNamedKey::ArrowUp),
+        "Down" => Some(TerminalNamedKey::ArrowDown),
+        "Right" => Some(TerminalNamedKey::ArrowRight),
+        "Left" => Some(TerminalNamedKey::ArrowLeft),
+        "Home" | "KP_Home" => Some(TerminalNamedKey::Home),
+        "End" | "KP_End" => Some(TerminalNamedKey::End),
+        "Page_Up" | "KP_Page_Up" => Some(TerminalNamedKey::PageUp),
+        "Page_Down" | "KP_Page_Down" => Some(TerminalNamedKey::PageDown),
+        "Delete" | "KP_Delete" => Some(TerminalNamedKey::Delete),
+        _ => None,
+    };
+    if let Some(named) = named {
+        return Some(TerminalKeyEvent {
+            text: None,
+            named: Some(named),
+            ctrl: false,
+            alt,
+        });
+    }
+    let ch = keyval.to_unicode()?;
+    if ctrl {
+        Some(TerminalKeyEvent {
+            text: Some(ch.to_string()),
+            named: None,
+            ctrl: true,
+            alt,
+        })
+    } else if ch.is_control() {
+        None
+    } else {
+        Some(TerminalKeyEvent {
+            text: Some(ch.to_string()),
+            named: None,
+            ctrl: false,
+            alt,
+        })
+    }
+}
+
+fn send_terminal_raw_input(
+    database_path: PathBuf,
+    workspace_name: String,
+    bytes: Vec<u8>,
+    toast_manager: ToastManager,
+) {
+    let Some(record) = latest_running_runtime_shell(&database_path, &workspace_name) else {
+        toast_manager.error("No running runtime shell session; start shell first.".to_owned());
+        return;
+    };
+    let Ok(input) = String::from_utf8(bytes) else {
+        toast_manager.error("Terminal input was not valid UTF-8.".to_owned());
+        return;
+    };
+    crate::archcar_async::spawn_archcar_request(
+        archductor_core::paths::AppPaths::from_env(),
+        ArchcarRequest::SendInput {
+            session_id: record.id,
+            input,
+            visible_input: None,
+            kind: ArchcarInputKind::RawTerminal,
+            delivery: archductor_core::archcar::protocol::ArchcarInputDelivery::Auto,
+        },
+    );
+}
 
 impl Default for TerminalPreferences {
     fn default() -> Self {
@@ -182,28 +787,49 @@ pub fn embedded_terminal_panel(
         root.append(&heading);
     }
 
-    let transcript = TextView::new();
-    transcript.set_editable(false);
-    transcript.set_monospace(true);
-    transcript.add_css_class("history-view");
-    transcript.add_css_class("terminal-transcript-dark");
-    apply_terminal_preferences(&transcript, &preferences);
-    set_terminal_buffer_scrollback(&transcript.buffer(), preferences.scrollback_lines);
-    transcript.buffer().set_text(&initial_terminal_text(
-        &database_path,
-        workspace_name,
-        workspace_path,
+    let terminal_surface = interactive_terminal_grid(
+        &initial_terminal_text(&database_path, workspace_name, workspace_path, &preferences),
         &preferences,
-    ));
-
-    let transcript_scroll = ScrolledWindow::new();
-    transcript_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
-    transcript_scroll.set_vexpand(true);
-    if full_mode {
-        transcript_scroll.set_min_content_height(420);
+    );
+    install_terminal_input_controller(
+        &terminal_surface,
+        database_path.clone(),
+        workspace_name.to_owned(),
+        toast_manager.clone(),
+    );
+    let transcript = terminal_surface.area();
+    let transcript_buffer = terminal_surface.buffer();
+    set_terminal_buffer_scrollback(&transcript_buffer, preferences.scrollback_lines);
+    {
+        let db_for_resize_event = database_path.clone();
+        let workspace_for_resize_event = workspace_name.to_owned();
+        let last_size = Rc::new(RefCell::new(None::<(u16, u16)>));
+        let last_size_for_resize = last_size.clone();
+        transcript.connect_resize(move |_, width, height| {
+            let (rows, cols) = terminal_size_from_pixels(width, height);
+            if *last_size_for_resize.borrow() == Some((rows, cols)) {
+                return;
+            }
+            *last_size_for_resize.borrow_mut() = Some((rows, cols));
+            let Some(record) =
+                latest_running_runtime_shell(&db_for_resize_event, &workspace_for_resize_event)
+            else {
+                return;
+            };
+            crate::archcar_async::spawn_archcar_request(
+                archductor_core::paths::AppPaths::from_env(),
+                ArchcarRequest::ResizeSession {
+                    session_id: record.id,
+                    rows,
+                    cols,
+                },
+            );
+        });
     }
-    transcript_scroll.set_child(Some(&transcript));
-    root.append(&transcript_scroll);
+    if full_mode {
+        terminal_surface.widget().set_min_content_height(420);
+    }
+    root.append(terminal_surface.widget());
 
     let controls = terminal_action_row();
     let start_btn = text_button("Start Shell");
@@ -217,7 +843,7 @@ pub fn embedded_terminal_panel(
 
     let db_for_start = database_path.clone();
     let workspace_for_start = workspace_name.to_owned();
-    let buffer_for_start = transcript.buffer();
+    let buffer_for_start = transcript_buffer.clone();
     let toast_for_start = toast_manager.clone();
     let refresh_for_start = refresh_hub.clone();
     start_btn.connect_clicked(move |_| {
@@ -255,7 +881,7 @@ pub fn embedded_terminal_panel(
 
     let db_for_resize = database_path.clone();
     let workspace_for_resize = workspace_name.to_owned();
-    let buffer_for_resize = transcript.buffer();
+    let buffer_for_resize = transcript_buffer.clone();
     let transcript_for_resize = transcript.clone();
     resize_btn.connect_clicked(move |_| {
         let running_shell = latest_running_runtime_shell(&db_for_resize, &workspace_for_resize);
@@ -289,7 +915,7 @@ pub fn embedded_terminal_panel(
 
     let db_for_stop = database_path.clone();
     let workspace_for_stop = workspace_name.to_owned();
-    let buffer_for_stop = transcript.buffer();
+    let buffer_for_stop = transcript_buffer.clone();
     let refresh_for_stop = refresh_hub.clone();
     stop_btn.connect_clicked(move |_| {
         let running_shell = latest_running_runtime_shell(&db_for_stop, &workspace_for_stop);
@@ -330,7 +956,7 @@ pub fn embedded_terminal_panel(
         button.set_tooltip_text(Some(&preset.command));
         let db = database_path.clone();
         let workspace = workspace_name.to_owned();
-        let buffer = transcript.buffer();
+        let buffer = transcript_buffer.clone();
         let command = preset.command.clone();
         button.connect_clicked(move |_| {
             run_terminal_command(
@@ -357,7 +983,7 @@ pub fn embedded_terminal_panel(
     let run_command = Rc::new({
         let db = database_path.clone();
         let workspace = workspace_name.to_owned();
-        let buffer = transcript.buffer();
+        let buffer = transcript_buffer.clone();
         let entry = entry.clone();
         move || {
             let command = entry.text().trim().to_owned();
@@ -2055,6 +2681,67 @@ fn apply_terminal_preferences(transcript: &TextView, preferences: &TerminalPrefe
     }
 }
 
+fn apply_terminal_widget_preferences<W: IsA<gtk::Widget>>(
+    widget: &W,
+    preferences: &TerminalPreferences,
+) {
+    widget.set_tooltip_text(Some(&preferences.summary()));
+    let Some(font) = preferences.font.as_deref() else {
+        return;
+    };
+    let class_name = terminal_font_class(font);
+    widget.add_css_class(&class_name);
+    let css = format!(
+        ".{class_name} {{ {} }}",
+        terminal_font_css_declarations(font)
+    );
+    let provider = CssProvider::new();
+    provider.load_from_data(&css);
+    if let Some(display) = gtk::gdk::Display::default() {
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
+}
+
+fn terminal_font_family(preferences: &TerminalPreferences) -> String {
+    preferences
+        .font
+        .as_deref()
+        .and_then(parse_terminal_font)
+        .map(|(family, _)| family)
+        .unwrap_or_else(|| "monospace".to_owned())
+}
+
+fn terminal_font_size(preferences: &TerminalPreferences) -> f64 {
+    preferences
+        .font
+        .as_deref()
+        .and_then(parse_terminal_font)
+        .and_then(|(_, size)| size)
+        .map(|size| size as f64)
+        .unwrap_or(13.0)
+}
+
+fn parse_terminal_font(font: &str) -> Option<(String, Option<u16>)> {
+    let trimmed = font.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut parts = trimmed.rsplitn(2, ' ');
+    let last = parts.next().unwrap_or(trimmed);
+    let maybe_family = parts.next();
+    if let (Some(family), Ok(size)) = (maybe_family, last.parse::<u16>()) {
+        let family = family.trim();
+        if !family.is_empty() {
+            return Some((family.to_owned(), Some(size)));
+        }
+    }
+    Some((trimmed.to_owned(), None))
+}
+
 fn terminal_font_class(font: &str) -> String {
     let mut hasher = DefaultHasher::new();
     font.hash(&mut hasher);
@@ -3312,6 +3999,28 @@ mod tests {
     }
 
     #[test]
+    fn terminal_grid_surface_sizes_content_to_buffered_lines() {
+        let source = include_str!("terminal.rs");
+        let start = source
+            .find("impl TerminalGridSurface")
+            .expect("terminal grid surface implementation exists");
+        let end = source[start..]
+            .find("pub(crate) fn read_only_terminal_grid")
+            .map(|offset| start + offset)
+            .expect("read-only constructor follows grid implementation");
+        let surface_impl = &source[start..end];
+
+        assert!(
+            surface_impl.contains("update_terminal_grid_content_height"),
+            "terminal grid must resize content to buffered terminal lines so GTK scrollback is available"
+        );
+        assert!(
+            !surface_impl.contains("set_content_height((rows as i32) * TERMINAL_CELL_HEIGHT)"),
+            "fixed viewport-height content clips terminal scrollback"
+        );
+    }
+
+    #[test]
     fn terminal_preferences_normalize_font_and_scrollback() {
         let preferences =
             TerminalPreferences::from_config(Some("  JetBrains Mono 13  "), Some(25_000));
@@ -3326,6 +4035,64 @@ mod tests {
 
         assert_eq!(preferences.font, None);
         assert_eq!(preferences.scrollback_lines, TERMINAL_SCROLLBACK_LINES);
+    }
+
+    #[test]
+    fn terminal_key_encoder_maps_common_terminal_keybinds() {
+        assert_eq!(
+            encode_terminal_key_event(TerminalKeyEvent::named(TerminalNamedKey::Enter)),
+            Some(b"\r".to_vec())
+        );
+        assert_eq!(
+            encode_terminal_key_event(TerminalKeyEvent::named(TerminalNamedKey::Backspace)),
+            Some(vec![0x7f])
+        );
+        assert_eq!(
+            encode_terminal_key_event(TerminalKeyEvent::named(TerminalNamedKey::ArrowUp)),
+            Some(b"\x1b[A".to_vec())
+        );
+        assert_eq!(
+            encode_terminal_key_event(TerminalKeyEvent::control('c')),
+            Some(vec![0x03])
+        );
+        assert_eq!(
+            encode_terminal_key_event(TerminalKeyEvent::alt_text("x")),
+            Some(b"\x1bx".to_vec())
+        );
+    }
+
+    #[test]
+    fn terminal_paste_uses_bracketed_paste_when_enabled() {
+        assert_eq!(encode_terminal_paste("hello\n", false), b"hello\n".to_vec());
+        assert_eq!(
+            encode_terminal_paste("hello\n", true),
+            b"\x1b[200~hello\n\x1b[201~".to_vec()
+        );
+    }
+
+    #[test]
+    fn alacritty_terminal_model_replays_raw_chunks_into_grid() {
+        let mut model = TerminalEmulatorModel::new(4, 20, 100);
+        model.feed_bytes(b"one\r\ntwo\r\n\x1b[1A\x1b[2Kdone\r\n");
+
+        let text = model.visible_text();
+
+        assert!(text.contains("one"));
+        assert!(text.contains("done"));
+        assert!(!text.contains("two"));
+    }
+
+    #[test]
+    fn terminal_model_clear_only_resets_visible_scrollback() {
+        let mut model = TerminalEmulatorModel::new(4, 20, 100);
+        model.feed_bytes(b"before\r\n");
+        model.clear_visible();
+        model.feed_bytes(b"after\r\n");
+
+        let text = model.visible_text();
+
+        assert!(!text.contains("before"));
+        assert!(text.contains("after"));
     }
 
     #[test]
@@ -3351,6 +4118,28 @@ mod tests {
             rendered,
             "[terminal scrollback trimmed]\ntwo\nthree\nfour\n"
         );
+    }
+
+    #[test]
+    fn terminal_buffer_changes_feed_only_appended_bytes() {
+        let source = include_str!("terminal.rs");
+        let start = source
+            .find("buffer.connect_changed")
+            .expect("buffer change handler exists");
+        let end = source[start..]
+            .find("buffer.set_text(text)")
+            .map(|offset| start + offset)
+            .expect("initial buffer population follows change handler");
+        let handler = &source[start..end];
+
+        assert!(handler.contains("last_buffer_len"));
+        let append_feed = handler
+            .find("feed_bytes(appended.as_bytes())")
+            .expect("appended text should be fed incrementally");
+        let reset_fallback = handler
+            .find("set_bytes(text.as_bytes())")
+            .expect("non-append changes should still reset the model");
+        assert!(append_feed < reset_fallback);
     }
 
     #[test]

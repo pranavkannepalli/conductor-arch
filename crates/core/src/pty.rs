@@ -16,6 +16,7 @@ pub struct PtySession {
     output: Arc<Mutex<Vec<u8>>>,
     screen: Arc<Mutex<Parser>>,
     read_cursor: usize,
+    exited: bool,
 }
 
 impl PtySession {
@@ -99,6 +100,7 @@ impl PtySession {
             output,
             screen,
             read_cursor: 0,
+            exited: false,
         })
     }
 
@@ -141,7 +143,11 @@ impl PtySession {
     }
 
     pub fn has_exited(&mut self) -> Result<bool> {
-        Ok(self.child.try_wait().context("poll pty child")?.is_some())
+        if self.exited {
+            return Ok(true);
+        }
+        self.exited = self.child.try_wait().context("poll pty child")?.is_some();
+        Ok(self.exited)
     }
 
     pub fn read_available(&mut self) -> String {
@@ -178,12 +184,78 @@ impl PtySession {
 
     pub fn stop(&mut self) -> Result<()> {
         debug!(pid = self.process_id(), "stopping pty session");
+        if self.child.try_wait().context("poll pty child")?.is_some() {
+            let _ = self.child.wait();
+            self.exited = true;
+            return Ok(());
+        }
+        if let Some(pid) = self.process_id() {
+            request_graceful_stop(pid);
+            if wait_for_child_exit(&mut *self.child, Duration::from_secs(3))? {
+                self.exited = true;
+                return Ok(());
+            }
+            force_stop(pid);
+            if wait_for_child_exit(&mut *self.child, Duration::from_millis(500))? {
+                self.exited = true;
+                return Ok(());
+            }
+        }
         if self.child.try_wait().context("poll pty child")?.is_none() {
             self.child.kill().context("kill pty child")?;
         }
         let _ = self.child.wait();
+        self.exited = true;
         Ok(())
     }
+}
+
+fn wait_for_child_exit(child: &mut dyn Child, timeout: Duration) -> Result<bool> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if child.try_wait().context("poll pty child")?.is_some() {
+            let _ = child.wait();
+            return Ok(true);
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    Ok(false)
+}
+
+fn request_graceful_stop(pid: u32) {
+    if crate::platform::terminate_process_group(pid, false).unwrap_or(false) {
+        return;
+    }
+    let _ = terminate_process(pid, false);
+}
+
+fn force_stop(pid: u32) {
+    if crate::platform::terminate_process_group(pid, true).unwrap_or(false) {
+        return;
+    }
+    let _ = terminate_process(pid, true);
+}
+
+#[cfg(unix)]
+fn terminate_process(pid: u32, force: bool) -> std::io::Result<bool> {
+    let signal = if force { "-KILL" } else { "-TERM" };
+    std::process::Command::new("kill")
+        .arg(signal)
+        .arg(pid.to_string())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+}
+
+#[cfg(windows)]
+fn terminate_process(pid: u32, force: bool) -> std::io::Result<bool> {
+    crate::platform::terminate_process_tree(pid, force)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn terminate_process(_pid: u32, _force: bool) -> std::io::Result<bool> {
+    Ok(false)
 }
 
 impl Drop for PtySession {
