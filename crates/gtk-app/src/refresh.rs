@@ -304,8 +304,6 @@ impl RefreshHub {
                 self.refresh_workspace_event(WorkspaceRefreshTarget::Review, &event);
             }
             RefreshEvent::WorkspaceGitReviewChanged { .. } => {
-                self.refresh(RefreshScope::Sidebar);
-                self.refresh(RefreshScope::Dashboard);
                 self.refresh_workspace_event(WorkspaceRefreshTarget::Review, &event);
                 self.run_event(
                     RefreshMetricTarget::WorkspaceNavRow,
@@ -671,7 +669,7 @@ mod tests {
     }
 
     #[test]
-    fn git_review_refresh_event_updates_review_nav_and_summaries_without_shell_rebuild() {
+    fn git_review_refresh_event_updates_review_and_nav_without_global_summary_refresh() {
         let hub = RefreshHub::default();
         let counts = RefreshCounts::default();
         counts.install(&hub);
@@ -680,7 +678,7 @@ mod tests {
             workspace: "demo".to_owned(),
         });
 
-        assert_eq!(counts.values(), (1, 1, 0, 0, 0, 0, 0, 0, 1, 1));
+        assert_eq!(counts.values(), (0, 0, 0, 0, 0, 0, 0, 0, 1, 1));
     }
 
     #[test]

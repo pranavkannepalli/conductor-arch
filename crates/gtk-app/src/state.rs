@@ -763,15 +763,24 @@ impl AppState {
         &self,
         workspace: String,
         snapshot: WorkspaceGitReviewUiSnapshot,
-    ) {
-        {
+    ) -> bool {
+        let changed = {
             let mut state = self.inner.borrow_mut();
-            state.refreshing_git_review_workspaces.remove(&workspace);
-            state
-                .git_review_snapshots
-                .insert(workspace.clone(), snapshot);
+            let was_refreshing = state.refreshing_git_review_workspaces.remove(&workspace);
+            let snapshot_changed = state.git_review_snapshots.get(&workspace) != Some(&snapshot);
+            if snapshot_changed {
+                state
+                    .git_review_snapshots
+                    .insert(workspace.clone(), snapshot);
+            }
+            was_refreshing || snapshot_changed
+        };
+        if changed {
+            self.emit(AppStateEvent::WorkspaceGitReviewStateChanged {
+                workspace: workspace.clone(),
+            });
         }
-        self.emit(AppStateEvent::WorkspaceGitReviewStateChanged { workspace });
+        changed
     }
 
     pub fn workspace_git_review_snapshot(
@@ -1138,6 +1147,33 @@ mod tests {
 
         assert!(!state.workspace_git_review_refreshing("berlin"));
         assert!(state.workspace_git_review_snapshot("berlin").is_some());
+    }
+
+    #[test]
+    fn app_state_does_not_emit_git_review_change_for_unchanged_snapshot() {
+        let state = AppState::new(
+            AppPaths::from_env(),
+            Some("berlin".to_owned()),
+            WorkspaceTab::Checks,
+            AppPage::Workspace,
+        );
+        let events = Rc::new(Cell::new(0));
+        let events_for_watcher = Rc::clone(&events);
+        let _subscription = state.subscribe(move |event, _snapshot| {
+            if matches!(event, AppStateEvent::WorkspaceGitReviewStateChanged { .. }) {
+                events_for_watcher.set(events_for_watcher.get() + 1);
+            }
+        });
+        let snapshot = WorkspaceGitReviewUiSnapshot {
+            pull_request: None,
+            readiness: None,
+            summary: None,
+        };
+
+        assert!(state.set_workspace_git_review_snapshot("berlin".to_owned(), snapshot.clone()));
+        assert!(!state.set_workspace_git_review_snapshot("berlin".to_owned(), snapshot));
+
+        assert_eq!(events.get(), 1);
     }
 
     #[test]

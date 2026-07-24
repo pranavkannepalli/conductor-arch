@@ -734,7 +734,7 @@ fn spawn_git_review_sample_now(db_path: PathBuf, app_state: AppState, workspaces
             Ok(samples) => {
                 for sample in samples {
                     let workspace = sample.workspace.clone();
-                    app_state.set_workspace_git_review_snapshot(
+                    let changed = app_state.set_workspace_git_review_snapshot(
                         workspace.clone(),
                         state::WorkspaceGitReviewUiSnapshot {
                             pull_request: sample.pull_request,
@@ -742,8 +742,10 @@ fn spawn_git_review_sample_now(db_path: PathBuf, app_state: AppState, workspaces
                             summary: sample.summary,
                         },
                     );
-                    app_state
-                        .request_refresh(RefreshEvent::WorkspaceGitReviewChanged { workspace });
+                    if changed {
+                        app_state
+                            .request_refresh(RefreshEvent::WorkspaceGitReviewChanged { workspace });
+                    }
                 }
             }
             Err(err) => {
@@ -1349,13 +1351,6 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
                     if due.is_empty() {
                         return;
                     }
-                    for workspace in &due {
-                        state_for_sample
-                            .mark_workspace_git_review_refreshing(workspace.clone(), true);
-                        state_for_sample.request_refresh(RefreshEvent::WorkspaceGitReviewChanged {
-                            workspace: workspace.clone(),
-                        });
-                    }
                     let due_for_error = due.clone();
                     let state_for_result = state_for_sample.clone();
                     archcar_async::spawn_background_job(
@@ -1373,17 +1368,22 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
                                 Ok(samples) => {
                                     for sample in samples {
                                         let workspace = sample.workspace.clone();
-                                        state_for_result.set_workspace_git_review_snapshot(
-                                            workspace.clone(),
-                                            state::WorkspaceGitReviewUiSnapshot {
-                                                pull_request: sample.pull_request,
-                                                readiness: sample.readiness,
-                                                summary: sample.summary,
-                                            },
-                                        );
-                                        state_for_result.request_refresh(
-                                            RefreshEvent::WorkspaceGitReviewChanged { workspace },
-                                        );
+                                        let changed = state_for_result
+                                            .set_workspace_git_review_snapshot(
+                                                workspace.clone(),
+                                                state::WorkspaceGitReviewUiSnapshot {
+                                                    pull_request: sample.pull_request,
+                                                    readiness: sample.readiness,
+                                                    summary: sample.summary,
+                                                },
+                                            );
+                                        if changed {
+                                            state_for_result.request_refresh(
+                                                RefreshEvent::WorkspaceGitReviewChanged {
+                                                    workspace,
+                                                },
+                                            );
+                                        }
                                     }
                                 }
                                 Err(err) => {
