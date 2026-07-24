@@ -1,0 +1,19 @@
+docs/superpowers/specs/2026-07-24-gtk-refresh-background-chat-risk-status.md
+  s_8551a3fcc67847::t_c7d3b94b1c4833 1-124
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "4927420db2cb9ce21cc0738be3a64e499948a36e",
+  "prompts": {},
+  "sessions": {
+    "s_8551a3fcc67847": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f9285-fae7-7613-88a4-cb990b7b1575",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
