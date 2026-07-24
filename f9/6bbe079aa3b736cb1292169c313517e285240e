@@ -1,0 +1,23 @@
+crates/core/src/archcar/session.rs
+  s_f13d2d5253a7ac::t_425f0ef79471a1 232
+  s_f13d2d5253a7ac::t_0f435ac734d63e 1649,1658-1662,1686-1687,3164,3166,3170,3174,3177-3182,3184-3185
+  s_f13d2d5253a7ac::t_29a3dfda4e3d2c 3339-3409,4928,4955-4956
+  s_f13d2d5253a7ac::t_9b896efb50ff98 1382-1390,3183,3186-3189
+  s_f13d2d5253a7ac::t_f9384d070f905d 1663-1685
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "f96bbe079aa3b736cb1292169c313517e285240e",
+  "prompts": {},
+  "sessions": {
+    "s_f13d2d5253a7ac": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f9258-560e-7ac2-a4e3-7d556b47105e",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
