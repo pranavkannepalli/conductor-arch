@@ -3264,6 +3264,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
     use std::sync::{Mutex, OnceLock};
+    use std::time::Instant;
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -3306,13 +3307,15 @@ mod tests {
     fn reattached_stop_sends_sigterm_before_force_kill() {
         let temp = tempfile::tempdir().unwrap();
         let marker = temp.path().join("term.marker");
-        let script = format!(
-            "trap 'echo term > {}; exit 0' TERM; while :; do sleep 1; done",
-            marker.display()
-        );
+        let ready = temp.path().join("ready.marker");
+        let script = "trap 'printf \"term\\n\" > \"$TERM_MARKER\"; exit 0' TERM; \
+            printf ready > \"$READY_MARKER\"; \
+            while :; do sleep 1; done";
         let mut child = Command::new("/bin/sh")
             .arg("-c")
             .arg(script)
+            .env("TERM_MARKER", &marker)
+            .env("READY_MARKER", &ready)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -3329,11 +3332,26 @@ mod tests {
             pid: child.id(),
         };
 
-        thread::sleep(Duration::from_millis(100));
+        wait_for_file_contents(&ready, "ready");
         session.stop().unwrap();
         let _ = child.wait();
 
         assert_eq!(fs::read_to_string(marker).unwrap(), "term\n");
+    }
+
+    #[cfg(unix)]
+    fn wait_for_file_contents(path: &Path, expected: &str) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if fs::read_to_string(path).is_ok_and(|contents| contents == expected) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        panic!(
+            "timed out waiting for {} to contain {expected:?}",
+            path.display()
+        );
     }
 
     #[cfg(unix)]

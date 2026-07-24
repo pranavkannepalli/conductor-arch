@@ -38,8 +38,9 @@ pub mod workspace;
 #[cfg(test)]
 mod pty_tests {
     use std::ffi::OsString;
-    use std::path::PathBuf;
-    use std::time::Duration;
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, Instant};
+    use std::{fs, thread};
 
     #[test]
     fn pty_session_accepts_input_and_streams_output() {
@@ -93,23 +94,41 @@ mod pty_tests {
     fn pty_stop_sends_sigterm_before_force_kill() {
         let temp = tempfile::tempdir().unwrap();
         let marker = temp.path().join("term.marker");
-        let script = format!(
-            "trap 'echo term > {}; exit 0' TERM; while :; do sleep 1; done",
-            marker.display()
-        );
+        let ready = temp.path().join("ready.marker");
+        let script = "trap 'printf \"term\\n\" > \"$TERM_MARKER\"; exit 0' TERM; \
+            printf ready > \"$READY_MARKER\"; \
+            while :; do sleep 1; done";
         let mut session = crate::pty::PtySession::spawn(
             PathBuf::from("/bin/sh"),
-            vec!["-c".to_owned(), script],
+            vec!["-c".to_owned(), script.to_owned()],
             temp.path(),
-            Vec::new(),
+            vec![
+                ("TERM_MARKER".to_owned(), marker.as_os_str().to_owned()),
+                ("READY_MARKER".to_owned(), ready.as_os_str().to_owned()),
+            ],
             24,
             80,
         )
         .unwrap();
 
-        std::thread::sleep(Duration::from_millis(100));
+        wait_for_file_contents(&ready, "ready");
         session.stop().unwrap();
 
         assert_eq!(std::fs::read_to_string(marker).unwrap(), "term\n");
+    }
+
+    #[cfg(unix)]
+    fn wait_for_file_contents(path: &Path, expected: &str) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if fs::read_to_string(path).is_ok_and(|contents| contents == expected) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        panic!(
+            "timed out waiting for {} to contain {expected:?}",
+            path.display()
+        );
     }
 }
