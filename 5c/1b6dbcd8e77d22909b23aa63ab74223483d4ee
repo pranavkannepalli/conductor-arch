@@ -1,0 +1,19 @@
+docs/gtk-refresh-refactor-map.md
+  s_1ccb275baaaa72::t_b3cac319fd802d 26-138
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "5c1b6dbcd8e77d22909b23aa63ab74223483d4ee",
+  "prompts": {},
+  "sessions": {
+    "s_1ccb275baaaa72": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f92d0-e866-7991-9cc2-28aa874b8b97",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
