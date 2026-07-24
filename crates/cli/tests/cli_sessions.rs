@@ -1140,7 +1140,7 @@ fn wait_for_visible_user_messages(
 }
 
 fn wait_for_session_exit(root: &Path, session_id: i64) {
-    for _ in 0..100 {
+    for _ in 0..300 {
         if WorkspaceStore::open(app_database_path(root))
             .and_then(|store| store.get_process_record(session_id))
             .map(|process| process.status != archductor_core::workspace::ProcessStatus::Running)

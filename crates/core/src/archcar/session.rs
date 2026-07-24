@@ -229,7 +229,10 @@ impl ManagedSessionConnection {
                 connection.child.kill()?;
                 Ok(())
             }
-            Self::Reattached { .. } => Ok(()),
+            Self::Reattached { pid, .. } => {
+                request_graceful_process_stop(*pid);
+                Ok(())
+            }
         }
     }
 
@@ -3127,6 +3130,25 @@ pub(crate) fn terminate_process(process_id: u32) {
         let _ = std::process::Command::new("kill")
             .arg("-KILL")
             .arg(process_id.to_string())
+            .status();
+    }
+}
+
+fn request_graceful_process_stop(process_id: u32) {
+    if crate::platform::terminate_process_group(process_id, false).unwrap_or(false) {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        let _ = std::process::Command::new("kill")
+            .arg("-TERM")
+            .arg(process_id.to_string())
+            .status();
+    }
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("taskkill.exe")
+            .args(["/PID", &process_id.to_string(), "/T"])
             .status();
     }
 }
