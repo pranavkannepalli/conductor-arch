@@ -1,0 +1,22 @@
+docs/app-state-refresh-map.md
+  s_21a3d65542d8de::t_bcde34031d8aae 155-158
+progress.md
+  s_21a3d65542d8de::t_bcde34031d8aae 3,130-133,220-228
+  s_21a3d65542d8de::t_dcf6bd592d1cfb 229
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "6be578b43c9702ef48438b96b73e9648fbe7b589",
+  "prompts": {},
+  "sessions": {
+    "s_21a3d65542d8de": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f92f6-3d1b-7170-bb86-897b524903bf",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
