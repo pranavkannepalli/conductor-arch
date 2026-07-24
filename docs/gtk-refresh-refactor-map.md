@@ -102,13 +102,31 @@ recovery.
 Whole sidebar/dashboard/history refresh for runtime/chat/review child changes
 
 - workspace nav row handler
-- sidebar row additions label
-- sidebar row deletions label
+- scoped workspace diff stats listener
 - future dashboard card handlers
 - future history row handlers
 - future runtime badge/count handlers
 - future chat badge/count handlers
 - future review badge/count handlers
+
+## Scoped Listener Model
+
+`RefreshHub` supports grouped updater callbacks for coarse mounted surfaces and
+RAII scoped listeners for payload-specific row/card ownership. Dropping the
+subscription unregisters the listener. Listener filters match the exact event
+type and key; missing listeners do not fall back to nav rows, sidebars, shells,
+or panels.
+
+Updater scopes:
+
+Workspace row/nav listener
+- WorkspaceHeaderChanged
+- WorkspaceStatusChanged
+- WorkspaceBranchChanged
+- WorkspaceMetadataChanged
+
+Workspace diff stats listener
+- WorkspaceDiffStatsChanged { workspace, additions, deletions }
 
 Whole right-panel refresh for child changes
 
@@ -140,9 +158,9 @@ Other broad or not-yet-split panel refreshes
 
 | File | Change |
 | --- | --- |
-| `crates/gtk-app/src/refresh.rs` | Removed broad refresh states, removed shell fallback, added small events, added right-panel child slots, added guard tests. |
+| `crates/gtk-app/src/refresh.rs` | Removed broad refresh states, removed shell fallback, added small events, added right-panel child slots, added scoped listener subscriptions, added guard tests. |
 | `crates/gtk-app/src/main.rs` | Replaced routine full refresh with debug full refresh; replaced command-palette terminal refresh with `TerminalChanged`. |
-| `crates/gtk-app/src/sidebar.rs` | Added row-level refs for additions/deletions labels and updates them from `WorkspaceDiffStatsChanged`. |
+| `crates/gtk-app/src/sidebar.rs` | Added row-level refs for additions/deletions labels and updates them from scoped `WorkspaceDiffStatsChanged` subscriptions. |
 | `crates/gtk-app/src/workspace_command_center.rs` | Replaced several workspace-shell rebuild callers with targeted workspace/right-panel events; registered right-panel file-list and diff-preview child handlers. |
 
 ## Status Legend
@@ -302,7 +320,7 @@ pub enum RefreshEvent {
 | `SettingsChanged` | Projects, workspace shell. | `SettingsChanged`; `SettingsSectionChanged { scope, section }` | `SettingsChanged` refreshes projects and workspace mount. `SettingsSectionChanged` is currently placeholder. | Split |
 | `WorkspaceSelectionChanged` | Sidebar, workspace shell. | `WorkspaceSelectionChanged` | Sidebar, workspace mount. | Mount-only |
 | `WorkspaceInventoryChanged` | Sidebar, dashboard, history, workspace shell. | `WorkspaceInventoryChanged`; `WorkspaceLifecycleChanged { workspace }` | Both route inventory/lifecycle changes to sidebar, dashboard, history, and workspace mount. | Split / mount-only |
-| `WorkspaceMetadataChanged { old_workspace, workspace, branch }` | Workspace nav row only. | `WorkspaceHeaderChanged`, `WorkspaceStatusChanged`, `WorkspaceDiffStatsChanged`, `WorkspaceBranchChanged`, `WorkspaceLifecycleChanged`, compatibility `WorkspaceMetadataChanged` | Header/status/branch/metadata/diff route to workspace nav row. `WorkspaceDiffStatsChanged` updates sidebar row diff labels. `WorkspaceMetadataChanged` still handles rename and optional branch text. | Split |
+| `WorkspaceMetadataChanged { old_workspace, workspace, branch }` | Workspace nav row only. | `WorkspaceHeaderChanged`, `WorkspaceStatusChanged`, `WorkspaceDiffStatsChanged`, `WorkspaceBranchChanged`, `WorkspaceLifecycleChanged`, compatibility `WorkspaceMetadataChanged` | Header/status/branch/metadata route to workspace nav row. `WorkspaceDiffStatsChanged` routes only to exact-workspace scoped listeners. `WorkspaceMetadataChanged` still handles rename and optional branch text. | Split |
 | `WorkspaceRuntimeChanged { workspace }` | Sidebar, dashboard, history, runtime. | `WorkspaceRuntimeChanged`; `RuntimeProcessChanged { workspace, process_id }` | `WorkspaceRuntimeChanged` routes only to runtime. `RuntimeProcessChanged` is placeholder. | Split |
 | `WorkspaceReviewChanged { workspace }` | Dashboard, history, review. | `WorkspaceReviewChanged`; `ReviewCommentsChanged { workspace }` | `WorkspaceReviewChanged` routes only to review. `ReviewCommentsChanged` is placeholder. | Split |
 | `WorkspaceGitReviewChanged { workspace }` | Review and workspace nav row. | `WorkspaceGitReviewChanged` | Review and workspace nav row. | Preserved |
@@ -318,7 +336,7 @@ pub enum RefreshEvent {
 | --- | --- | --- | --- |
 | `WorkspaceHeaderChanged { workspace }` | Header/title row and nav row. | Workspace nav row. | Placeholder in mounted sidebar handler. |
 | `WorkspaceStatusChanged { workspace }` | Workspace status label and row/card status. | Workspace nav row. | Placeholder in mounted sidebar handler. |
-| `WorkspaceDiffStatsChanged { workspace, additions, deletions }` | Sidebar/dashboard/history row/card diff labels. | Workspace nav row. | Implemented for sidebar row additions/deletions labels. |
+| `WorkspaceDiffStatsChanged { workspace, additions, deletions }` | Sidebar/dashboard/history row/card diff labels. | Scoped diff stats listeners. | Implemented for sidebar row additions/deletions labels. |
 | `WorkspaceBranchChanged { workspace }` | Branch label and row/card branch metadata. | Workspace nav row. | Placeholder unless paired with `WorkspaceMetadataChanged { branch: Some(..) }`. |
 | `WorkspaceLifecycleChanged { workspace }` | Structural mount changes: create/delete/archive/restore. | Sidebar, dashboard, history, workspace mount. | Implemented as mount/inventory fanout. |
 | `WorkspaceMetadataChanged { old_workspace, workspace, branch }` | Compatibility rename/branch update event. | Workspace nav row. | Implemented for sidebar rename and optional branch text. |
@@ -344,7 +362,7 @@ pub enum RefreshEvent {
 | `ProjectInventoryChanged` | Project-level list/card rebuilds. | Projects, sidebar, dashboard. | Implemented. |
 | `WorkspaceInventoryChanged` | Workspace structural list/card rebuilds. | Sidebar, dashboard, history, workspace mount. | Implemented. |
 | `WorkspaceMetadataChanged` | Affected workspace row. | Workspace nav row. | Implemented for sidebar row rename/branch. |
-| `WorkspaceDiffStatsChanged` | Affected workspace row/card diff labels. | Workspace nav row. | Implemented for sidebar row labels. Dashboard/history card handlers are not wired in this commit. |
+| `WorkspaceDiffStatsChanged` | Affected workspace row/card diff labels. | Scoped diff stats listeners. | Implemented for sidebar row labels. Dashboard/history card handlers are not wired in this commit. |
 | `WorkspaceRuntimeChanged` | Affected runtime badge/count only. | Runtime only. | Sidebar/dashboard/history no longer refresh from this event. Targeted row/card runtime handlers are not wired in this commit. |
 | `WorkspaceChatLifecycleChanged` | Affected chat badge/count only. | Chat tabs only. | Sidebar/dashboard/history no longer refresh from this event. Targeted row/card chat handlers are not wired in this commit. |
 | `WorkspaceReviewChanged` | Affected review badge/count only. | Review only. | Dashboard/history no longer refresh from this event. Targeted card review handlers are not wired in this commit. |
@@ -381,7 +399,7 @@ pub enum RefreshEvent {
 | `set_workspace_chat_tabs` | Workspace chat tab strip callback. | `set_workspace_chat_tabs` | Preserved, no shell fallback. |
 | `set_workspace_runtime` | Workspace runtime callback. | `set_workspace_runtime` | Preserved, no shell fallback. |
 | `set_workspace_review` | Workspace review callback. | `set_workspace_review` | Preserved, no shell fallback. |
-| `set_workspace_nav_row` | Sidebar row metadata callback. | `set_workspace_nav_row` | Expanded to receive split workspace row events. |
+| `set_workspace_nav_row` | Sidebar row metadata callback. | `set_workspace_nav_row` | Receives workspace header/status/branch/metadata events. Diff stats use scoped subscriptions. |
 | none | Mounted right-panel file list. | `set_right_panel_file_list` | Added. |
 | none | Mounted right-panel file diff/preview. | `set_right_panel_diff_preview` | Added. |
 
@@ -434,7 +452,7 @@ Acceptance check:
 | Link/unlink directory refreshed whole workspace. | Emits `RightPanelFileListChanged`. | `workspace_command_center.rs` |
 | Conflict copy all refreshed whole workspace. | Emits `RightPanelFileListChanged`. | `workspace_command_center.rs` |
 | Conflict copy one file refreshed whole workspace. | Emits `RightPanelFileListChanged`. | `workspace_command_center.rs` |
-| Sidebar row metadata handler only handled rename. | Sidebar stores diff label refs and updates additions/deletions from `WorkspaceDiffStatsChanged`. | `sidebar.rs` |
+| Sidebar row metadata handler only handled rename. | Sidebar row diff labels update from per-row scoped `WorkspaceDiffStatsChanged` subscriptions. | `sidebar.rs` |
 
 ## Current Gaps
 
@@ -458,8 +476,9 @@ Known placeholder events:
 
 Known partially wired events:
 
-- `WorkspaceDiffStatsChanged` updates sidebar row diff labels; dashboard and
-  history card diff labels are not wired.
+- `WorkspaceDiffStatsChanged` updates mounted sidebar row diff labels through
+  exact-workspace scoped listeners; dashboard and history card diff labels are
+  not wired.
 - `ChatMessageAppended`, `ChatMessageUpdated`, and `ChatTimelineTailChanged`
   route to the chat surface, but most current callers still emit
   `WorkspaceChatMessagesChanged`.

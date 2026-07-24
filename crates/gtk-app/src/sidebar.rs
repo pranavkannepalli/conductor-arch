@@ -22,7 +22,7 @@ use crate::archcar_async::{
 };
 use crate::buttons::{icon_button, menu_text_button, resolve_icon_name, text_button};
 use crate::projects::show_project_creation_popover;
-use crate::refresh::{RefreshEvent, RefreshHub, RefreshScope};
+use crate::refresh::{RefreshEvent, RefreshHub, RefreshScope, RefreshSubscription};
 use crate::state::{AppPage, AppState, WorkspaceTab};
 use crate::title_case_workspace;
 use crate::toast::{surface_label_error, ToastManager};
@@ -488,6 +488,12 @@ pub(crate) fn build_app_sidebar(
                                 &ws.updated_at,
                             );
                             let workspace_name = Rc::new(RefCell::new(ws.name.clone()));
+                            let diff_stats_subscription = workspace_diff_stats_subscription(
+                                &refresh_hub,
+                                ws.name.clone(),
+                                row.additions_label.clone(),
+                                row.deletions_label.clone(),
+                            );
                             workspace_rows_for_apply.borrow_mut().insert(
                                 ws.name.clone(),
                                 SidebarWorkspaceRow {
@@ -496,6 +502,7 @@ pub(crate) fn build_app_sidebar(
                                     meta_label: row.meta_label.clone(),
                                     additions_label: row.additions_label.clone(),
                                     deletions_label: row.deletions_label.clone(),
+                                    _diff_stats_subscription: diff_stats_subscription,
                                     branch: ws.branch.clone(),
                                     status: ws.status.clone(),
                                     updated_at: ws.updated_at.clone(),
@@ -557,12 +564,14 @@ pub(crate) fn build_app_sidebar(
     {
         let names = Rc::clone(&names);
         let workspace_rows = Rc::clone(&workspace_rows);
-        refresh_hub.set_workspace_nav_row(move |event| match event {
-            RefreshEvent::WorkspaceMetadataChanged {
+        let refresh_hub_for_subscription = refresh_hub.clone();
+        refresh_hub.set_workspace_nav_row(move |event| {
+            if let RefreshEvent::WorkspaceMetadataChanged {
                 old_workspace,
                 workspace,
                 branch,
-            } => {
+            } = event
+            {
                 let row = { workspace_rows.borrow_mut().remove(old_workspace) };
                 if let Some(mut row) = row {
                     row.name_label.set_text(&title_case_workspace(workspace));
@@ -575,6 +584,12 @@ pub(crate) fn build_app_sidebar(
                         ));
                     }
                     *row.name.borrow_mut() = workspace.clone();
+                    row._diff_stats_subscription = workspace_diff_stats_subscription(
+                        &refresh_hub_for_subscription,
+                        workspace.clone(),
+                        row.additions_label.clone(),
+                        row.deletions_label.clone(),
+                    );
                     workspace_rows.borrow_mut().insert(workspace.clone(), row);
                 }
 
@@ -584,21 +599,6 @@ pub(crate) fn build_app_sidebar(
                     }
                 }
             }
-            RefreshEvent::WorkspaceDiffStatsChanged {
-                workspace,
-                additions,
-                deletions,
-            } => {
-                if let Some(row) = workspace_rows.borrow().get(workspace) {
-                    if let Some(label) = row.additions_label.as_ref() {
-                        label.set_text(&format!("+ {additions}"));
-                    }
-                    if let Some(label) = row.deletions_label.as_ref() {
-                        label.set_text(&format!("- {deletions}"));
-                    }
-                }
-            }
-            _ => {}
         });
     }
 
@@ -854,13 +854,13 @@ where
     }
 }
 
-#[derive(Clone)]
 struct SidebarWorkspaceRow {
     name: Rc<RefCell<String>>,
     name_label: Label,
     meta_label: Label,
     additions_label: Option<Label>,
     deletions_label: Option<Label>,
+    _diff_stats_subscription: Option<RefreshSubscription>,
     branch: String,
     status: String,
     updated_at: String,
@@ -1016,6 +1016,23 @@ fn workspace_diff_stats(additions: usize, deletions: usize) -> WorkspaceDiffStat
         additions_label,
         deletions_label,
     }
+}
+
+fn workspace_diff_stats_subscription(
+    refresh_hub: &RefreshHub,
+    workspace: String,
+    additions_label: Option<Label>,
+    deletions_label: Option<Label>,
+) -> Option<RefreshSubscription> {
+    let (Some(additions_label), Some(deletions_label)) = (additions_label, deletions_label) else {
+        return None;
+    };
+    Some(
+        refresh_hub.on_workspace_diff_stats(workspace, move |stats| {
+            additions_label.set_text(&format!("+ {}", stats.additions));
+            deletions_label.set_text(&format!("- {}", stats.deletions));
+        }),
+    )
 }
 
 fn attach_workspace_row_context_menu(
@@ -1874,6 +1891,28 @@ mod tests {
         assert!(
             !populate_region.contains("WorkspaceStore::open_app(db_path_populate.clone())"),
             "sidebar populate must not open workspace storage on the GTK thread"
+        );
+    }
+
+    #[test]
+    fn sidebar_workspace_diff_stats_use_scoped_listener() {
+        let source = include_str!("sidebar.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("sidebar source should contain production code");
+
+        assert!(
+            production_source.contains(".on_workspace_diff_stats("),
+            "sidebar workspace rows must use scoped diff-stat subscriptions"
+        );
+        let nav_start = production_source
+            .find("refresh_hub.set_workspace_nav_row")
+            .expect("workspace nav row handler exists");
+        let nav_region = &production_source[nav_start..];
+        assert!(
+            !nav_region.contains("RefreshEvent::WorkspaceDiffStatsChanged"),
+            "workspace nav row handler must not handle diff-stat updates"
         );
     }
 

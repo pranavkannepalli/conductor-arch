@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 #[derive(Clone, Copy, Debug)]
 pub enum RefreshScope {
@@ -126,6 +126,57 @@ pub enum RefreshEvent {
 
 type RefreshHandler = Rc<dyn Fn()>;
 type RefreshEventHandler = Rc<dyn Fn(&RefreshEvent)>;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RefreshFilter {
+    WorkspaceDiffStats { workspace: String },
+}
+
+impl RefreshFilter {
+    pub fn workspace_diff_stats(workspace: impl Into<String>) -> Self {
+        Self::WorkspaceDiffStats {
+            workspace: workspace.into(),
+        }
+    }
+
+    fn matches(&self, event: &RefreshEvent) -> bool {
+        match (self, event) {
+            (
+                Self::WorkspaceDiffStats { workspace: target },
+                RefreshEvent::WorkspaceDiffStatsChanged { workspace, .. },
+            ) => workspace == target,
+            _ => false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceDiffStatsRefresh {
+    pub workspace: String,
+    pub additions: u64,
+    pub deletions: u64,
+}
+
+struct RefreshListener {
+    id: u64,
+    filter: RefreshFilter,
+    handler: RefreshEventHandler,
+}
+
+pub struct RefreshSubscription {
+    id: u64,
+    listeners: Weak<RefCell<Vec<RefreshListener>>>,
+}
+
+impl Drop for RefreshSubscription {
+    fn drop(&mut self) {
+        if let Some(listeners) = self.listeners.upgrade() {
+            listeners
+                .borrow_mut()
+                .retain(|listener| listener.id != self.id);
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 enum RefreshMetricTarget {
@@ -300,6 +351,8 @@ pub struct RefreshHub {
     workspace_nav_row: Rc<RefCell<Option<RefreshEventHandler>>>,
     right_panel_file_list: Rc<RefCell<Option<RefreshEventHandler>>>,
     right_panel_diff_preview: Rc<RefCell<Option<RefreshEventHandler>>>,
+    listeners: Rc<RefCell<Vec<RefreshListener>>>,
+    next_listener_id: Rc<Cell<u64>>,
     metrics: Rc<RefreshMetrics>,
 }
 
@@ -352,7 +405,50 @@ impl RefreshHub {
         *self.right_panel_diff_preview.borrow_mut() = Some(Rc::new(handler));
     }
 
+    pub fn subscribe(
+        &self,
+        filter: RefreshFilter,
+        handler: impl Fn(&RefreshEvent) + 'static,
+    ) -> RefreshSubscription {
+        let id = self.next_listener_id.get();
+        self.next_listener_id.set(id.saturating_add(1));
+        self.listeners.borrow_mut().push(RefreshListener {
+            id,
+            filter,
+            handler: Rc::new(handler),
+        });
+        RefreshSubscription {
+            id,
+            listeners: Rc::downgrade(&self.listeners),
+        }
+    }
+
+    pub fn on_workspace_diff_stats(
+        &self,
+        workspace: impl Into<String>,
+        handler: impl Fn(WorkspaceDiffStatsRefresh) + 'static,
+    ) -> RefreshSubscription {
+        self.subscribe(
+            RefreshFilter::workspace_diff_stats(workspace),
+            move |event| {
+                if let RefreshEvent::WorkspaceDiffStatsChanged {
+                    workspace,
+                    additions,
+                    deletions,
+                } = event
+                {
+                    handler(WorkspaceDiffStatsRefresh {
+                        workspace: workspace.clone(),
+                        additions: *additions,
+                        deletions: *deletions,
+                    });
+                }
+            },
+        )
+    }
+
     pub fn refresh_event(&self, event: RefreshEvent) {
+        self.run_listeners(&event);
         match event {
             RefreshEvent::ProjectInventoryChanged => {
                 self.refresh(RefreshScope::Projects);
@@ -381,7 +477,6 @@ impl RefreshHub {
             }
             RefreshEvent::WorkspaceHeaderChanged { .. }
             | RefreshEvent::WorkspaceStatusChanged { .. }
-            | RefreshEvent::WorkspaceDiffStatsChanged { .. }
             | RefreshEvent::WorkspaceBranchChanged { .. }
             | RefreshEvent::WorkspaceMetadataChanged { .. } => {
                 self.run_event(
@@ -390,6 +485,7 @@ impl RefreshHub {
                     &event,
                 );
             }
+            RefreshEvent::WorkspaceDiffStatsChanged { .. } => {}
             RefreshEvent::WorkspaceRuntimeChanged { .. } | RefreshEvent::TerminalChanged { .. } => {
                 self.refresh_workspace_event(WorkspaceRefreshTarget::Runtime, &event);
             }
@@ -505,6 +601,19 @@ impl RefreshHub {
         let handler = slot.borrow().as_ref().cloned();
         if let Some(handler) = handler {
             self.metrics.record(target);
+            handler(event);
+        }
+    }
+
+    fn run_listeners(&self, event: &RefreshEvent) {
+        let handlers: Vec<RefreshEventHandler> = self
+            .listeners
+            .borrow()
+            .iter()
+            .filter(|listener| listener.filter.matches(event))
+            .map(|listener| Rc::clone(&listener.handler))
+            .collect();
+        for handler in handlers {
             handler(event);
         }
     }
@@ -646,6 +755,99 @@ mod tests {
         });
 
         assert_eq!(counts.values(), (0, 0, 0, 0, 0, 0, 0, 0, 0, 1));
+    }
+
+    #[test]
+    fn workspace_diff_stats_subscription_receives_only_matching_workspace() {
+        let hub = RefreshHub::default();
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let seen_for_handler = Rc::clone(&seen);
+        let _subscription = hub.on_workspace_diff_stats("a", move |stats| {
+            seen_for_handler.borrow_mut().push(stats);
+        });
+
+        hub.refresh_event(RefreshEvent::WorkspaceDiffStatsChanged {
+            workspace: "a".to_owned(),
+            additions: 12,
+            deletions: 3,
+        });
+        hub.refresh_event(RefreshEvent::WorkspaceDiffStatsChanged {
+            workspace: "b".to_owned(),
+            additions: 99,
+            deletions: 88,
+        });
+        hub.refresh_event(RefreshEvent::WorkspaceMetadataChanged {
+            old_workspace: "old-a".to_owned(),
+            workspace: "a".to_owned(),
+            branch: None,
+        });
+        hub.refresh_event(RefreshEvent::WorkspaceStatusChanged {
+            workspace: "a".to_owned(),
+        });
+        hub.refresh_event(RefreshEvent::WorkspaceRuntimeChanged {
+            workspace: "a".to_owned(),
+        });
+        hub.refresh_event(RefreshEvent::WorkspaceChatMessagesChanged {
+            workspace: "a".to_owned(),
+            thread_id: 7,
+        });
+        hub.refresh_event(RefreshEvent::RightPanelDiffPreviewChanged {
+            workspace: "a".to_owned(),
+            path: "src/lib.rs".to_owned(),
+        });
+
+        assert_eq!(
+            *seen.borrow(),
+            vec![WorkspaceDiffStatsRefresh {
+                workspace: "a".to_owned(),
+                additions: 12,
+                deletions: 3,
+            }]
+        );
+    }
+
+    #[test]
+    fn workspace_diff_stats_subscription_unregisters_on_drop() {
+        let hub = RefreshHub::default();
+        let seen = Rc::new(Cell::new(0));
+        let seen_for_handler = Rc::clone(&seen);
+        let subscription = hub.on_workspace_diff_stats("a", move |_| {
+            seen_for_handler.set(seen_for_handler.get() + 1);
+        });
+
+        hub.refresh_event(RefreshEvent::WorkspaceDiffStatsChanged {
+            workspace: "a".to_owned(),
+            additions: 1,
+            deletions: 2,
+        });
+        drop(subscription);
+        hub.refresh_event(RefreshEvent::WorkspaceDiffStatsChanged {
+            workspace: "a".to_owned(),
+            additions: 3,
+            deletions: 4,
+        });
+
+        assert_eq!(seen.get(), 1);
+    }
+
+    #[test]
+    fn workspace_diff_stats_refresh_does_not_call_workspace_nav_row() {
+        let hub = RefreshHub::default();
+        let counts = RefreshCounts::default();
+        counts.install(&hub);
+
+        hub.refresh_event(RefreshEvent::WorkspaceDiffStatsChanged {
+            workspace: "demo".to_owned(),
+            additions: 4,
+            deletions: 2,
+        });
+
+        assert_eq!(counts.values(), (0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
+        let metrics = hub.refresh_metrics_snapshot();
+        assert_eq!(metrics.total, 0);
+        assert_eq!(metrics.workspace_nav_row, 0);
+        assert_eq!(metrics.sidebar, 0);
+        assert_eq!(metrics.workspace_shell, 0);
     }
 
     #[test]
