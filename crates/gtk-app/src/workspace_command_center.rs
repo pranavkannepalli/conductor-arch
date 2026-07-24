@@ -7,9 +7,9 @@ use archductor_core::doctor::SetupReadiness;
 use archductor_core::paths::AppPaths;
 use archductor_core::settings::PromptKind;
 use archductor_core::workspace::{
-    ChatThreadRecord, DiffFileSummary, ProcessRecord, ProcessStatus, PullRequest,
-    PullRequestCheckRun, PullRequestReviewThread, ReviewComment, SessionKind, Workspace,
-    WorkspaceStore, WorkspaceTimelineEvent,
+    ChatThreadRecord, DiffFileSummary, MergePullRequestResult, ProcessRecord, ProcessStatus,
+    PullRequest, PullRequestCheckRun, PullRequestReviewThread, ReviewComment, SessionKind,
+    Workspace, WorkspaceStore, WorkspaceTimelineEvent,
 };
 use gtk::prelude::*;
 use gtk::{
@@ -2105,50 +2105,30 @@ fn ws_simple_file_list(_db_path: &Path, ws: &Workspace, open_file: Rc<dyn Fn(&st
     list.add_css_class("ws-file-list");
     list.set_selection_mode(gtk::SelectionMode::Single);
 
-    let mut files = list_workspace_files(&ws.path);
-    files.sort();
-
     let rows: Rc<RefCell<Vec<FileTreeRow>>> = Rc::new(RefCell::new(Vec::new()));
-    let mut dir_children: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    let mut file_children: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-
-    for path in &files {
-        let path_ref = std::path::Path::new(path);
-        let mut parent_key = String::new();
-        if let Some(parent) = path_ref.parent() {
-            for component in parent.components() {
-                let name = component.as_os_str().to_string_lossy().into_owned();
-                let next_key = tree_join_path(&parent_key, &name);
-                dir_children
-                    .entry(parent_key.clone())
-                    .or_default()
-                    .insert(name);
-                parent_key = next_key;
-            }
+    let collapsed_dirs: Rc<RefCell<HashSet<String>>> = Rc::new(RefCell::new(HashSet::new()));
+    let workspace_path = ws.path.clone();
+    spawn_background_job(move || list_workspace_files(&workspace_path), {
+        let list = list.clone();
+        let rows = rows.clone();
+        let collapsed_dirs = collapsed_dirs.clone();
+        move |mut files: Vec<String>| {
+            files.sort();
+            clear_list_box(&list);
+            rows.borrow_mut().clear();
+            let (dir_children, file_children) = file_tree_maps(&files);
+            *collapsed_dirs.borrow_mut() = initial_collapsed_dirs(&dir_children);
+            append_file_tree_rows(
+                &list,
+                &rows,
+                &collapsed_dirs,
+                &dir_children,
+                &file_children,
+                "",
+                0,
+            );
         }
-        let file_name = path_ref
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(path.as_str())
-            .to_owned();
-        file_children
-            .entry(parent_key)
-            .or_default()
-            .insert(file_name);
-    }
-
-    let collapsed_dirs: Rc<RefCell<HashSet<String>>> =
-        Rc::new(RefCell::new(initial_collapsed_dirs(&dir_children)));
-
-    append_file_tree_rows(
-        &list,
-        &rows,
-        &collapsed_dirs,
-        &dir_children,
-        &file_children,
-        "",
-        0,
-    );
+    });
 
     let rows_for_select = rows.clone();
     list.connect_row_selected(move |_, row| {
@@ -2174,6 +2154,47 @@ fn ws_simple_file_list(_db_path: &Path, ws: &Workspace, open_file: Rc<dyn Fn(&st
     panel.append(&scroll);
 
     panel
+}
+
+fn clear_list_box(list: &ListBox) {
+    while let Some(child) = list.first_child() {
+        list.remove(&child);
+    }
+}
+
+fn file_tree_maps(
+    files: &[String],
+) -> (
+    BTreeMap<String, BTreeSet<String>>,
+    BTreeMap<String, BTreeSet<String>>,
+) {
+    let mut dir_children: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut file_children: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for path in files {
+        let path_ref = std::path::Path::new(path);
+        let mut parent_key = String::new();
+        if let Some(parent) = path_ref.parent() {
+            for component in parent.components() {
+                let name = component.as_os_str().to_string_lossy().into_owned();
+                let next_key = tree_join_path(&parent_key, &name);
+                dir_children
+                    .entry(parent_key.clone())
+                    .or_default()
+                    .insert(name);
+                parent_key = next_key;
+            }
+        }
+        let file_name = path_ref
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(path.as_str())
+            .to_owned();
+        file_children
+            .entry(parent_key)
+            .or_default()
+            .insert(file_name);
+    }
+    (dir_children, file_children)
 }
 
 fn tree_join_path(parent: &str, child: &str) -> String {
@@ -2913,68 +2934,42 @@ fn workspace_files_panel(
     panel.append(&action_row);
 
     let file_list = GBox::new(Orientation::Vertical, 4);
-    let files = list_workspace_files(&ws.path);
-    if files.is_empty() {
-        file_list.append(&detail_row("Files", "No visible files."));
-    } else {
-        for relative in files {
-            let open_btn = flat_button(&relative);
-            open_btn.set_hexpand(true);
-            open_btn.set_halign(Align::Fill);
-            let current_file_open = current_file.clone();
-            let selected_file_open = selected_file.clone();
-            let edit_buffer = edit_view.buffer();
-            let diff_buffer = diff_view.buffer();
-            let preview_buffer = preview_view.buffer();
-            let workspace_path = ws.path.clone();
-            let db_path_open = db_path.to_path_buf();
-            let workspace_name = ws.name.clone();
-            let relative_path = relative.clone();
-            let mode_stack_open = mode_stack.clone();
-            open_btn.connect_clicked(move |_| {
-                *selected_file_open.borrow_mut() = Some(relative_path.clone());
-                current_file_open.set_text(&relative_path);
-                edit_buffer.set_text("Loading file...");
-                preview_buffer.set_text("Loading file...");
-                diff_buffer.set_text("Loading diff...");
-                let selected_file_apply = selected_file_open.clone();
-                let edit_buffer_apply = edit_buffer.clone();
-                let preview_buffer_apply = preview_buffer.clone();
-                let diff_buffer_apply = diff_buffer.clone();
-                let mode_stack_apply = mode_stack_open.clone();
-                let workspace_path = workspace_path.clone();
-                let db_path_open = db_path_open.clone();
-                let workspace_name = workspace_name.clone();
-                let relative_path = relative_path.clone();
-                spawn_background_job(
-                    move || {
-                        load_workspace_file_snapshot(
-                            workspace_path,
-                            db_path_open,
-                            workspace_name,
-                            relative_path,
-                        )
-                    },
-                    move |snapshot| {
-                        if selected_file_apply.borrow().as_deref()
-                            != Some(snapshot.relative_path.as_str())
-                        {
-                            return;
-                        }
-                        edit_buffer_apply.set_text(&snapshot.contents);
-                        preview_buffer_apply.set_text(&snapshot.contents);
-                        diff_buffer_apply.set_text(&snapshot.diff_text);
-                        if snapshot.relative_path.ends_with(".md") {
-                            mode_stack_apply.set_visible_child_name("preview");
-                        } else {
-                            mode_stack_apply.set_visible_child_name("edit");
-                        }
-                    },
-                );
-            });
-            file_list.append(&open_btn);
+    file_list.append(&detail_row("Files", "Loading files..."));
+    let workspace_path_for_files = ws.path.clone();
+    spawn_background_job(move || list_workspace_files(&workspace_path_for_files), {
+        let file_list = file_list.clone();
+        let current_file = current_file.clone();
+        let selected_file = selected_file.clone();
+        let edit_buffer = edit_view.buffer();
+        let diff_buffer = diff_view.buffer();
+        let preview_buffer = preview_view.buffer();
+        let workspace_path = ws.path.clone();
+        let db_path_open = db_path.to_path_buf();
+        let workspace_name = ws.name.clone();
+        let mode_stack = mode_stack.clone();
+        move |files: Vec<String>| {
+            clear_box_children(&file_list);
+            if files.is_empty() {
+                file_list.append(&detail_row("Files", "No visible files."));
+            } else {
+                for relative in files {
+                    append_workspace_file_open_button(
+                        &file_list,
+                        relative,
+                        selected_file.clone(),
+                        current_file.clone(),
+                        edit_buffer.clone(),
+                        diff_buffer.clone(),
+                        preview_buffer.clone(),
+                        workspace_path.clone(),
+                        db_path_open.clone(),
+                        workspace_name.clone(),
+                        mode_stack.clone(),
+                    );
+                }
+            }
         }
-    }
+    });
 
     let file_scroll = ScrolledWindow::new();
     file_scroll.set_policy(PolicyType::Automatic, PolicyType::Automatic);
@@ -3065,6 +3060,67 @@ fn workspace_files_panel(
     });
 
     panel
+}
+
+fn clear_box_children(container: &GBox) {
+    while let Some(child) = container.first_child() {
+        container.remove(&child);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_workspace_file_open_button(
+    file_list: &GBox,
+    relative: String,
+    selected_file: Rc<RefCell<Option<String>>>,
+    current_file: Label,
+    edit_buffer: gtk::TextBuffer,
+    diff_buffer: gtk::TextBuffer,
+    preview_buffer: gtk::TextBuffer,
+    workspace_path: PathBuf,
+    db_path: PathBuf,
+    workspace_name: String,
+    mode_stack: Stack,
+) {
+    let open_btn = flat_button(&relative);
+    open_btn.set_hexpand(true);
+    open_btn.set_halign(Align::Fill);
+    open_btn.connect_clicked(move |_| {
+        *selected_file.borrow_mut() = Some(relative.clone());
+        current_file.set_text(&relative);
+        edit_buffer.set_text("Loading file...");
+        preview_buffer.set_text("Loading file...");
+        diff_buffer.set_text("Loading diff...");
+        let selected_file_apply = selected_file.clone();
+        let edit_buffer_apply = edit_buffer.clone();
+        let preview_buffer_apply = preview_buffer.clone();
+        let diff_buffer_apply = diff_buffer.clone();
+        let mode_stack_apply = mode_stack.clone();
+        let workspace_path = workspace_path.clone();
+        let db_path = db_path.clone();
+        let workspace_name = workspace_name.clone();
+        let relative_path = relative.clone();
+        spawn_background_job(
+            move || {
+                load_workspace_file_snapshot(workspace_path, db_path, workspace_name, relative_path)
+            },
+            move |snapshot| {
+                if selected_file_apply.borrow().as_deref() != Some(snapshot.relative_path.as_str())
+                {
+                    return;
+                }
+                edit_buffer_apply.set_text(&snapshot.contents);
+                preview_buffer_apply.set_text(&snapshot.contents);
+                diff_buffer_apply.set_text(&snapshot.diff_text);
+                if snapshot.relative_path.ends_with(".md") {
+                    mode_stack_apply.set_visible_child_name("preview");
+                } else {
+                    mode_stack_apply.set_visible_child_name("edit");
+                }
+            },
+        );
+    });
+    file_list.append(&open_btn);
 }
 
 fn list_workspace_files(root: &Path) -> Vec<String> {
@@ -5623,6 +5679,8 @@ struct WorkspacePrStatusSnapshot {
     pr: Option<PullRequest>,
     status: Option<PullRequestStatusSummary>,
     summary: Option<archductor_core::workspace::ChecksSummary>,
+    refreshing: bool,
+    has_review_snapshot: bool,
 }
 
 pub(crate) fn pull_request_status_summary(
@@ -5696,16 +5754,41 @@ pub(crate) fn workspace_pull_request_status_summary(
 fn workspace_pr_status_snapshot(
     store: &WorkspaceStore,
     workspace_name: &str,
+    state: &AppState,
 ) -> WorkspacePrStatusSnapshot {
+    let refreshing = state.workspace_git_review_refreshing(workspace_name);
+    if let Some(cached) = state.workspace_git_review_snapshot(workspace_name) {
+        let pr = cached.pull_request.or_else(|| {
+            cached
+                .summary
+                .as_ref()
+                .and_then(|summary| summary.pull_request.clone())
+        });
+        let status = pr.as_ref().map(|pr| match cached.summary.as_ref() {
+            Some(summary) => pull_request_status_summary(pr, cached.readiness.as_ref(), summary),
+            None => {
+                pull_request_status_summary_without_checks_summary(pr, cached.readiness.as_ref())
+            }
+        });
+        return WorkspacePrStatusSnapshot {
+            pr,
+            status,
+            summary: cached.summary,
+            refreshing,
+            has_review_snapshot: true,
+        };
+    }
+
     let pr = store.pull_request(workspace_name).ok().flatten();
-    let summary = store.checks_summary(workspace_name).ok();
     let status = pr
         .as_ref()
-        .map(|pr| workspace_pull_request_status_summary(store, workspace_name, pr));
+        .map(|pr| pull_request_status_summary_without_checks_summary(pr, None));
     WorkspacePrStatusSnapshot {
         pr,
         status,
-        summary,
+        summary: None,
+        refreshing,
+        has_review_snapshot: false,
     }
 }
 
@@ -5860,46 +5943,55 @@ fn queue_prompt_to_selected_archcar_chat(
     workspace_name: &str,
     prompt: &str,
 ) -> bool {
+    let Some((thread_id, request, draft)) =
+        selected_archcar_chat_queue_request(db_path, state, workspace_name, prompt)
+    else {
+        return false;
+    };
+    state.queue_chat_input(thread_id, draft);
+    crate::archcar_async::spawn_archcar_request(state.paths.clone(), request);
+    true
+}
+
+fn selected_archcar_chat_queue_request(
+    db_path: &Path,
+    state: &AppState,
+    workspace_name: &str,
+    prompt: &str,
+) -> Option<(i64, ArchcarRequest, QueuedChatInputDraft)> {
     let prompt = prompt.trim();
     if prompt.is_empty() {
-        return false;
+        return None;
     }
-    let Some(thread_id) = state.selected_chat_thread() else {
-        return false;
-    };
+    let thread_id = state.selected_chat_thread()?;
     let Ok(store) = WorkspaceStore::open_app(db_path) else {
-        return false;
+        return None;
     };
     let Ok(thread) = store.get_chat_thread_record(thread_id) else {
-        return false;
+        return None;
     };
     let Ok(workspace) = store.get_workspace_record(thread.workspace_id) else {
-        return false;
+        return None;
     };
     if workspace.name != workspace_name {
-        return false;
+        return None;
     }
     let session_kind = session_kind_from_provider(&thread.provider);
-    let Ok(queued) = store.enqueue_chat_input(
+    let request = ArchcarRequest::QueueChatInput {
         thread_id,
-        prompt,
-        None,
-        ArchcarInputKind::User,
+        input: prompt.to_owned(),
+        visible_input: None,
+        kind: ArchcarInputKind::User,
         session_kind,
-    ) else {
-        return false;
     };
-    state.queue_chat_input(
-        thread_id,
-        QueuedChatInputDraft {
-            id: Some(queued.id),
-            input: queued.input,
-            visible_input: queued.visible_input,
-            kind: queued.input_kind,
-            session_kind: queued.session_kind,
-        },
-    );
-    true
+    let draft = QueuedChatInputDraft {
+        id: None,
+        input: prompt.to_owned(),
+        visible_input: None,
+        kind: ArchcarInputKind::User,
+        session_kind,
+    };
+    Some((thread_id, request, draft))
 }
 
 fn session_kind_from_provider(provider: &str) -> SessionKind {
@@ -5991,19 +6083,53 @@ fn connect_merge_pr_button(
     let workspace_for_merge = workspace_name.to_owned();
     let feedback_for_merge = feedback.clone();
     let toast_for_merge = toast_overlay.clone();
-    button.connect_clicked(move |_| {
-        let result = WorkspaceStore::open_app(db_for_merge.clone()).and_then(|store| {
-            store.merge_and_maybe_archive_pull_request(&workspace_for_merge, Some("squash"))
-        });
-        let refresh_event = pull_request_merge_refresh_event(&workspace_for_merge, &result);
-        apply_action_feedback(
-            &feedback_for_merge,
-            &toast_for_merge,
-            &pull_request_merge_and_archive_feedback(result),
-            true,
+    button.connect_clicked(move |button| {
+        button.set_sensitive(false);
+        let button = button.clone();
+        let db_for_merge = db_for_merge.clone();
+        let workspace_for_merge = workspace_for_merge.clone();
+        let workspace_for_result = workspace_for_merge.clone();
+        let feedback_for_merge = feedback_for_merge.clone();
+        let toast_for_merge = toast_for_merge.clone();
+        let refresh_hub = refresh_hub.clone();
+        spawn_background_job(
+            move || {
+                run_merge_pull_request_action(
+                    db_for_merge,
+                    workspace_for_merge,
+                    Some("squash".to_owned()),
+                )
+            },
+            move |result| {
+                button.set_sensitive(true);
+                let refresh_event =
+                    pull_request_merge_refresh_event(&workspace_for_result, &result);
+                apply_action_feedback(
+                    &feedback_for_merge,
+                    &toast_for_merge,
+                    &pull_request_merge_and_archive_feedback(result),
+                    true,
+                );
+                refresh_hub.refresh_event(refresh_event);
+            },
         );
-        refresh_hub.refresh_event(refresh_event);
     });
+}
+
+fn run_merge_pull_request_action(
+    db_path: PathBuf,
+    workspace: String,
+    method: Option<String>,
+) -> anyhow::Result<MergePullRequestResult> {
+    WorkspaceStore::open_app(db_path)
+        .and_then(|store| store.merge_and_maybe_archive_pull_request(&workspace, method.as_deref()))
+}
+
+fn run_refresh_pull_request_action(
+    db_path: PathBuf,
+    workspace: String,
+) -> anyhow::Result<Option<PullRequest>> {
+    WorkspaceStore::open_app(db_path).and_then(|store| store.refresh_pull_request_state(&workspace))
 }
 
 fn workspace_pr_status_panel(
@@ -6014,7 +6140,7 @@ fn workspace_pr_status_panel(
     refresh_hub: RefreshHub,
     toast_overlay: &ToastOverlay,
 ) -> GBox {
-    let snapshot = workspace_pr_status_snapshot(store, workspace_name);
+    let snapshot = workspace_pr_status_snapshot(store, workspace_name, state);
     let action = workspace_pr_primary_action(&snapshot);
     let panel = GBox::new(Orientation::Horizontal, 8);
     panel.add_css_class("ws-pr-compact-panel");
@@ -6033,7 +6159,13 @@ fn workspace_pr_status_panel(
         chip.connect_clicked(move |_| open_external_url(&url));
         panel.append(&chip);
     }
+    if workspace_pr_status_is_loading(&snapshot) {
+        let spinner = Spinner::new();
+        spinner.start();
+        panel.append(&spinner);
+    }
     let title = Label::new(Some(match action {
+        _ if workspace_pr_status_is_loading(&snapshot) => "Updating review state...",
         Some(action) => workspace_pr_status_title(&snapshot, action),
         None => "No changes",
     }));
@@ -6149,6 +6281,10 @@ fn workspace_pr_status_title(
         Some(PullRequestStateKind::Open) => "Pull request open",
         None => "No pull request yet",
     }
+}
+
+fn workspace_pr_status_is_loading(snapshot: &WorkspacePrStatusSnapshot) -> bool {
+    snapshot.refreshing || (snapshot.pr.is_some() && !snapshot.has_review_snapshot)
 }
 
 fn pull_request_status_summary_without_checks_summary(
@@ -6740,6 +6876,15 @@ fn check_status_icon(key: &str, val: &str) -> (&'static str, &'static str) {
     }
 }
 
+fn run_push_branch_action(db_path: PathBuf, workspace: String) -> anyhow::Result<String> {
+    WorkspaceStore::open_app(db_path).and_then(|store| store.push_branch(&workspace))
+}
+
+fn run_force_push_branch_action(db_path: PathBuf, workspace: String) -> anyhow::Result<String> {
+    WorkspaceStore::open_app(db_path)
+        .and_then(|store| store.force_push_branch_with_lease(&workspace))
+}
+
 fn connect_push_branch_button(
     push_btn: &Button,
     db_path: &Path,
@@ -6751,26 +6896,36 @@ fn connect_push_branch_button(
     let workspace_for_push = name.to_owned();
     let feedback_for_push = feedback.clone();
     let toast_for_push = toast_overlay.clone();
-    push_btn.connect_clicked(move |_| {
-        match WorkspaceStore::open_app(db_for_push.clone())
-            .and_then(|store| store.push_branch(&workspace_for_push))
-        {
-            Ok(output) => {
-                let message = output
-                    .lines()
-                    .map(str::trim)
-                    .find(|line| !line.is_empty())
-                    .map(|line| format!("Pushed branch: {line}"))
-                    .unwrap_or_else(|| "Pushed branch.".to_owned());
-                apply_action_feedback(&feedback_for_push, &toast_for_push, &message, true);
-            }
-            Err(err) => apply_action_feedback(
-                &feedback_for_push,
-                &toast_for_push,
-                &push_branch_error_feedback(&err),
-                true,
-            ),
-        }
+    push_btn.connect_clicked(move |button| {
+        button.set_sensitive(false);
+        let button = button.clone();
+        let db_for_push = db_for_push.clone();
+        let workspace_for_push = workspace_for_push.clone();
+        let feedback_for_push = feedback_for_push.clone();
+        let toast_for_push = toast_for_push.clone();
+        spawn_background_job(
+            move || run_push_branch_action(db_for_push, workspace_for_push),
+            move |result| {
+                button.set_sensitive(true);
+                match result {
+                    Ok(output) => {
+                        let message = output
+                            .lines()
+                            .map(str::trim)
+                            .find(|line| !line.is_empty())
+                            .map(|line| format!("Pushed branch: {line}"))
+                            .unwrap_or_else(|| "Pushed branch.".to_owned());
+                        apply_action_feedback(&feedback_for_push, &toast_for_push, &message, true);
+                    }
+                    Err(err) => apply_action_feedback(
+                        &feedback_for_push,
+                        &toast_for_push,
+                        &push_branch_error_feedback(&err),
+                        true,
+                    ),
+                }
+            },
+        );
     });
 }
 
@@ -6801,38 +6956,42 @@ fn connect_force_push_button(
             return;
         }
         force_push_btn_for_click.set_sensitive(false);
-        match WorkspaceStore::open_app(db_for_force_push.clone())
-            .and_then(|store| store.force_push_branch_with_lease(&workspace_for_force_push))
-        {
-            Ok(output) => {
-                *force_confirmed_for_click.borrow_mut() = false;
-                force_push_btn_for_click.set_sensitive(true);
-                force_push_btn_for_click.set_label("Force Push");
-                let message = output
-                    .lines()
-                    .map(str::trim)
-                    .find(|line| !line.is_empty())
-                    .map(|line| format!("Force pushed with lease: {line}"))
-                    .unwrap_or_else(|| "Force pushed with lease.".to_owned());
-                apply_action_feedback(
-                    &feedback_for_force_push,
-                    &toast_for_force_push,
-                    &message,
-                    true,
-                );
-            }
-            Err(err) => {
-                *force_confirmed_for_click.borrow_mut() = false;
-                force_push_btn_for_click.set_sensitive(true);
-                force_push_btn_for_click.set_label("Force Push");
-                apply_action_feedback(
-                    &feedback_for_force_push,
-                    &toast_for_force_push,
-                    &push_branch_error_feedback(&err),
-                    true,
-                );
-            }
-        }
+        let db_for_force_push = db_for_force_push.clone();
+        let workspace_for_force_push = workspace_for_force_push.clone();
+        let feedback_for_force_push = feedback_for_force_push.clone();
+        let toast_for_force_push = toast_for_force_push.clone();
+        let force_confirmed_for_result = force_confirmed_for_click.clone();
+        let force_push_btn_for_result = force_push_btn_for_click.clone();
+        spawn_background_job(
+            move || run_force_push_branch_action(db_for_force_push, workspace_for_force_push),
+            move |result| {
+                *force_confirmed_for_result.borrow_mut() = false;
+                force_push_btn_for_result.set_sensitive(true);
+                force_push_btn_for_result.set_label("Force Push");
+                match result {
+                    Ok(output) => {
+                        let message = output
+                            .lines()
+                            .map(str::trim)
+                            .find(|line| !line.is_empty())
+                            .map(|line| format!("Force pushed with lease: {line}"))
+                            .unwrap_or_else(|| "Force pushed with lease.".to_owned());
+                        apply_action_feedback(
+                            &feedback_for_force_push,
+                            &toast_for_force_push,
+                            &message,
+                            true,
+                        );
+                    }
+                    Err(err) => apply_action_feedback(
+                        &feedback_for_force_push,
+                        &toast_for_force_push,
+                        &push_branch_error_feedback(&err),
+                        true,
+                    ),
+                }
+            },
+        );
     });
 }
 
@@ -7128,21 +7287,38 @@ fn workspace_checks_panel(
                     let refresh_after = refresh_hub.clone();
                     let feedback_for_refresh = feedback.clone();
                     let toast_for_refresh = toast_overlay.clone();
-                    refresh_btn.connect_clicked(move |_| {
-                        let result =
-                            WorkspaceStore::open_app(db_for_refresh.clone()).and_then(|store| {
-                                store.refresh_pull_request_state(&workspace_for_refresh)
-                            });
-                        let message = pull_request_refresh_feedback(result);
-                        apply_action_feedback(
-                            &feedback_for_refresh,
-                            &toast_for_refresh,
-                            &message,
-                            true,
+                    refresh_btn.connect_clicked(move |button| {
+                        button.set_sensitive(false);
+                        let button = button.clone();
+                        let db_for_refresh = db_for_refresh.clone();
+                        let workspace_for_refresh = workspace_for_refresh.clone();
+                        let workspace_for_event = workspace_for_refresh.clone();
+                        let feedback_for_refresh = feedback_for_refresh.clone();
+                        let toast_for_refresh = toast_for_refresh.clone();
+                        let refresh_after = refresh_after.clone();
+                        spawn_background_job(
+                            move || {
+                                run_refresh_pull_request_action(
+                                    db_for_refresh,
+                                    workspace_for_refresh,
+                                )
+                            },
+                            move |result| {
+                                button.set_sensitive(true);
+                                let message = pull_request_refresh_feedback(result);
+                                apply_action_feedback(
+                                    &feedback_for_refresh,
+                                    &toast_for_refresh,
+                                    &message,
+                                    true,
+                                );
+                                refresh_after.refresh_event(
+                                    RefreshEvent::WorkspaceGitReviewChanged {
+                                        workspace: workspace_for_event,
+                                    },
+                                );
+                            },
                         );
-                        refresh_after.refresh_event(RefreshEvent::WorkspaceGitReviewChanged {
-                            workspace: workspace_for_refresh.clone(),
-                        });
                     });
 
                     top_row.append(&summary_btn);
@@ -7169,27 +7345,42 @@ fn workspace_checks_panel(
                     let feedback_for_merge = feedback.clone();
                     let toast_for_merge = toast_overlay.clone();
                     let merge_method_for_merge = merge_method.clone();
-                    merge_btn.connect_clicked(move |_| {
+                    merge_btn.connect_clicked(move |button| {
                         let method = merge_method_for_merge
                             .active_id()
                             .map(|method| method.to_string())
                             .unwrap_or_else(|| "squash".to_owned());
-                        let result =
-                            WorkspaceStore::open_app(db_for_merge.clone()).and_then(|store| {
-                                store.merge_and_maybe_archive_pull_request(
-                                    &workspace_for_merge,
-                                    Some(&method),
+                        button.set_sensitive(false);
+                        let button = button.clone();
+                        let db_for_merge = db_for_merge.clone();
+                        let workspace_for_merge = workspace_for_merge.clone();
+                        let workspace_for_result = workspace_for_merge.clone();
+                        let refresh_after_merge = refresh_after_merge.clone();
+                        let feedback_for_merge = feedback_for_merge.clone();
+                        let toast_for_merge = toast_for_merge.clone();
+                        spawn_background_job(
+                            move || {
+                                run_merge_pull_request_action(
+                                    db_for_merge,
+                                    workspace_for_merge,
+                                    Some(method),
                                 )
-                            });
-                        let refresh_event =
-                            pull_request_merge_refresh_event(&workspace_for_merge, &result);
-                        apply_action_feedback(
-                            &feedback_for_merge,
-                            &toast_for_merge,
-                            &pull_request_merge_and_archive_feedback(result),
-                            true,
+                            },
+                            move |result| {
+                                button.set_sensitive(true);
+                                let refresh_event = pull_request_merge_refresh_event(
+                                    &workspace_for_result,
+                                    &result,
+                                );
+                                apply_action_feedback(
+                                    &feedback_for_merge,
+                                    &toast_for_merge,
+                                    &pull_request_merge_and_archive_feedback(result),
+                                    true,
+                                );
+                                refresh_after_merge.refresh_event(refresh_event);
+                            },
                         );
-                        refresh_after_merge.refresh_event(refresh_event);
                     });
 
                     let db_for_stage = db_path.to_path_buf();
@@ -7224,21 +7415,38 @@ fn workspace_checks_panel(
                     let refresh_after = refresh_hub.clone();
                     let feedback_for_refresh = feedback.clone();
                     let toast_for_refresh = toast_overlay.clone();
-                    refresh_btn.connect_clicked(move |_| {
-                        let result =
-                            WorkspaceStore::open_app(db_for_refresh.clone()).and_then(|store| {
-                                store.refresh_pull_request_state(&workspace_for_refresh)
-                            });
-                        let message = pull_request_refresh_feedback(result);
-                        apply_action_feedback(
-                            &feedback_for_refresh,
-                            &toast_for_refresh,
-                            &message,
-                            true,
+                    refresh_btn.connect_clicked(move |button| {
+                        button.set_sensitive(false);
+                        let button = button.clone();
+                        let db_for_refresh = db_for_refresh.clone();
+                        let workspace_for_refresh = workspace_for_refresh.clone();
+                        let workspace_for_event = workspace_for_refresh.clone();
+                        let feedback_for_refresh = feedback_for_refresh.clone();
+                        let toast_for_refresh = toast_for_refresh.clone();
+                        let refresh_after = refresh_after.clone();
+                        spawn_background_job(
+                            move || {
+                                run_refresh_pull_request_action(
+                                    db_for_refresh,
+                                    workspace_for_refresh,
+                                )
+                            },
+                            move |result| {
+                                button.set_sensitive(true);
+                                let message = pull_request_refresh_feedback(result);
+                                apply_action_feedback(
+                                    &feedback_for_refresh,
+                                    &toast_for_refresh,
+                                    &message,
+                                    true,
+                                );
+                                refresh_after.refresh_event(
+                                    RefreshEvent::WorkspaceGitReviewChanged {
+                                        workspace: workspace_for_event,
+                                    },
+                                );
+                            },
                         );
-                        refresh_after.refresh_event(RefreshEvent::WorkspaceGitReviewChanged {
-                            workspace: workspace_for_refresh.clone(),
-                        });
                     });
 
                     merge_row.append(&merge_method);
@@ -7314,21 +7522,38 @@ fn workspace_checks_panel(
                     let refresh_after = refresh_hub.clone();
                     let feedback_for_refresh = feedback.clone();
                     let toast_for_refresh = toast_overlay.clone();
-                    refresh_btn.connect_clicked(move |_| {
-                        let result =
-                            WorkspaceStore::open_app(db_for_refresh.clone()).and_then(|store| {
-                                store.refresh_pull_request_state(&workspace_for_refresh)
-                            });
-                        let message = pull_request_refresh_feedback(result);
-                        apply_action_feedback(
-                            &feedback_for_refresh,
-                            &toast_for_refresh,
-                            &message,
-                            true,
+                    refresh_btn.connect_clicked(move |button| {
+                        button.set_sensitive(false);
+                        let button = button.clone();
+                        let db_for_refresh = db_for_refresh.clone();
+                        let workspace_for_refresh = workspace_for_refresh.clone();
+                        let workspace_for_event = workspace_for_refresh.clone();
+                        let feedback_for_refresh = feedback_for_refresh.clone();
+                        let toast_for_refresh = toast_for_refresh.clone();
+                        let refresh_after = refresh_after.clone();
+                        spawn_background_job(
+                            move || {
+                                run_refresh_pull_request_action(
+                                    db_for_refresh,
+                                    workspace_for_refresh,
+                                )
+                            },
+                            move |result| {
+                                button.set_sensitive(true);
+                                let message = pull_request_refresh_feedback(result);
+                                apply_action_feedback(
+                                    &feedback_for_refresh,
+                                    &toast_for_refresh,
+                                    &message,
+                                    true,
+                                );
+                                refresh_after.refresh_event(
+                                    RefreshEvent::WorkspaceGitReviewChanged {
+                                        workspace: workspace_for_event,
+                                    },
+                                );
+                            },
                         );
-                        refresh_after.refresh_event(RefreshEvent::WorkspaceGitReviewChanged {
-                            workspace: workspace_for_refresh.clone(),
-                        });
                     });
 
                     top_row.append(&fix_btn);
@@ -7543,36 +7768,35 @@ fn workspace_conflict_resolution_panel(
         let diff_buffer_for_diff_all = diff_preview.buffer();
         let db_for_diff_all = db_path.to_path_buf();
         let toast_for_diff_all = toast_manager.clone();
-        diff_all_btn.connect_clicked(move |_| {
-            let mut sections = Vec::new();
-            for file in &files_for_diff_all {
-                let file_path = Path::new(file).to_path_buf();
-                match WorkspaceStore::open_app(db_for_diff_all.clone()).and_then(|store| {
-                    store.unified_diff(&source_workspace_for_diff_all, Some(file_path.as_path()))
-                }) {
-                    Ok(output) => {
-                        sections.push(format!(
-                            "# {}:{}\n{}\n",
-                            source_workspace_for_diff_all,
-                            file_path.display(),
-                            output
-                        ));
-                    }
-                    Err(err) => {
-                        surface_label_error(
+        diff_all_btn.connect_clicked(move |button| {
+            button.set_sensitive(false);
+            let button = button.clone();
+            let files_for_diff_all = files_for_diff_all.clone();
+            let source_workspace_for_diff_all = source_workspace_for_diff_all.clone();
+            let db_for_diff_all = db_for_diff_all.clone();
+            let feedback_for_diff_all = feedback_for_diff_all.clone();
+            let diff_buffer_for_diff_all = diff_buffer_for_diff_all.clone();
+            let toast_for_diff_all = toast_for_diff_all.clone();
+            spawn_background_job(
+                move || {
+                    run_conflict_diff_all_action(
+                        db_for_diff_all,
+                        source_workspace_for_diff_all,
+                        files_for_diff_all,
+                    )
+                },
+                move |result| {
+                    button.set_sensitive(true);
+                    match result {
+                        Ok(output) => diff_buffer_for_diff_all.set_text(&output),
+                        Err(err) => surface_label_error(
                             &feedback_for_diff_all,
                             &toast_for_diff_all,
-                            format!("Could not read diff for {file}: {err:#}"),
-                        );
-                        return;
+                            format!("Could not read conflict diffs: {err:#}"),
+                        ),
                     }
-                }
-            }
-            if sections.is_empty() {
-                diff_buffer_for_diff_all.set_text("No conflicting files to diff.");
-            } else {
-                diff_buffer_for_diff_all.set_text(&sections.join("\n"));
-            }
+                },
+            );
         });
         let copy_all_btn = secondary_button("Copy all from sibling");
         let files_for_copy_all = files.clone();
@@ -7582,60 +7806,70 @@ fn workspace_conflict_resolution_panel(
         let feedback_for_copy_all = conflict_feedback.clone();
         let refresh_after_copy_all = refresh_hub.clone();
         let toast_for_copy_all = toast_manager.clone();
-        copy_all_btn.connect_clicked(move |_| {
-            let mut copied = 0usize;
-            let mut failures = Vec::new();
-            for file in &files_for_copy_all {
-                let result = WorkspaceStore::open_app(db_for_copy_all.clone()).and_then(|store| {
-                    store.copy_conflict_file_from_workspace(
-                        &destination_workspace,
-                        &source_workspace,
-                        file,
+        copy_all_btn.connect_clicked(move |button| {
+            button.set_sensitive(false);
+            let button = button.clone();
+            let files_for_copy_all = files_for_copy_all.clone();
+            let source_workspace = source_workspace.clone();
+            let destination_workspace = destination_workspace.clone();
+            let db_for_copy_all = db_for_copy_all.clone();
+            let feedback_for_copy_all = feedback_for_copy_all.clone();
+            let refresh_after_copy_all = refresh_after_copy_all.clone();
+            let toast_for_copy_all = toast_for_copy_all.clone();
+            spawn_background_job(
+                move || {
+                    run_conflict_copy_all_action(
+                        db_for_copy_all,
+                        destination_workspace,
+                        source_workspace,
+                        files_for_copy_all,
                     )
-                });
-                match result {
-                    Ok(()) => copied += 1,
-                    Err(err) => failures.push(format!("{file}: {err:#}")),
-                }
-            }
-            match (copied, failures.is_empty()) {
-                (0, true) => {
-                    surface_label_error(
-                        &feedback_for_copy_all,
-                        &toast_for_copy_all,
-                        format!("No files available to copy from {source_workspace}."),
-                    );
-                }
-                (0, false) => {
-                    surface_label_error(
-                        &feedback_for_copy_all,
-                        &toast_for_copy_all,
-                        format!(
-                            "Failed to copy files from {source_workspace}: {}",
-                            failures.join("; ")
-                        ),
-                    );
-                }
-                (_, true) => {
-                    refresh_after_copy_all.refresh(RefreshScope::Workspace);
-                    feedback_for_copy_all.set_text(&format!(
-                        "Copied {} conflicting file(s) from {source_workspace}.",
-                        copied
-                    ));
-                }
-                (_, false) => {
-                    refresh_after_copy_all.refresh(RefreshScope::Workspace);
-                    surface_label_error(
-                        &feedback_for_copy_all,
-                        &toast_for_copy_all,
-                        format!(
-                            "Copied {copied} file(s) from {source_workspace}, but {} failed: {}",
-                            failures.len(),
-                            failures.join("; ")
-                        ),
-                    );
-                }
-            }
+                },
+                move |result| {
+                    button.set_sensitive(true);
+                    match (result.copied, result.failures.is_empty()) {
+                        (0, true) => {
+                            surface_label_error(
+                                &feedback_for_copy_all,
+                                &toast_for_copy_all,
+                                format!("No files available to copy from {}.", result.source),
+                            );
+                        }
+                        (0, false) => {
+                            surface_label_error(
+                                &feedback_for_copy_all,
+                                &toast_for_copy_all,
+                                format!(
+                                    "Failed to copy files from {}: {}",
+                                    result.source,
+                                    result.failures.join("; ")
+                                ),
+                            );
+                        }
+                        (_, true) => {
+                            refresh_after_copy_all.refresh(RefreshScope::Workspace);
+                            feedback_for_copy_all.set_text(&format!(
+                                "Copied {} conflicting file(s) from {}.",
+                                result.copied, result.source
+                            ));
+                        }
+                        (_, false) => {
+                            refresh_after_copy_all.refresh(RefreshScope::Workspace);
+                            surface_label_error(
+                                &feedback_for_copy_all,
+                                &toast_for_copy_all,
+                                format!(
+                                    "Copied {} file(s) from {}, but {} failed: {}",
+                                    result.copied,
+                                    result.source,
+                                    result.failures.len(),
+                                    result.failures.join("; ")
+                                ),
+                            );
+                        }
+                    }
+                },
+            );
         });
 
         action_row.append(&copy_all_btn);
@@ -7654,25 +7888,26 @@ fn workspace_conflict_resolution_panel(
             let source_workspace_for_diff = conflict_workspace.clone();
             let file_for_diff = Path::new(&file).to_path_buf();
             let diff_buffer = diff_preview.buffer();
-            diff_btn.connect_clicked(move |_| {
-                let output = WorkspaceStore::open_app(db_for_diff.clone())
-                    .and_then(|store| {
-                        store
-                            .unified_diff(&source_workspace_for_diff, Some(file_for_diff.as_path()))
-                    })
-                    .unwrap_or_else(|err| {
-                        format!(
-                            "Could not read diff for {}: {err:#}",
-                            file_for_diff.display()
+            diff_btn.connect_clicked(move |button| {
+                button.set_sensitive(false);
+                let button = button.clone();
+                let db_for_diff = db_for_diff.clone();
+                let source_workspace_for_diff = source_workspace_for_diff.clone();
+                let file_for_diff = file_for_diff.clone();
+                let diff_buffer = diff_buffer.clone();
+                spawn_background_job(
+                    move || {
+                        run_conflict_diff_action(
+                            db_for_diff,
+                            source_workspace_for_diff,
+                            file_for_diff,
                         )
-                    });
-                let formatted = format!(
-                    "# {}:{}\n{}",
-                    source_workspace_for_diff,
-                    file_for_diff.display(),
-                    output
+                    },
+                    move |formatted| {
+                        button.set_sensitive(true);
+                        diff_buffer.set_text(&formatted);
+                    },
                 );
-                diff_buffer.set_text(&formatted);
             });
 
             let copy_btn = secondary_button("Copy from sibling");
@@ -7683,29 +7918,42 @@ fn workspace_conflict_resolution_panel(
             let feedback_for_copy = conflict_feedback.clone();
             let refresh_after_copy = refresh_hub.clone();
             let toast_for_copy = toast_manager.clone();
-            copy_btn.connect_clicked(move |_| {
-                let result = WorkspaceStore::open_app(db_for_copy.clone()).and_then(|store| {
-                    store.copy_conflict_file_from_workspace(
-                        &destination_workspace,
-                        &source_workspace,
-                        &file_for_copy,
-                    )
-                });
-                match result {
-                    Ok(()) => {
-                        feedback_for_copy.set_text(&format!(
-                            "Copied {file_for_copy} from {source_workspace} into {destination_workspace}"
-                        ));
-                        refresh_after_copy.refresh(RefreshScope::Workspace);
-                    }
-                    Err(err) => {
-                        surface_label_error(
-                            &feedback_for_copy,
-                            &toast_for_copy,
-                            format!("Could not copy {file_for_copy}: {err:#}"),
-                        );
-                    }
-                }
+            copy_btn.connect_clicked(move |button| {
+                button.set_sensitive(false);
+                let button = button.clone();
+                let db_for_copy = db_for_copy.clone();
+                let destination_workspace = destination_workspace.clone();
+                let source_workspace = source_workspace.clone();
+                let file_for_copy = file_for_copy.clone();
+                let feedback_for_copy = feedback_for_copy.clone();
+                let refresh_after_copy = refresh_after_copy.clone();
+                let toast_for_copy = toast_for_copy.clone();
+                spawn_background_job(
+                    move || {
+                        run_conflict_copy_action(
+                            db_for_copy,
+                            destination_workspace,
+                            source_workspace,
+                            file_for_copy,
+                        )
+                    },
+                    move |result| {
+                        button.set_sensitive(true);
+                        match result {
+                            Ok((destination_workspace, source_workspace, file_for_copy)) => {
+                                feedback_for_copy.set_text(&format!(
+                                    "Copied {file_for_copy} from {source_workspace} into {destination_workspace}"
+                                ));
+                                refresh_after_copy.refresh(RefreshScope::Workspace);
+                            }
+                            Err(err) => surface_label_error(
+                                &feedback_for_copy,
+                                &toast_for_copy,
+                                format!("Could not copy file from sibling: {err:#}"),
+                            ),
+                        }
+                    },
+                );
             });
 
             file_row.append(&file_label);
@@ -7720,6 +7968,93 @@ fn workspace_conflict_resolution_panel(
     panel.append(&conflict_feedback);
     panel.append(&diff_container);
     panel
+}
+
+struct ConflictCopyAllResult {
+    source: String,
+    copied: usize,
+    failures: Vec<String>,
+}
+
+fn run_conflict_diff_all_action(
+    db_path: PathBuf,
+    source_workspace: String,
+    files: Vec<String>,
+) -> anyhow::Result<String> {
+    let store = WorkspaceStore::open_app(db_path)?;
+    let mut sections = Vec::new();
+    for file in files {
+        let file_path = Path::new(&file).to_path_buf();
+        let output = store.unified_diff(&source_workspace, Some(file_path.as_path()))?;
+        sections.push(format!(
+            "# {}:{}\n{}\n",
+            source_workspace,
+            file_path.display(),
+            output
+        ));
+    }
+    if sections.is_empty() {
+        Ok("No conflicting files to diff.".to_owned())
+    } else {
+        Ok(sections.join("\n"))
+    }
+}
+
+fn run_conflict_copy_all_action(
+    db_path: PathBuf,
+    destination_workspace: String,
+    source_workspace: String,
+    files: Vec<String>,
+) -> ConflictCopyAllResult {
+    let mut copied = 0usize;
+    let mut failures = Vec::new();
+    match WorkspaceStore::open_app(db_path) {
+        Ok(store) => {
+            for file in files {
+                match store.copy_conflict_file_from_workspace(
+                    &destination_workspace,
+                    &source_workspace,
+                    &file,
+                ) {
+                    Ok(()) => copied += 1,
+                    Err(err) => failures.push(format!("{file}: {err:#}")),
+                }
+            }
+        }
+        Err(err) => failures.push(format!("open workspace store: {err:#}")),
+    }
+    ConflictCopyAllResult {
+        source: source_workspace,
+        copied,
+        failures,
+    }
+}
+
+fn run_conflict_diff_action(
+    db_path: PathBuf,
+    source_workspace: String,
+    file_path: PathBuf,
+) -> String {
+    let output = WorkspaceStore::open_app(db_path)
+        .and_then(|store| store.unified_diff(&source_workspace, Some(file_path.as_path())))
+        .unwrap_or_else(|err| format!("Could not read diff for {}: {err:#}", file_path.display()));
+    format!("# {}:{}\n{}", source_workspace, file_path.display(), output)
+}
+
+fn run_conflict_copy_action(
+    db_path: PathBuf,
+    destination_workspace: String,
+    source_workspace: String,
+    file_for_copy: String,
+) -> anyhow::Result<(String, String, String)> {
+    WorkspaceStore::open_app(db_path).and_then(|store| {
+        store.copy_conflict_file_from_workspace(
+            &destination_workspace,
+            &source_workspace,
+            &file_for_copy,
+        )
+    })?;
+    Ok((destination_workspace, source_workspace, file_for_copy))
 }
 
 fn pull_request_create_feedback(result: anyhow::Result<String>) -> String {
@@ -8806,9 +9141,9 @@ mod tests {
         );
 
         let queued =
-            queue_prompt_to_selected_archcar_chat(&db_path, &state, "berlin", "Commit and push");
+            selected_archcar_chat_queue_request(&db_path, &state, "berlin", "Commit and push");
 
-        assert!(!queued);
+        assert!(queued.is_none());
         assert_eq!(state.take_pending_chat_prompt(), None);
     }
 
@@ -8851,16 +9186,29 @@ mod tests {
         state.set_selected_chat_thread(Some(7));
 
         let queued =
-            queue_prompt_to_selected_archcar_chat(&db_path, &state, "berlin", "Commit and push");
+            selected_archcar_chat_queue_request(&db_path, &state, "berlin", "Commit and push");
 
-        assert!(queued);
+        let Some((thread_id, request, draft)) = queued else {
+            panic!("selected chat should produce an archcar queue request");
+        };
+        assert_eq!(thread_id, 7);
         assert_eq!(state.take_pending_chat_prompt(), None);
+        assert_eq!(draft.id, None);
+        assert_eq!(draft.input, "Commit and push");
+        assert_eq!(draft.kind, ArchcarInputKind::User);
+        assert_eq!(draft.session_kind, SessionKind::Codex);
+        assert_eq!(
+            request,
+            ArchcarRequest::QueueChatInput {
+                thread_id: 7,
+                input: "Commit and push".to_owned(),
+                visible_input: None,
+                kind: ArchcarInputKind::User,
+                session_kind: SessionKind::Codex,
+            }
+        );
         let store = WorkspaceStore::open_app(&db_path).unwrap();
-        let inputs = store.list_queued_chat_inputs(7).unwrap();
-        assert_eq!(inputs.len(), 1);
-        assert_eq!(inputs[0].input, "Commit and push");
-        assert_eq!(inputs[0].input_kind, ArchcarInputKind::User);
-        assert_eq!(inputs[0].session_kind, SessionKind::Codex);
+        assert!(store.list_queued_chat_inputs(7).unwrap().is_empty());
     }
 
     fn test_checks_summary(
@@ -9736,7 +10084,11 @@ mod tests {
     fn chat_session_refresh_callbacks_publish_chat_lifecycle_events() {
         let source = include_str!("workspace_command_center.rs");
         let production = source
-            .split("#[cfg(test)]")
+            .split(
+                "
+#[cfg(test)]
+mod tests",
+            )
             .next()
             .expect("production source exists");
         let callback_regions = [
@@ -9824,7 +10176,11 @@ mod tests {
     fn plus_tab_buttons_use_extra_small_text_button_state() {
         let source = include_str!("workspace_command_center.rs");
         let production = source
-            .split("#[cfg(test)]")
+            .split(
+                "
+#[cfg(test)]
+mod tests",
+            )
             .next()
             .expect("production source exists");
 
@@ -9847,7 +10203,11 @@ mod tests {
     fn chat_tab_snapshot_reuses_open_workspace_store_for_nav() {
         let source = include_str!("workspace_command_center.rs");
         let production = source
-            .split("#[cfg(test)]")
+            .split(
+                "
+#[cfg(test)]
+mod tests",
+            )
             .next()
             .expect("production source exists");
         let start = production
@@ -9868,7 +10228,11 @@ mod tests {
     fn workspace_file_open_and_reload_load_snapshots_in_background() {
         let source = include_str!("workspace_command_center.rs");
         let production = source
-            .split("#[cfg(test)]")
+            .split(
+                "
+#[cfg(test)]
+mod tests",
+            )
             .next()
             .expect("production source exists");
         for (name, start_needle, end_needle) in [
@@ -9901,6 +10265,116 @@ mod tests {
             assert!(
                 !region.contains("workspace_diff_text_for_path("),
                 "{name} must not calculate diffs on the GTK thread"
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_file_lists_load_in_background() {
+        let source = include_str!("workspace_command_center.rs");
+        let production = source
+            .split(
+                "
+#[cfg(test)]
+mod tests",
+            )
+            .next()
+            .expect("production source exists");
+
+        for (name, start_needle, end_needle) in [
+            (
+                "workspace file tree",
+                "fn ws_simple_file_list(",
+                "fn tree_join_path(",
+            ),
+            (
+                "workspace files panel list",
+                "fn workspace_files_panel(",
+                "let file_scroll = ScrolledWindow::new();",
+            ),
+        ] {
+            let start = production.find(start_needle).expect(name);
+            let end = production[start..]
+                .find(end_needle)
+                .map(|offset| start + offset)
+                .expect(name);
+            let region = &production[start..end];
+
+            assert!(
+                region.contains("spawn_background_job("),
+                "{name} must scan workspace files off the GTK thread"
+            );
+            assert!(
+                !region.contains("list_workspace_files(&ws.path)"),
+                "{name} must not recursively scan files during GTK render"
+            );
+        }
+    }
+
+    #[test]
+    fn git_review_action_buttons_spawn_background_work() {
+        let source = include_str!("workspace_command_center.rs");
+        let production = source
+            .split(
+                "
+#[cfg(test)]
+mod tests",
+            )
+            .next()
+            .expect("production source exists");
+
+        for (name, start_needle, end_needle, forbidden) in [
+            (
+                "push branch",
+                "push_btn.connect_clicked",
+                "fn connect_force_push_button(",
+                "store.push_branch(",
+            ),
+            (
+                "force push branch",
+                "force_push_btn.connect_clicked",
+                "fn workspace_check_runner_panel(",
+                "store.force_push_branch_with_lease(",
+            ),
+            (
+                "PR refresh",
+                "refresh_btn.connect_clicked",
+                "top_row.append(&summary_btn);",
+                "store.refresh_pull_request_state(",
+            ),
+            (
+                "PR merge",
+                "merge_btn.connect_clicked",
+                "let db_for_stage = db_path.to_path_buf();",
+                "store.merge_and_maybe_archive_pull_request(",
+            ),
+            (
+                "conflict diff all",
+                "diff_all_btn.connect_clicked",
+                "let copy_all_btn = secondary_button(\"Copy all from sibling\");",
+                "store.unified_diff(",
+            ),
+            (
+                "conflict copy all",
+                "copy_all_btn.connect_clicked",
+                "action_row.append(&copy_all_btn);",
+                "store.copy_conflict_file_from_workspace(",
+            ),
+        ] {
+            let start = production.find(start_needle).expect(name);
+            let end = production[start..]
+                .find(end_needle)
+                .map(|offset| start + offset)
+                .expect(name);
+            let region = &production[start..end];
+
+            assert!(
+                region.contains("spawn_background_job("),
+                "{name} must run git/gh/file work off the GTK thread"
+            );
+            assert!(
+                !region.contains(forbidden),
+                "{name} must not call blocking core work directly in the GTK handler"
             );
         }
     }
@@ -10171,7 +10645,7 @@ mod tests {
         let helper = &source[start..end];
 
         assert!(
-            !helper.contains("checks_summary("),
+            !helper.contains(".checks_summary("),
             "PR status render must use cached background review state instead of running git"
         );
     }
@@ -10190,6 +10664,8 @@ mod tests {
             pr: None,
             status: None,
             summary: Some(test_checks_summary(0, None, Vec::new())),
+            refreshing: false,
+            has_review_snapshot: true,
         };
         assert_eq!(workspace_pr_primary_action_label(&no_pr), Some("Create PR"));
 
@@ -10197,6 +10673,8 @@ mod tests {
             pr: None,
             status: None,
             summary: Some(test_checks_summary(3, None, Vec::new())),
+            refreshing: false,
+            has_review_snapshot: true,
         };
         assert_eq!(workspace_pr_primary_action_label(&dirty), Some("Create PR"));
         let dirty_action = workspace_pr_primary_action(&dirty).unwrap();
@@ -10218,6 +10696,8 @@ mod tests {
                 }),
                 Vec::new(),
             )),
+            refreshing: false,
+            has_review_snapshot: true,
         };
         assert_eq!(
             workspace_pr_primary_action_label(&needs_push),
@@ -10242,6 +10722,8 @@ mod tests {
             pr: Some(test_pull_request("OPEN")),
             status: None,
             summary: Some(source_ahead_summary),
+            refreshing: false,
+            has_review_snapshot: true,
         };
         assert_eq!(
             workspace_pr_primary_action_label(&source_ahead),
@@ -10266,6 +10748,8 @@ mod tests {
                 }),
                 Vec::new(),
             )),
+            refreshing: false,
+            has_review_snapshot: true,
         };
         assert_eq!(
             workspace_pr_primary_action_label(&clean_without_upstream),
@@ -10280,6 +10764,8 @@ mod tests {
                 kind: PullRequestStateKind::Ready,
             }),
             summary: Some(test_checks_summary(0, None, Vec::new())),
+            refreshing: false,
+            has_review_snapshot: true,
         };
 
         assert_eq!(
@@ -10299,6 +10785,8 @@ mod tests {
                 kind: PullRequestStateKind::Failed,
             }),
             summary: Some(test_checks_summary(0, None, Vec::new())),
+            refreshing: false,
+            has_review_snapshot: true,
         };
         assert_eq!(
             workspace_pr_primary_action_label(&blocked),
@@ -10317,6 +10805,8 @@ mod tests {
                 kind: PullRequestStateKind::MergeBlocked,
             }),
             summary: Some(test_checks_summary(0, None, Vec::new())),
+            refreshing: false,
+            has_review_snapshot: true,
         };
         assert_eq!(
             workspace_pr_primary_action(&conflict).unwrap().kind,
@@ -10339,6 +10829,8 @@ mod tests {
                 kind: PullRequestStateKind::Merged,
             }),
             summary: Some(test_checks_summary(0, None, Vec::new())),
+            refreshing: false,
+            has_review_snapshot: true,
         };
         assert_eq!(workspace_pr_primary_action_label(&merged), Some("Merged"));
         assert_eq!(
@@ -10478,7 +10970,11 @@ mod tests {
     fn workspace_surfaces_use_shared_embedded_terminal_panel() {
         let source = include_str!("workspace_command_center.rs");
         let production = source
-            .split("#[cfg(test)]")
+            .split(
+                "
+#[cfg(test)]
+mod tests",
+            )
             .next()
             .expect("production source exists");
 
@@ -11180,7 +11676,11 @@ mod tests {
     fn workspace_action_rename_uses_metadata_refresh() {
         let source = include_str!("workspace_command_center.rs");
         let production_source = source
-            .split("#[cfg(test)]")
+            .split(
+                "
+#[cfg(test)]
+mod tests",
+            )
             .next()
             .expect("workspace command center source should contain production code");
 
@@ -11194,7 +11694,11 @@ mod tests {
     fn branch_checkout_and_rename_publish_metadata_refresh_with_branch() {
         let source = include_str!("workspace_command_center.rs");
         let production_source = source
-            .split("#[cfg(test)]")
+            .split(
+                "
+#[cfg(test)]
+mod tests",
+            )
             .next()
             .expect("workspace command center source should contain production code");
         let branch_panel = production_source
@@ -11211,7 +11715,11 @@ mod tests {
     fn workspace_lifecycle_actions_use_current_selected_workspace_name() {
         let source = include_str!("workspace_command_center.rs");
         let production_source = source
-            .split("#[cfg(test)]")
+            .split(
+                "
+#[cfg(test)]
+mod tests",
+            )
             .next()
             .expect("workspace command center source should contain production code");
         let action_handler = production_source
@@ -11252,7 +11760,11 @@ mod tests {
     fn chat_tab_refresh_drops_selected_thread_borrow_before_callback_runs() {
         let source = include_str!("workspace_command_center.rs");
         let production_source = source
-            .split("#[cfg(test)]")
+            .split(
+                "
+#[cfg(test)]
+mod tests",
+            )
             .next()
             .expect("workspace command center source should contain production code");
 

@@ -1,6 +1,6 @@
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::index::{Column, Line, Point};
+use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config as AlacrittyConfig, Term, TermMode};
 use alacritty_terminal::vte::ansi::Processor as VteProcessor;
@@ -104,7 +104,7 @@ impl TerminalGridSurface {
         drawing_area.set_hexpand(true);
         drawing_area.set_vexpand(true);
         drawing_area.set_content_width((cols as i32) * TERMINAL_CELL_WIDTH);
-        drawing_area.set_content_height((rows as i32) * TERMINAL_CELL_HEIGHT);
+        update_terminal_grid_content_height(&drawing_area, &model.borrow());
         drawing_area.add_css_class("history-view");
         drawing_area.add_css_class("terminal-transcript-dark");
         drawing_area.add_css_class("terminal-grid-view");
@@ -130,6 +130,7 @@ impl TerminalGridSurface {
             model_for_resize
                 .borrow_mut()
                 .resize(rows as usize, cols as usize);
+            update_terminal_grid_content_height(area, &model_for_resize.borrow());
             area.queue_draw();
         });
 
@@ -153,6 +154,7 @@ impl TerminalGridSurface {
                 model_for_buffer.borrow_mut().set_bytes(text.as_bytes());
             }
             *last_len = text.len();
+            update_terminal_grid_content_height(&area_for_buffer, &model_for_buffer.borrow());
             area_for_buffer.queue_draw();
         });
         buffer.set_text(text);
@@ -321,11 +323,63 @@ impl TerminalEmulatorModel {
         lines
     }
 
+    fn scrollable_line_count(&self) -> usize {
+        self.term.grid().total_lines().max(self.rows)
+    }
+
+    fn scrollable_lines(&self) -> Vec<String> {
+        (0..self.scrollable_line_count())
+            .map(|row| self.scrollable_line(row))
+            .collect()
+    }
+
+    fn scrollable_line(&self, row: usize) -> String {
+        let total_lines = self.scrollable_line_count();
+        let history_lines = total_lines.saturating_sub(self.rows);
+        let line = Line(row as i32 - history_lines as i32);
+        let mut text = String::with_capacity(self.cols);
+        for col in 0..self.cols {
+            let cell = &self.term.grid()[line][Column(col)];
+            if cell
+                .flags
+                .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+            {
+                continue;
+            }
+            text.push(cell.c);
+            for c in cell.zerowidth().into_iter().flatten() {
+                text.push(*c);
+            }
+        }
+        text
+    }
+
+    fn scrollable_line_range_for_clip(&self, clip_top: f64, clip_bottom: f64) -> (usize, usize) {
+        let total_lines = self.scrollable_line_count();
+        let first = ((clip_top - TERMINAL_PADDING_Y) / TERMINAL_CELL_HEIGHT as f64)
+            .floor()
+            .max(0.0) as usize;
+        let last = ((clip_bottom - TERMINAL_PADDING_Y) / TERMINAL_CELL_HEIGHT as f64)
+            .ceil()
+            .max(0.0) as usize
+            + 1;
+        (first.min(total_lines), last.min(total_lines))
+    }
+
+    fn clipped_scrollable_lines(&self, clip_top: f64, clip_bottom: f64) -> Vec<(usize, String)> {
+        let (first, last) = self.scrollable_line_range_for_clip(clip_top, clip_bottom);
+        let mut lines = Vec::with_capacity(last.saturating_sub(first));
+        for row in first..last {
+            lines.push((row, self.scrollable_line(row)));
+        }
+        lines
+    }
+
     fn cursor_position(&self) -> Option<(usize, usize)> {
-        let content = self.term.renderable_content();
-        let cursor = content.cursor.point;
-        alacritty_terminal::term::point_to_viewport(content.display_offset, cursor)
-            .map(|Point { line, column }| (line, column.0))
+        let cursor = self.term.grid().cursor.point;
+        let history_lines = self.scrollable_line_count().saturating_sub(self.rows);
+        let line = cursor.line.0 + history_lines as i32;
+        (line >= 0).then_some((line as usize, cursor.column.0))
     }
 }
 
@@ -453,7 +507,11 @@ fn draw_terminal_grid(
     context.set_font_size(font_size);
     context.set_source_rgb(0.86, 0.89, 0.92);
 
-    for (index, line) in model.visible_lines().iter().enumerate() {
+    let (_, clip_top, _, clip_bottom) =
+        context
+            .clip_extents()
+            .unwrap_or((0.0, 0.0, width as f64, height as f64));
+    for (index, line) in model.clipped_scrollable_lines(clip_top, clip_bottom) {
         let baseline = TERMINAL_PADDING_Y + (index as f64 * TERMINAL_CELL_HEIGHT as f64);
         if baseline > height as f64 + TERMINAL_CELL_HEIGHT as f64 {
             break;
@@ -474,6 +532,14 @@ fn draw_terminal_grid(
         );
         let _ = context.fill();
     }
+}
+
+fn update_terminal_grid_content_height(area: &DrawingArea, model: &TerminalEmulatorModel) {
+    area.set_content_height(terminal_grid_content_height(model.scrollable_line_count()));
+}
+
+fn terminal_grid_content_height(lines: usize) -> i32 {
+    ((lines.max(1) as i32) * TERMINAL_CELL_HEIGHT) + (TERMINAL_PADDING_Y as i32 * 2)
 }
 
 fn install_terminal_input_controller(
@@ -3930,6 +3996,28 @@ mod tests {
         let rendered = trim_terminal_scrollback("one\ntwo\nthree\nfour\n", 2);
 
         assert_eq!(rendered, "[terminal scrollback trimmed]\nthree\nfour\n");
+    }
+
+    #[test]
+    fn terminal_grid_surface_sizes_content_to_buffered_lines() {
+        let source = include_str!("terminal.rs");
+        let start = source
+            .find("impl TerminalGridSurface")
+            .expect("terminal grid surface implementation exists");
+        let end = source[start..]
+            .find("pub(crate) fn read_only_terminal_grid")
+            .map(|offset| start + offset)
+            .expect("read-only constructor follows grid implementation");
+        let surface_impl = &source[start..end];
+
+        assert!(
+            surface_impl.contains("update_terminal_grid_content_height"),
+            "terminal grid must resize content to buffered terminal lines so GTK scrollback is available"
+        );
+        assert!(
+            !surface_impl.contains("set_content_height((rows as i32) * TERMINAL_CELL_HEIGHT)"),
+            "fixed viewport-height content clips terminal scrollback"
+        );
     }
 
     #[test]

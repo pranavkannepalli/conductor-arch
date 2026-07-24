@@ -10,7 +10,9 @@ use archductor_core::provider_projection::{
     provider_projection_from_records, provider_projection_item_is_relevant_chat_event,
     ProviderProjectionStatus,
 };
-use archductor_core::workspace::{ChatThreadRecord, WorkspaceStore};
+use archductor_core::workspace::{
+    ChatThreadRecord, ChecksSummary, PullRequest, PullRequestReadiness, WorkspaceStore,
+};
 
 use crate::refresh::RefreshEvent;
 
@@ -42,6 +44,14 @@ pub(crate) struct WorkspaceGitReviewSampleCandidate {
     pub status: String,
     pub path_exists: bool,
     pub selected: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkspaceGitReviewSample {
+    pub workspace: String,
+    pub pull_request: Option<PullRequest>,
+    pub readiness: Option<PullRequestReadiness>,
+    pub summary: Option<ChecksSummary>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -129,15 +139,15 @@ pub(crate) fn load_workspace_git_review_candidates(
 ) -> Result<Vec<WorkspaceGitReviewSampleCandidate>> {
     let store = WorkspaceStore::open_app(db_path)?;
     Ok(store
-        .list_status()?
+        .list()?
         .into_iter()
-        .map(|line| {
-            let workspace = line.workspace.name;
+        .map(|workspace| {
+            let name = workspace.name;
             WorkspaceGitReviewSampleCandidate {
-                selected: selected_workspace == Some(workspace.as_str()),
-                status: line.workspace.status,
-                path_exists: line.workspace.path.exists(),
-                workspace,
+                selected: selected_workspace == Some(name.as_str()),
+                status: workspace.status,
+                path_exists: workspace.path.exists(),
+                workspace: name,
             }
         })
         .collect())
@@ -146,16 +156,31 @@ pub(crate) fn load_workspace_git_review_candidates(
 pub(crate) fn sample_workspace_git_review_state(
     db_path: &Path,
     workspaces: &[String],
-) -> Result<Vec<String>> {
+) -> Result<Vec<WorkspaceGitReviewSample>> {
     let store = WorkspaceStore::open_app(db_path)?;
-    let mut refreshed = Vec::new();
+    let mut refreshed = Vec::with_capacity(workspaces.len());
     for workspace in workspaces {
-        let _ = store.branch_push_state(workspace);
-        let _ = store.checks_summary(workspace);
-        if store.pull_request(workspace)?.is_some() {
-            let _ = store.refresh_pull_request_state(workspace);
+        let mut pull_request = store.pull_request(workspace).ok().flatten();
+        if pull_request.is_some() {
+            if let Ok(refreshed_pr) = store.refresh_pull_request_state(workspace) {
+                pull_request = refreshed_pr.or(pull_request);
+            }
         }
-        refreshed.push(workspace.clone());
+        let readiness = pull_request
+            .as_ref()
+            .and_then(|_| store.pull_request_readiness(workspace).ok());
+        let summary = store.checks_summary(workspace).ok();
+        if pull_request.is_none() {
+            pull_request = summary
+                .as_ref()
+                .and_then(|summary| summary.pull_request.clone());
+        }
+        refreshed.push(WorkspaceGitReviewSample {
+            workspace: workspace.clone(),
+            pull_request,
+            readiness,
+            summary,
+        });
     }
     Ok(refreshed)
 }
@@ -702,6 +727,24 @@ mod tests {
         assert!(sampler.due_workspaces(31, &candidates).is_empty());
         sampler.mark_finished();
         assert_eq!(sampler.due_workspaces(31, &candidates), vec!["active"]);
+    }
+
+    #[test]
+    fn git_review_candidate_loading_does_not_call_status_summary() {
+        let source = include_str!("background_sync.rs");
+        let start = source
+            .find("pub(crate) fn load_workspace_git_review_candidates")
+            .expect("candidate loader exists");
+        let end = source[start..]
+            .find("pub(crate) fn sample_workspace_git_review_state")
+            .map(|offset| start + offset)
+            .expect("sampler follows candidate loader");
+        let loader = &source[start..end];
+
+        assert!(
+            !loader.contains("list_status()"),
+            "candidate discovery runs on a timer path and must not compute git status summaries"
+        );
     }
 
     #[test]

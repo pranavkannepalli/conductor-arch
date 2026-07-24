@@ -55,6 +55,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use toast::{ToastManager, ToastMessage};
 
@@ -720,16 +721,39 @@ fn spawn_git_review_sample_now(db_path: PathBuf, app_state: AppState, workspaces
     if workspaces.is_empty() {
         return;
     }
+    for workspace in &workspaces {
+        app_state.mark_workspace_git_review_refreshing(workspace.clone(), true);
+        app_state.request_refresh(RefreshEvent::WorkspaceGitReviewChanged {
+            workspace: workspace.clone(),
+        });
+    }
+    let workspaces_for_error = workspaces.clone();
     archcar_async::spawn_background_job(
         move || background_sync::sample_workspace_git_review_state(&db_path, &workspaces),
         move |result| match result {
-            Ok(workspaces) => {
-                for workspace in workspaces {
+            Ok(samples) => {
+                for sample in samples {
+                    let workspace = sample.workspace.clone();
+                    app_state.set_workspace_git_review_snapshot(
+                        workspace.clone(),
+                        state::WorkspaceGitReviewUiSnapshot {
+                            pull_request: sample.pull_request,
+                            readiness: sample.readiness,
+                            summary: sample.summary,
+                        },
+                    );
                     app_state
                         .request_refresh(RefreshEvent::WorkspaceGitReviewChanged { workspace });
                 }
             }
-            Err(err) => tracing::warn!(error = %err, "gtk immediate git review sample failed"),
+            Err(err) => {
+                tracing::warn!(error = %err, "gtk immediate git review sample failed");
+                for workspace in workspaces_for_error {
+                    app_state.mark_workspace_git_review_refreshing(workspace.clone(), false);
+                    app_state
+                        .request_refresh(RefreshEvent::WorkspaceGitReviewChanged { workspace });
+                }
+            }
         },
     );
 }
@@ -1279,50 +1303,104 @@ fn build_ui(app: &Application, launch_target: LaunchTarget, debug_mode: bool) {
     {
         let db_path_git_review = app_state.workspace_database_path();
         let state_git_review = app_state.clone();
-        let sampler = Rc::new(RefCell::new(
+        let sampler = Arc::new(Mutex::new(
             background_sync::WorkspaceGitReviewSampler::default(),
         ));
+        let scheduler_in_flight = Rc::new(Cell::new(false));
         let started_at = Instant::now();
         // PER-190: Git review metadata can change outside focused workspaces;
         // this recurring sampler owns lightweight refresh discovery until the
         // background sync loop grows push-based repository change notifications.
         glib::timeout_add_seconds_local(2, move || {
-            let now_secs = started_at.elapsed().as_secs();
-            let selected = state_git_review.selected_workspace();
-            let candidates = match background_sync::load_workspace_git_review_candidates(
-                &db_path_git_review,
-                selected.as_deref(),
-            ) {
-                Ok(candidates) => candidates,
-                Err(err) => {
-                    tracing::warn!(error = %err, "gtk git review candidates failed");
-                    return glib::ControlFlow::Continue;
-                }
-            };
-            let due = sampler.borrow().due_workspaces(now_secs, &candidates);
-            if due.is_empty() {
+            if scheduler_in_flight.get() {
                 return glib::ControlFlow::Continue;
             }
-            sampler.borrow_mut().mark_started(now_secs, &due);
-            let db_path = db_path_git_review.clone();
-            let state = state_git_review.clone();
-            let sampler_done = Rc::clone(&sampler);
+            scheduler_in_flight.set(true);
+            let now_secs = started_at.elapsed().as_secs();
+            let selected = state_git_review.selected_workspace();
+            let db_path_for_schedule = db_path_git_review.clone();
+            let sampler_for_schedule = Arc::clone(&sampler);
+            let scheduler_done = Rc::clone(&scheduler_in_flight);
+            let db_path_for_sample = db_path_git_review.clone();
+            let state_for_sample = state_git_review.clone();
+            let sampler_for_sample = Arc::clone(&sampler);
             archcar_async::spawn_background_job(
-                move || background_sync::sample_workspace_git_review_state(&db_path, &due),
+                move || {
+                    let candidates = background_sync::load_workspace_git_review_candidates(
+                        &db_path_for_schedule,
+                        selected.as_deref(),
+                    )?;
+                    let mut sampler = sampler_for_schedule
+                        .lock()
+                        .expect("git review sampler mutex poisoned");
+                    let due = sampler.due_workspaces(now_secs, &candidates);
+                    sampler.mark_started(now_secs, &due);
+                    Ok::<_, anyhow::Error>(due)
+                },
                 move |result| {
-                    sampler_done.borrow_mut().mark_finished();
-                    match result {
-                        Ok(workspaces) => {
-                            for workspace in workspaces {
-                                state.request_refresh(RefreshEvent::WorkspaceGitReviewChanged {
-                                    workspace,
-                                });
-                            }
-                        }
+                    scheduler_done.set(false);
+                    let due = match result {
+                        Ok(due) => due,
                         Err(err) => {
-                            tracing::warn!(error = %err, "gtk git review sampler failed");
+                            tracing::warn!(error = %err, "gtk git review schedule failed");
+                            return;
                         }
+                    };
+                    if due.is_empty() {
+                        return;
                     }
+                    for workspace in &due {
+                        state_for_sample
+                            .mark_workspace_git_review_refreshing(workspace.clone(), true);
+                        state_for_sample.request_refresh(RefreshEvent::WorkspaceGitReviewChanged {
+                            workspace: workspace.clone(),
+                        });
+                    }
+                    let due_for_error = due.clone();
+                    let state_for_result = state_for_sample.clone();
+                    archcar_async::spawn_background_job(
+                        move || {
+                            background_sync::sample_workspace_git_review_state(
+                                &db_path_for_sample,
+                                &due,
+                            )
+                        },
+                        move |result| {
+                            if let Ok(mut sampler) = sampler_for_sample.lock() {
+                                sampler.mark_finished();
+                            }
+                            match result {
+                                Ok(samples) => {
+                                    for sample in samples {
+                                        let workspace = sample.workspace.clone();
+                                        state_for_result.set_workspace_git_review_snapshot(
+                                            workspace.clone(),
+                                            state::WorkspaceGitReviewUiSnapshot {
+                                                pull_request: sample.pull_request,
+                                                readiness: sample.readiness,
+                                                summary: sample.summary,
+                                            },
+                                        );
+                                        state_for_result.request_refresh(
+                                            RefreshEvent::WorkspaceGitReviewChanged { workspace },
+                                        );
+                                    }
+                                }
+                                Err(err) => {
+                                    tracing::warn!(error = %err, "gtk git review sampler failed");
+                                    for workspace in due_for_error {
+                                        state_for_result.mark_workspace_git_review_refreshing(
+                                            workspace.clone(),
+                                            false,
+                                        );
+                                        state_for_result.request_refresh(
+                                            RefreshEvent::WorkspaceGitReviewChanged { workspace },
+                                        );
+                                    }
+                                }
+                            }
+                        },
+                    );
                 },
             );
             glib::ControlFlow::Continue
