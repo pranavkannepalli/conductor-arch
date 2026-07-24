@@ -1,0 +1,23 @@
+docs/gtk-refresh-refactor-map.md
+  s_1ccb275baaaa72::t_f52c3d82f1798a 1-375
+docs/app-state-refresh-map.md
+  s_1ccb275baaaa72::t_48b5ede2a903db 90-109
+  s_1ccb275baaaa72::t_5b93b5e417532d 24-25,310-313,315-316,379
+  s_1ccb275baaaa72::t_ac23b6ecff053c 160,189-190,353-356
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "db56f56cd4cfbef19dcb06ed2c6535a4b5d0c4fa",
+  "prompts": {},
+  "sessions": {
+    "s_1ccb275baaaa72": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f92d0-e866-7991-9cc2-28aa874b8b97",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
